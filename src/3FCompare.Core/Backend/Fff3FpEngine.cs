@@ -1,13 +1,14 @@
 using System.Runtime.InteropServices;
 using System.Text;
 using _3FCompare.Core.Backend.Interop;
+using _3FCompare.Core.Display;
 
 namespace _3FCompare.Core.Backend;
 
 /// <summary>3FP 后端适配器（基于 fork 的 FFF.Native，MIT）。</summary>
 public sealed class Fff3FpEngine : IPlayerEngine
 {
-    private const uint ConfigVersion = 10;
+    private const uint ConfigVersion = 11;
 
     public IReadOnlyList<AdapterInfo> EnumerateAdapters()
     {
@@ -29,12 +30,14 @@ public sealed class Fff3FpEngine : IPlayerEngine
             OutputWindow = options.OutputWindow,
             DecodeMode = (uint)(options.HardwareDecode ? FffDecodeMode.Gpu : FffDecodeMode.Cpu),
             ColorMode = (uint)(FffColorMode)options.ColorMode,
-            SdrPeakNits = 100f,
-            HdrPeakNits = 1000f,
-            SdrPaperWhiteNits = 203f,
+            // SdrPeakNits 和 SdrPaperWhiteNits 留到运行时调用 SetColorMode 时智能设置
+            SdrPeakNits = 100f,  // 占位值，后续会被智能参数覆盖
+            HdrPeakNits = 0f,    // 0=自动（由3FP内部ResolveTargetPeak处理）
+            SdrPaperWhiteNits = 203f,  // 占位值，后续会被智能参数覆盖
             AudioEndpointIdUtf8 = 0,
             EventCallback = session.Callback,
             EventCallbackContext = session.CallbackContext,
+            VideoScalingQuality = 1, // HighQuality
         };
 
         var result = Fff3FpNative.FFF3FP_Create(in config, out var handle);
@@ -45,6 +48,10 @@ public sealed class Fff3FpEngine : IPlayerEngine
         }
 
         session.AttachHandle(handle);
+
+        // 创建会话后立即设置智能参数
+        session.ApplyToneMappingParameters(options.ColorMode, options.OutputWindow);
+
         return session;
     }
 
@@ -53,6 +60,9 @@ public sealed class Fff3FpEngine : IPlayerEngine
         private readonly EngineSessionOptions _options;
         private nint _handle;
         private bool _disposed;
+
+        /// <summary>创建会话时的输出窗口（用于运行时重新读取显示器能力）。</summary>
+        private nint _outputWindow;
 
         // ---- 事件回调（原生工作线程调用，__cdecl）----
         private readonly Fff3FpEventCallback _callback;
@@ -66,6 +76,7 @@ public sealed class Fff3FpEngine : IPlayerEngine
         internal Fff3FpSession(EngineSessionOptions options)
         {
             _options = options;
+            _outputWindow = options.OutputWindow;
             _callback = OnEngineEvent;
             _callbackContext = GCHandle.Alloc(this);
         }
@@ -158,6 +169,35 @@ public sealed class Fff3FpEngine : IPlayerEngine
         {
             ThrowIfDisposed();
             Check(Fff3FpNative.FFF3FP_SetVolume(_handle, volume, muted ? 1u : 0u), nameof(SetVolume));
+        }
+
+        /// <summary>设置色彩模式（运行时切换 HDR/SDR）。
+        /// 使用智能参数计算（ToneMappingParameters），避免固定的 100 nits 导致 BT.2390 曲线失效。</summary>
+        public void SetColorMode(ColorMode mode)
+        {
+            ThrowIfDisposed();
+
+            // 获取当前媒体信息，判断是否为 HDR 内容
+            var mediaInfo = ReadMediaInfo();
+            var contentIsHdr = mediaInfo?.IsHdr ?? false;
+
+            // 智能计算参数（与创建会话时一致：从输出窗口读取真实显示器能力）
+            var displayCapabilities = _outputWindow != 0
+                ? DisplayCapabilities.ReadForWindow(_outputWindow)
+                : null;
+            var config = ToneMappingParameters.Calculate(mode, displayCapabilities, contentIsHdr);
+
+            var result = Fff3FpNative.FFF3FP_SetColorMode(_handle, (uint)mode, config.SdrPeakNits, config.HdrPeakNits, config.PaperWhiteNits);
+            if (result != FffResult.Success)
+                throw new EngineException((int)result, $"SetColorMode 失败: {result}");
+        }
+
+        public void SetViewTransform(float zoom, float panX, float panY)
+        {
+            ThrowIfDisposed();
+            var result = Fff3FpNative.FFF3FP_SetViewTransform(_handle, zoom, panX, panY);
+            if (result != FffResult.Success)
+                throw new EngineException((int)result, $"SetViewTransform 失败: {result}");
         }
 
         public EngineSnapshot ReadSnapshot()
@@ -385,6 +425,28 @@ public sealed class Fff3FpEngine : IPlayerEngine
             }
             sample = new PixelSample(probe.Red, probe.Green, probe.Blue, probe.Alpha, probe.OutputBitDepth);
             return true;
+        }
+
+        /// <summary>应用智能色调映射参数（调用3FP SetColorMode）。</summary>
+        public void ApplyToneMappingParameters(ColorMode colorMode, nint outputWindow)
+        {
+            // 获取显示器能力
+            var displayCapabilities = DisplayCapabilities.ReadForWindow(outputWindow);
+
+            // 获取当前媒体信息，判断是否为 HDR 内容
+            var mediaInfo = ReadMediaInfo();
+            var contentIsHdr = mediaInfo?.IsHdr ?? false;
+
+            // 智能计算参数
+            var config = ToneMappingParameters.Calculate(colorMode, displayCapabilities, contentIsHdr);
+
+            // 调用3FP的SetColorMode API
+            var result = Fff3FpNative.FFF3FP_SetColorMode(_handle, (uint)colorMode, config.SdrPeakNits, config.HdrPeakNits, config.PaperWhiteNits);
+            if (result != FffResult.Success && result != FffResult.NotSupported)
+            {
+                // 忽略 NotSupported（3FP可能不支持某些模式）
+                throw new EngineException((int)result, $"SetColorMode 失败: {result}");
+            }
         }
 
         public void Dispose()

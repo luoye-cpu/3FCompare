@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using _3FCompare.App.Utils;
 
 namespace _3FCompare.App.Controls;
 
@@ -40,15 +41,15 @@ public sealed class BookmarkPanel : Panel
         _currentPos = currentPosGetter;
         Dock = DockStyle.Right;
         Width = 240;
-        BackColor = Color.FromArgb(30, 30, 36);
+        BackColor = AppTheme.Colors.PanelBackground;
 
         var title = new Label
         {
             Text = "书签",
             Dock = DockStyle.Top,
             Height = 28,
-            Font = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold),
-            ForeColor = Color.White,
+            Font = AppTheme.Fonts.TitleFont,
+            ForeColor = AppTheme.Colors.TextPrimary,
             TextAlign = ContentAlignment.MiddleLeft,
         };
 
@@ -56,10 +57,10 @@ public sealed class BookmarkPanel : Panel
         {
             Dock = DockStyle.Top,
             Height = 30,
-            Font = new Font("Microsoft YaHei UI", 9f),
+            Font = AppTheme.Fonts.BodyFont,
             PlaceholderText = "备注内容…",
-            BackColor = Color.FromArgb(50, 50, 58),
-            ForeColor = Color.White,
+            BackColor = AppTheme.Colors.InputBackgroundAlt,
+            ForeColor = AppTheme.Colors.TextPrimary,
             BorderStyle = BorderStyle.FixedSingle,
         };
 
@@ -69,8 +70,8 @@ public sealed class BookmarkPanel : Panel
             Height = 28,
             Text = "＋ 添加当前帧",
             FlatStyle = FlatStyle.Flat,
-            BackColor = Color.FromArgb(60, 90, 60),
-            ForeColor = Color.White,
+            BackColor = AppTheme.Colors.ButtonActive,
+            ForeColor = AppTheme.Colors.TextPrimary,
         };
         _btnAdd.Click += (_, _) => AddCurrent();
 
@@ -80,8 +81,8 @@ public sealed class BookmarkPanel : Panel
             Height = 28,
             Text = "⇩ 导出…",
             FlatStyle = FlatStyle.Flat,
-            BackColor = Color.FromArgb(60, 60, 66),
-            ForeColor = Color.White,
+            BackColor = AppTheme.Colors.ButtonSecondary,
+            ForeColor = AppTheme.Colors.TextPrimary,
         };
         _btnExport.Click += (_, _) => Export();
 
@@ -91,8 +92,8 @@ public sealed class BookmarkPanel : Panel
             View = View.Details,
             FullRowSelect = true,
             GridLines = false,
-            BackColor = Color.FromArgb(40, 40, 46),
-            ForeColor = Color.White,
+            BackColor = AppTheme.Colors.ControlBackground,
+            ForeColor = AppTheme.Colors.TextPrimary,
             BorderStyle = BorderStyle.None,
         };
         _list.Columns.Add("时间", 110);

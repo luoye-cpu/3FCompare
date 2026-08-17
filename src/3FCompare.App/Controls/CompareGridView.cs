@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using _3FCompare.Core.Backend;
+using _3FCompare.App.Utils;
 
 namespace _3FCompare.App.Controls;
 
@@ -43,7 +44,7 @@ public sealed class CompareGridView : Control
         RealMode = realMode;
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
                  ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        BackColor = Color.FromArgb(10, 10, 12);
+        BackColor = AppTheme.Colors.CanvasBackgroundDark;
         DoubleBuffered = true;
     }
 
@@ -61,7 +62,11 @@ public sealed class CompareGridView : Control
         while (_surfaces.Count < count)
         {
             var surface = new PlayerSurface(_surfaces.Count, RealMode);
-            surface.SurfaceClicked += (_, _) => { if (_surfaces.IndexOf(surface) is var i && i >= 0) SelectedIndex = i; };
+            surface.SurfaceClicked += (s, _) =>
+            {
+                var idx = _surfaces.IndexOf((PlayerSurface)s!);
+                if (Geometry.IsValidIndex(idx, _surfaces.Count)) SelectedIndex = idx;
+            };
             _surfaces.Add(surface);
             Controls.Add(surface);
         }
@@ -109,14 +114,10 @@ public sealed class CompareGridView : Control
             return;
         }
 
-        var cellW = ClientSize.Width / cols;
-        var cellH = ClientSize.Height / rows;
         for (var i = 0; i < _surfaces.Count; i++)
         {
             _surfaces[i].Visible = true;
-            var r = i / cols;
-            var c = i % cols;
-            _surfaces[i].Bounds = new Rectangle(c * cellW, r * cellH, cellW, cellH);
+            _surfaces[i].Bounds = Geometry.CellRect(i, cols, rows, ClientRectangle);
         }
     }
 
@@ -131,7 +132,7 @@ public sealed class CompareGridView : Control
         base.OnPaint(e);
         if (_surfaces.Count == 0)
         {
-            using var brush = new SolidBrush(Color.FromArgb(40, 40, 46));
+            using var brush = new SolidBrush(AppTheme.Colors.TextMuted);
             using var font = new Font("Microsoft YaHei UI", 14f);
             var text = "点击「打开视频」或拖拽文件到此处\n支持 1~9 路对比";
             e.Graphics.DrawString(text, font, brush, ClientRectangle,

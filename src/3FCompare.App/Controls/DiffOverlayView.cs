@@ -1,4 +1,5 @@
 using _3FCompare.Core.Backend;
+using _3FCompare.App.Utils;
 
 namespace _3FCompare.App.Controls;
 
@@ -19,7 +20,7 @@ public sealed class DiffOverlayView : Control
         _grid = grid;
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
                  ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        BackColor = Color.FromArgb(12, 12, 14);
+        BackColor = AppTheme.Colors.CanvasBackgroundDark;
         DoubleBuffered = true;
     }
 
@@ -42,7 +43,7 @@ public sealed class DiffOverlayView : Control
         if (rect.Width <= 0 || rect.Height <= 0) return;
 
         // 背景
-        g.Clear(Color.FromArgb(12, 12, 14));
+        g.Clear(AppTheme.Colors.CanvasBackgroundDark);
 
         var a = _grid.GetSurface(_aIndex);
         var b = _grid.GetSurface(_bIndex);
@@ -96,7 +97,7 @@ public sealed class DiffOverlayView : Control
         }
 
         using var infoFont = new Font("Microsoft YaHei UI", 8f);
-        using var infoBrush = new SolidBrush(Color.FromArgb(180, 180, 190));
+        using var infoBrush = new SolidBrush(AppTheme.Colors.TextSecondary);
         g.DrawString($"差异点: {diffCount} / {cellsX * cellsY}  ({(double)diffCount / Math.Max(1, cellsX * cellsY) * 100:0.#}%)", infoFont, infoBrush, 10, rect.Height - 18);
 
         // 图例

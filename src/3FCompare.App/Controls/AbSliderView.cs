@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using _3FCompare.Core.Backend;
+using _3FCompare.App.Utils;
 
 namespace _3FCompare.App.Controls;
 
@@ -28,7 +29,7 @@ public sealed class AbSliderView : Control
         _grid = grid;
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
                  ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        BackColor = Color.FromArgb(18, 18, 20);
+        BackColor = AppTheme.Colors.CanvasBackground;
         DoubleBuffered = true;
         Height = 480;
         Cursor = Cursors.VSplit;
@@ -61,10 +62,10 @@ public sealed class AbSliderView : Control
         PaintSlot(g, _bIndex, new Rectangle(splitX, 0, rect.Width - splitX, rect.Height));
 
         // 分隔滑块（垂直）
-        using var sliderPen = new Pen(Color.FromArgb(255, 200, 64), 3);
+        using var sliderPen = new Pen(AppTheme.Colors.Accent, 3);
         g.DrawLine(sliderPen, splitX, 0, splitX, rect.Height);
         // 滑块手柄
-        using var handleBrush = new SolidBrush(Color.FromArgb(255, 200, 64));
+        using var handleBrush = new SolidBrush(AppTheme.Colors.Accent);
         var handleRect = new Rectangle(splitX - 14, rect.Height / 2 - 20, 28, 40);
         g.FillRectangle(handleBrush, handleRect);
         using var whitePen = new Pen(Color.White, 2);
@@ -84,7 +85,7 @@ public sealed class AbSliderView : Control
         var surface = _grid.GetSurface(surfaceIndex);
         if (surface is null)
         {
-            using var empty = new SolidBrush(Color.FromArgb(35, 35, 40));
+            using var empty = new SolidBrush(AppTheme.Colors.PanelBackground);
             g.FillRectangle(empty, rect);
             return;
         }

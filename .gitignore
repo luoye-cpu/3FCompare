@@ -46,8 +46,12 @@ logs/
 third_party/fff_project/third_party/vcpkg/
 third_party/vcpkg/
 
-# 测试媒体
-testmedia/
+# 测试媒体（生成产物不入库；保留测试脚本和枚举测试项目）
+testmedia/*.mp4
+testmedia/*.png
+testmedia/*.pid
+testmedia/selftest_*.txt
+testmedia/screen*.png
 
 # 发布产物（NativeAOT + 第三方 DLL，190+ MB）
 publish/

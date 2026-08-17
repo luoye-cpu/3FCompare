@@ -38,6 +38,13 @@ public interface IPlayerSession : IDisposable
     /// <summary>音量设置（0..1；muted=1 静音）。</summary>
     void SetVolume(float volume, bool muted);
 
+    /// <summary>设置色彩模式（MapToSdr/RawHdrAsSdr/MapToHdr）。运行时切换 HDR/SDR。</summary>
+    void SetColorMode(ColorMode mode);
+
+    /// <summary>设置视口变换（缩放 + 平移）。zoom=1.0 表示适应窗口；
+    /// panX/panY 为相对未缩放视频框的归一化偏移 [-1,1]。</summary>
+    void SetViewTransform(float zoom, float panX, float panY);
+
     /// <summary>读取当前快照（高频安全）。</summary>
     EngineSnapshot ReadSnapshot();
 

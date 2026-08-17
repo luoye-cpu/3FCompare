@@ -11,7 +11,7 @@ public sealed class AppSettings
     /// <summary>手动指定的 FFmpeg DLL 目录（null/空白 = 自动检测系统路径）。</summary>
     public string? FfmpegDirectory { get; set; }
 
-    public ColorModeSetting ColorMode { get; set; } = ColorModeSetting.MapToSdr;
+    public ColorModeSetting ColorMode { get; set; } = ColorModeSetting.MapToHdr;
 
     /// <summary>按帧步进步长（F12），默认 1。</summary>
     public int FrameStep { get; set; } = 1;
@@ -32,9 +32,9 @@ public sealed class AppSettings
 
     public int WindowY { get; set; } = -1;
 
-    public int WindowWidth { get; set; } = 1280;
+    public int WindowWidth { get; set; } = 1600;
 
-    public int WindowHeight { get; set; } = 800;
+    public int WindowHeight { get; set; } = 900;
 
     public bool WindowMaximized { get; set; }
 }

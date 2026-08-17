@@ -1,3 +1,5 @@
+using _3FCompare.App.Utils;
+
 namespace _3FCompare.App.Controls;
 
 /// <summary>时间轴：单轨道（master）+ 播放头 + A/B 区间标记 + 点击/拖动 Seek + A/B 打点。
@@ -20,7 +22,7 @@ public sealed class TimelineView : Control
     {
         Height = 34;
         Dock = DockStyle.Bottom;
-        BackColor = Color.FromArgb(24, 24, 28);
+        BackColor = AppTheme.Colors.Background;
         DoubleBuffered = true;
         ContextMenuStrip = BuildContextMenu();
     }
@@ -82,7 +84,7 @@ public sealed class TimelineView : Control
         var rect = ClientRectangle;
 
         // 背景轨
-        using var trackBrush = new SolidBrush(Color.FromArgb(45, 45, 52));
+        using var trackBrush = new SolidBrush(AppTheme.Colors.ControlBackgroundLight);
         g.FillRectangle(trackBrush, new Rectangle(0, rect.Height / 2 - 5, rect.Width, 10));
 
         // A/B 区间高亮
@@ -104,10 +106,10 @@ public sealed class TimelineView : Control
         if (_duration100ns > 0)
         {
             var x = (int)(_position100ns / (double)_duration100ns * rect.Width);
-            using var headPen = new Pen(Color.FromArgb(255, 200, 64), 2);
+            using var headPen = new Pen(AppTheme.Colors.Accent, 2);
             g.DrawLine(headPen, x, 0, x, rect.Height);
             // 头部三角
-            using var headBrush = new SolidBrush(Color.FromArgb(255, 200, 64));
+            using var headBrush = new SolidBrush(AppTheme.Colors.Accent);
             g.FillPolygon(headBrush, new[]
             {
                 new Point(x - 5, 0), new Point(x + 5, 0), new Point(x, 8),
@@ -116,7 +118,7 @@ public sealed class TimelineView : Control
 
         // 时间刻度
         using var font = new Font("Consolas", 8f);
-        using var textBrush = new SolidBrush(Color.FromArgb(150, 150, 160));
+        using var textBrush = new SolidBrush(AppTheme.Colors.TextMuted);
         for (var i = 0; i <= 10; i++)
         {
             var x = (int)(i / 10.0 * rect.Width);

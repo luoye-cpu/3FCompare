@@ -129,6 +129,10 @@ public sealed class SimulatedEngine : IPlayerEngine
 
         public void SetVolume(float volume, bool muted) { /* 演示模式无音频 */ }
 
+        public void SetColorMode(ColorMode mode) { /* 演示模式略过 */ }
+
+        public void SetViewTransform(float zoom, float panX, float panY) { /* 演示模式略过 */ }
+
         public EngineSnapshot ReadSnapshot()
         {
             lock (_lock)

@@ -119,6 +119,17 @@ public sealed class SyncController
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    /// <summary>向所有会话广播统一的视口变换（缩放 + 平移），保证多路看到同一区域。</summary>
+    public void SetViewTransform(float zoom, float panX, float panY)
+    {
+        foreach (var slot in _slots)
+        {
+            if (slot.Failed) continue;
+            try { slot.Session.SetViewTransform(zoom, panX, panY); }
+            catch (Exception ex) { ReportRuntimeError($"视图变换第 {_slots.IndexOf(slot)} 路", ex); }
+        }
+    }
+
     public void Stop()
     {
         foreach (var slot in _slots)

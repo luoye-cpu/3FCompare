@@ -1,3 +1,5 @@
+using _3FCompare.App.Utils;
+
 namespace _3FCompare.App.Controls;
 
 /// <summary>放大镜（F17）：在视频面上跟随鼠标显示放大局部区域。
@@ -51,7 +53,7 @@ public sealed class MagnifierOverlay : Control
         var g = e.Graphics;
         g.Clear(Color.FromArgb(220, 16, 16, 20));
 
-        using var border = new Pen(Color.FromArgb(255, 200, 64), 2);
+        using var border = new Pen(AppTheme.Colors.Accent, 2);
         g.DrawRectangle(border, new Rectangle(0, 0, Width - 1, Height - 1));
 
         // 中心十字

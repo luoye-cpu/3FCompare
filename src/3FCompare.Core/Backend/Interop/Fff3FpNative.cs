@@ -19,6 +19,16 @@ internal enum FffResult : int
     NotSupported = -7,
 }
 
+/// <summary>显示器HDR能力（对应3FP的HdrDisplayCapabilities）。</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct HdrDisplayCapabilities
+{
+    public bool supported;              // 是否支持HDR
+    public float minimumNits;           // 最小亮度（nits）
+    public float maximumNits;           // 峰值亮度（nits）
+    public float maximumFullFrameNits;  // 全帧最大亮度（nits）
+}
+
 /// <summary>解码模式（FFF3FPDecodeMode）。</summary>
 internal enum FffDecodeMode : uint
 {
@@ -63,6 +73,7 @@ internal struct Fff3FpConfiguration
     public nint AudioEndpointIdUtf8;
     public nint EventCallback;
     public nint EventCallbackContext;
+    public uint VideoScalingQuality; // 新增 v11: 0=Balanced, 1=HighQuality
 }
 
 /// <summary>FFF3FPSnapshot 完整布局（对照 FFF.Player.Api.h v8，逐字段对齐）。</summary>
@@ -200,6 +211,14 @@ internal static partial class Fff3FpNative
 
     [LibraryImport(DllName)]
     internal static partial FffResult FFF3FP_SetOutputWindow(nint player, nint outputWindow);
+
+    [LibraryImport(DllName)]
+    internal static partial FffResult FFF3FP_SetViewTransform(nint player,
+        float zoom, float panX, float panY);
+
+    [LibraryImport(DllName)]
+    internal static partial FffResult FFF3FP_SetColorMode(nint player,
+        uint colorMode, float sdrPeakNits, float hdrPeakNits, float sdrPaperWhiteNits);
 
     // ---- 读取 ----
 

@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using _3FCompare.Core.Backend;
+using _3FCompare.App.Utils;
 
 namespace _3FCompare.App.Controls;
 
@@ -55,7 +56,7 @@ public sealed class PlayerSurface : Control
         _realMode = realMode;
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
                  ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        BackColor = Color.FromArgb(18, 18, 20);
+        BackColor = AppTheme.Colors.CanvasBackground;
         Cursor = Cursors.Hand;
         DoubleBuffered = true;
     }
@@ -105,7 +106,7 @@ public sealed class PlayerSurface : Control
     {
         if (_failed)
         {
-            using var bg = new SolidBrush(Color.FromArgb(30, 30, 34));
+            using var bg = new SolidBrush(AppTheme.Colors.PanelBackground);
             g.FillRectangle(bg, rect);
             return;
         }
@@ -139,7 +140,7 @@ public sealed class PlayerSurface : Control
 
     private void PaintBorder(Graphics g, Rectangle rect)
     {
-        var color = _selected ? Color.FromArgb(255, 200, 64) : Color.FromArgb(60, 60, 66);
+        var color = _selected ? AppTheme.Colors.Accent : AppTheme.Colors.ButtonSecondary;
         using var pen = new Pen(color, _selected ? 3f : 1f);
         var r = Rectangle.Inflate(rect, -1, -1);
         g.DrawRectangle(pen, r);
@@ -152,7 +153,7 @@ public sealed class PlayerSurface : Control
 
         if (_failed)
         {
-            using var red = new SolidBrush(Color.FromArgb(255, 120, 120));
+            using var red = new SolidBrush(AppTheme.Colors.Error);
             g.DrawString($"✖ {_error}", font, red, new RectangleF(8, 8, rect.Width - 16, 60));
         }
         else

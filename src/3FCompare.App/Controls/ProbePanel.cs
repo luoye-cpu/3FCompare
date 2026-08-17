@@ -1,5 +1,6 @@
 using System.Text;
 using _3FCompare.Core.Backend;
+using _3FCompare.App.Utils;
 
 namespace _3FCompare.App.Controls;
 
@@ -18,15 +19,15 @@ public sealed class ProbePanel : Panel
     {
         Dock = DockStyle.Right;
         Width = 230;
-        BackColor = Color.FromArgb(30, 30, 36);
+        BackColor = AppTheme.Colors.PanelBackground;
 
         var title = new Label
         {
             Text = "像素探针",
             Dock = DockStyle.Top,
             Height = 28,
-            Font = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold),
-            ForeColor = Color.White,
+            Font = AppTheme.Fonts.TitleFont,
+            ForeColor = AppTheme.Colors.TextPrimary,
             TextAlign = ContentAlignment.MiddleLeft,
         };
         title.Margin = new Padding(8, 4, 0, 0);
@@ -37,7 +38,7 @@ public sealed class ProbePanel : Panel
             Dock = DockStyle.Top,
             Height = 20,
             Font = new Font("Consolas", 9f),
-            ForeColor = Color.FromArgb(200, 200, 210),
+            ForeColor = AppTheme.Colors.TextSecondary,
         };
         _modeLabel = new Label
         {
@@ -45,7 +46,7 @@ public sealed class ProbePanel : Panel
             Dock = DockStyle.Top,
             Height = 20,
             Font = new Font("Consolas", 9f),
-            ForeColor = Color.FromArgb(200, 200, 210),
+            ForeColor = AppTheme.Colors.TextSecondary,
         };
         _valueLabel = new Label
         {
@@ -53,7 +54,7 @@ public sealed class ProbePanel : Panel
             Dock = DockStyle.Top,
             Height = 60,
             Font = new Font("Consolas", 12f, FontStyle.Bold),
-            ForeColor = Color.FromArgb(255, 200, 64),
+            ForeColor = AppTheme.Colors.Accent,
             TextAlign = ContentAlignment.MiddleLeft,
         };
 
@@ -62,8 +63,8 @@ public sealed class ProbePanel : Panel
             Text = "鼠标悬停视频面以读取像素\n（显示颜色管理前码值）",
             Dock = DockStyle.Top,
             Height = 40,
-            Font = new Font("Microsoft YaHei UI", 8.5f),
-            ForeColor = Color.FromArgb(140, 140, 150),
+            Font = AppTheme.Fonts.CaptionFont,
+            ForeColor = AppTheme.Colors.TextMuted,
         };
 
         Controls.AddRange(new Control[] { hint, _valueLabel, _modeLabel, _coordLabel, title });
@@ -85,7 +86,7 @@ public sealed class ProbePanel : Panel
     /// <summary>由外部（视频面鼠标移动）驱动更新探针读数。</summary>
     public void UpdatePoint(int x, int y)
     {
-        if (_session is null) return;
+        if (_session is null || x < 0 || y < 0) return;
         _lastX = x;
         _lastY = y;
         _coordLabel.Text = $"坐标: ({x}, {y})";

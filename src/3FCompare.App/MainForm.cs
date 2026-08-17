@@ -1,5 +1,6 @@
 using _3FCompare.App.Capture;
 using _3FCompare.App.Controls;
+using _3FCompare.App.Utils;
 using _3FCompare.Core.Backend;
 using _3FCompare.Core.Settings;
 using _3FCompare.Core.Sync;
@@ -8,11 +9,15 @@ namespace _3FCompare.App;
 
 /// <summary>主窗体：菜单 + 网格 + 传输栏 + 时间轴 + 状态栏。
 /// 职责：会话管理（SyncController）、打开/关闭/步进/循环/全屏/设置、快照轮询、快捷键。</summary>
-public sealed class MainForm : Form
+public sealed class MainForm : Form, IMessageFilter
 {
     private readonly bool _realMode;
     private readonly IPlayerEngine _engine;
     private readonly SyncController _sync = new();
+
+    // WM_MOUSEWHEEL：全局消息过滤，绕过 WinForms「仅焦点控件接收滚轮」的限制，
+    // 让鼠标悬停在任一画面（PlayerSurface）上滚动时都能缩放。
+    private const int WM_MOUSEWHEEL = 0x020A;
     private readonly AppSettings _settings;
     private readonly System.Windows.Forms.Timer _pollTimer;
 
@@ -38,14 +43,21 @@ public sealed class MainForm : Form
     private bool _isPlaying;
     private bool _abViewVisible;
 
+    // ---- 同步视图变换状态（多路共享，滚轮缩放 + 拖拽平移）----
+    private float _viewZoom = 1.0f;
+    private float _viewPanX;
+    private float _viewPanY;
+    private Point _dragStart;
+    private bool _dragging;
+
     /// <summary>右侧工具区布局容器（探针/书签 +/- 切换）。</summary>
     private sealed class VerticalDockHost : Panel
     {
         public VerticalDockHost()
         {
             Dock = DockStyle.Right;
-            Width = 240;
-            BackColor = Color.FromArgb(30, 30, 36);
+            Width = LayoutConstants.Tools.DefaultWidth;
+            BackColor = AppTheme.Colors.PanelBackground;
             AutoScroll = true;
         }
 
@@ -76,7 +88,7 @@ public sealed class MainForm : Form
         _engine = EngineFactory.Create();
 
         Text = "3FCompare – ICAT 类视频盯帧对比";
-        ClientSize = new Size(1280, 800);
+        ClientSize = new Size(1600, 900);
 
         // 窗口位置/尺寸记忆（F27 窗口管理；仅当有上次记录时恢复）
         if (_settings.WindowWidth >= 640 && _settings.WindowHeight >= 400)
@@ -97,7 +109,7 @@ public sealed class MainForm : Form
 
         KeyPreview = true;
         AllowDrop = true;
-        BackColor = Color.FromArgb(24, 24, 28);
+        BackColor = AppTheme.Colors.Background;
 
         _sync.StepProfile = new StepProfile { FrameStep = _settings.FrameStep, SecondsStep = _settings.SecondsStep };
 
@@ -160,7 +172,7 @@ public sealed class MainForm : Form
             Checked = false,
             Dock = DockStyle.Top,
             Height = 26,
-            ForeColor = Color.White,
+            ForeColor = AppTheme.Colors.TextPrimary,
         };
         _chkMagnifier.CheckedChanged += (_, _) =>
         {
@@ -194,8 +206,8 @@ public sealed class MainForm : Form
         settingsMenu.DropDownItems.Add(settingsItem);
 
         _menu.Items.AddRange(new ToolStripItem[] { fileMenu, viewMenu, settingsMenu });
-        _menu.BackColor = Color.FromArgb(30, 30, 36);
-        _menu.ForeColor = Color.White;
+        _menu.BackColor = AppTheme.Colors.PanelBackground;
+        _menu.ForeColor = AppTheme.Colors.TextPrimary;
         MainMenuStrip = _menu;
 
         // 传输栏
@@ -208,6 +220,7 @@ public sealed class MainForm : Form
         _transport.AddClicked += (_, _) => AddSlotPlaceholder();
         _transport.RemoveClicked += (_, _) => RemoveLastSlot();
         _transport.SpeedChanged += (_, speed) => SetPlaybackSpeed(speed);
+        _transport.ColorModeChanged += (_, index) => OnColorModeChanged(index);
 
         // 时间轴
         _timeline = new TimelineView();
@@ -219,8 +232,8 @@ public sealed class MainForm : Form
         _statusMode = new ToolStripStatusLabel(_realMode ? "引擎: FFF.Native (3FP)" : "引擎: 演示模式 (Simulated)");
         _statusInfo = new ToolStripStatusLabel("就绪 — 点击「打开视频」或拖拽文件");
         _statusStrip.Items.AddRange(new ToolStripItem[] { _statusMode, new ToolStripStatusLabel(" | "), _statusInfo });
-        _statusStrip.BackColor = Color.FromArgb(30, 30, 36);
-        _statusStrip.ForeColor = Color.White;
+        _statusStrip.BackColor = AppTheme.Colors.PanelBackground;
+        _statusStrip.ForeColor = AppTheme.Colors.TextPrimary;
 
         Controls.AddRange(new Control[] { _grid, _transport, _timeline, _statusStrip, _menu, _toolsDock });
 
@@ -253,6 +266,39 @@ public sealed class MainForm : Form
         _grid.SetCount(2);
         WireSurfaceTools();
         UpdateStatus();
+
+        // 全局滚轮消息过滤：使「鼠标悬停任意画面即缩放」生效
+        // （WinForms 的 MouseWheel 事件只在焦点控件触发，普通无焦点 Control 收不到）。
+        Application.AddMessageFilter(this);
+    }
+
+    // ---- 全局消息过滤（解决滚轮缩放失效）----
+    // WinForms 的 WM_MOUSEWHEEL 只派发给「拥有键盘焦点的控件」，而 PlayerSurface
+    // 是普通无焦点 Control，鼠标悬停其上滚动时收不到事件 → 缩放无效。
+    // 这里在应用级拦截滚轮消息，按鼠标位置定位到具体画面并统一缩放。
+    bool IMessageFilter.PreFilterMessage(ref Message m)
+    {
+        if (m.Msg != WM_MOUSEWHEEL) return false;
+
+        // 判断鼠标是否落在某个可见的画面（PlayerSurface）上
+        var cursor = MousePosition;
+        foreach (var surface in _grid.Surfaces)
+        {
+            if (!surface.Visible) continue;
+            var p = surface.PointToClient(cursor);
+            if (surface.ClientRectangle.Contains(p))
+            {
+                // 缩放：滚轮向上放大，向下缩小（保持 Ctrl 语义：Delta>0 放大）
+                var delta = (short)((long)m.WParam >> 16);
+                if (delta == 0) return false;
+                var factor = delta > 0 ? 1.15f : 1 / 1.15f;
+                _viewZoom = Math.Clamp(_viewZoom * factor, 1f, 32f);
+                ApplyViewTransform();
+                // 已处理滚动：返回 true 阻止继续冒泡（避免容器/窗体再滚动）
+                return true;
+            }
+        }
+        return false;
     }
 
     // ---------- 会话管理 ----------
@@ -553,6 +599,7 @@ public sealed class MainForm : Form
                     ColorMode = (ColorMode)_settings.ColorMode,
                 });
                 surface.AttachSession(session);
+                WireSingleSurface(surface);
                 _sync.AddSlot(session, path);
 
                 // 异步打开
@@ -617,6 +664,8 @@ public sealed class MainForm : Form
     {
         if (_sync.Count >= 9) return;
         _grid.SetCount(_sync.Count + 1);
+        // 为新 surface 绑定鼠标事件
+        WireSingleSurface(_grid.Surfaces[_sync.Count - 1]);
         UpdateStatus();
     }
 
@@ -629,21 +678,74 @@ public sealed class MainForm : Form
         UpdateStatus();
     }
 
-    // 打开文件后架设探针/放大镜联动
+    // 打开文件后架设探针/放大镜/缩放平移联动
     private void WireSurfaceTools()
     {
         foreach (var s in _grid.Surfaces)
         {
-            var surface = s;
-            surface.MouseMove += (_, e) =>
-            {
-                if (_chkMagnifier.Checked)
-                    _magnifier.UpdateMagnifier(new Point(e.X, e.Y));
-                if (_probe.Visible && surface.Selected)
-                    _probe.UpdatePoint(e.X, e.Y);
-            };
-            surface.MouseLeave += (_, _) => _magnifier.HideMagnifier();
+            WireSingleSurface(s);
         }
+    }
+
+    /// <summary>为单个 Surface 挂载鼠标事件（缩放/平移/放大镜/探针）。</summary>
+    private void WireSingleSurface(PlayerSurface surface)
+    {
+        // 避免重复绑定
+        if (surface.Tag is int tag && tag == 1) return;
+        surface.Tag = 1;
+
+        surface.MouseMove += (_, e) =>
+        {
+            if (_chkMagnifier.Checked)
+                _magnifier.UpdateMagnifier(new Point(e.X, e.Y));
+            if (_probe.Visible && surface.Selected)
+                _probe.UpdatePoint(e.X, e.Y);
+            // 拖拽平移
+            if (_dragging && _viewZoom > 1.001f)
+            {
+                var dx = e.X - _dragStart.X;
+                var dy = e.Y - _dragStart.Y;
+                _dragStart = e.Location;
+                var scale = 2.0f / Math.Max(surface.Width, surface.Height);
+                _viewPanX = Math.Clamp(_viewPanX + dx * scale, -1f, 1f);
+                _viewPanY = Math.Clamp(_viewPanY + dy * scale, -1f, 1f);
+                ApplyViewTransform();
+            }
+        };
+        surface.MouseLeave += (_, _) =>
+        {
+            _magnifier.HideMagnifier();
+            _dragging = false;
+        };
+        surface.MouseDown += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Left && _viewZoom > 1.001f)
+            {
+                _dragging = true;
+                _dragStart = e.Location;
+            }
+        };
+        surface.MouseUp += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Left) _dragging = false;
+        };
+    }
+
+    /// <summary>将当前共享的缩放/平移广播到所有会话（多路同步）。</summary>
+    private void ApplyViewTransform()
+    {
+        try { _sync.SetViewTransform(_viewZoom, _viewPanX, _viewPanY); }
+        catch (Exception ex) { Console.WriteLine($"ApplyViewTransform: {ex.Message}"); }
+    }
+
+    /// <summary>重置缩放和平移到默认（适应窗口）。</summary>
+    private void ResetViewTransform()
+    {
+        _viewZoom = 1.0f;
+        _viewPanX = 0f;
+        _viewPanY = 0f;
+        _dragging = false;
+        ApplyViewTransform();
     }
 
     // ---------- 播放控制 ----------
@@ -720,6 +822,25 @@ public sealed class MainForm : Form
     }
 
     private double _playbackSpeed = 1.0;
+
+    private void OnColorModeChanged(int index)
+    {
+        // 0=SDR (MapToSdr), 1=HDR (MapToHdr)
+        // 注: RawHdrAsSdr 无标准意义，跳过
+        var mode = index == 0 ? ColorMode.MapToSdr : ColorMode.MapToHdr;
+        if (_realMode && _sync.Count > 0)
+        {
+            foreach (var slot in _sync.Slots)
+            {
+                try { slot.Session.SetColorMode(mode); }
+                catch { /* 单路失败忽略 */ }
+            }
+        }
+        _settings.ColorMode = (ColorModeSetting)(index == 0 ? 0 : 2);
+        var names = new[] { "SDR", "HDR" };
+        _statusInfo.Text = $"色彩: {names[index]}";
+        UpdateStatus();
+    }
 
     // ---------- 视图 ----------
 
@@ -1238,6 +1359,9 @@ public sealed class MainForm : Form
                 return true;
             case Keys.F6:
                 ToggleOffsetPanel();
+                return true;
+            case Keys.R:
+                ResetViewTransform();
                 return true;
             case Keys.Delete:
                 _bookmarks.RemoveSelected();

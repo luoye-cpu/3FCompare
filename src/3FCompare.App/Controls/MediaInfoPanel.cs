@@ -1,4 +1,5 @@
 using _3FCompare.Core.Backend;
+using _3FCompare.App.Utils;
 
 namespace _3FCompare.App.Controls;
 
@@ -13,15 +14,15 @@ public sealed class MediaInfoPanel : Panel
     public MediaInfoPanel()
     {
         Dock = DockStyle.Fill;
-        BackColor = Color.FromArgb(30, 30, 36);
+        BackColor = AppTheme.Colors.PanelBackground;
 
         _title = new Label
         {
             Text = "媒体信息",
             Dock = DockStyle.Top,
             Height = 26,
-            Font = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold),
-            ForeColor = Color.White,
+            Font = AppTheme.Fonts.TitleFont,
+            ForeColor = AppTheme.Colors.TextPrimary,
             Padding = new Padding(4, 2, 0, 0),
         };
 
@@ -30,8 +31,8 @@ public sealed class MediaInfoPanel : Panel
             Text = "选中一个已打开的媒体以查看信息",
             Dock = DockStyle.Top,
             Height = 30,
-            Font = new Font("Microsoft YaHei UI", 9f),
-            ForeColor = Color.FromArgb(140, 140, 150),
+            Font = AppTheme.Fonts.BodyFont,
+            ForeColor = AppTheme.Colors.TextMuted,
             Padding = new Padding(4, 4, 0, 0),
         };
 
@@ -39,10 +40,10 @@ public sealed class MediaInfoPanel : Panel
         {
             Dock = DockStyle.Fill,
             ReadOnly = true,
-            BackColor = Color.FromArgb(36, 36, 42),
-            ForeColor = Color.FromArgb(220, 220, 228),
+            BackColor = AppTheme.Colors.InputBackground,
+            ForeColor = AppTheme.Colors.TextSecondary,
             BorderStyle = BorderStyle.None,
-            Font = new Font("Consolas", 9f),
+            Font = AppTheme.Fonts.MonospaceFont,
             DetectUrls = false,
         };
 

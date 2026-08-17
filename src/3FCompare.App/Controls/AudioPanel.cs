@@ -1,4 +1,5 @@
 using _3FCompare.Core.Backend;
+using _3FCompare.App.Utils;
 
 namespace _3FCompare.App.Controls;
 
@@ -15,19 +16,19 @@ public sealed class AudioPanel : Panel
     public AudioPanel()
     {
         Dock = DockStyle.Fill;
-        BackColor = Color.FromArgb(30, 30, 36);
-        Padding = new Padding(12);
+        BackColor = AppTheme.Colors.PanelBackground;
+        Padding = AppTheme.Spacing.Large;
 
         var title = new Label
         {
             Text = "音频",
             Dock = DockStyle.Top,
             Height = 26,
-            Font = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold),
-            ForeColor = Color.White,
+            Font = AppTheme.Fonts.TitleFont,
+            ForeColor = AppTheme.Colors.TextPrimary,
         };
 
-        var lblTrack = new Label { Text = "音轨:", Location = new Point(12, 40), AutoSize = true, ForeColor = Color.White };
+        var lblTrack = new Label { Text = "音轨:", Location = new Point(12, 40), AutoSize = true, ForeColor = AppTheme.Colors.TextPrimary };
         _trackBox = new ComboBox
         {
             Location = new Point(60, 36),
@@ -36,7 +37,7 @@ public sealed class AudioPanel : Panel
         };
         _trackBox.SelectedIndexChanged += (_, _) => ApplyTrack();
 
-        var lblVol = new Label { Text = "音量:", Location = new Point(12, 76), AutoSize = true, ForeColor = Color.White };
+        var lblVol = new Label { Text = "音量:", Location = new Point(12, 76), AutoSize = true, ForeColor = AppTheme.Colors.TextPrimary };
         _volumeBar = new TrackBar
         {
             Location = new Point(60, 68),
@@ -53,7 +54,7 @@ public sealed class AudioPanel : Panel
             Text = "静音",
             Location = new Point(60, 104),
             AutoSize = true,
-            ForeColor = Color.White,
+            ForeColor = AppTheme.Colors.TextPrimary,
         };
         _chkMute.CheckedChanged += (_, _) => ApplyVolume();
 
@@ -62,8 +63,8 @@ public sealed class AudioPanel : Panel
             Text = "音轨选择对真实 3FP 会话生效；演示模式为占位。",
             Location = new Point(12, 140),
             AutoSize = true,
-            ForeColor = Color.FromArgb(140, 140, 150),
-            Font = new Font("Microsoft YaHei UI", 8f),
+            ForeColor = AppTheme.Colors.TextMuted,
+            Font = AppTheme.Fonts.CaptionFont,
         };
 
         Controls.AddRange(new Control[] { hint, _chkMute, lblVol, _volumeBar, lblTrack, _trackBox, title });

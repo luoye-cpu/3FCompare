@@ -34,6 +34,26 @@ if (-not (Test-Path (Join-Path $ForkRoot "FFF.Native\FFF.Native.vcxproj"))) {
     Pop-Location
 }
 
+# 应用自定义补丁（如果尚未应用）
+$PatchesDir = Join-Path $PSScriptRoot "patches"
+$PatchMarker = Join-Path $ForkRoot ".3fc_patches_applied"
+if ((Test-Path $PatchesDir) -and -not (Test-Path $PatchMarker)) {
+    Write-Host "应用 3FCompare 自定义补丁..."
+    Push-Location $ForkRoot
+    Get-ChildItem $PatchesDir -Filter *.patch | Sort-Object Name | ForEach-Object {
+        Write-Host "  正在应用: $($_.Name)"
+        git apply --ignore-whitespace $_.FullName 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  ✅ $($_.Name) 已应用"
+        } else {
+            Write-Host "  ⚠️  $($_.Name) 应用失败（可能已应用过），继续..."
+        }
+    }
+    Pop-Location
+    # 创建标记文件，避免重复打补丁
+    New-Item -ItemType File -Path $PatchMarker -Force | Out-Null
+}
+
 Write-Host "=== [1/4] 准备 FFmpeg（若缺失） ==="
 $ffmpegMarker = Join-Path $ForkRoot "third_party\ffmpeg\include\libavcodec\avcodec.h"
 if (-not (Test-Path $ffmpegMarker)) {

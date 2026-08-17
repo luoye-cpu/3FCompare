@@ -1,3 +1,5 @@
+using _3FCompare.App.Utils;
+
 namespace _3FCompare.App.Controls;
 
 /// <summary>偏移校准面板（F9）：对选中路调整相对 master 的媒体时间偏移。
@@ -23,24 +25,24 @@ public sealed class OffsetPanel : Panel
     public OffsetPanel()
     {
         Dock = DockStyle.Fill;
-        BackColor = Color.FromArgb(30, 30, 36);
-        Padding = new Padding(8);
+        BackColor = AppTheme.Colors.PanelBackground;
+        Padding = AppTheme.Spacing.Standard;
 
         _info = new Label
         {
             Text = "偏移校准（相对第 1 路）",
             Dock = DockStyle.Top,
             Height = 26,
-            Font = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold),
-            ForeColor = Color.White,
+            Font = AppTheme.Fonts.TitleFont,
+            ForeColor = AppTheme.Colors.TextPrimary,
         };
         _current = new Label
         {
             Text = "偏移: 0ms (0帧@24fps)",
             Dock = DockStyle.Top,
             Height = 24,
-            Font = new Font("Consolas", 10f),
-            ForeColor = Color.FromArgb(255, 200, 64),
+            Font = AppTheme.Fonts.MonospaceMediumFont,
+            ForeColor = AppTheme.Colors.Accent,
         };
 
         _btnAlign = MakeButton("◎ 对齐于此帧");
@@ -105,10 +107,10 @@ public sealed class OffsetPanel : Panel
     {
         Text = text,
         FlatStyle = FlatStyle.Flat,
-        FlatAppearance = { BorderColor = Color.FromArgb(80, 80, 90), BorderSize = 1 },
-        BackColor = Color.FromArgb(45, 45, 52),
-        ForeColor = Color.White,
-        Font = new Font("Microsoft YaHei UI", 8.5f),
+        FlatAppearance = { BorderColor = AppTheme.Colors.Border, BorderSize = 1 },
+        BackColor = AppTheme.Colors.ControlBackgroundLight,
+        ForeColor = AppTheme.Colors.TextPrimary,
+        Font = AppTheme.Fonts.CaptionFont,
         Margin = new Padding(2, 0, 2, 0),
     };
 }
