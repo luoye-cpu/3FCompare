@@ -1,0 +1,387 @@
+using System.Runtime.InteropServices;
+using System.Text;
+using _3FCompare.Core.Backend.Interop;
+
+namespace _3FCompare.Core.Backend;
+
+/// <summary>3FP 后端适配器（基于 fork 的 FFF.Native，MIT）。</summary>
+public sealed class Fff3FpEngine : IPlayerEngine
+{
+    private const uint ConfigVersion = 10;
+
+    public IReadOnlyList<AdapterInfo> EnumerateAdapters()
+    {
+        // 计划：扩展补丁 `FFF3FP_EnumerateAdapters`（03 §6 / A11）。
+        // 当前无 API 时仅报告“系统默认”，保证冒烟可运行。
+        return new[] { new AdapterInfo { Index = -1, Description = "System Default (D3D11)", DedicatedMemoryBytes = 0 } };
+    }
+
+    public IPlayerSession CreateSession(EngineSessionOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        var configSize = Marshal.SizeOf<Fff3FpConfiguration>();
+        var config = new Fff3FpConfiguration
+        {
+            Size = (uint)configSize,
+            Version = ConfigVersion,
+            OutputWindow = options.OutputWindow,
+            DecodeMode = (uint)(options.HardwareDecode ? FffDecodeMode.Gpu : FffDecodeMode.Cpu),
+            ColorMode = (uint)(FffColorMode)options.ColorMode,
+            SdrPeakNits = 100f,
+            HdrPeakNits = 1000f,
+            SdrPaperWhiteNits = 203f,
+            AudioEndpointIdUtf8 = 0,
+            EventCallback = 0,
+            EventCallbackContext = 0,
+        };
+
+        var result = Fff3FpNative.FFF3FP_Create(in config, out var handle);
+        if (result != FffResult.Success)
+            throw new EngineException((int)result, $"FFF3FP_Create 失败: {result}");
+
+        return new Fff3FpSession(handle, options);
+    }
+
+    private sealed class Fff3FpSession : IPlayerSession
+    {
+        private readonly nint _handle;
+        private readonly EngineSessionOptions _options;
+        private bool _disposed;
+
+        public Fff3FpSession(nint handle, EngineSessionOptions options)
+        {
+            _handle = handle;
+            _options = options;
+        }
+
+        public Task OpenAsync(string localPath, CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(localPath);
+            ThrowIfDisposed();
+
+            // 简化版打开：同步调用原生 Open，异步包装（上游托管层用异步线程 + 取消队列；骨架阶段先同步）。
+            return Task.Run(() =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var result = Fff3FpNative.FFF3FP_Open(_handle, localPath);
+                if (result != FffResult.Success)
+                    throw new EngineException((int)result, $"FFF3FP_Open 失败: {result} ({LastError()})");
+            }, cancellationToken);
+        }
+
+        public void Play()
+        {
+            ThrowIfDisposed();
+            Check(Fff3FpNative.FFF3FP_Play(_handle), nameof(Play));
+        }
+
+        public void Pause()
+        {
+            ThrowIfDisposed();
+            Check(Fff3FpNative.FFF3FP_Pause(_handle), nameof(Pause));
+        }
+
+        public void Stop()
+        {
+            ThrowIfDisposed();
+            Check(Fff3FpNative.FFF3FP_Stop(_handle), nameof(Stop));
+        }
+
+        public void Seek(long position100ns)
+        {
+            ThrowIfDisposed();
+            Check(Fff3FpNative.FFF3FP_Seek(_handle, position100ns), nameof(Seek));
+        }
+
+        public void SeekFrame(long frameIndex)
+        {
+            ThrowIfDisposed();
+            Check(Fff3FpNative.FFF3FP_SeekFrame(_handle, frameIndex), nameof(SeekFrame));
+        }
+
+        public void StepFrame(int direction)
+        {
+            ThrowIfDisposed();
+            Check(Fff3FpNative.FFF3FP_StepFrame(_handle, direction), nameof(StepFrame));
+        }
+
+        public void SelectAudioStream(int streamIndex)
+        {
+            ThrowIfDisposed();
+            Check(Fff3FpNative.FFF3FP_SelectAudioStream(_handle, streamIndex), nameof(SelectAudioStream));
+        }
+
+        public void SelectVideoStream(int streamIndex)
+        {
+            ThrowIfDisposed();
+            Check(Fff3FpNative.FFF3FP_SelectVideoStream(_handle, streamIndex), nameof(SelectVideoStream));
+        }
+
+        public void SetVolume(float volume, bool muted)
+        {
+            ThrowIfDisposed();
+            Check(Fff3FpNative.FFF3FP_SetVolume(_handle, volume, muted ? 1u : 0u), nameof(SetVolume));
+        }
+
+        public EngineSnapshot ReadSnapshot()
+        {
+            ThrowIfDisposed();
+            var snapshotSize = Marshal.SizeOf<Fff3FpSnapshot>();
+            var snap = new Fff3FpSnapshot { Size = (uint)snapshotSize, Version = 8 };
+            Check(Fff3FpNative.FFF3FP_GetSnapshot(_handle, ref snap), $"GetSnapshot(size={snapshotSize})");
+            return new EngineSnapshot
+            {
+                Position100ns = snap.Position100ns,
+                Duration100ns = snap.Duration100ns,
+                FrameIndex = snap.FrameIndex,
+                RawFramePts = snap.FramePts,
+                FrameTimeBaseNum = snap.FrameTimeBaseNumerator,
+                FrameTimeBaseDen = snap.FrameTimeBaseDenominator,
+                Decoder = (int)snap.Decoder,
+                ActualColorMode = snap.ActualColorMode,
+                State = (int)snap.State,
+            };
+        }
+
+        public EngineMediaInfo? ReadMediaInfo()
+        {
+            ThrowIfDisposed();
+            var required = 0u;
+            var result = Fff3FpNative.FFF3FP_GetMediaInfo(_handle, 0, 0, out required);
+            if (result == FffResult.BufferTooSmall && required > 0 && required <= 4 * 1024 * 1024)
+            {
+                var buffer = new byte[required];
+                unsafe
+                {
+                    fixed (byte* p = buffer)
+                    {
+                        result = Fff3FpNative.FFF3FP_GetMediaInfo(_handle, (nint)p, required, out _);
+                        if (result == FffResult.Success)
+                        {
+                            var json = DecodeNulTerminatedUtf8(buffer);
+                            return ParseMediaInfoJson(json);
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+
+        private static string DecodeNulTerminatedUtf8(byte[] buffer)
+        {
+            var idx = Array.IndexOf(buffer, (byte)0);
+            var len = idx < 0 ? buffer.Length : idx;
+            return Encoding.UTF8.GetString(buffer, 0, len);
+        }
+
+        /// <summary>解析 3FP GetMediaInfo 的嵌套 JSON（英文驼峰字段，见诊断 dump）。</summary>
+        private static EngineMediaInfo? ParseMediaInfoJson(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return null;
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(json);
+                var root = doc.RootElement;
+
+                // 顶层非 streams 字段处理
+                var path = GetString(root, "path") ?? GetString(root, "filename") ?? string.Empty;
+
+                // 视频流字段（streams[])
+                var video = default(System.Text.Json.JsonElement);
+                var hasVideo = false;
+                if (root.TryGetProperty("streams", out var streams) &&
+                    streams.ValueKind == System.Text.Json.JsonValueKind.Array)
+                {
+                    foreach (var s in streams.EnumerateArray())
+                    {
+                        if (string.Equals(GetString(s, "type"), "video", StringComparison.OrdinalIgnoreCase))
+                        {
+                            video = s;
+                            hasVideo = true;
+                            break;
+                        }
+                    }
+                }
+
+                int width = 0, height = 0;
+                double fps = 0;
+                string? codec = null;
+                bool isHdr = false;
+                bool isLossless = false;
+                int bitDepth = 8;
+                string? pixelFormat = null;
+                string? chroma = null;
+                string? colorPrimaries = null;
+                string? colorTransfer = null;
+                string? colorSpace = null;
+                string? hdrFormat = null;
+                bool interlaced = false;
+                bool fieldOrder = false;
+                long frameCount = 0;
+                string? audioCodec = null;
+                int audioChannels = 0;
+                int audioSampleRate = 0;
+
+                if (hasVideo)
+                {
+                    width = GetInt(video, "width") ?? 0;
+                    height = GetInt(video, "height") ?? 0;
+                    codec = GetString(video, "codec") ?? GetString(video, "codec_name") ?? "unknown";
+
+                    // 帧率：优先 nominalFrameRateNum/Den，其次 averageFrameRate*
+                    var fpsNum = GetInt(video, "nominalFrameRateNumerator") ?? GetInt(video, "averageFrameRateNumerator") ?? 0;
+                    var fpsDen = GetInt(video, "nominalFrameRateDenominator") ?? GetInt(video, "averageFrameRateDenominator") ?? 1;
+                    if (fpsNum > 0 && fpsDen > 0) fps = (double)fpsNum / fpsDen;
+
+                    isHdr = GetBool(video, "hdr") ||
+                            string.Equals(GetString(video, "hdrFormat"), "HDR10", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(GetString(video, "hdrFormat"), "HDR10+", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(GetString(video, "hdrFormat"), "HLG", StringComparison.OrdinalIgnoreCase);
+
+                    // 扩展字段
+                    isLossless = GetBool(video, "lossless");
+                    bitDepth = GetInt(video, "decoderBitDepth") ?? GetInt(video, "bitDepth") ?? 8;
+                    pixelFormat = GetString(video, "pixelFormat") ?? GetString(video, "decoderPixelFormat");
+                    chroma = GetString(video, "chromaSubsampling");
+                    colorPrimaries = GetString(video, "colorPrimaries");
+                    colorTransfer = GetString(video, "colorTransfer");
+                    colorSpace = GetString(video, "colorSpace");
+                    hdrFormat = GetString(video, "hdrFormat");
+                    frameCount = GetLong(video, "frames") ?? 0;
+                    var fo = GetInt(video, "fieldOrder") ?? 0;
+                    interlaced = fo is -1 or > 0;
+                    _ = fieldOrder;
+                }
+
+                // 音频流
+                if (root.TryGetProperty("streams", out var streams2) &&
+                    streams2.ValueKind == System.Text.Json.JsonValueKind.Array)
+                {
+                    foreach (var s in streams2.EnumerateArray())
+                    {
+                        if (string.Equals(GetString(s, "type"), "audio", StringComparison.OrdinalIgnoreCase))
+                        {
+                            audioCodec = GetString(s, "codec") ?? GetString(s, "codec_name");
+                            audioChannels = GetInt(s, "channels") ?? GetInt(s, "channelCount") ?? 0;
+                            audioSampleRate = GetInt(s, "sampleRate") ?? GetInt(s, "sample_rate") ?? 0;
+                            break;
+                        }
+                    }
+                }
+
+                return new EngineMediaInfo
+                {
+                    Path = path,
+                    VideoWidth = width,
+                    VideoHeight = height,
+                    FrameRate = fps,
+                    Codec = codec ?? "unknown",
+                    IsHdr = isHdr,
+                    Format = GetString(root, "format") ?? GetString(root, "formatLongName"),
+                    Duration100ns = GetLong(root, "duration100ns") ?? 0,
+                    BitRate = GetLong(root, "bitRate") ?? 0,
+                    FileSize = GetLong(root, "fileSize") ?? 0,
+                    IsLossless = isLossless,
+                    BitDepth = bitDepth,
+                    PixelFormat = pixelFormat,
+                    ChromaSubsampling = chroma,
+                    ColorPrimaries = colorPrimaries,
+                    ColorTransfer = colorTransfer,
+                    ColorSpace = colorSpace,
+                    HdrFormat = hdrFormat,
+                    Interlaced = interlaced,
+                    FrameCount = frameCount,
+                    AudioCodec = audioCodec,
+                    AudioChannels = audioChannels,
+                    AudioSampleRate = audioSampleRate,
+                };
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static long? GetLong(System.Text.Json.JsonElement el, string name)
+            => el.TryGetProperty(name, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.Number
+                ? (long?)v.GetInt64() : null;
+
+        private static int? GetInt(System.Text.Json.JsonElement el, string name)
+            => el.TryGetProperty(name, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.Number
+                ? (int?)v.GetInt32() : null;
+
+        private static string? GetString(System.Text.Json.JsonElement el, string name)
+            => el.TryGetProperty(name, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String
+                ? v.GetString() : null;
+
+        private static double? GetDouble(System.Text.Json.JsonElement el, string name)
+        {
+            if (!el.TryGetProperty(name, out var v)) return null;
+            return v.ValueKind switch
+            {
+                System.Text.Json.JsonValueKind.Number => v.GetDouble(),
+                System.Text.Json.JsonValueKind.String when double.TryParse(v.GetString(), out var d) => d,
+                _ => null,
+            };
+        }
+
+        private static bool GetBool(System.Text.Json.JsonElement el, string name)
+            => el.TryGetProperty(name, out var v) && (v.ValueKind == System.Text.Json.JsonValueKind.True ||
+               (v.ValueKind == System.Text.Json.JsonValueKind.Number && v.GetInt32() == 1) ||
+               (v.ValueKind == System.Text.Json.JsonValueKind.String && v.GetString() == "true"));
+
+        public bool TryReadPixel(int x, int y, out PixelSample sample)
+        {
+            ThrowIfDisposed();
+            var probe = new Fff3FpVideoPixelProbe
+            {
+                Size = (uint)Marshal.SizeOf<Fff3FpVideoPixelProbe>(),
+                Version = 1,
+                X = (uint)Math.Max(0, x),
+                Y = (uint)Math.Max(0, y),
+            };
+            var result = Fff3FpNative.FFF3FP_ReadVideoPixel(_handle, ref probe);
+            if (result != FffResult.Success)
+            {
+                sample = default;
+                return false;
+            }
+            sample = new PixelSample(probe.Red, probe.Green, probe.Blue, probe.Alpha, probe.OutputBitDepth);
+            return true;
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            Fff3FpNative.FFF3FP_Destroy(_handle);
+            GC.SuppressFinalize(this);
+        }
+
+        private string LastError()
+        {
+            var required = 0u;
+            var result = Fff3FpNative.FFF3FP_GetLastError(_handle, 0, 0, out required);
+            if (result != FffResult.BufferTooSmall || required == 0) return string.Empty;
+            var buffer = new byte[required];
+            unsafe
+            {
+                fixed (byte* p = buffer)
+                {
+                    Fff3FpNative.FFF3FP_GetLastError(_handle, (nint)p, required, out _);
+                    var len = buffer.AsSpan().IndexOf((byte)0);
+                    return Encoding.UTF8.GetString(buffer, 0, len < 0 ? buffer.Length : len);
+                }
+            }
+        }
+
+        private static void Check(FffResult result, string op)
+        {
+            if (result != FffResult.Success)
+                throw new EngineException((int)result, $"{op} 失败: {result}");
+        }
+
+        private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
+    }
+}

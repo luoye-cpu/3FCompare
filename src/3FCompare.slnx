@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="3FCompare.App/3FCompare.App.csproj" />
+  <Project Path="3FCompare.Core/3FCompare.Core.csproj" />
+  <Project Path="../tests/3FCompare.Core.Tests/3FCompare.Core.Tests.csproj" />
+  <Project Path="../tests/3FCompare.SmokeTests/3FCompare.SmokeTests.csproj" />
+</Solution>

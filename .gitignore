@@ -1,0 +1,55 @@
+# Build —— bin/ obj/ 为全局规则，自动覆盖 src/ 与 tests/ 下所有项目
+bin/
+obj/
+artifacts/
+*.user
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Windows / 编辑器杂项
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.orig
+*.rej
+*.tmp
+*.bak
+*~
+
+# Native (FFF.Native fork 构建产物)
+x64/
+*.lib
+*.exp
+*.pdb
+*.ilk
+
+# FFmpeg / libass 第三方二进制（不纳入仓库）
+third_party/ffmpeg/
+third_party/libass/
+third_party/vcpkg_installed/
+*.dll
+
+# Test paths
+TestResults/
+*.trx
+
+# 本地日志
+logs/
+*.log
+# vcpkg（外部工具，不入库）
+third_party/fff_project/third_party/vcpkg/
+third_party/vcpkg/
+
+# 测试媒体
+testmedia/
+# 内核构建产物（可从 submodule 重建）
+third_party/fff_project/FFF.Native/x64/
+third_party/fff_project/runtime/
+third_party/fff_project/third_party/ffmpeg/
+third_party/fff_project/third_party/vcpkg_installed/

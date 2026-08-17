@@ -1,0 +1,29 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net11.0-windows</TargetFramework>
+    <RootNamespace>_3FCompare.App</RootNamespace>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!--
+      NativeAOT 分发（已启用）：
+      - PublishAot=true 输出原生单文件；.NET 11 preview 中 Native 编译隐含裁剪。
+      - WinForms 裁剪在 preview 报 NETSDK1175；官方 SDK 提供 _SuppressWinFormsTrimError
+        抑制开关（见 dotnet/sdk 的 GivenThatWeWantToPublishTrimmedWindowsFormsAndWPFApps 测试）。
+      - JSON 已改源生成上下文（JsonAotContext / BookmarkJsonContext），无运行时反射。
+    -->
+    <PublishAot>true</PublishAot>
+    <PublishSelfContained>true</PublishSelfContained>
+    <!-- 官方支持的 WinForms 裁剪抑制开关（NETSDK1175） -->
+    <_SuppressWinFormsTrimError>true</_SuppressWinFormsTrimError>
+    <SuppressTrimAnalysisWarnings>false</SuppressTrimAnalysisWarnings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\3FCompare.Core\3FCompare.Core.csproj" />
+  </ItemGroup>
+
+</Project>
