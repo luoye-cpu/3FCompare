@@ -6,7 +6,6 @@ public sealed class MagnifierOverlay : Control
 {
     private Point _mousePos = new(-1000, -1000);
     private int _zoom = 4;
-    private bool _mouseInside;
 
     public MagnifierOverlay()
     {
@@ -31,7 +30,6 @@ public sealed class MagnifierOverlay : Control
     public void HideMagnifier()
     {
         Visible = false;
-        _mouseInside = false;
     }
 
     private void PositionNearMouse(Point p)

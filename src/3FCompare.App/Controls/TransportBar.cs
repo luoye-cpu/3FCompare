@@ -134,5 +134,13 @@ public sealed class TransportBar : Control
 
     public void SetInfo(string info) => _infoLabel.Text = info;
 
-    public double CurrentSpeed => double.Parse(((string)_speedBox.SelectedItem).TrimEnd('x'));
+    public double CurrentSpeed
+    {
+        get
+        {
+            return _speedBox.SelectedItem is string s && s.EndsWith("x")
+                ? double.Parse(s.TrimEnd('x'))
+                : 1.0;
+        }
+    }
 }

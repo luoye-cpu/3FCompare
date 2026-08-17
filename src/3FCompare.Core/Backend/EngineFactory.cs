@@ -2,7 +2,8 @@ using _3FCompare.Core.Backend.Interop;
 
 namespace _3FCompare.Core.Backend;
 
-/// <summary>引擎工厂：自动探测 FFF.Native 是否可用，选择真实 3FP 后端或演示后端。</summary>
+/// <summary>引擎工厂：自动探测 FFF.Native 是否可用，选择真实 3FP 后端或演示后端。
+/// 可通过 <see cref="NativeRuntime.SetFfmpegDirectory"/> 指定 FFmpeg DLL 搜索目录。</summary>
 public static class EngineFactory
 {
     /// <summary>探测 FFF.Native.dll 是否存在于应用目录 / 当前目录 / PATH。</summary>

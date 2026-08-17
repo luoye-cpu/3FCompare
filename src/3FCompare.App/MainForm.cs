@@ -63,9 +63,15 @@ public sealed class MainForm : Form
         }
     }
 
-    public MainForm()
+    public MainForm(string? ffmpegDirOverride = null)
     {
         _settings = SettingsStore.Load();
+
+        // 手动 FFmpeg 目录优先于引擎探测（设置 > 自动检测系统变量 > 命令行覆盖）
+        var ffmpegDir = ffmpegDirOverride ?? _settings.FfmpegDirectory;
+        if (!string.IsNullOrWhiteSpace(ffmpegDir))
+            NativeRuntime.SetFfmpegDirectory(ffmpegDir);
+
         _realMode = EngineFactory.IsNativeAvailable();
         _engine = EngineFactory.Create();
 
@@ -127,6 +133,17 @@ public sealed class MainForm : Form
             new ToolStripSeparator(), diffItem, audioItem, showGridItem, fullItem,
         });
 
+        // 网格（先于工具面板创建：AbSliderView / DiffOverlayView 依赖其实例）
+        _grid = new CompareGridView(_realMode);
+        _grid.SelectionChanged += (_, _) =>
+        {
+            AttachProbeToSelected();
+            UpdateOffsetPanel();
+            RefreshMediaInfoPanel();
+            RefreshAudioPanel();
+            UpdateStatus();
+        };
+
         // 工具面板（探针/书签/A-B/放大镜）
         _probe = new ProbePanel();
         _bookmarks = new BookmarkPanel(() =>
@@ -180,17 +197,6 @@ public sealed class MainForm : Form
         _menu.BackColor = Color.FromArgb(30, 30, 36);
         _menu.ForeColor = Color.White;
         MainMenuStrip = _menu;
-
-        // 网格
-        _grid = new CompareGridView(_realMode);
-        _grid.SelectionChanged += (_, _) =>
-        {
-            AttachProbeToSelected();
-            UpdateOffsetPanel();
-            RefreshMediaInfoPanel();
-            RefreshAudioPanel();
-            UpdateStatus();
-        };
 
         // 传输栏
         _transport = new TransportBar();
@@ -401,7 +407,7 @@ public sealed class MainForm : Form
                     return;
                 }
 
-                Bitmap bmp = null!;
+                Bitmap? bmp = null;
                 if (_realMode)
                 {
                     // 真实模式：优先 PrintWindow 抓 D3D 合成帧；失败回退 BitBlt 屏幕区；再回退像素采样
@@ -565,6 +571,14 @@ public sealed class MainForm : Form
     {
         try
         {
+            // 订阅引擎事件（原生工作线程回调 → 调度到 UI 线程）
+            slot.Session.EngineEvent += (_, evt) =>
+            {
+                if (IsDisposed || !IsHandleCreated) return;
+                try { BeginInvoke(() => HandleEngineEvent(slot, surface, evt)); }
+                catch { /* 窗体已关闭 */ }
+            };
+
             await slot.Session.OpenAsync(path);
             surface.FileName = Path.GetFileName(path);
         }
@@ -576,6 +590,27 @@ public sealed class MainForm : Form
             surface.ErrorText = ex.Message;
         }
         UpdateStatus();
+    }
+
+    private void HandleEngineEvent(SyncController.SyncSlot slot, PlayerSurface surface, EngineEvent evt)
+    {
+        switch (evt.Type)
+        {
+            case EngineEventType.Error:
+                // 内核错误：标记该路失败并显示
+                if (evt.DetailJson.Contains("\"state\":6", StringComparison.OrdinalIgnoreCase)
+                    || evt.DetailJson.Contains("fail", StringComparison.OrdinalIgnoreCase))
+                {
+                    slot.Failed = true;
+                    slot.Error = $"内核错误: {evt.DetailJson}";
+                    surface.IsFailed = true;
+                    surface.ErrorText = slot.Error;
+                }
+                break;
+            case EngineEventType.PlaybackEnded:
+                UpdateStatus();
+                break;
+        }
     }
 
     private void AddSlotPlaceholder()
@@ -922,7 +957,11 @@ public sealed class MainForm : Form
             _settings.ColorMode = dlg.Result.ColorMode;
             _settings.DefaultGridCols = dlg.Result.DefaultGridCols;
             _settings.DefaultGridRows = dlg.Result.DefaultGridRows;
+            _settings.FfmpegDirectory = dlg.Result.FfmpegDirectory;
             SettingsStore.Save(_settings);
+
+            // 应用 FFmpeg 目录变更（影响后续新建会话的 DLL 加载路径）
+            NativeRuntime.SetFfmpegDirectory(_settings.FfmpegDirectory);
 
             _sync.StepProfile = new StepProfile { FrameStep = _settings.FrameStep, SecondsStep = _settings.SecondsStep };
             UpdateStatus();
@@ -955,7 +994,7 @@ public sealed class MainForm : Form
 
         try
         {
-            Bitmap bmp;
+            Bitmap? bmp;
             if (_realMode)
             {
                 // 真实模式：PrintWindow 抓取 D3D 合成帧（回退 ReadVideoPixel 采样）
@@ -977,7 +1016,7 @@ public sealed class MainForm : Form
                 }
             }
 
-            bmp.Save(dlg.FileName, System.Drawing.Imaging.ImageFormat.Png);
+            bmp!.Save(dlg.FileName, System.Drawing.Imaging.ImageFormat.Png);
             bmp.Dispose();
             _statusInfo.Text = $"已导出截图: {Path.GetFileName(dlg.FileName)}";
         }
@@ -1146,8 +1185,10 @@ public sealed class MainForm : Form
         }
         var mode = _grid.SingleView ? "单屏" : "网格";
         var failed = _sync.Slots.Count(s => s.Failed);
+        var runtimeError = _sync.LastRuntimeError;
         _statusInfo.Text = $"{mode}模式 | 路数 {_sync.Count}/9 | 步进: {_sync.StepProfile.FrameStep}帧/{_sync.StepProfile.SecondsStep:0.#}秒" +
-            (failed > 0 ? $" | {failed} 路失败" : string.Empty);
+            (failed > 0 ? $" | {failed} 路失败" : string.Empty) +
+            (runtimeError is not null ? $" | ⚠ {runtimeError}" : string.Empty);
     }
 
     // ---------- 快捷键 ----------

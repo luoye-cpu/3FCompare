@@ -12,16 +12,18 @@ public sealed class SettingsDialog : Form
     private readonly IReadOnlyList<AdapterInfo> _adapters;
     private bool _changed;
 
-    // 控件
-    private CheckBox _chkHardware;
-    private ComboBox _cmbAdapter;
-    private NumericUpDown _numFrameStep;
-    private NumericUpDown _numSecStep;
-    private CheckBox _chkStartFullscreen;
-    private CheckBox _chkHideChrome;
-    private ComboBox _cmbColorMode;
-    private NumericUpDown _numGridCols;
-    private NumericUpDown _numGridRows;
+    // 控件（BuildUi 中初始化；! 抑制 CS8618 因非构造函数内赋值）
+    private CheckBox _chkHardware = null!;
+    private ComboBox _cmbAdapter = null!;
+    private NumericUpDown _numFrameStep = null!;
+    private NumericUpDown _numSecStep = null!;
+    private CheckBox _chkStartFullscreen = null!;
+    private CheckBox _chkHideChrome = null!;
+    private ComboBox _cmbColorMode = null!;
+    private NumericUpDown _numGridCols = null!;
+    private NumericUpDown _numGridRows = null!;
+    private TextBox _txtFfmpegDir = null!;
+    private Label _lblFfmpegStatus = null!;
 
     public bool Changed => _changed;
 
@@ -152,7 +154,79 @@ public sealed class SettingsDialog : Form
         };
         layout.Controls.AddRange(new Control[] { lblCols, _numGridCols, lblRows, _numGridRows });
 
-        tabs.TabPages.AddRange(new TabPage[] { hardware, stepping, window, color, layout });
+        // ---- FFmpeg 路径页 ----
+        var ffmpeg = new TabPage("FFmpeg 路径");
+        var lblFfmpeg = new Label
+        {
+            Text = "FFmpeg DLL 目录（手动设置 > 自动检测）：",
+            Location = new Point(16, 16),
+            AutoSize = true,
+        };
+        _txtFfmpegDir = new TextBox
+        {
+            Text = _settings.FfmpegDirectory ?? string.Empty,
+            Location = new Point(16, 40),
+            Size = new Size(360, 24),
+            BackColor = Color.FromArgb(50, 50, 56),
+            ForeColor = Color.White,
+            BorderStyle = BorderStyle.FixedSingle,
+        };
+        var btnBrowse = new Button
+        {
+            Text = "浏览…",
+            Location = new Point(384, 38),
+            Size = new Size(80, 28),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(60, 60, 66),
+            ForeColor = Color.White,
+        };
+        btnBrowse.Click += (_, _) =>
+        {
+            using var dlg = new FolderBrowserDialog();
+            dlg.Description = "选择包含 FFmpeg DLL（avcodec-*.dll, avformat-*.dll 等）的目录";
+            if (!string.IsNullOrWhiteSpace(_txtFfmpegDir.Text) && Directory.Exists(_txtFfmpegDir.Text))
+                dlg.SelectedPath = _txtFfmpegDir.Text;
+            if (dlg.ShowDialog() == DialogResult.OK)
+            {
+                _txtFfmpegDir.Text = dlg.SelectedPath;
+                UpdateFfmpegStatus();
+            }
+        };
+        _lblFfmpegStatus = new Label
+        {
+            Location = new Point(16, 72),
+            AutoSize = true,
+        };
+        var btnTest = new Button
+        {
+            Text = "测试探测",
+            Location = new Point(16, 100),
+            Size = new Size(100, 28),
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(50, 70, 50),
+            ForeColor = Color.White,
+        };
+        btnTest.Click += (_, _) =>
+        {
+            var dir = _txtFfmpegDir.Text.Trim();
+            var err = NativeRuntime.ValidateFfmpegDirectory(dir);
+            if (err is not null)
+            {
+                _lblFfmpegStatus.Text = $"✗ {err}";
+                _lblFfmpegStatus.ForeColor = Color.FromArgb(255, 140, 140);
+                return;
+            }
+            var ok = NativeRuntime.IsNativeAvailableWithDirectory(dir);
+            _lblFfmpegStatus.Text = ok
+                ? "✓ FFF.Native 加载成功，FFmpeg 可用"
+                : "✗ FFF.Native 加载失败（检查目录是否包含 FFF.Native.dll 及所有 FFmpeg DLL）";
+            _lblFfmpegStatus.ForeColor = ok ? Color.FromArgb(140, 255, 140) : Color.FromArgb(255, 140, 140);
+        };
+        // 初始状态
+        UpdateFfmpegStatus();
+        ffmpeg.Controls.AddRange(new Control[] { lblFfmpeg, _txtFfmpegDir, btnBrowse, _lblFfmpegStatus, btnTest });
+
+        tabs.TabPages.AddRange(new TabPage[] { hardware, stepping, window, color, layout, ffmpeg });
         Controls.Add(tabs);
 
         var btnOk = new Button { Text = "确定", Location = new Point(300, 404), Size = new Size(90, 32), DialogResult = DialogResult.OK };
@@ -166,11 +240,27 @@ public sealed class SettingsDialog : Form
         CancelButton = btnCancel;
     }
 
+    private void UpdateFfmpegStatus()
+    {
+        var dir = _txtFfmpegDir.Text.Trim();
+        if (string.IsNullOrEmpty(dir))
+        {
+            _lblFfmpegStatus.Text = "留空 = 自动检测（应用目录 / PATH）";
+            _lblFfmpegStatus.ForeColor = Color.FromArgb(160, 160, 170);
+            return;
+        }
+        var err = NativeRuntime.ValidateFfmpegDirectory(dir);
+        _lblFfmpegStatus.Text = err is null ? "✓ 目录有效" : $"✗ {err}";
+        _lblFfmpegStatus.ForeColor = err is null ? Color.FromArgb(140, 255, 140) : Color.FromArgb(255, 140, 140);
+    }
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         base.OnFormClosing(e);
         if (DialogResult == DialogResult.OK)
         {
+            var ffmpegDir = _txtFfmpegDir.Text.Trim();
+            if (string.IsNullOrEmpty(ffmpegDir)) ffmpegDir = null!;
             var changed =
                 _chkHardware.Checked != _settings.HardwareDecode ||
                 _cmbAdapter.SelectedIndex != _settings.PreferredAdapterIndex ||
@@ -180,7 +270,8 @@ public sealed class SettingsDialog : Form
                 _chkHideChrome.Checked != _settings.HideChromeInFullscreen ||
                 _cmbColorMode.SelectedIndex != (int)_settings.ColorMode ||
                 (int)_numGridCols.Value != _settings.DefaultGridCols ||
-                (int)_numGridRows.Value != _settings.DefaultGridRows;
+                (int)_numGridRows.Value != _settings.DefaultGridRows ||
+                ffmpegDir != (_settings.FfmpegDirectory ?? string.Empty);
 
             if (changed)
             {
@@ -196,6 +287,7 @@ public sealed class SettingsDialog : Form
                     ColorMode = (ColorModeSetting)Math.Clamp(_cmbColorMode.SelectedIndex, 0, 2),
                     DefaultGridCols = (int)_numGridCols.Value,
                     DefaultGridRows = (int)_numGridRows.Value,
+                    FfmpegDirectory = string.IsNullOrEmpty(ffmpegDir) ? null : ffmpegDir,
                 };
             }
         }

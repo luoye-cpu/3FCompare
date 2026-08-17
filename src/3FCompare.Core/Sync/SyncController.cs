@@ -26,6 +26,13 @@ public sealed class SyncController
 
     public event EventHandler? StateChanged;
 
+    /// <summary>运行时错误（最近一次被吞掉的会话异常；UI 可显示）。</summary>
+    public string? LastRuntimeError { get; private set; }
+
+    /// <summary>记录运行时错误（不抛出不打断流程）。</summary>
+    private void ReportRuntimeError(string action, Exception ex)
+        => LastRuntimeError = $"{action}: {ex.Message}";
+
     public IReadOnlyList<SyncSlot> Slots => _slots;
 
     public int Count => _slots.Count;
@@ -75,7 +82,7 @@ public sealed class SyncController
     {
         if (_slots.Count == 0) return null;
         try { return _slots[0].Session.ReadSnapshot(); }
-        catch { return null; }
+        catch (Exception ex) { ReportRuntimeError("读取 master 快照", ex); return null; }
     }
 
     /// <summary>读取全部会话快照（UI 轮询用）。</summary>
@@ -85,7 +92,7 @@ public sealed class SyncController
         for (var i = 0; i < _slots.Count; i++)
         {
             try { result[i] = _slots[i].Session.ReadSnapshot(); }
-            catch { result[i] = null; }
+            catch (Exception ex) { ReportRuntimeError($"读取第 {i} 路快照", ex); result[i] = null; }
         }
         return result;
     }
@@ -95,7 +102,8 @@ public sealed class SyncController
         foreach (var slot in _slots)
         {
             if (slot.Failed) continue;
-            try { slot.Session.Play(); } catch { /* 忽略 */ }
+            try { slot.Session.Play(); }
+            catch (Exception ex) { ReportRuntimeError($"播放第 {_slots.IndexOf(slot)} 路", ex); }
         }
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -105,7 +113,8 @@ public sealed class SyncController
         foreach (var slot in _slots)
         {
             if (slot.Failed) continue;
-            try { slot.Session.Pause(); } catch { /* 忽略 */ }
+            try { slot.Session.Pause(); }
+            catch (Exception ex) { ReportRuntimeError($"暂停第 {_slots.IndexOf(slot)} 路", ex); }
         }
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -115,7 +124,8 @@ public sealed class SyncController
         foreach (var slot in _slots)
         {
             if (slot.Failed) continue;
-            try { slot.Session.Stop(); } catch { /* 忽略 */ }
+            try { slot.Session.Stop(); }
+            catch (Exception ex) { ReportRuntimeError($"停止第 {_slots.IndexOf(slot)} 路", ex); }
         }
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -132,7 +142,7 @@ public sealed class SyncController
                 var t = Math.Clamp(target100ns + slot.Offset100ns, 0, long.MaxValue);
                 slot.Session.Seek(t);
             }
-            catch { /* 忽略单路失败 */ }
+            catch (Exception ex) { ReportRuntimeError($"Seek 第 {i} 路", ex); }
         }
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -151,7 +161,8 @@ public sealed class SyncController
             // 尝试精确帧步进：master 直接 StepFrame，其余按 master 新位置对齐
             var oldPos = snap.Position100ns;
             var oldFrame = snap.FrameIndex;
-            try { master.Session.StepFrame(frames); } catch { /* 回退时间步进 */ }
+            try { master.Session.StepFrame(frames); }
+            catch (Exception ex) { ReportRuntimeError($"帧步进 master", ex); /* 回退时间步进 */ }
 
             var newSnap = master.Session.ReadSnapshot();
             var newPos = newSnap.Position100ns;
@@ -174,10 +185,10 @@ public sealed class SyncController
                     var t = Math.Clamp(newPos + slot.Offset100ns, 0, long.MaxValue);
                     slot.Session.Seek(t);
                 }
-                catch { /* 忽略 */ }
+                catch (Exception ex) { ReportRuntimeError($"帧步进对齐第 {i} 路", ex); }
             }
         }
-        catch { /* master 读取失败则整体跳过 */ }
+        catch (Exception ex) { ReportRuntimeError("帧步进读取 master", ex); /* master 读取失败则整体跳过 */ }
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -192,7 +203,7 @@ public sealed class SyncController
             var target = FrameTimeline.StepBySeconds(snap.Position100ns, snap.Duration100ns, seconds);
             SeekTo(target);
         }
-        catch { /* 忽略 */ }
+        catch (Exception ex) { ReportRuntimeError("秒步进读取 master", ex); }
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -215,7 +226,7 @@ public sealed class SyncController
             {
                 slot.Session.Seek(Math.Clamp(masterPos + slot.Offset100ns, 0, long.MaxValue));
             }
-            catch { /* 忽略单路 */ }
+            catch (Exception ex) { ReportRuntimeError($"偏移重对齐第 {i} 路", ex); }
         }
         StateChanged?.Invoke(this, EventArgs.Empty);
     }

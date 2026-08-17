@@ -12,7 +12,6 @@ public sealed class TimelineView : Control
     private bool _dragging;
 
     public event EventHandler<long>? SeekRequested;
-    public event EventHandler? LoopABClicked;
 
     /// <summary>A/B 点被打点（参数 = 100ns 位置；负表示清除）。</summary>
     public event EventHandler<(long position, bool isA)>? AbPointSet;

@@ -21,6 +21,9 @@ public sealed class SimulatedEngine : IPlayerEngine
         private readonly int _hue; // 每路不同色相
         private static int s_nextHue;
 
+        /// <summary>引擎事件（演示模式为基础状态变更模拟；原生线程无，安全）。</summary>
+        public event EventHandler<EngineEvent>? EngineEvent;
+
         private long _position100ns;
         private long _frameIndex;
         private bool _playing;
@@ -48,6 +51,7 @@ public sealed class SimulatedEngine : IPlayerEngine
                 _opened = true;
                 _playing = false;
             }
+            EngineEvent?.Invoke(this, new EngineEvent(EngineEventType.OpenCompleted, "{\"success\":true}"));
             return Task.CompletedTask;
         }
 

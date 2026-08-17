@@ -55,11 +55,11 @@ public static class GpuEnumeration
 
     // ---- COM 互操作（手写 vtable） ----
 
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct DxgiAdapterDesc1
+    /// <summary>DXGI_ADAPTER_DESC1 原生布局：Description 为 WCHAR[128] 内嵌缓冲（fixed 避免托管字段取址，兼容 AOT）。</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private unsafe struct DxgiAdapterDesc1Raw
     {
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
-        public string Description;
+        public fixed char Description[128];
         public uint VendorId;
         public uint DeviceId;
         public uint SubSysId;
@@ -67,6 +67,20 @@ public static class GpuEnumeration
         public nuint DedicatedVideoMemory;
         public nuint DedicatedSystemMemory;
         public nuint SharedSystemMemory;
+        public uint Flags;
+    }
+
+    /// <summary>托管版本（枚举结果使用）。</summary>
+    private struct DxgiAdapterDesc1
+    {
+        public string Description;
+        public uint VendorId;
+        public uint DeviceId;
+        public uint SubSysId;
+        public uint Revision;
+        public ulong DedicatedVideoMemory;
+        public ulong DedicatedSystemMemory;
+        public ulong SharedSystemMemory;
         public uint Flags;
     }
 
@@ -90,10 +104,27 @@ public static class GpuEnumeration
     {
         // IDXGIAdapter1 vtable: IUnknown(3) + EnumOutputs(4) + GetDesc(5) + GetDesc1(6)
         var vtbl = *(nint**)(*(nint*)adapter);
-        var fn = (delegate* unmanaged[Stdcall]<nint, DxgiAdapterDesc1*, int>)vtbl[5];
-        var desc = new DxgiAdapterDesc1();
-        fn(adapter, &desc);
-        return desc;
+        var fn = (delegate* unmanaged[Stdcall]<nint, DxgiAdapterDesc1Raw*, int>)vtbl[5];
+        var raw = new DxgiAdapterDesc1Raw();
+        fn(adapter, &raw);
+
+        // 从 WCHAR[128] 提取描述字符串（fixed buffer → string）
+        var descLen = 0;
+        while (descLen < 128 && raw.Description[descLen] != '\0') descLen++;
+        var description = new string(raw.Description, 0, descLen);
+
+        return new DxgiAdapterDesc1
+        {
+            Description = description,
+            VendorId = raw.VendorId,
+            DeviceId = raw.DeviceId,
+            SubSysId = raw.SubSysId,
+            Revision = raw.Revision,
+            DedicatedVideoMemory = (ulong)raw.DedicatedVideoMemory,
+            DedicatedSystemMemory = (ulong)raw.DedicatedSystemMemory,
+            SharedSystemMemory = (ulong)raw.SharedSystemMemory,
+            Flags = raw.Flags,
+        };
     }
 
     private static unsafe void ReleaseCom(nint obj)

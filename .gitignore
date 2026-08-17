@@ -48,6 +48,9 @@ third_party/vcpkg/
 
 # 测试媒体
 testmedia/
+
+# 发布产物（NativeAOT + 第三方 DLL，190+ MB）
+publish/
 # 内核构建产物（可从 submodule 重建）
 third_party/fff_project/FFF.Native/x64/
 third_party/fff_project/runtime/

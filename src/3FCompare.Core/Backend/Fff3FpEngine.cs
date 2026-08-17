@@ -21,6 +21,7 @@ public sealed class Fff3FpEngine : IPlayerEngine
         ArgumentNullException.ThrowIfNull(options);
 
         var configSize = Marshal.SizeOf<Fff3FpConfiguration>();
+        var session = new Fff3FpSession(options);
         var config = new Fff3FpConfiguration
         {
             Size = (uint)configSize,
@@ -32,27 +33,62 @@ public sealed class Fff3FpEngine : IPlayerEngine
             HdrPeakNits = 1000f,
             SdrPaperWhiteNits = 203f,
             AudioEndpointIdUtf8 = 0,
-            EventCallback = 0,
-            EventCallbackContext = 0,
+            EventCallback = session.Callback,
+            EventCallbackContext = session.CallbackContext,
         };
 
         var result = Fff3FpNative.FFF3FP_Create(in config, out var handle);
         if (result != FffResult.Success)
+        {
+            session.Dispose();
             throw new EngineException((int)result, $"FFF3FP_Create 失败: {result}");
+        }
 
-        return new Fff3FpSession(handle, options);
+        session.AttachHandle(handle);
+        return session;
     }
 
     private sealed class Fff3FpSession : IPlayerSession
     {
-        private readonly nint _handle;
         private readonly EngineSessionOptions _options;
+        private nint _handle;
         private bool _disposed;
 
-        public Fff3FpSession(nint handle, EngineSessionOptions options)
+        // ---- 事件回调（原生工作线程调用，__cdecl）----
+        private readonly Fff3FpEventCallback _callback;
+        private readonly GCHandle _callbackContext; // 防回调委托被 GC
+        internal nint Callback => Marshal.GetFunctionPointerForDelegate(_callback);
+        internal nint CallbackContext => GCHandle.ToIntPtr(_callbackContext);
+
+        /// <summary>引擎事件（原生线程触发；消费方应调度到 UI 线程）。</summary>
+        public event EventHandler<EngineEvent>? EngineEvent;
+
+        internal Fff3FpSession(EngineSessionOptions options)
         {
-            _handle = handle;
             _options = options;
+            _callback = OnEngineEvent;
+            _callbackContext = GCHandle.Alloc(this);
+        }
+
+        internal void AttachHandle(nint handle) => _handle = handle;
+
+        private void OnEngineEvent(nint contextPtr, uint eventType, nint detailJsonUtf8)
+        {
+            // 校验 context 仍是本会话（防御性）
+            if (GCHandle.FromIntPtr(contextPtr).Target is not Fff3FpSession) return;
+
+            var json = detailJsonUtf8 == 0
+                ? string.Empty
+                : Marshal.PtrToStringUTF8(detailJsonUtf8) ?? string.Empty;
+
+            try
+            {
+                EngineEvent?.Invoke(this, new EngineEvent((EngineEventType)eventType, json));
+            }
+            catch
+            {
+                // 回调内不抛异常回原生层
+            }
         }
 
         public Task OpenAsync(string localPath, CancellationToken cancellationToken = default)
@@ -355,7 +391,13 @@ public sealed class Fff3FpEngine : IPlayerEngine
         {
             if (_disposed) return;
             _disposed = true;
-            Fff3FpNative.FFF3FP_Destroy(_handle);
+
+            EngineEvent = null; // 脱离回调，防止释放后仍在触发
+            if (_handle != 0)
+                Fff3FpNative.FFF3FP_Destroy(_handle);
+            if (_callbackContext.IsAllocated)
+                _callbackContext.Free();
+
             GC.SuppressFinalize(this);
         }
 

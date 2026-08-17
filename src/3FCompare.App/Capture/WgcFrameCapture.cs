@@ -1,7 +1,5 @@
 using System.Runtime.InteropServices;
 
-using System.Runtime.InteropServices;
-
 namespace _3FCompare.App.Capture;
 
 /// <summary>

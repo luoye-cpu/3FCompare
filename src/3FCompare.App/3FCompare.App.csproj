@@ -8,6 +8,14 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- 版本号 -->
+    <Version>0.1.0</Version>
+    <VersionSuffix>BETA</VersionSuffix>
+    <AssemblyVersion>0.1.0.0</AssemblyVersion>
+    <FileVersion>0.1.0.0</FileVersion>
+    <InformationalVersion>0.1.0-BETA</InformationalVersion>
+
     <!--
       NativeAOT 分发（已启用）：
       - PublishAot=true 输出原生单文件；.NET 11 preview 中 Native 编译隐含裁剪。
@@ -21,6 +29,12 @@
     <_SuppressWinFormsTrimError>true</_SuppressWinFormsTrimError>
     <SuppressTrimAnalysisWarnings>false</SuppressTrimAnalysisWarnings>
   </PropertyGroup>
+
+  <!-- 嵌入 FFF.Native.dll 实现单文件发布（完整版用；精简版发布时不包含此资源） -->
+  <ItemGroup Condition="'$(EmbedFffNative)' == 'true'">
+    <EmbeddedResource Include="..\..\third_party\fff_project\FFF.Native\x64\Release\FFF.Native.dll"
+                      LogicalName="FFF.Native.dll" />
+  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\3FCompare.Core\3FCompare.Core.csproj" />

@@ -2,6 +2,10 @@ using System.Runtime.InteropServices;
 
 namespace _3FCompare.Core.Backend.Interop;
 
+/// <summary>事件回调（FFF3FPEventCallback：__cdecl，来自原生工作线程）。</summary>
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate void Fff3FpEventCallback(nint context, uint eventType, nint detailJsonUtf8);
+
 /// <summary>3FP 原生播放器结果（对齐 FFFResult，FFF.Player.Api.h）。</summary>
 internal enum FffResult : int
 {

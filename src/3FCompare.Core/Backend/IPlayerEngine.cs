@@ -46,6 +46,9 @@ public interface IPlayerSession : IDisposable
 
     /// <summary>读取某像素（颜色管理前原生缓冲）。</summary>
     bool TryReadPixel(int x, int y, out PixelSample sample);
+
+    /// <summary>引擎事件（原生工作线程回调；消费者须自行调度到 UI 线程）。</summary>
+    event EventHandler<EngineEvent>? EngineEvent;
 }
 
 /// <summary>会话创建选项。</summary>
@@ -126,6 +129,21 @@ public sealed record EngineMediaInfo
 
 /// <summary>单像素采样（颜色管理前 BGRA8/RGB10A2 码值）。</summary>
 public readonly record struct PixelSample(float R, float G, float B, float A, uint BitDepth);
+
+/// <summary>引擎事件（3FP FFF3FPEvent 回调，Fff3FpSession.EventReceived）。</summary>
+public enum EngineEventType
+{
+    StateChanged = 1,
+    OpenCompleted = 2,
+    OperationCompleted = 3,
+    PlaybackEnded = 4,
+    Error = 5,
+    ColorModeChanged = 6,
+    DeviceChanged = 7,
+}
+
+/// <summary>引擎事件载荷（detailJsonUtf8 原样保留，由消费方解析）。</summary>
+public readonly record struct EngineEvent(EngineEventType Type, string DetailJson);
 
 /// <summary>引擎异常（对应 3FP FFFResult 与错误消息）。</summary>
 public sealed class EngineException : Exception
