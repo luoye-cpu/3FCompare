@@ -6,12 +6,18 @@ namespace _3FCompare.Core.Backend;
 /// 可通过 <see cref="NativeRuntime.SetFfmpegDirectory"/> 指定 FFmpeg DLL 搜索目录。</summary>
 public static class EngineFactory
 {
-    /// <summary>探测 FFF.Native.dll 是否存在于应用目录 / 当前目录 / PATH。</summary>
+    /// <summary>探测真实 3FP 后端是否可用。
+    /// 需同时满足：① FFF.Native.dll 可加载（应用目录/PATH）；② FFmpeg 核心 DLL 已在应用目录。
+    /// 缺 FFmpeg 时 FFF.Native 虽能加载，但打开视频时 Delay-Load FFmpeg 会原生崩溃，
+    /// 故此时应回退演示模式（见 NativeRuntime.IsFfmpegAvailable）。</summary>
     public static bool IsNativeAvailable()
     {
+        // 先低成本检查 FFmpeg（避免加载 FFF.Native 后才发现不可用）
+        if (!NativeRuntime.IsFfmpegAvailable())
+            return false;
         try
         {
-            // 直接尝试加载并调用无副作用函数，最可靠。
+            // 再尝试加载 FFF.Native 并调用无副作用函数，最可靠。
             return Fff3FpNativeProbe.FFF3FP_GetApiVersion() >= 1;
         }
         catch (DllNotFoundException)

@@ -42,9 +42,11 @@ TestResults/
 # 本地日志
 logs/
 *.log
-# vcpkg（外部工具，不入库）
-third_party/fff_project/third_party/vcpkg/
-third_party/vcpkg/
+
+# 内核（FFF_Project，已解除 submodule 跟踪）
+# 整个目录不入库：第三方源码 + 构建产物，依赖 tools/构建全部.ps1 重新获取/构建。
+# 对内核的自研补丁单独存放于 tools/patches/*.patch（入库跟踪），由 tools/更新内核.ps1 自动重打。
+third_party/fff_project/
 
 # 测试媒体（生成产物不入库；保留测试脚本和枚举测试项目）
 testmedia/*.mp4
@@ -55,8 +57,3 @@ testmedia/screen*.png
 
 # 发布产物（NativeAOT + 第三方 DLL，190+ MB）
 publish/
-# 内核构建产物（可从 submodule 重建）
-third_party/fff_project/FFF.Native/x64/
-third_party/fff_project/runtime/
-third_party/fff_project/third_party/ffmpeg/
-third_party/fff_project/third_party/vcpkg_installed/

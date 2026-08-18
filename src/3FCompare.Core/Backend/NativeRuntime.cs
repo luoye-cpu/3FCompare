@@ -68,6 +68,26 @@ public static partial class NativeRuntime
             CopyDlls(FfmpegDirectory);
     }
 
+    /// <summary>检测应用目录是否已具备 FFmpeg 核心 DLL（avcodec-*.dll）。
+    /// 3FP 内核通过 Delay-Load 从应用目录解析 FFmpeg（CopyDlls 复制到应用目录）。
+    /// 用于引擎可用性探测：仅有 FFF.Native 而没有 FFmpeg 时不能使用真实模式
+    /// （否则打开视频时 FFmpeg Delay-Load 失败会导致原生崩溃）。
+    /// </summary>
+    public static bool IsFfmpegAvailable()
+    {
+        try
+        {
+            var appDir = AppContext.BaseDirectory;
+            if (!Directory.Exists(appDir)) return false;
+            return Directory.GetFiles(appDir, "avcodec-*.dll").Length > 0
+                || Directory.GetFiles(appDir, "avcodec*.dll").Length > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     /// <summary>验证目录是否包含 FFmpeg 核心 DLL（avcodec-*.dll）。</summary>
     public static string? ValidateFfmpegDirectory(string? directory)
     {

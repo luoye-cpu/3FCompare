@@ -320,7 +320,7 @@ public sealed class MainForm : Form, IMessageFilter
             {
                 if (!_realMode)
                 {
-                    Console.WriteLine("selftest: 未检测到 FFF.Native，演示模式无法做真实后端验证");
+                    Console.WriteLine("selftest: 未检测到 FFmpeg 或 FFF.Native，回退演示模式（无法做真实后端验证）");
                 }
 
                 // 打开（复用真实路径：OpenFiles 会创建会话并异步 OpenAsync）

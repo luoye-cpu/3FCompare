@@ -75,10 +75,10 @@ function Invoke-Pack([string]$mode) {
         # 1) 将 FFmpeg DLL 复制到 exe 同级目录（FFF.Native Delay-Load 必需）
         $FfmpegSrc = "$PublishDir\PLAN\ffmpeg-full"
         if (Test-Path $FfmpegSrc) {
-            $ffDlls = Get-ChildItem "$FfmpegSrc\*.dll" -ErrorAction SilentlyContinue
-            if ($ffDlls) {
+            $ffDlls = @(Get-ChildItem "$FfmpegSrc\*.dll" -ErrorAction SilentlyContinue)
+            if ($ffDlls.Count -gt 0) {
                 $ffDlls | ForEach-Object { Copy-Item $_.FullName $OutputDir -Force }
-                Write-Host "   ✅ FFmpeg DLL 已复制到程序目录（${count} 个）" -ForegroundColor Green
+                Write-Host "   ✅ FFmpeg DLL 已复制到程序目录（$($ffDlls.Count) 个）" -ForegroundColor Green
             }
         } else {
             Write-Host "   ⚠️ FFmpeg 源目录不存在: $FfmpegSrc" -ForegroundColor Yellow
