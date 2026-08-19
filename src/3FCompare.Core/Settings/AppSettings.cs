@@ -8,7 +8,7 @@ public sealed class AppSettings
     /// <summary>默认解码 GPU（-1=系统默认）。</summary>
     public int PreferredAdapterIndex { get; set; } = -1;
 
-    /// <summary>手动指定的 FFmpeg DLL 目录（null/空白 = 自动检测系统路径）。</summary>
+    /// <summary>手动指定的 FFmpeg DLL 目录（null/空白 = 自动检测：FFMPEG_DIR → PATH → 应用目录）。</summary>
     public string? FfmpegDirectory { get; set; }
 
     public ColorModeSetting ColorMode { get; set; } = ColorModeSetting.MapToHdr;

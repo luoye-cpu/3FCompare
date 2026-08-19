@@ -58,33 +58,52 @@ public sealed class TransportBar : Control
         Dock = DockStyle.Bottom;
         _toolTip = new ToolTip { AutoPopDelay = 5000, InitialDelay = 300, ReshowDelay = 100 };
 
-        _btnPlay = MakeButton("▶", new Point(8, 6), 40, Tooltips.Play);
+        // 流式布局：按钮/下拉/标签按顺序自动排布（WrapContents=false），
+        // 高 DPI 下按钮被缩放后不会互相挤压溢出，超宽时 AutoScroll 兜底。
+        var flow = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            AutoScroll = true,
+            Padding = new Padding(6, 6, 6, 0),
+            BackColor = AppTheme.Colors.PanelBackground,
+        };
+
+        _btnPlay = MakeButton("▶", 40, Tooltips.Play);
         _btnPlay.Click += (_, _) => PlayPauseClicked?.Invoke(this, EventArgs.Empty);
+        flow.Controls.Add(_btnPlay);
 
-        _btnStop = MakeButton("■", new Point(52, 6), 32, Tooltips.Stop);
+        _btnStop = MakeButton("■", 32, Tooltips.Stop);
         _btnStop.Click += (_, _) => StopClicked?.Invoke(this, EventArgs.Empty);
+        flow.Controls.Add(_btnStop);
 
-        _btnFramePrev = MakeButton("◀◀", new Point(96, 6), 36, Tooltips.FramePrev);
+        _btnFramePrev = MakeButton("◀◀", 36, Tooltips.FramePrev);
         _btnFramePrev.Click += (_, _) => FrameStepClicked?.Invoke(this, -1);
+        flow.Controls.Add(_btnFramePrev);
 
-        _btnFrameNext = MakeButton("▶▶", new Point(136, 6), 36, Tooltips.FrameNext);
+        _btnFrameNext = MakeButton("▶▶", 36, Tooltips.FrameNext);
         _btnFrameNext.Click += (_, _) => FrameStepClicked?.Invoke(this, +1);
+        flow.Controls.Add(_btnFrameNext);
 
-        _btnSecPrev = MakeButton("◀", new Point(184, 6), 28, Tooltips.SecPrev);
+        _btnSecPrev = MakeButton("◀", 28, Tooltips.SecPrev);
         _btnSecPrev.Click += (_, _) => SecondsStepClicked?.Invoke(this, -1);
+        flow.Controls.Add(_btnSecPrev);
 
-        _btnSecNext = MakeButton("▶", new Point(216, 6), 28, Tooltips.SecNext);
+        _btnSecNext = MakeButton("▶", 28, Tooltips.SecNext);
         _btnSecNext.Click += (_, _) => SecondsStepClicked?.Invoke(this, +1);
+        flow.Controls.Add(_btnSecNext);
 
-        _btnLoop = MakeButton("🔁", new Point(256, 6), 36, Tooltips.LoopOff);
+        _btnLoop = MakeButton("🔁", 36, Tooltips.LoopOff);
         _btnLoop.Click += (_, _) => LoopToggled?.Invoke(this, EventArgs.Empty);
+        flow.Controls.Add(_btnLoop);
 
         _speedBox = new ComboBox
         {
-            Location = new Point(300, 7),
             Size = new Size(60, 24),
             DropDownStyle = ComboBoxStyle.DropDownList,
         };
+        _speedBox.Margin = new Padding(4, 2, 4, 2);
         _speedBox.Items.AddRange(new object[] { "0.5x", "1.0x", "2.0x", "4.0x" });
         _speedBox.SelectedIndex = 1;
         _toolTip.SetToolTip(_speedBox, Tooltips.Speed);
@@ -93,61 +112,62 @@ public sealed class TransportBar : Control
             if (_speedBox.SelectedItem is string s)
                 SpeedChanged?.Invoke(this, double.Parse(s.TrimEnd('x')));
         };
+        flow.Controls.Add(_speedBox);
 
-        _btnAdd = MakeButton("+", new Point(368, 6), 28, Tooltips.Add);
+        _btnAdd = MakeButton("+", 28, Tooltips.Add);
         _btnAdd.Click += (_, _) => AddClicked?.Invoke(this, EventArgs.Empty);
+        flow.Controls.Add(_btnAdd);
 
-        _btnRemove = MakeButton("−", new Point(400, 6), 28, Tooltips.Remove);
+        _btnRemove = MakeButton("−", 28, Tooltips.Remove);
         _btnRemove.Click += (_, _) => RemoveClicked?.Invoke(this, EventArgs.Empty);
+        flow.Controls.Add(_btnRemove);
 
         // HDR/SDR 色彩模式切换（紧凑下拉）
         _cmbColorMode = new ComboBox
         {
-            Location = new Point(436, 7),
             Size = new Size(72, 24),
             DropDownStyle = ComboBoxStyle.DropDownList,
         };
+        _cmbColorMode.Margin = new Padding(4, 2, 4, 2);
         _cmbColorMode.Items.AddRange(new object[] { "SDR", "HDR" });
         _cmbColorMode.SelectedIndex = 1;
         _toolTip.SetToolTip(_cmbColorMode, Tooltips.ColorMode);
         _cmbColorMode.SelectedIndexChanged += (_, _) =>
             ColorModeChanged?.Invoke(this, _cmbColorMode.SelectedIndex);
+        flow.Controls.Add(_cmbColorMode);
 
         _timeLabel = new Label
         {
-            Location = new Point(520, 10),
             AutoSize = true,
+            Margin = new Padding(12, 6, 4, 0),
             ForeColor = AppTheme.Colors.TextPrimary,
             Font = AppTheme.Fonts.MonospaceMediumFont,
             Text = "00:00:00.000 / 00:00:00.000",
         };
+        flow.Controls.Add(_timeLabel);
 
         _infoLabel = new Label
         {
-            Location = new Point(780, 10),
             AutoSize = true,
+            Margin = new Padding(12, 6, 4, 0),
             ForeColor = AppTheme.Colors.TextMuted,
             Font = AppTheme.Fonts.BodyFont,
             Text = string.Empty,
         };
+        flow.Controls.Add(_infoLabel);
 
-        Controls.AddRange(new Control[]
-        {
-            _btnPlay, _btnStop, _btnFramePrev, _btnFrameNext, _btnSecPrev, _btnSecNext,
-            _btnLoop, _speedBox, _btnAdd, _btnRemove, _cmbColorMode, _timeLabel, _infoLabel,
-        });
+        Controls.Add(flow);
     }
 
     public void SetColorMode(int index) => _cmbColorMode.SelectedIndex = index;
 
     public int CurrentColorMode => _cmbColorMode.SelectedIndex;
 
-    private Button MakeButton(string text, Point location, int width, string tooltip)
+    private Button MakeButton(string text, int width, string tooltip)
     {
         var btn = new Button
         {
             Text = text,
-            Location = location,
             Size = new Size(width, 30),
             FlatStyle = FlatStyle.Flat,
             FlatAppearance = { BorderColor = AppTheme.Colors.Border, BorderSize = 1 },

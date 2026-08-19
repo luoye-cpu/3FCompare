@@ -10,6 +10,8 @@ public sealed class CompareGridView : Control
     private readonly List<PlayerSurface> _surfaces = new();
     private int _selectedIndex = -1;
     private bool _singleView; // 单屏（只显示选中路）
+    private int _overrideCols; // 布局预设列（0 = 未设置，自动）
+    private int _overrideRows;
 
     public event EventHandler? SelectionChanged;
 
@@ -97,10 +99,35 @@ public sealed class CompareGridView : Control
         };
     }
 
+    /// <summary>设置网格布局预设（列×行）。路数多于容量时自动回退到 ComputeGrid。</summary>
+    public void SetGridLayout(int cols, int rows)
+    {
+        _overrideCols = Math.Max(1, cols);
+        _overrideRows = Math.Max(1, rows);
+        LayoutSurfaces();
+    }
+
+    /// <summary>清除布局预设，恢复自动布局。</summary>
+    public void ResetGridLayout()
+    {
+        _overrideCols = 0;
+        _overrideRows = 0;
+        LayoutSurfaces();
+    }
+
+    /// <summary>解析最终布局：单屏 (1,1)；预设可用时用预设；否则自动计算。</summary>
+    private (int cols, int rows) ResolveGrid(int count, bool singleView)
+    {
+        if (singleView) return (1, 1);
+        if (_overrideCols > 0 && _overrideRows > 0 && count <= _overrideCols * _overrideRows)
+            return (_overrideCols, _overrideRows);
+        return ComputeGrid(count, singleView);
+    }
+
     public void LayoutSurfaces()
     {
         if (ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
-        var (cols, rows) = ComputeGrid(_surfaces.Count, _singleView);
+        var (cols, rows) = ResolveGrid(_surfaces.Count, _singleView);
 
         // 单屏：只显示选中路
         if (_singleView)

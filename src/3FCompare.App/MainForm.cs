@@ -43,6 +43,11 @@ public sealed class MainForm : Form, IMessageFilter
     private bool _isPlaying;
     private bool _abViewVisible;
 
+    // ---- 时间轴拖动缩略图预览（ScrubPreview）----
+    private readonly System.Windows.Forms.Timer _scrubTimer;  // 150ms 节流抓帧
+    private ThumbnailPopup? _thumbnail;                        // 悬浮缩略图窗（懒创建）
+    private long _scrubTarget;                                 // 待抓帧的目标位置
+
     // ---- 同步视图变换状态（多路共享，滚轮缩放 + 拖拽平移）----
     private float _viewZoom = 1.0f;
     private float _viewPanX;
@@ -50,28 +55,217 @@ public sealed class MainForm : Form, IMessageFilter
     private Point _dragStart;
     private bool _dragging;
 
-    /// <summary>右侧工具区布局容器（探针/书签 +/- 切换）。</summary>
+    /// <summary>右侧工具区布局容器：顶部标签条 + 内容区 + 折叠按钮。
+    /// 标签（探针/书签/偏移/媒体/音频）点击切换面板；Pin 固定的控件（如放大镜）
+    /// 始终显示在内容区顶部；折叠按钮把宽度收到 24px，仅留竖条。</summary>
     private sealed class VerticalDockHost : Panel
     {
+        private const int CollapsedWidth = 24;
+        private readonly FlowLayoutPanel _tabBar;
+        private readonly Panel _content;
+        private readonly Button _btnCollapse;
+        private readonly List<(Button Btn, Action Select)> _tabs = new();
+        private readonly List<Control> _pinned = new();
+        private Button? _activeTab;
+        private bool _expanded = true;
+        private bool _resizing;
+        private int _resizeStartX;
+        private int _resizeStartWidth;
+
         public VerticalDockHost()
         {
             Dock = DockStyle.Right;
             Width = LayoutConstants.Tools.DefaultWidth;
             BackColor = AppTheme.Colors.PanelBackground;
-            AutoScroll = true;
+            Cursor = Cursors.VSplit; // 左缘热区拖拽宽度
+
+            _btnCollapse = new Button
+            {
+                Text = "◀",
+                FlatStyle = FlatStyle.Flat,
+                FlatAppearance = { BorderSize = 0 },
+                BackColor = AppTheme.Colors.ControlBackground,
+                ForeColor = AppTheme.Colors.TextSecondary,
+                Font = AppTheme.Fonts.TitleFont,
+                Cursor = Cursors.Default,
+                TabStop = false,
+            };
+            _btnCollapse.Click += (_, _) => ToggleCollapsed();
+
+            _tabBar = new FlowLayoutPanel
+            {
+                BackColor = AppTheme.Colors.PanelBackground,
+                AutoScroll = false,
+                WrapContents = false,
+                FlowDirection = FlowDirection.LeftToRight,
+            };
+
+            _content = new Panel
+            {
+                BackColor = AppTheme.Colors.PanelBackground,
+            };
+
+            Controls.AddRange(new Control[] { _tabBar, _content, _btnCollapse });
         }
 
+        /// <summary>注册标签页：创建 56px 宽扁平按钮，点击执行 onSelect 并高亮。</summary>
+        public void AddTab(string label, Action onSelect)
+        {
+            var btn = new Button
+            {
+                Text = label,
+                Height = LayoutConstants.Tools.ToggleButtonHeight - 4,
+                Width = 56,
+                Margin = new Padding(1, 2, 1, 2),
+                FlatStyle = FlatStyle.Flat,
+                FlatAppearance = { BorderSize = 0 },
+                BackColor = AppTheme.Colors.ControlBackgroundLight,
+                ForeColor = AppTheme.Colors.TextSecondary,
+                Font = AppTheme.Fonts.BodyFont,
+                Cursor = Cursors.Default,
+                TabStop = false,
+            };
+            btn.Click += (_, _) =>
+            {
+                SetActiveTab(btn);
+                onSelect();
+            };
+            _tabs.Add((btn, onSelect));
+            _tabBar.Controls.Add(btn);
+        }
+
+        /// <summary>固定控件（始终显示在内容区顶部，如放大镜开关）。</summary>
+        public void Pin(Control c)
+        {
+            c.Dock = DockStyle.Top;
+            _pinned.Add(c);
+            if (!_content.Controls.Contains(c))
+                _content.Controls.Add(c);
+            c.BringToFront();
+        }
+
+        /// <summary>显示指定面板：隐藏非固定面板，显示该面板。</summary>
         public void ShowPanel(Control c)
         {
-            foreach (Control it in Controls) it.Visible = false;
-            if (!Controls.Contains(c)) Controls.Add(c);
+            foreach (var it in _content.Controls)
+            {
+                if (it is Control cc && !_pinned.Contains(cc))
+                    cc.Visible = false;
+            }
+            if (!_content.Controls.Contains(c))
+                _content.Controls.Add(c);
+            c.Dock = DockStyle.Fill;
             c.Visible = true;
             c.BringToFront();
         }
 
+        /// <summary>隐藏所有非固定面板。</summary>
         public void HideAll()
         {
-            foreach (Control it in Controls) it.Visible = false;
+            foreach (var it in _content.Controls)
+            {
+                if (it is Control cc && !_pinned.Contains(cc))
+                    cc.Visible = false;
+            }
+            _content.Visible = true;
+        }
+
+        /// <summary>设置标签高亮（Accent 底 + 黑字）。</summary>
+        public void SetActiveTab(Button active)
+        {
+            foreach (var (btn, _) in _tabs)
+            {
+                if (btn == active)
+                {
+                    btn.BackColor = AppTheme.Colors.Accent;
+                    btn.ForeColor = Color.Black;
+                }
+                else
+                {
+                    btn.BackColor = AppTheme.Colors.ControlBackgroundLight;
+                    btn.ForeColor = AppTheme.Colors.TextSecondary;
+                }
+            }
+            _activeTab = active;
+        }
+
+        /// <summary>获取标签按钮（供初始高亮）。</summary>
+        public Button? GetTab(int index)
+            => index >= 0 && index < _tabs.Count ? _tabs[index].Btn : null;
+
+        /// <summary>折叠/展开侧边栏（◀ / ▶）。</summary>
+        public void ToggleCollapsed()
+        {
+            _expanded = !_expanded;
+            ApplyCollapsed();
+        }
+
+        private void ApplyCollapsed()
+        {
+            Width = _expanded ? LayoutConstants.Tools.DefaultWidth : CollapsedWidth;
+            _btnCollapse.Text = _expanded ? "◀" : "▶";
+            _tabBar.Visible = _expanded;
+            _content.Visible = _expanded;
+            if (_expanded && _activeTab is not null)
+                SetActiveTab(_activeTab);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            // 左缘热区（-2..6px）开始拖拽宽度
+            if (e.Button == MouseButtons.Left && e.X >= -2 && e.X <= 6)
+            {
+                _resizing = true;
+                _resizeStartX = e.X;
+                _resizeStartWidth = Width;
+                Capture = true;
+                Cursor = Cursors.VSplit;
+            }
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (!_resizing) return;
+            var delta = _resizeStartX - e.X;
+            var w = Math.Clamp(_resizeStartWidth + delta, LayoutConstants.Tools.MinWidth, LayoutConstants.Tools.MaxWidth);
+            Width = w;
+            if (w > CollapsedWidth) _expanded = true;
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            if (_resizing)
+            {
+                _resizing = false;
+                Capture = false;
+                Cursor = Cursors.VSplit;
+                if (Width <= CollapsedWidth) ToggleCollapsed();
+            }
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            if (_resizing)
+            {
+                _resizing = false;
+                Capture = false;
+                Cursor = Cursors.VSplit;
+            }
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            // ctor 早期 SetBounds 会触发 OnResize，此时子控件尚未创建
+            if (_btnCollapse is null || _tabBar is null || _content is null) return;
+            var barH = LayoutConstants.Tools.ToggleButtonHeight;
+            _btnCollapse.Bounds = new Rectangle(0, 0, CollapsedWidth, barH);
+            _tabBar.Bounds = new Rectangle(CollapsedWidth, 0, Math.Max(0, Width - CollapsedWidth), barH);
+            _content.Bounds = new Rectangle(0, barH, Width, Math.Max(0, Height - barH));
         }
     }
 
@@ -79,10 +273,14 @@ public sealed class MainForm : Form, IMessageFilter
     {
         _settings = SettingsStore.Load();
 
-        // 手动 FFmpeg 目录优先于引擎探测（设置 > 自动检测系统变量 > 命令行覆盖）
+        // FFmpeg 目录解析链：命令行 --ffmpegdir > 设置 FfmpegDirectory > 自动检测
+        // （FFMPEG_DIR 环境变量 → PATH → 应用目录）。探测到即复制 DLL 到应用目录，
+        // 供 FFF.Native 内核 Delay-Load 命中；仍未找到则回退演示模式。
         var ffmpegDir = ffmpegDirOverride ?? _settings.FfmpegDirectory;
         if (!string.IsNullOrWhiteSpace(ffmpegDir))
             NativeRuntime.SetFfmpegDirectory(ffmpegDir);
+        else if (NativeRuntime.AutoDetectFfmpegDirectory() is { } detected)
+            NativeRuntime.SetFfmpegDirectory(detected);
 
         _realMode = EngineFactory.IsNativeAvailable();
         _engine = EngineFactory.Create();
@@ -111,6 +309,11 @@ public sealed class MainForm : Form, IMessageFilter
         AllowDrop = true;
         BackColor = AppTheme.Colors.Background;
 
+        // 高 DPI 自动缩放：以 96 DPI 为基准，整棵控件树（含硬编码像素坐标的子控件）
+        // 由 WinForms 按实际 DPI 自动缩放，避免 4K 250% 等下控件挤压/重叠/溢出。
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleDimensions = new SizeF(Dpi.BaseDpi, Dpi.BaseDpi);
+
         _sync.StepProfile = new StepProfile { FrameStep = _settings.FrameStep, SecondsStep = _settings.SecondsStep };
 
         // 菜单
@@ -138,11 +341,24 @@ public sealed class MainForm : Form, IMessageFilter
         var diffItem = new ToolStripMenuItem("差异叠加", null, (_, _) => ToggleDiffView());
         var audioItem = new ToolStripMenuItem("音频", null, (_, _) => ToggleAudioPanel());
         var showGridItem = new ToolStripMenuItem("显示 对比网格", null, (_, _) => ShowGridOnly());
+
+        // 网格布局预设子菜单
+        var gridLayoutMenu = new ToolStripMenuItem("网格布局");
+        gridLayoutMenu.DropDownItems.AddRange(new ToolStripItem[]
+        {
+            new ToolStripMenuItem("2×1（默认）", null, (_, _) => ApplyGridLayout(2, 1)),
+            new ToolStripMenuItem("2×2", null, (_, _) => ApplyGridLayout(2, 2)),
+            new ToolStripMenuItem("3×3", null, (_, _) => ApplyGridLayout(3, 3)),
+            new ToolStripSeparator(),
+            new ToolStripMenuItem("自动", null, (_, _) => ApplyGridAuto()),
+        });
+
         viewMenu.DropDownItems.AddRange(new ToolStripItem[]
         {
             singleItem, new ToolStripSeparator(), abItem,
             new ToolStripSeparator(), probeItem, bookmarkItem, offsetItem, mediaInfoItem,
-            new ToolStripSeparator(), diffItem, audioItem, showGridItem, fullItem,
+            new ToolStripSeparator(), diffItem, audioItem, gridLayoutMenu,
+            new ToolStripSeparator(), showGridItem, fullItem,
         });
 
         // 网格（先于工具面板创建：AbSliderView / DiffOverlayView 依赖其实例）
@@ -198,8 +414,18 @@ public sealed class MainForm : Form, IMessageFilter
         _mediaInfoPanel = new MediaInfoPanel();
         _diffView = new DiffOverlayView(_grid);
         _audioPanel = new AudioPanel();
-        _toolsDock.Controls.Add(_chkMagnifier);
+
+        // 侧边栏：放大镜开关固定可见（Pin），其余为标签切换面板
+        _toolsDock.Pin(_chkMagnifier);
+        _toolsDock.AddTab("探针", ToggleProbePanel);
+        _toolsDock.AddTab("书签", ToggleBookmarkPanel);
+        _toolsDock.AddTab("偏移", ToggleOffsetPanel);
+        _toolsDock.AddTab("媒体", ToggleMediaInfoPanel);
+        _toolsDock.AddTab("音频", ToggleAudioPanel);
         _toolsDock.ShowPanel(_probe);
+        // 默认高亮「探针」标签
+        if (_toolsDock.GetTab(0) is { } probeTab)
+            _toolsDock.SetActiveTab(probeTab);
 
         var settingsMenu = new ToolStripMenuItem("设置(&S)");
         var settingsItem = new ToolStripMenuItem("设置…", null, (_, _) => OpenSettings());
@@ -226,6 +452,11 @@ public sealed class MainForm : Form, IMessageFilter
         _timeline = new TimelineView();
         _timeline.SeekRequested += (_, pos) => _sync.SeekTo(pos);
         _timeline.AbPointSet += (_, p) => SetLoopPoint(p.position, p.isA);
+        _timeline.ScrubPreview += OnTimelineScrub;
+
+        // 拖动缩略图节流定时器：150ms 内最多抓一次帧
+        _scrubTimer = new System.Windows.Forms.Timer { Interval = 150 };
+        _scrubTimer.Tick += (_, _) => PerformScrubCapture();
 
         // 状态栏
         _statusStrip = new StatusStrip();
@@ -1245,6 +1476,73 @@ public sealed class MainForm : Form, IMessageFilter
 
     private long _lastShownPos;
 
+    // ---------- 网格布局 ----------
+
+    private void ApplyGridLayout(int cols, int rows) => _grid.SetGridLayout(cols, rows);
+    private void ApplyGridAuto() => _grid.ResetGridLayout();
+
+    // ---------- 时间轴拖动缩略图预览 ----------
+
+    /// <summary>时间轴拖动中：记录目标位置，150ms 节流触发抓帧；弹出悬浮缩略图跟随鼠标。</summary>
+    private void OnTimelineScrub(object? sender, long position100ns)
+    {
+        _scrubTarget = position100ns;
+        _scrubTimer.Stop();
+        _scrubTimer.Start(); // 重置节流计时
+
+        _thumbnail ??= new ThumbnailPopup();
+        // 跟随鼠标屏幕坐标（缩略图在进度条上方）
+        var screenPos = _timeline.PointToScreen(_timeline.PointToClient(Control.MousePosition));
+        screenPos = new Point(screenPos.X, _timeline.PointToScreen(Point.Empty).Y - 6);
+        _thumbnail.ShowAt(screenPos, null); // 先显示占位
+    }
+
+    /// <summary>节流触发：master 临时 Seek 到目标 → 抓帧 → 恢复 → 更新缩略图。</summary>
+    private void PerformScrubCapture()
+    {
+        _scrubTimer.Stop();
+        if (_sync.Count == 0) return;
+        try
+        {
+            var idx = 0; // master 路
+            var surface = _grid.GetSurface(idx);
+            var session = _sync.Slots[idx].Session;
+            if (surface is null || session is null) return;
+
+            var before = _sync.GetMasterPosition100ns();
+            _sync.SeekTo(_scrubTarget);
+            Application.DoEvents(); // 让 D3D 渲染一帧
+
+            Bitmap? bmp;
+            if (_realMode)
+            {
+                bmp = WgcFrameCapture.CaptureWindowFrame(surface.Handle);
+            }
+            else
+            {
+                bmp = new Bitmap(Math.Max(1, surface.Width), Math.Max(1, surface.Height));
+                using var g = Graphics.FromImage(bmp);
+                surface.DrawToBitmap(bmp, new Rectangle(0, 0, bmp.Width, bmp.Height));
+            }
+
+            if (bmp is not null && _thumbnail is not null)
+            {
+                var screenPos = _timeline.PointToScreen(_timeline.PointToClient(Control.MousePosition));
+                screenPos = new Point(screenPos.X, _timeline.PointToScreen(Point.Empty).Y - 6);
+                _thumbnail.ShowAt(screenPos, bmp);
+            }
+            bmp?.Dispose();
+
+            // 恢复原位置（若仍在拖动，下个节流周期继续跟随）
+            if (!_timeline.IsScrubbing)
+                _sync.SeekTo(before);
+        }
+        catch
+        {
+            // 抓帧异常静默，不影响拖动
+        }
+    }
+
     private void PollSnapshots()
     {
         if (_sync.Count == 0) return;
@@ -1259,7 +1557,9 @@ public sealed class MainForm : Form, IMessageFilter
         if (master is not null)
         {
             _timeline.SetDuration(master.Duration100ns);
-            _timeline.SetPosition(master.Position100ns);
+            // 拖动缩略图预览期间不覆盖播放头位置（保留 ScrubPreview 预览位置）
+            if (!_timeline.IsScrubbing)
+                _timeline.SetPosition(master.Position100ns);
             _transport.SetTime(TimeSpan.FromTicks(master.Position100ns), TimeSpan.FromTicks(master.Duration100ns));
         }
 
@@ -1295,6 +1595,11 @@ public sealed class MainForm : Form, IMessageFilter
         {
             _lastShownPos = master.Position100ns;
         }
+
+        // 自适应轮询频率：播放中（含伪变速）16ms 精跟；空闲 250ms 省电
+        var wantHigh = _isPlaying && _sync.Count > 0;
+        var target = wantHigh ? 16 : 250;
+        if (_pollTimer.Interval != target) _pollTimer.Interval = target;
     }
 
     private void UpdateStatus()
@@ -1409,6 +1714,10 @@ public sealed class MainForm : Form, IMessageFilter
         SettingsStore.Save(_settings);
 
         _pollTimer.Stop();
+        _scrubTimer?.Stop();
+        _thumbnail?.Close();
+        _thumbnail?.Dispose();
+        _thumbnail = null;
         _sync.Clear();
         base.OnFormClosing(e);
     }

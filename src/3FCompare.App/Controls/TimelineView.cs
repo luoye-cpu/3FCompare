@@ -3,8 +3,9 @@ using _3FCompare.App.Utils;
 namespace _3FCompare.App.Controls;
 
 /// <summary>时间轴：单轨道（master）+ 播放头 + A/B 区间标记 + 点击/拖动 Seek + A/B 打点。
-/// 交互：左键拖拽 Seek；按下「A」键设 A 点，按「B」键设 B 点（或右键设 A、中键设 B）。
-/// 支持设置 A/B 循环区间（F11）。</summary>
+/// 交互：左键拖拽 Seek（拖动期间不跳转，仅 OnMouseUp 触发一次 Seek，避免高频性能损耗）；
+/// 拖动时触发 ScrubPreview（节流 >10ms）供外部抓帧做悬浮缩略图；按下「A」键设 A 点，
+/// 按「B」键设 B 点（或右键设 A、中键设 B）。支持设置 A/B 循环区间（F11）。</summary>
 public sealed class TimelineView : Control
 {
     private long _duration100ns;
@@ -12,11 +13,20 @@ public sealed class TimelineView : Control
     private long _loopStart = -1;
     private long _loopEnd = -1;
     private bool _dragging;
+    private bool _scrubbing;          // 拖动中（预览模式，播放头可被外部 SetPreviewPosition 覆盖）
+    private long _lastPreviewTicks;   // ScrubPreview 节流基线
+    private long _lastDragPos;        // 拖动最后一次位置
 
     public event EventHandler<long>? SeekRequested;
 
     /// <summary>A/B 点被打点（参数 = 100ns 位置；负表示清除）。</summary>
     public event EventHandler<(long position, bool isA)>? AbPointSet;
+
+    /// <summary>拖动暂停在某个位置（参数 = 100ns 位置）。外部借此抓帧做悬浮缩略图预览。</summary>
+    public event EventHandler<long>? ScrubPreview;
+
+    /// <summary>是否正在拖拽（供外部跳过普通 SetPosition 以保留预览位置）。</summary>
+    public bool IsScrubbing => _scrubbing;
 
     public TimelineView()
     {
@@ -58,6 +68,13 @@ public sealed class TimelineView : Control
     }
 
     public void SetPosition(long position100ns)
+    {
+        _position100ns = Math.Clamp(position100ns, 0, Math.Max(0, _duration100ns));
+        Invalidate();
+    }
+
+    /// <summary>外部注入预览用位置（拖动悬浮缩略图时由外部回调设置，可反映预览位置）。</summary>
+    public void SetPreviewPosition(long position100ns)
     {
         _position100ns = Math.Clamp(position100ns, 0, Math.Max(0, _duration100ns));
         Invalidate();
@@ -140,19 +157,38 @@ public sealed class TimelineView : Control
         if (e.Button == MouseButtons.Left)
         {
             _dragging = true;
-            SeekRequested?.Invoke(this, PositionFromX(e.X));
+            _scrubbing = true;
+            _lastDragPos = PositionFromX(e.X);
+            _lastPreviewTicks = 0;
+            // 拖动开始：立即触发一次预览，但不 Seek（避免拖动起步就跳）
+            ScrubPreview?.Invoke(this, _lastDragPos);
         }
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
-        if (_dragging) SeekRequested?.Invoke(this, PositionFromX(e.X));
+        if (!_dragging) return;
+        var pos = PositionFromX(e.X);
+        _lastDragPos = pos;
+        // 拖动期间不 Seek；节流（>10ms）触发 ScrubPreview
+        var now = Environment.TickCount64;
+        if (now - _lastPreviewTicks >= 10)
+        {
+            _lastPreviewTicks = now;
+            ScrubPreview?.Invoke(this, pos);
+        }
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
-        _dragging = false;
+        if (_dragging)
+        {
+            _dragging = false;
+            _scrubbing = false;
+            // 只在松手时触发一次 Seek（到最终位置），避免拖动高频 Seek 占用性能
+            SeekRequested?.Invoke(this, _lastDragPos);
+        }
     }
 }

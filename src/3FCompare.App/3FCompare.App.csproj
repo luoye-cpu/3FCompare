@@ -9,12 +9,14 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 
-    <!-- 版本号 -->
-    <Version>0.1.0</Version>
+    <!-- 高 DPI：PerMonitorV2 按显示器 DPI 自适应（4K 250% 等缩放比例下正确渲染） -->
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+
+    <!-- 版本号：默认 0.1.2-BETA；pack.ps1 用 -p:Version=X.Y.Z 覆盖时全链路生效。
+         AssemblyVersion/FileVersion/InformationalVersion 均由 SDK 从 Version(+Suffix) 自动派生，
+         不再硬编码（修复 0.1.2 发布时 exe 仍是 0.1.0-BETA 的版本错位）。 -->
+    <Version>0.1.2</Version>
     <VersionSuffix>BETA</VersionSuffix>
-    <AssemblyVersion>0.1.0.0</AssemblyVersion>
-    <FileVersion>0.1.0.0</FileVersion>
-    <InformationalVersion>0.1.0-BETA</InformationalVersion>
 
     <!--
       NativeAOT 分发（已启用）：

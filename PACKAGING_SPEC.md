@@ -1,6 +1,6 @@
 # 📦 3FCompare 打包规范
 
-> 版本: 1.0 | 最后更新: 2026-08-17 | 适用于 v0.1.0+
+> 版本: 1.1 | 最后更新: 2026-08-19 | 适用于 v0.1.0+
 
 ---
 
@@ -69,8 +69,9 @@
 ### 3.1 前置准备
 
 ```powershell
-# 1. 确保代码已更新到目标版本号
-# 更新 src/3FCompare.App/3FCompare.App.csproj 中的 <Version> 标签
+# 1. 版本号由 pack.ps1 -p:Version 统一控制（自动覆盖 csproj 中的 <Version>），
+#    无需手动修改 csproj；其中 <Version>/<VersionSuffix> 仅为未传参时的默认值
+#    （SDK 会从 Version+Suffix 自动派生 AssemblyVersion/FileVersion/InformationalVersion）
 
 # 2. 确保 FFF.Native 内核已构建（third_party/fff_project/FFF.Native/x64/Release/FFF.Native.dll）
 # 合并使用 tools/构建全部.ps1 一键构建

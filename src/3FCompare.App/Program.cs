@@ -9,6 +9,7 @@ static class Program
     ///  `--autodemo <文件...>`：启动后自动打开指定文件并播放。
     ///  `--selftest <文件>`：真实模式自检（打开→等就绪→双步进断言→退出码）。
     ///  `--ffmpegdir <目录> --selftest <文件>`：指定 FFmpeg DLL 目录后自检。
+    ///  FFmpeg 探测链：命令行 --ffmpegdir > 设置 > FFMPEG_DIR 环境变量 > PATH（含 bin/bin64）> 应用目录。
     /// </summary>
     [STAThread]
     static int Main(string[] args)

@@ -49,6 +49,10 @@ public sealed class SettingsDialog : Form
         BackColor = AppTheme.Colors.InputBackground;
         ForeColor = AppTheme.Colors.TextPrimary;
 
+        // 高 DPI 自动缩放：以 96 DPI 为基准，控件树与实际窗体尺寸按 DPI 因子放大
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleDimensions = new SizeF(Dpi.BaseDpi, Dpi.BaseDpi);
+
         BuildUi();
     }
 
@@ -330,8 +334,18 @@ public sealed class SettingsDialog : Form
         var dir = _txtFfmpegDir.Text.Trim();
         if (string.IsNullOrEmpty(dir))
         {
-            _lblFfmpegStatus.Text = "留空 = 自动检测（应用目录 / PATH）";
-            _lblFfmpegStatus.ForeColor = AppTheme.Colors.TextMuted;
+            // 留空 = 自动检测：FFMPEG_DIR → PATH → 应用目录
+            var detected = NativeRuntime.AutoDetectFfmpegDirectory();
+            if (detected is null)
+            {
+                _lblFfmpegStatus.Text = "留空 = 自动检测（FFMPEG_DIR / PATH / 应用目录），当前未找到 FFmpeg";
+                _lblFfmpegStatus.ForeColor = AppTheme.Colors.TextMuted;
+            }
+            else
+            {
+                _lblFfmpegStatus.Text = $"✓ 自动检测到：{detected}";
+                _lblFfmpegStatus.ForeColor = AppTheme.Colors.Success;
+            }
             return;
         }
         var err = NativeRuntime.ValidateFfmpegDirectory(dir);

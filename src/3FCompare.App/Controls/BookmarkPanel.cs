@@ -66,7 +66,7 @@ public sealed class BookmarkPanel : Panel
 
         _btnAdd = new Button
         {
-            Dock = DockStyle.Top,
+            Dock = DockStyle.Fill,
             Height = 28,
             Text = "＋ 添加当前帧",
             FlatStyle = FlatStyle.Flat,
@@ -77,7 +77,7 @@ public sealed class BookmarkPanel : Panel
 
         _btnExport = new Button
         {
-            Dock = DockStyle.Top,
+            Dock = DockStyle.Fill,
             Height = 28,
             Text = "⇩ 导出…",
             FlatStyle = FlatStyle.Flat,
@@ -108,15 +108,23 @@ public sealed class BookmarkPanel : Panel
             JumpRequested?.Invoke(this, _items[item.Index].Position100ns);
         };
 
-        var rightBar = new Panel { Dock = DockStyle.Top, Height = 32 };
-        rightBar.Controls.Add(_btnExport);
-        _btnExport.Location = new Point(0, 0);
-        _btnExport.Size = new Size(rightBar.Width / 2, 30);
-        _btnExport.Anchor = AnchorStyles.Left | AnchorStyles.Top;
-        rightBar.Controls.Add(_btnAdd);
-        _btnAdd.Location = new Point(rightBar.Width / 2 + 2, 0);
-        _btnAdd.Size = new Size(rightBar.Width / 2 - 2, 30);
-        _btnAdd.Anchor = AnchorStyles.Left | AnchorStyles.Top;
+        // 添加/导出按钮并排：TableLayoutPanel 两列等分，高 DPI 下自动缩放
+        var rightBar = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 32,
+            ColumnCount = 2,
+            RowCount = 1,
+            BackColor = AppTheme.Colors.PanelBackground,
+        };
+        rightBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+        rightBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+        _btnExport.Dock = DockStyle.Fill;
+        _btnExport.Margin = new Padding(0, 1, 2, 1);
+        _btnAdd.Dock = DockStyle.Fill;
+        _btnAdd.Margin = new Padding(2, 1, 0, 1);
+        rightBar.Controls.Add(_btnExport, 0, 0);
+        rightBar.Controls.Add(_btnAdd, 1, 0);
 
         Controls.AddRange(new Control[] { _list, rightBar, _noteBox, title });
     }
