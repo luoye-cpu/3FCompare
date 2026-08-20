@@ -343,7 +343,12 @@ public sealed class MainForm : Form, IMessageFilter
         var showGridItem = new ToolStripMenuItem("显示 对比网格", null, (_, _) => ShowGridOnly());
 
         // 网格布局预设子菜单
-        var gridLayoutMenu = new ToolStripMenuItem("网格布局");
+        // 默认子菜单向右侧展开，当"网格布局"靠近屏幕/窗口右缘时会被剪裁、部分遮挡。
+        // 显式向左弹出，确保子菜单始终落在可视区域内。
+        var gridLayoutMenu = new ToolStripMenuItem("网格布局")
+        {
+            DropDownDirection = ToolStripDropDownDirection.Left,
+        };
         gridLayoutMenu.DropDownItems.AddRange(new ToolStripItem[]
         {
             new ToolStripMenuItem("2×1（默认）", null, (_, _) => ApplyGridLayout(2, 1)),
@@ -931,7 +936,8 @@ public sealed class MainForm : Form, IMessageFilter
                 _magnifier.UpdateMagnifier(new Point(e.X, e.Y));
             if (_probe.Visible && surface.Selected)
                 _probe.UpdatePoint(e.X, e.Y);
-            // 拖拽平移
+            // 拖拽平移：启用鼠标捕获后，即使指针移出本 surface（进入相邻画面/空隙），
+            // MouseMove 仍持续派发到按下时的 surface，跨路同步拖动不中断。
             if (_dragging && _viewZoom > 1.001f)
             {
                 var dx = e.X - _dragStart.X;
@@ -943,10 +949,13 @@ public sealed class MainForm : Form, IMessageFilter
                 ApplyViewTransform();
             }
         };
+        // MouseLeave 只隐藏放大镜，不再清除 _dragging：
+        // 原实现把 MouseLeave 当拖拽结束信号，但网格多路布局下指针一跨出当前画面
+        // 就触发 MouseLeave → 共享 _dragging 被清 → 即使左键仍按住，上下左右同步拖动即失效。
+        // 拖拽结束改为完全由 MouseUp + 鼠标捕获释放决定（见 MouseDown/MouseUp）。
         surface.MouseLeave += (_, _) =>
         {
             _magnifier.HideMagnifier();
-            _dragging = false;
         };
         surface.MouseDown += (_, e) =>
         {
@@ -954,11 +963,18 @@ public sealed class MainForm : Form, IMessageFilter
             {
                 _dragging = true;
                 _dragStart = e.Location;
+                // 捕获鼠标：指针移出 surface 后仍持续收到 MouseMove/MouseUp，
+                // 保证多路同步拖动稳定（坐标系始终相对本 surface，不产生跳变）。
+                surface.Capture = true;
             }
         };
         surface.MouseUp += (_, e) =>
         {
-            if (e.Button == MouseButtons.Left) _dragging = false;
+            if (e.Button == MouseButtons.Left)
+            {
+                _dragging = false;
+                if (surface.Capture) surface.Capture = false;
+            }
         };
     }
 
