@@ -1,4 +1,13 @@
-# 3FCompare（项目代号：ICAT-Like 视频盯帧/画质对比软件）
+# 3FCompare – ICAT-like video frame-by-frame comparison tool
+
+> English | [简体中文](#chinese)
+>
+> Compare multiple encoded video streams side-by-side, frame by frame.
+> Powered by the **3FP player kernel** from [FFF_Project](https://github.com/Lake1059/FFF_Project).
+
+---
+
+## <span id="chinese">3FCompare（项目代号：ICAT-Like 视频盯帧/画质对比软件）</span>
 
 > 目标：做一款与 NVIDIA ICAT 同类的视频盯帧（逐帧对比）桌面软件，
 > 播放/解码后端复用 FFF 帝国（[FFF_Project](https://github.com/Lake1059/FFF_Project)）的 **3FP 播放器内核**。
@@ -10,20 +19,20 @@
 
 ---
 
-## 📌 产品定位
+## 📌 产品定位 / Product Positioning
 
-| 维度 | 说明 |
+| 维度 / Dimension | 说明 / Description |
 | --- | --- |
-| 产品形态 | Windows 桌面应用（WinForms，.NET 11）；**NativeAOT 自包含单文件（约 23MB 原生产物）** |
-| 对标产品 | NVIDIA ICAT（最多 4 路视频/图像对比）——本项目**扩展至 1~9 路**，对齐、双步进、硬件解码开关、窗口/全屏、多显卡解码 |
-| 后端 | FFF_Project 的 **3FP**（`FFF.Native` fork + 自研补丁，见 docs/03） |
-| 业务规模 | **1~9 路对比**（3x3 网格上限），架构按 N 路扩展 | 
-| 解码 | 3FP 原生能力：CPU（FFmpeg）/ GPU（CUDA/NVDEC、D3D11VA 优先）+ 自动回退；**硬件开关 + 多 GPU 指定** |
+| 产品形态 / Type | Windows 桌面应用（WinForms，.NET 11）；**NativeAOT 自包含单文件（约 23MB 原生产物）** / Windows desktop app (WinForms, .NET 11); **NativeAOT self-contained single file (~23MB native binary)** |
+| 对标产品 / Reference | NVIDIA ICAT（最多 4 路视频/图像对比）——本项目**扩展至 1~9 路**，对齐、双步进、硬件解码开关、窗口/全屏、多显卡解码 / NVIDIA ICAT (up to 4-way) — **extended to 1–9 ways** with alignment, dual stepping, HW decode toggle, window/fullscreen, multi-GPU |
+| 后端 / Backend | FFF_Project 的 **3FP**（`FFF.Native` fork + 自研补丁，见 docs/03） / **3FP** from FFF_Project (forked `FFF.Native` + custom patches, see docs/03) |
+| 业务规模 / Scale | **1~9 路对比**（3x3 网格上限），架构按 N 路扩展 / **1–9 way comparison** (3×3 grid max), architecture scales to N-way |
+| 解码 / Decode | 3FP 原生能力：CPU（FFmpeg）/ GPU（CUDA/NVDEC、D3D11VA 优先）+ 自动回退；**硬件开关 + 多 GPU 指定** / 3FP native: CPU (FFmpeg) / GPU (CUDA/NVDEC, D3D11VA preferred) + auto fallback; **HW toggle + multi-GPU selection** |
 
 
 | [PACKAGING_SPEC.md](PACKAGING_SPEC.md) | 打包规范：NativeAOT 双版本发布流程、命名规则、压缩配置 |
 
-## 🌈 显示链路（ACM / VRR）要点
+## 🌈 显示链路（ACM / VRR）要点 / Display Chain Highlights
 
 - **ACM/广色域**：完全遵循 3FP 的 Advanced Color 交换链契约（SDR `BGRA8/RGB10A2`、HDR `R10G10B10A2+PQ/BT.2020`），
   显示侧校色交给 DWM；本项目自行探测显示能力（DXGI 亮度读取）并计算智能色调映射参数，探针/截屏始终读取「颜色管理前」的原生缓冲，保证跨路对比一致。
@@ -31,7 +40,7 @@
   （Present 节奏 / `ALLOW_TEARING`，见 [docs/03](docs/03-后端接入与能力映射.md) 待确认项 **A8/A9**），待专项实测。
 - 专项验收清单见 [docs/01-需求分析.md §5.1](docs/01-需求分析.md)。
 
-## ⚖️ 依赖与许可提示
+## ⚖️ 依赖与许可提示 / License & Dependencies
 
 - `FFF.Native` 为 **MIT 许可（已确认）**，本项目**基于其源码二次开发**：以 git submodule 固定 commit，
   在其上追加自研扩展补丁（VRR 交换链 / 视口子区域 / 全帧回读等，见 `docs/03 §6`），保持与上游可合并。
@@ -57,52 +66,51 @@ third_party/
     └── third_party/vcpkg_installed/  # libass（vcpkg，已准备）
 ```
 
-**里程碑状态**：✅ 真实 3FP 内核全链路已验证（FFmpeg 解码 → D3D 渲染 → App 显示）。
-✅ **NativeAOT 已启用**：`dotnet publish -c Release -r win-x64` → 约 23MB 原生单文件 `3FCompare.App.exe`，
+**里程碑状态 / Milestone**: ✅ 真实 3FP 内核全链路已验证（FFmpeg 解码 → D3D 渲染 → App 显示） / Real 3FP kernel pipeline verified (FFmpeg decode → D3D render → App display).
+✅ **NativeAOT 已启用 / Enabled**: `dotnet publish -c Release -r win-x64` → 约 23MB 原生单文件 `3FCompare.App.exe`，
 真实视频渲染 + `--selftest` 均验证通过（官方 `_SuppressWinFormsTrimError` 抑制 NETSDK1175）。
 `tools/构建全部.ps1` 一键复现内核构建与 DLL 部署。
 
 
-### 已实现功能
+### 已实现功能 / Implemented Features
 
-- **多路对比 1~9 路**（2x2/3x2/3x3 自动网格，点击选中，单屏/多屏切换，数字键 1-9 加路）
-- **双步进**：按帧（←/→）与按秒（Shift+←/→）两组前进/后退，步长可在设置中调整
-- **同步播放/暂停/停止/Seek/循环**：以第 0 路为 master 的媒体时间同步（SyncController）
-- **二级设置窗口**：硬件解码开关、GPU 选择（多显卡）、步进步长、色彩模式、默认布局、窗口/全屏行为（F25/F26）
-- **全屏模式**（F11）+ 窗口模式，全屏可隐藏工具栏/时间轴
-- **会话保存/加载**（`.3fcs` JSON：文件列表/偏移/布局/位置/循环区间）
-- **快捷键**：Space 播放/暂停、←→ 帧步进、Shift+←→ 秒步进、↑↓ 10 秒、F11 全屏、B A-B滑块、P 探针、O 打开、R 重置视图、Esc 退出全屏
-- **对比工具**：像素探针（F19）、A-B 滑块视图（F15）、放大镜（F17）、书签导出与跳转（F22）、
-  截图导出 PNG（F21）、差异叠加热力图（F20，可选）、媒体信息面板（F3）、音频面板（音轨/音量/静音）、时间轴 A/B 打点（A/B 键）
-- **同步视图变换**：鼠标滚轮**缩放**（1~32×）+ 拖拽**平移**（多路同步），R 键重置（0.1.1 新增）
-- **网格布局预设菜单**：视图 → 网格布局一键切换 2×1 / 2×2 / 3×3 预设或自动布局（0.1.2 新增）
-- **可停靠工具侧栏**：右侧 Dock 标签页（探针 / 书签 / 偏移 / 媒体 / 音频）+ Pin 置顶固定（0.1.2 新增）
-- **时间轴拖动缩略图预览**：拖动进度条时悬浮显示当前帧缩略图（节流 >10ms），松手快速定位关键帧（0.1.2 新增）
-- **自适应轮询**：播放中 16ms 精跟、空闲 250ms 省电，动态切换（0.1.2 新增）
-- **高 DPI 支持**：PerMonitorV2 多显示器自适应缩放，4K 250% 缩放下控件不挤压/不重叠/不溢出（Dpi 工具类 + 全控件树 AutoScale，0.1.2 新增）
-- **深色主题系统**：统一 AppTheme + 布局常量，设置窗口重构为分页标签布局（0.1.1 新增）
-- **智能色调映射**：基于真实显示器能力（DXGI 亮度读取）与源内容 HDR 状态，自动计算 BT.2390 映射参数，替代固定 100 nits（0.1.1 新增）
-- **引擎自动探测**：同时存在 `FFF.Native.dll` 与 FFmpeg 核心 DLL（`avcodec-*.dll`）在程序目录时用真实 3FP 内核，否则回退**演示模式**（合成画面）；`--selftest` 两模式均通过
-- **真实内核已验证**：FFmpeg + libass + FFF.Native 全链路构建成功，App 真实渲染视频确认（见 README 底部工程状态）。
-- **拖拽平移稳定性修复**：滚轮缩放后按住拖动跨画面边界不中断（鼠标捕获 + 不再由 MouseLeave 提前结束拖拽），多路同步平移连贯（0.1.4 新增）
+- **多路对比 1~9 路**（2x2/3x2/3x3 自动网格，点击选中，单屏/多屏切换，数字键 1-9 加路） / **1–9 way comparison** (2×2/3×2/3×3 automatic grid, click selection, single/multi view toggle, number keys 1-9)
+- **双步进**：按帧（←/→）与按秒（Shift+←/→）两组前进/后退，步长可在设置中调整 / **Dual stepping**: frame-stepping (←/→) and second-stepping (Shift+←/→), configurable step sizes
+- **同步播放/暂停/停止/Seek/循环**：以第 0 路为 master 的媒体时间同步（SyncController）/ **Sync play/pause/stop/seek/loop**: SyncController with slot 0 as master
+- **二级设置窗口**：硬件解码开关、GPU 选择（多显卡）、步进步长、色彩模式、默认布局、窗口/全屏行为（F25/F26） / **Settings dialog**: HW decode toggle, multi-GPU selection, step sizes, color mode, layout, window/fullscreen behavior (F25/F26)
+- **全屏模式**（F11）+ 窗口模式，全屏可隐藏工具栏/时间轴 / **Fullscreen mode** (F11) + window mode, hide chrome in fullscreen
+- **会话保存/加载**（`.3fcs` JSON：文件列表/偏移/布局/位置/循环区间） / **Session save/load** (`.3fcs` JSON: file list, offsets, layout, position, loop range)
+- **快捷键** / **Keyboard shortcuts**: Space play/pause, ←→ frame step, Shift+←→ second step, ↑↓ 10s step, F11 fullscreen, B A-B marker, P probe, O open, R reset view, Esc exit fullscreen
+- **对比工具** / **Comparison tools**: 像素探针 pixel probe (F19)、A-B 滑块滑块 A-B slider view (F15)、放大镜 magnifier (F17)、书签 bookmarks (F22)、截图导出 screenshot export PNG (F21)、差异叠加 diff overlay heatmap (F20)、媒体信息 media info (F3)、音频面板 audio panel、时间轴 A/B 打点 timeline A/B markers (A/B keys)
+- **同步视图变换**：鼠标滚轮**缩放**（1~32×）+ 拖拽**平移**（多路同步），R 键重置（0.1.1 新增） / **Sync view transform**: mouse wheel **zoom** (1–32×) + drag **pan** (multi-way sync), R reset (0.1.1)
+- **网格布局预设菜单**：视图 → 网格布局一键切换 2×1 / 2×2 / 3×3 预设或自动布局（0.1.2 新增） / **Grid layout presets**: View → Grid Layout 2×1/2×2/3×3 or auto (0.1.2)
+- **可停靠工具侧栏**：右侧 Dock 标签页（探针 / 书签 / 偏移 / 媒体 / 音频）+ Pin 置顶固定（0.1.2 新增） / **Dockable tool sidebar**: right dock tabs (probe/bookmarks/offset/media/audio) + Pin (0.1.2)
+- **时间轴拖动缩略图预览**：拖动进度条时悬浮显示当前帧缩略图（节流 >10ms），松手快速定位关键帧（0.1.2 新增） / **Timeline scrub preview**: thumbnail popup on drag, throttle >10ms (0.1.2)
+- **自适应轮询**：播放中 16ms 精跟、空闲 250ms 省电，动态切换（0.1.2 新增） / **Adaptive polling**: 16ms during playback, 250ms idle (0.1.2)
+- **高 DPI 支持**：PerMonitorV2 多显示器自适应缩放，4K 250% 缩放下控件不挤压/不重叠/不溢出（Dpi 工具类 + 全控件树 AutoScale，0.1.2 新增） / **High-DPI support**: PerMonitorV2, Dpi utility class, full control tree AutoScale (0.1.2)
+- **深色主题系统**：统一 AppTheme + 布局常量，设置窗口重构为分页标签布局（0.1.1 新增） / **Dark theme system**: unified AppTheme + LayoutConstants, tabbed settings (0.1.1)
+- **智能色调映射**：基于真实显示器能力（DXGI 亮度读取）与源内容 HDR 状态，自动计算 BT.2390 映射参数，替代固定 100 nits（0.1.1 新增） / **Smart tone mapping**: DXGI-based display luminance detection, BT.2390 auto calculation (0.1.1)
+- **引擎自动探测**：同时存在 `FFF.Native.dll` 与 FFmpeg 核心 DLL（`avcodec-*.dll`）在程序目录时用真实 3FP 内核，否则回退**演示模式**（合成画面）；`--selftest` 两模式均通过 / **Engine auto-detection**: real 3FP kernel when both `FFF.Native.dll` and FFmpeg DLLs present, otherwise fallback to **demo mode** (synthetic frames); `--selftest` passes both modes
+- **真实内核已验证**：FFmpeg + libass + FFF.Native 全链路构建成功，App 真实渲染视频确认 / **Real kernel verified**: FFmpeg + libass + FFF.Native pipeline built, real video rendering confirmed.
+- **拖拽平移稳定性修复**：滚轮缩放后按住拖动跨画面边界不中断（鼠标捕获 + 不再由 MouseLeave 提前结束拖拽），多路同步平移连贯（0.1.4 新增） / **Drag-pan stability fix**: cross-surface drag without interruption via mouse capture, continuous multi-way sync pan (0.1.4)
 
-### 构建与运行
+### 构建与运行 / Build & Run
 
 ```powershell
-# 一键构建内核 + 部署（需 VS 2022+ C++、Git；首次联网下载 FFmpeg/vcpkg）
+# 一键构建内核 + 部署（需 VS 2022+ C++、Git；首次联网下载 FFmpeg/vcpkg） / One-click kernel build + deploy (requires VS 2022+ C++, Git; first-run downloads FFmpeg/vcpkg)
 powershell -ExecutionPolicy Bypass -File tools/构建全部.ps1
 
-# 单元测试
+# 单元测试 / Unit tests
 dotnet test  tests/3FCompare.Core.Tests
 
-# 运行应用（有 FFF.Native 时真实模式，无则演示模式）
+# 运行应用（有 FFF.Native 时真实模式，无则演示模式） / Run (real mode with FFF.Native, demo mode otherwise)
 dotnet run --project src/3FCompare.App
 
-# 演示模式体验（任意文件，合成画面）
-dotnet run --project src/3FCompare.App -- --autodemo <文件...>
+# 演示模式体验（任意文件，合成画面） / Demo mode: any file, synthetic frames
+dotnet run --project src/3FCompare.App -- --autodemo &lt;文件...&gt;
 
-# E3 冒烟（真实/演示自动切换）
-dotnet run --project tests/3FCompare.SmokeTests -- <视频> [更多视频...]
+# E3 冒烟（真实/演示自动切换） / E3 smoke test (auto real/demo mode)
+dotnet run --project tests/3FCompare.SmokeTests -- &lt;视频&gt; [更多视频...]
 ```
 
 ---
