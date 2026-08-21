@@ -14,6 +14,8 @@ public sealed class ProbePanel : Panel
     private IPlayerSession? _session;
     private int _lastX = -1;
     private int _lastY = -1;
+    private readonly Label _title;
+    private readonly Label _hint;
 
     public ProbePanel()
     {
@@ -21,20 +23,20 @@ public sealed class ProbePanel : Panel
         Width = 230;
         BackColor = AppTheme.Colors.PanelBackground;
 
-        var title = new Label
+        _title = new Label
         {
-            Text = "像素探针",
+            Text = LanguageManager.T("Probe_Title"),
             Dock = DockStyle.Top,
             Height = 28,
             Font = AppTheme.Fonts.TitleFont,
             ForeColor = AppTheme.Colors.TextPrimary,
             TextAlign = ContentAlignment.MiddleLeft,
         };
-        title.Margin = new Padding(8, 4, 0, 0);
+        _title.Margin = new Padding(8, 4, 0, 0);
 
         _coordLabel = new Label
         {
-            Text = "坐标: --",
+            Text = LanguageManager.T("Probe_Coord"),
             Dock = DockStyle.Top,
             Height = 20,
             Font = new Font("Consolas", 9f),
@@ -42,7 +44,7 @@ public sealed class ProbePanel : Panel
         };
         _modeLabel = new Label
         {
-            Text = "色彩模式: --",
+            Text = LanguageManager.T("Probe_Mode"),
             Dock = DockStyle.Top,
             Height = 20,
             Font = new Font("Consolas", 9f),
@@ -58,17 +60,32 @@ public sealed class ProbePanel : Panel
             TextAlign = ContentAlignment.MiddleLeft,
         };
 
-        var hint = new Label
+        _hint = new Label
         {
-            Text = "鼠标悬停视频面以读取像素\n（显示颜色管理前码值）",
+            Text = LanguageManager.T("Probe_Hint"),
             Dock = DockStyle.Top,
             Height = 40,
             Font = AppTheme.Fonts.CaptionFont,
             ForeColor = AppTheme.Colors.TextMuted,
         };
 
-        Controls.AddRange(new Control[] { hint, _valueLabel, _modeLabel, _coordLabel, title });
-        Controls.Add(_valueLabel);
+        Controls.AddRange(new Control[] { _hint, _valueLabel, _modeLabel, _coordLabel, _title });
+    }
+
+    /// <summary>语言切换后刷新静态文本。</summary>
+    public void ApplyLanguage()
+    {
+        _title.Text = LanguageManager.T("Probe_Title");
+        _hint.Text = LanguageManager.T("Probe_Hint");
+        if (_session is null)
+        {
+            _coordLabel.Text = LanguageManager.T("Probe_Coord");
+            _modeLabel.Text = LanguageManager.T("Probe_Mode");
+        }
+        else
+        {
+            UpdatePoint(_lastX, _lastY); // 保留当前读数并刷新语言
+        }
     }
 
     /// <summary>关联到某路会话（探针读取源）。null 表示取消关联。</summary>
@@ -77,9 +94,9 @@ public sealed class ProbePanel : Panel
         _session = session;
         if (session is null)
         {
-            _coordLabel.Text = "坐标: --";
+            _coordLabel.Text = LanguageManager.T("Probe_Coord");
             _valueLabel.Text = "R: --  G: --  B: --  A: --";
-            _modeLabel.Text = "色彩模式: --";
+            _modeLabel.Text = LanguageManager.T("Probe_Mode");
         }
     }
 
@@ -89,11 +106,11 @@ public sealed class ProbePanel : Panel
         if (_session is null || x < 0 || y < 0) return;
         _lastX = x;
         _lastY = y;
-        _coordLabel.Text = $"坐标: ({x}, {y})";
+        _coordLabel.Text = LanguageManager.T("Probe_Coord").Replace("--", $"({x}, {y})");
 
         if (!_session.TryReadPixel(x, y, out var pixel))
         {
-            _valueLabel.Text = "读取失败";
+            _valueLabel.Text = LanguageManager.T("Probe_ReadFail");
             return;
         }
 
@@ -101,12 +118,19 @@ public sealed class ProbePanel : Panel
         var g8 = (int)Math.Clamp(pixel.G * 255f, 0, 255);
         var b8 = (int)Math.Clamp(pixel.B * 255f, 0, 255);
         _valueLabel.Text = $"R:{pixel.R:F3}  G:{pixel.G:F3}\nB:{pixel.B:F3}  A:{pixel.A:F3}  ({pixel.BitDepth}-bit)";
-        _modeLabel.Text = $"码值(8位): {r8} {g8} {b8}";
+        _modeLabel.Text = $"{LanguageManager.T("Probe_Bits")}: {r8} {g8} {b8}";
     }
 
     public void ShowColorMethod(uint actualColorMode)
     {
-        _modeLabel.Text = $"色彩模式: {actualColorMode switch { 0 => "映射SDR", 1 => "原始HDR", 2 => "峰值HDR", _ => actualColorMode.ToString() }}";
+        var modeName = actualColorMode switch
+        {
+            0 => LanguageManager.T("Probe_MapSdr"),
+            1 => LanguageManager.T("Probe_RawHdr"),
+            2 => LanguageManager.T("Probe_PeakHdr"),
+            _ => actualColorMode.ToString(),
+        };
+        _modeLabel.Text = $"{LanguageManager.T("Probe_Mode").Replace(": --", "")}: {modeName}";
     }
 
     /// <summary>复制当前读数到剪贴板（JSON 格式便于记录）。</summary>

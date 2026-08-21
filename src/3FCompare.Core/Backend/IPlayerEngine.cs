@@ -89,6 +89,19 @@ public enum ColorMode
     MapToHdr = 2,
 }
 
+/// <summary>播放器状态（与 3FP FFF3FPState 对齐）。</summary>
+public enum PlayerState
+{
+    Idle = 0,
+    Opening = 1,
+    Ready = 2,
+    Playing = 3,
+    Paused = 4,
+    Ended = 5,
+    Failed = 6,
+    Closed = 7,
+}
+
 /// <summary>快照（对齐 3FP FFF3FPSnapshot 的关键字段）。</summary>
 public sealed record EngineSnapshot
 {
@@ -100,7 +113,7 @@ public sealed record EngineSnapshot
     public int FrameTimeBaseDen { get; init; }
     public int Decoder { get; init; }
     public uint ActualColorMode { get; init; }
-    public int State { get; init; } = 2; // 默认 Ready
+    public PlayerState State { get; init; } = PlayerState.Ready;
 }
 
 /// <summary>媒体信息（从 3FP GetMediaInfo JSON 反序列化，F3 媒体信息面板）。</summary>

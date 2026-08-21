@@ -105,7 +105,7 @@ public sealed class AbSliderView : Control
             // 通过刷新轮询拿到接近真值（低精度占位）
             using var font = new Font("Consolas", 14f, FontStyle.Bold);
             using var textBrush = new SolidBrush(Color.FromArgb(200, 255, 255, 255));
-            var label = $"路 {surfaceIndex + 1}";
+            var label = LanguageManager.Tf("AbSlider_LaneFmt", surfaceIndex + 1);
             var size = g.MeasureString(label, font);
             g.DrawString(label, font, textBrush,
                 rect.X + (rect.Width - size.Width) / 2f,

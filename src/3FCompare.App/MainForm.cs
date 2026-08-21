@@ -39,9 +39,18 @@ public sealed class MainForm : Form, IMessageFilter
     private readonly AudioPanel _audioPanel;
     private readonly VerticalDockHost _toolsDock;
 
+    // ---- 菜单项引用（供 UpdateMenuLanguage 刷新文本）----
+    private readonly ToolStripMenuItem _fileMenu, _openItem, _saveItem, _loadItem, _screenItem, _exitItem;
+    private readonly ToolStripMenuItem _viewMenu, _singleItem, _fullItem, _abItem, _probeItem, _bookmarkItem, _offsetItem, _mediaInfoItem, _diffItem, _audioItem, _showGridItem;
+    private readonly ToolStripMenuItem _gridLayoutMenu, _grid2x1, _grid2x2, _grid3x3, _gridAuto;
+    private readonly ToolStripMenuItem _settingsMenu, _settingsItem;
+
     private bool _fullscreen;
     private bool _isPlaying;
     private bool _abViewVisible;
+
+    // 播放速度（真实模式伪变速；A2 落地前）。
+    private double _playbackSpeed = 1.0;
 
     // ---- 时间轴拖动缩略图预览（ScrubPreview）----
     private readonly System.Windows.Forms.Timer _scrubTimer;  // 150ms 节流抓帧
@@ -273,6 +282,9 @@ public sealed class MainForm : Form, IMessageFilter
     {
         _settings = SettingsStore.Load();
 
+        // 应用已保存的语言（关键：此前未在此初始化，导致保存英文后重启仍是中文）
+        LanguageManager.SetLanguage(_settings.Language);
+
         // FFmpeg 目录解析链：命令行 --ffmpegdir > 设置 FfmpegDirectory > 自动检测
         // （FFMPEG_DIR 环境变量 → PATH → 应用目录）。探测到即复制 DLL 到应用目录，
         // 供 FFF.Native 内核 Delay-Load 命中；仍未找到则回退演示模式。
@@ -285,7 +297,7 @@ public sealed class MainForm : Form, IMessageFilter
         _realMode = EngineFactory.IsNativeAvailable();
         _engine = EngineFactory.Create();
 
-        Text = "3FCompare – ICAT 类视频盯帧对比";
+        Text = LanguageManager.T("Win_Title");
         ClientSize = new Size(1600, 900);
 
         // 窗口位置/尺寸记忆（F27 窗口管理；仅当有上次记录时恢复）
@@ -318,52 +330,54 @@ public sealed class MainForm : Form, IMessageFilter
 
         // 菜单
         _menu = new MenuStrip();
-        var fileMenu = new ToolStripMenuItem("文件(&F)");
-        var openItem = new ToolStripMenuItem("打开视频…", null, (_, _) => OpenVideos());
-        var saveItem = new ToolStripMenuItem("保存会话…", null, (_, _) => SaveSession());
-        var loadItem = new ToolStripMenuItem("加载会话…", null, (_, _) => LoadSession());
-        var screenItem = new ToolStripMenuItem("导出当前帧 PNG… (Ctrl+S)", null, (_, _) => CaptureSelectedFrame());
-        var exitItem = new ToolStripMenuItem("退出", null, (_, _) => Close());
-        fileMenu.DropDownItems.AddRange(new ToolStripItem[]
+        _fileMenu = new ToolStripMenuItem("文件(&F)");
+        _openItem = new ToolStripMenuItem("打开视频…", null, (_, _) => OpenVideos());
+        _saveItem = new ToolStripMenuItem("保存会话…", null, (_, _) => SaveSession());
+        _loadItem = new ToolStripMenuItem("加载会话…", null, (_, _) => LoadSession());
+        _screenItem = new ToolStripMenuItem("导出当前帧 PNG… (Ctrl+S)", null, (_, _) => CaptureSelectedFrame());
+        _exitItem = new ToolStripMenuItem("退出", null, (_, _) => Close());
+        _fileMenu.DropDownItems.AddRange(new ToolStripItem[]
         {
-            openItem, new ToolStripSeparator(), saveItem, loadItem,
-            new ToolStripSeparator(), screenItem, new ToolStripSeparator(), exitItem,
+            _openItem, new ToolStripSeparator(), _saveItem, _loadItem,
+            new ToolStripSeparator(), _screenItem, new ToolStripSeparator(), _exitItem,
         });
 
-        var viewMenu = new ToolStripMenuItem("视图(&V)");
-        var singleItem = new ToolStripMenuItem("单屏/多屏切换", null, (_, _) => ToggleSingleView());
-        var fullItem = new ToolStripMenuItem("全屏切换 (F11)", null, (_, _) => ToggleFullscreen());
-        var abItem = new ToolStripMenuItem("A-B 滑块视图", null, (_, _) => ToggleAbView());
-        var probeItem = new ToolStripMenuItem("像素探针", null, (_, _) => ToggleProbePanel());
-        var bookmarkItem = new ToolStripMenuItem("书签", null, (_, _) => ToggleBookmarkPanel());
-        var offsetItem = new ToolStripMenuItem("偏移校准 (F6)", null, (_, _) => ToggleOffsetPanel());
-        var mediaInfoItem = new ToolStripMenuItem("媒体信息", null, (_, _) => ToggleMediaInfoPanel());
-        var diffItem = new ToolStripMenuItem("差异叠加", null, (_, _) => ToggleDiffView());
-        var audioItem = new ToolStripMenuItem("音频", null, (_, _) => ToggleAudioPanel());
-        var showGridItem = new ToolStripMenuItem("显示 对比网格", null, (_, _) => ShowGridOnly());
+        _viewMenu = new ToolStripMenuItem("视图(&V)");
+        _singleItem = new ToolStripMenuItem("单屏/多屏切换", null, (_, _) => ToggleSingleView());
+        _fullItem = new ToolStripMenuItem("全屏切换 (F11)", null, (_, _) => ToggleFullscreen());
+        _abItem = new ToolStripMenuItem("A-B 滑块视图", null, (_, _) => ToggleAbView());
+        _probeItem = new ToolStripMenuItem("像素探针", null, (_, _) => ToggleProbePanel());
+        _bookmarkItem = new ToolStripMenuItem("书签", null, (_, _) => ToggleBookmarkPanel());
+        _offsetItem = new ToolStripMenuItem("偏移校准 (F6)", null, (_, _) => ToggleOffsetPanel());
+        _mediaInfoItem = new ToolStripMenuItem("媒体信息", null, (_, _) => ToggleMediaInfoPanel());
+        _diffItem = new ToolStripMenuItem("差异叠加", null, (_, _) => ToggleDiffView());
+        _audioItem = new ToolStripMenuItem("音频", null, (_, _) => ToggleAudioPanel());
+        _showGridItem = new ToolStripMenuItem("显示 对比网格", null, (_, _) => ShowGridOnly());
 
         // 网格布局预设子菜单
         // 默认子菜单向右侧展开，当"网格布局"靠近屏幕/窗口右缘时会被剪裁、部分遮挡。
         // 显式向左弹出，确保子菜单始终落在可视区域内。
-        var gridLayoutMenu = new ToolStripMenuItem("网格布局")
+        _gridLayoutMenu = new ToolStripMenuItem("网格布局")
         {
             DropDownDirection = ToolStripDropDownDirection.Left,
         };
-        gridLayoutMenu.DropDownItems.AddRange(new ToolStripItem[]
+        _grid2x1 = new ToolStripMenuItem("2×1（默认）", null, (_, _) => ApplyGridLayout(2, 1));
+        _grid2x2 = new ToolStripMenuItem("2×2", null, (_, _) => ApplyGridLayout(2, 2));
+        _grid3x3 = new ToolStripMenuItem("3×3", null, (_, _) => ApplyGridLayout(3, 3));
+        _gridAuto = new ToolStripMenuItem("自动", null, (_, _) => ApplyGridAuto());
+        _gridLayoutMenu.DropDownItems.AddRange(new ToolStripItem[]
         {
-            new ToolStripMenuItem("2×1（默认）", null, (_, _) => ApplyGridLayout(2, 1)),
-            new ToolStripMenuItem("2×2", null, (_, _) => ApplyGridLayout(2, 2)),
-            new ToolStripMenuItem("3×3", null, (_, _) => ApplyGridLayout(3, 3)),
+            _grid2x1, _grid2x2, _grid3x3,
             new ToolStripSeparator(),
-            new ToolStripMenuItem("自动", null, (_, _) => ApplyGridAuto()),
+            _gridAuto,
         });
 
-        viewMenu.DropDownItems.AddRange(new ToolStripItem[]
+        _viewMenu.DropDownItems.AddRange(new ToolStripItem[]
         {
-            singleItem, new ToolStripSeparator(), abItem,
-            new ToolStripSeparator(), probeItem, bookmarkItem, offsetItem, mediaInfoItem,
-            new ToolStripSeparator(), diffItem, audioItem, gridLayoutMenu,
-            new ToolStripSeparator(), showGridItem, fullItem,
+            _singleItem, new ToolStripSeparator(), _abItem,
+            new ToolStripSeparator(), _probeItem, _bookmarkItem, _offsetItem, _mediaInfoItem,
+            new ToolStripSeparator(), _diffItem, _audioItem, _gridLayoutMenu,
+            new ToolStripSeparator(), _showGridItem, _fullItem,
         });
 
         // 网格（先于工具面板创建：AbSliderView / DiffOverlayView 依赖其实例）
@@ -389,7 +403,7 @@ public sealed class MainForm : Form, IMessageFilter
         _magnifier = new MagnifierOverlay();
         _chkMagnifier = new CheckBox
         {
-            Text = "放大镜",
+            Text = LanguageManager.T("Mag_Magnifier"),
             Checked = false,
             Dock = DockStyle.Top,
             Height = 26,
@@ -422,21 +436,21 @@ public sealed class MainForm : Form, IMessageFilter
 
         // 侧边栏：放大镜开关固定可见（Pin），其余为标签切换面板
         _toolsDock.Pin(_chkMagnifier);
-        _toolsDock.AddTab("探针", ToggleProbePanel);
-        _toolsDock.AddTab("书签", ToggleBookmarkPanel);
-        _toolsDock.AddTab("偏移", ToggleOffsetPanel);
-        _toolsDock.AddTab("媒体", ToggleMediaInfoPanel);
-        _toolsDock.AddTab("音频", ToggleAudioPanel);
+        _toolsDock.AddTab(LanguageManager.T("Tab_Probe"), ToggleProbePanel);
+        _toolsDock.AddTab(LanguageManager.T("Tab_Bookmarks"), ToggleBookmarkPanel);
+        _toolsDock.AddTab(LanguageManager.T("Tab_Offset"), ToggleOffsetPanel);
+        _toolsDock.AddTab(LanguageManager.T("Tab_Media"), ToggleMediaInfoPanel);
+        _toolsDock.AddTab(LanguageManager.T("Tab_Audio"), ToggleAudioPanel);
         _toolsDock.ShowPanel(_probe);
         // 默认高亮「探针」标签
         if (_toolsDock.GetTab(0) is { } probeTab)
             _toolsDock.SetActiveTab(probeTab);
 
-        var settingsMenu = new ToolStripMenuItem("设置(&S)");
-        var settingsItem = new ToolStripMenuItem("设置…", null, (_, _) => OpenSettings());
-        settingsMenu.DropDownItems.Add(settingsItem);
+        _settingsMenu = new ToolStripMenuItem(LanguageManager.T("Menu_Settings"));
+        _settingsItem = new ToolStripMenuItem(LanguageManager.T("Menu_SettingsDialog"), null, (_, _) => OpenSettings());
+        _settingsMenu.DropDownItems.AddRange(new ToolStripItem[] { _settingsItem });
 
-        _menu.Items.AddRange(new ToolStripItem[] { fileMenu, viewMenu, settingsMenu });
+        _menu.Items.AddRange(new ToolStripItem[] { _fileMenu, _viewMenu, _settingsMenu });
         _menu.BackColor = AppTheme.Colors.PanelBackground;
         _menu.ForeColor = AppTheme.Colors.TextPrimary;
         MainMenuStrip = _menu;
@@ -465,8 +479,8 @@ public sealed class MainForm : Form, IMessageFilter
 
         // 状态栏
         _statusStrip = new StatusStrip();
-        _statusMode = new ToolStripStatusLabel(_realMode ? "引擎: FFF.Native (3FP)" : "引擎: 演示模式 (Simulated)");
-        _statusInfo = new ToolStripStatusLabel("就绪 — 点击「打开视频」或拖拽文件");
+        _statusMode = new ToolStripStatusLabel(_realMode ? LanguageManager.T("Status_EngineReal") : LanguageManager.T("Status_EngineDemo"));
+        _statusInfo = new ToolStripStatusLabel(LanguageManager.T("Status_ReadyOpen"));
         _statusStrip.Items.AddRange(new ToolStripItem[] { _statusMode, new ToolStripStatusLabel(" | "), _statusInfo });
         _statusStrip.BackColor = AppTheme.Colors.PanelBackground;
         _statusStrip.ForeColor = AppTheme.Colors.TextPrimary;
@@ -506,6 +520,46 @@ public sealed class MainForm : Form, IMessageFilter
         // 全局滚轮消息过滤：使「鼠标悬停任意画面即缩放」生效
         // （WinForms 的 MouseWheel 事件只在焦点控件触发，普通无焦点 Control 收不到）。
         Application.AddMessageFilter(this);
+
+        // 语言切换时刷新全部 UI 文本（菜单/状态栏/面板/工具栏）
+        LanguageManager.LanguageChanged += (_, _) =>
+        {
+            if (IsDisposed) return;
+            if (!IsHandleCreated)
+            {
+                // 句柄未建时延后到 Shown（构造早期设置语言可能触发）
+                Shown += (_, _) => RefreshAllUiLanguage();
+            }
+            else
+            {
+                RefreshAllUiLanguage();
+            }
+        };
+
+        // 应用已保存语言（覆盖菜单/面板的默认中文初值，处理启动即为英文的情形）
+        RefreshAllUiLanguage();
+    }
+
+    /// <summary>刷新全部界面语言（菜单、状态栏、放大镜、侧边栏标签、各工具面板、传输栏）。
+    /// 由设置对话框保存语言后与启动时调用。</summary>
+    private void RefreshAllUiLanguage()
+    {
+        UpdateMenuLanguage();
+        Text = LanguageManager.T("Win_Title");
+        _statusMode.Text = _realMode ? LanguageManager.T("Status_EngineReal") : LanguageManager.T("Status_EngineDemo");
+        _chkMagnifier.Text = LanguageManager.T("Mag_Magnifier");
+        _transport.ApplyLanguage();
+        _probe.ApplyLanguage();
+        _bookmarks.ApplyLanguage();
+        _offsetPanel.ApplyLanguage();
+        _mediaInfoPanel.ApplyLanguage();
+        _audioPanel.ApplyLanguage();
+        _timeline.ApplyLanguage();
+        _diffView.ApplyLanguage();
+        _grid.Invalidate();
+        _abSlider.Invalidate();
+        _thumbnail?.Invalidate();
+        UpdateStatus();
     }
 
     // ---- 全局消息过滤（解决滚轮缩放失效）----
@@ -573,7 +627,7 @@ public sealed class MainForm : Form, IMessageFilter
                     await Task.Delay(120);
 
                     var snap = _sync.ReadMasterSnapshot();
-                    if (snap is { Duration100ns: > 0 } && (snap.State == 2 || snap.State == 3 || snap.State == 4))
+                    if (snap is { Duration100ns: > 0 } && IsReadyState(snap.State))
                     {
                         ready = true;
                         Console.WriteLine($"selftest: 就绪 ✓ 时长={TimeSpan.FromTicks(snap.Duration100ns)} 帧号={snap.FrameIndex} 状态={snap.State}");
@@ -663,7 +717,7 @@ public sealed class MainForm : Form, IMessageFilter
                 {
                     await Task.Delay(120);
                     var snap = _sync.ReadMasterSnapshot();
-                    if (snap is { Duration100ns: > 0 } && (snap.State == 2 || snap.State == 3 || snap.State == 4))
+                    if (snap is { Duration100ns: > 0 } && IsReadyState(snap.State))
                     {
                         ready = true;
                         break;
@@ -799,7 +853,7 @@ public sealed class MainForm : Form, IMessageFilter
     {
         using var dlg = new OpenFileDialog
         {
-            Filter = "媒体文件|*.mp4;*.mkv;*.mov;*.webm;*.avi;*.ts;*.m2ts;*.flv;*.wmv|所有文件|*.*",
+            Filter = LanguageManager.T("Filter_Media"),
             Multiselect = true,
         };
         if (dlg.ShowDialog(this) == DialogResult.OK)
@@ -997,11 +1051,16 @@ public sealed class MainForm : Form, IMessageFilter
 
     // ---------- 播放控制 ----------
 
+    /// <summary>会话是否已就绪（可交互）：Ready / Playing / Paused。
+    /// 打开完成后用于双步进断言与等待就绪。</summary>
+    private static bool IsReadyState(PlayerState state)
+        => state is PlayerState.Ready or PlayerState.Playing or PlayerState.Paused;
+
     private void TogglePlay()
     {
         if (_sync.Count == 0) return;
         var snap = _sync.ReadMasterSnapshot();
-        var playing = snap is { State: 3 };
+        var playing = snap is { State: PlayerState.Playing };
         if (playing) _sync.Pause();
         else _sync.Play();
         _isPlaying = !playing;
@@ -1068,8 +1127,6 @@ public sealed class MainForm : Form, IMessageFilter
         _playbackSpeed = speed;
     }
 
-    private double _playbackSpeed = 1.0;
-
     private void OnColorModeChanged(int index)
     {
         // 0=SDR (MapToSdr), 1=HDR (MapToHdr)
@@ -1129,7 +1186,7 @@ public sealed class MainForm : Form, IMessageFilter
     {
         if (_sync.Count < 2)
         {
-            MessageBox.Show(this, "差异叠加需要至少 2 路视频。请先用「打开视频」加载两路。", "3FCompare",
+            MessageBox.Show(this, LanguageManager.T("Msg_DiffNeed2"), LanguageManager.T("Msg_AppName"),
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
@@ -1138,7 +1195,7 @@ public sealed class MainForm : Form, IMessageFilter
         var b = (sel + 1) % _sync.Count;
         var dialog = new Form
         {
-            Text = $"差异叠加 [{a + 1}] vs [{b + 1}]",
+            Text = LanguageManager.Tf("Diff_HeaderFmt", a + 1, b + 1),
             Size = new Size(720, 520),
             StartPosition = FormStartPosition.CenterParent,
         };
@@ -1227,7 +1284,7 @@ public sealed class MainForm : Form, IMessageFilter
         var idx = _grid.SelectedIndex;
         if (idx < 0 || idx >= _sync.Count)
         {
-            _offsetPanel.SetPlaceholder("未选中路");
+            _offsetPanel.SetPlaceholder();
             return;
         }
         var slot = _sync.Slots[idx];
@@ -1314,7 +1371,7 @@ public sealed class MainForm : Form, IMessageFilter
     private void OpenSettings()
     {
         using var dlg = new SettingsDialog(_settings);
-        if (dlg.ShowDialog(this) == DialogResult.OK && dlg.Changed)
+        if (dlg.ShowDialog() == DialogResult.OK)
         {
             _settings.HardwareDecode = dlg.Result.HardwareDecode;
             _settings.PreferredAdapterIndex = dlg.Result.PreferredAdapterIndex;
@@ -1326,14 +1383,47 @@ public sealed class MainForm : Form, IMessageFilter
             _settings.DefaultGridCols = dlg.Result.DefaultGridCols;
             _settings.DefaultGridRows = dlg.Result.DefaultGridRows;
             _settings.FfmpegDirectory = dlg.Result.FfmpegDirectory;
+            _settings.Language = dlg.Result.Language;
             SettingsStore.Save(_settings);
 
-            // 应用 FFmpeg 目录变更（影响后续新建会话的 DLL 加载路径）
-            NativeRuntime.SetFfmpegDirectory(_settings.FfmpegDirectory);
+            LanguageManager.SetLanguage(_settings.Language);
+            UpdateMenuLanguage();
 
+            NativeRuntime.SetFfmpegDirectory(_settings.FfmpegDirectory);
             _sync.StepProfile = new StepProfile { FrameStep = _settings.FrameStep, SecondsStep = _settings.SecondsStep };
-            UpdateStatus();
         }
+    }
+
+    private void UpdateMenuLanguage()
+    {
+        // 全部菜单项改用 LanguageManager 资源键，覆盖 file/view/gridLayout/settings 全部分支
+        _fileMenu.Text = LanguageManager.T("Menu_File");
+        _openItem.Text = LanguageManager.T("Menu_Open");
+        _saveItem.Text = LanguageManager.T("Menu_SaveSession");
+        _loadItem.Text = LanguageManager.T("Menu_LoadSession");
+        _screenItem.Text = LanguageManager.T("Menu_ExportFrame");
+        _exitItem.Text = LanguageManager.T("Menu_Exit");
+
+        _viewMenu.Text = LanguageManager.T("Menu_View");
+        _singleItem.Text = LanguageManager.T("Menu_ToggleSingle");
+        _fullItem.Text = LanguageManager.T("Menu_Fullscreen");
+        _abItem.Text = LanguageManager.T("Menu_AbSlider");
+        _probeItem.Text = LanguageManager.T("Menu_Probe");
+        _bookmarkItem.Text = LanguageManager.T("Menu_Bookmarks");
+        _offsetItem.Text = LanguageManager.T("Menu_Offset");
+        _mediaInfoItem.Text = LanguageManager.T("Menu_MediaInfo");
+        _diffItem.Text = LanguageManager.T("Menu_Diff");
+        _audioItem.Text = LanguageManager.T("Menu_Audio");
+        _showGridItem.Text = LanguageManager.T("Menu_ShowGrid");
+
+        _gridLayoutMenu.Text = LanguageManager.T("Menu_GridLayout");
+        _grid2x1.Text = LanguageManager.T("Menu_Grid_2x1");
+        _grid2x2.Text = LanguageManager.T("Menu_Grid_2x2");
+        _grid3x3.Text = LanguageManager.T("Menu_Grid_3x3");
+        _gridAuto.Text = LanguageManager.T("Menu_Grid_Auto");
+
+        _settingsMenu.Text = LanguageManager.T("Menu_Settings");
+        _settingsItem.Text = LanguageManager.T("Menu_SettingsDialog");
     }
 
     // ---------- 会话保存/加载 ----------
@@ -1346,7 +1436,7 @@ public sealed class MainForm : Form, IMessageFilter
         var idx = _grid.SelectedIndex;
         if (idx < 0 || idx >= _sync.Count)
         {
-            MessageBox.Show(this, "请先选中一个已打开的媒体", "3FCompare", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, LanguageManager.T("Msg_SelectMedia"), LanguageManager.T("Msg_AppName"), MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
@@ -1355,7 +1445,7 @@ public sealed class MainForm : Form, IMessageFilter
 
         using var dlg = new SaveFileDialog
         {
-            Filter = "PNG 图像|*.png",
+            Filter = LanguageManager.T("Filter_Png"),
             FileName = $"frame_{DateTime.Now:yyyyMMdd_HHmmss}.png",
         };
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
@@ -1370,7 +1460,7 @@ public sealed class MainForm : Form, IMessageFilter
                     ?? CapturePixelSampled();
                 if (bmp is null)
                 {
-                    MessageBox.Show(this, "截图失败：窗口帧捕获与像素采样均不可用", "3FCompare",
+                    MessageBox.Show(this, LanguageManager.T("Msg_CaptureUnavailable"), LanguageManager.T("Msg_AppName"),
                         MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
@@ -1386,11 +1476,11 @@ public sealed class MainForm : Form, IMessageFilter
 
             bmp!.Save(dlg.FileName, System.Drawing.Imaging.ImageFormat.Png);
             bmp.Dispose();
-            _statusInfo.Text = $"已导出截图: {Path.GetFileName(dlg.FileName)}";
+            _statusInfo.Text = $"{LanguageManager.T("Status_ExportDone")}: {Path.GetFileName(dlg.FileName)}";
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"截图失败: {ex.Message}", "3FCompare", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, $"{LanguageManager.T("Msg_CaptureFail")}: {ex.Message}", LanguageManager.T("Msg_AppName"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 
@@ -1439,7 +1529,7 @@ public sealed class MainForm : Form, IMessageFilter
 
     private void SaveSession()
     {
-        using var dlg = new SaveFileDialog { Filter = "3FCompare 会话|*.3fcs|JSON|*.json", FileName = "session.3fcs" };
+        using var dlg = new SaveFileDialog { Filter = LanguageManager.T("Filter_Session"), FileName = "session.3fcs" };
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
         var snap = new SessionSnapshot
@@ -1463,13 +1553,13 @@ public sealed class MainForm : Form, IMessageFilter
 
     private void LoadSession()
     {
-        using var dlg = new OpenFileDialog { Filter = "3FCompare 会话|*.3fcs;*.json" };
+        using var dlg = new OpenFileDialog { Filter = LanguageManager.T("Filter_Session") };
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
         var snap = SessionSnapshot.LoadFromFile(dlg.FileName);
         if (snap is null || snap.Items.Count == 0)
         {
-            MessageBox.Show(this, "会话文件无效或为空", "3FCompare", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, LanguageManager.T("Msg_SessionInvalid"), LanguageManager.T("Msg_AppName"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
@@ -1580,12 +1670,12 @@ public sealed class MainForm : Form, IMessageFilter
         }
 
         // 播放状态回显（若被原生事件改变）
-        if (master is { State: 3 } && !_isPlaying)
+        if (master is { State: PlayerState.Playing } && !_isPlaying)
         {
             _isPlaying = true;
             _transport.SetPlaying(true);
         }
-        else if (master is not null and { State: not 3 } && _isPlaying)
+        else if (master is not null and { State: not PlayerState.Playing } && _isPlaying)
         {
             _isPlaying = false;
             _transport.SetPlaying(false);
@@ -1622,13 +1712,13 @@ public sealed class MainForm : Form, IMessageFilter
     {
         if (_sync.Count == 0)
         {
-            _statusInfo.Text = _realMode ? "就绪 — 打开视频开始对比" : "演示模式 — 打开任意视频文件体验（画面为合成）";
+            _statusInfo.Text = _realMode ? LanguageManager.T("Status_Ready") : LanguageManager.T("Status_DemoHint");
             return;
         }
-        var mode = _grid.SingleView ? "单屏" : "网格";
+        var mode = _grid.SingleView ? LanguageManager.T("Status_SingleMode") : LanguageManager.T("Status_GridMode");
         var failed = _sync.Slots.Count(s => s.Failed);
         var runtimeError = _sync.LastRuntimeError;
-        _statusInfo.Text = $"{mode}模式 | 路数 {_sync.Count}/9 | 步进: {_sync.StepProfile.FrameStep}帧/{_sync.StepProfile.SecondsStep:0.#}秒" +
+        _statusInfo.Text = $"{mode}模式 | 路数 {_sync.Count}/9 | {LanguageManager.T("Status_Steps")}: {_sync.StepProfile.FrameStep}帧/{_sync.StepProfile.SecondsStep:0.#}秒" +
             (failed > 0 ? $" | {failed} 路失败" : string.Empty) +
             (runtimeError is not null ? $" | ⚠ {runtimeError}" : string.Empty);
     }

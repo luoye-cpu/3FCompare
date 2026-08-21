@@ -37,6 +37,9 @@ public sealed class AppSettings
     public int WindowHeight { get; set; } = 900;
 
     public bool WindowMaximized { get; set; }
+
+    /// <summary>界面语言（0=中文，1=英文）。</summary>
+    public int Language { get; set; } = 0;
 }
 
 public enum ColorModeSetting

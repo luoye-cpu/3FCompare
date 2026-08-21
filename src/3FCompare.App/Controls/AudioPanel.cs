@@ -10,6 +10,10 @@ public sealed class AudioPanel : Panel
     private readonly ComboBox _trackBox;
     private readonly TrackBar _volumeBar;
     private readonly CheckBox _chkMute;
+    private readonly Label _title;
+    private readonly Label _lblTrack;
+    private readonly Label _lblVol;
+    private readonly Label _hint;
     private IPlayerSession? _session;
     private bool _busy;
 
@@ -18,9 +22,9 @@ public sealed class AudioPanel : Panel
         Dock = DockStyle.Fill;
         BackColor = AppTheme.Colors.PanelBackground;
 
-        var title = new Label
+        _title = new Label
         {
-            Text = "音频",
+            Text = LanguageManager.T("Audio_Title"),
             Dock = DockStyle.Top,
             Height = 26,
             Font = AppTheme.Fonts.TitleFont,
@@ -38,7 +42,7 @@ public sealed class AudioPanel : Panel
             BackColor = AppTheme.Colors.PanelBackground,
         };
 
-        var lblTrack = new Label { Text = "音轨:", AutoSize = true, ForeColor = AppTheme.Colors.TextPrimary, Margin = new Padding(0, 8, 0, 0) };
+        _lblTrack = new Label { Text = LanguageManager.T("Audio_Track"), AutoSize = true, ForeColor = AppTheme.Colors.TextPrimary, Margin = new Padding(0, 8, 0, 0) };
         _trackBox = new ComboBox
         {
             Size = new Size(170, 24),
@@ -47,7 +51,7 @@ public sealed class AudioPanel : Panel
         _trackBox.Margin = new Padding(0, 0, 0, 8);
         _trackBox.SelectedIndexChanged += (_, _) => ApplyTrack();
 
-        var lblVol = new Label { Text = "音量:", AutoSize = true, ForeColor = AppTheme.Colors.TextPrimary, Margin = new Padding(0, 8, 0, 0) };
+        _lblVol = new Label { Text = LanguageManager.T("Audio_Volume"), AutoSize = true, ForeColor = AppTheme.Colors.TextPrimary, Margin = new Padding(0, 8, 0, 0) };
         _volumeBar = new TrackBar
         {
             Size = new Size(180, 30),
@@ -61,24 +65,34 @@ public sealed class AudioPanel : Panel
 
         _chkMute = new CheckBox
         {
-            Text = "静音",
+            Text = LanguageManager.T("Audio_Mute"),
             AutoSize = true,
             ForeColor = AppTheme.Colors.TextPrimary,
             Margin = new Padding(0, 4, 0, 8),
         };
         _chkMute.CheckedChanged += (_, _) => ApplyVolume();
 
-        var hint = new Label
+        _hint = new Label
         {
-            Text = "音轨选择对真实 3FP 会话生效；演示模式为占位。",
+            Text = LanguageManager.T("Audio_Hint"),
             AutoSize = true,
             ForeColor = AppTheme.Colors.TextMuted,
             Font = AppTheme.Fonts.CaptionFont,
             Margin = new Padding(0, 8, 0, 0),
         };
 
-        flow.Controls.AddRange(new Control[] { lblTrack, _trackBox, lblVol, _volumeBar, _chkMute, hint });
-        Controls.AddRange(new Control[] { flow, title });
+        flow.Controls.AddRange(new Control[] { _lblTrack, _trackBox, _lblVol, _volumeBar, _chkMute, _hint });
+        Controls.AddRange(new Control[] { flow, _title });
+    }
+
+    /// <summary>语言切换后刷新静态文本。</summary>
+    public void ApplyLanguage()
+    {
+        _title.Text = LanguageManager.T("Audio_Title");
+        _lblTrack.Text = LanguageManager.T("Audio_Track");
+        _lblVol.Text = LanguageManager.T("Audio_Volume");
+        _chkMute.Text = LanguageManager.T("Audio_Mute");
+        _hint.Text = LanguageManager.T("Audio_Hint");
     }
 
     /// <summary>关联会话并从媒体信息填充音轨列表。</summary>
@@ -91,12 +105,12 @@ public sealed class AudioPanel : Panel
         if (media is not null && !string.IsNullOrEmpty(media.AudioCodec))
         {
             // 单音轨信息直接展示；多音轨在多轨容器时从 streams 枚举（此处简化）
-            _trackBox.Items.Add($"轨 0: {media.AudioCodec} ({media.AudioChannels}ch)");
+            _trackBox.Items.Add(LanguageManager.Tf("Audio_TrackFmt", 0, media.AudioCodec, media.AudioChannels));
             _trackBox.SelectedIndex = 0;
         }
         else
         {
-            _trackBox.Items.Add("无音轨");
+            _trackBox.Items.Add(LanguageManager.T("Audio_NoTrack"));
             _trackBox.SelectedIndex = 0;
         }
         _busy = false;

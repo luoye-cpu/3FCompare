@@ -103,12 +103,12 @@ internal static class Program
         if (sync.Count == 0)
             throw new InvalidOperationException("所有会话打开失败");
 
-        // 等待 master 就绪（3FP 异步打开；Ready=2 / Playing=3 / Paused=4）；真实模式须 pump 消息循环
+        // 等待 master 就绪（3FP 异步打开；Ready/Playing/Paused）；真实模式须 pump 消息循环
         var ready = false;
         for (var i = 0; i < 100 && !ready; i++)
         {
             var s = sync.ReadMasterSnapshot();
-            if (s is { Duration100ns: > 0 } && (s.State == 2 || s.State == 3 || s.State == 4))
+            if (s is { Duration100ns: > 0 } && s.State is PlayerState.Ready or PlayerState.Playing or PlayerState.Paused)
                 ready = true;
             else
             {
@@ -120,7 +120,7 @@ internal static class Program
         {
             // 最后尝试：输出 LastError 辅助诊断
             var lastSnap = sync.ReadMasterSnapshot();
-            throw new InvalidOperationException($"master 会话未在 10s 内就绪 (state={(int?)lastSnap?.State}, dur={lastSnap?.Duration100ns})");
+            throw new InvalidOperationException($"master 会话未在 10s 内就绪 (state={lastSnap?.State}, dur={lastSnap?.Duration100ns})");
         }
 
         var master = sync.ReadMasterSnapshot()

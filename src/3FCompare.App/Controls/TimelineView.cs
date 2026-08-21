@@ -40,10 +40,18 @@ public sealed class TimelineView : Control
     private ContextMenuStrip BuildContextMenu()
     {
         var menu = new ContextMenuStrip();
-        var setA = new ToolStripMenuItem("设为 A 点", null, (_, _) => AbPointSet?.Invoke(this, (PositionFromX(PointToClient(MousePosition).X), true)));
-        var setB = new ToolStripMenuItem("设为 B 点", null, (_, _) => AbPointSet?.Invoke(this, (PositionFromX(PointToClient(MousePosition).X), false)));
+        var setA = new ToolStripMenuItem(LanguageManager.T("Timeline_SetA"), null, (_, _) => AbPointSet?.Invoke(this, (PositionFromX(PointToClient(MousePosition).X), true)));
+        var setB = new ToolStripMenuItem(LanguageManager.T("Timeline_SetB"), null, (_, _) => AbPointSet?.Invoke(this, (PositionFromX(PointToClient(MousePosition).X), false)));
         menu.Items.AddRange(new ToolStripItem[] { setA, setB });
         return menu;
+    }
+
+    /// <summary>语言切换后刷新右键菜单文本。</summary>
+    public void ApplyLanguage()
+    {
+        if (ContextMenuStrip?.Items is not { Count: >= 2 }) return;
+        ContextMenuStrip.Items[0].Text = LanguageManager.T("Timeline_SetA");
+        ContextMenuStrip.Items[1].Text = LanguageManager.T("Timeline_SetB");
     }
 
     protected override void OnKeyDown(KeyEventArgs e)

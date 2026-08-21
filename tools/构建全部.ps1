@@ -40,18 +40,27 @@ $PatchMarker = Join-Path $ForkRoot ".3fc_patches_applied"
 if ((Test-Path $PatchesDir) -and -not (Test-Path $PatchMarker)) {
     Write-Host "应用 3FCompare 自定义补丁..."
     Push-Location $ForkRoot
+    $allApplied = $true
     Get-ChildItem $PatchesDir -Filter *.patch | Sort-Object Name | ForEach-Object {
         Write-Host "  正在应用: $($_.Name)"
         git apply --ignore-whitespace $_.FullName 2>&1 | Out-Null
         if ($LASTEXITCODE -eq 0) {
             Write-Host "  ✅ $($_.Name) 已应用"
         } else {
-            Write-Host "  ⚠️  $($_.Name) 应用失败（可能已应用过），继续..."
+            Write-Host "  ❌ $($_.Name) 应用失败"
+            $allApplied = $false
         }
     }
     Pop-Location
-    # 创建标记文件，避免重复打补丁
-    New-Item -ItemType File -Path $PatchMarker -Force | Out-Null
+    # 仅当全部补丁成功时才创建标记文件，避免失败补丁被永久跳过；
+    # 若存在失败，删除残留标记（若之前误建），下次重跑可重试。
+    if ($allApplied) {
+        New-Item -ItemType File -Path $PatchMarker -Force | Out-Null
+        Write-Host "✅ 全部补丁已应用，已创建标记文件"
+    } else {
+        if (Test-Path $PatchMarker) { Remove-Item $PatchMarker -Force -ErrorAction SilentlyContinue }
+        Write-Host "⚠️ 存在补丁未能应用，请检查冲突后重新运行本脚本"
+    }
 }
 
 Write-Host "=== [1/4] 准备 FFmpeg（若缺失） ==="

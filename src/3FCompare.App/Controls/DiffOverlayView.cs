@@ -52,18 +52,18 @@ public sealed class DiffOverlayView : Control
 
         if (a is null || b is null)
         {
-            g.DrawString("差异叠加：需要至少 2 路已打开的媒体", headerFont, headerBrush, 10, 10);
+            g.DrawString(LanguageManager.T("Diff_Need2"), headerFont, headerBrush, 10, 10);
             return;
         }
 
-        g.DrawString($"差异热力图  [{_aIndex + 1}] vs [{_bIndex + 1}]  （点击刷新）", headerFont, headerBrush, 10, 10);
+        g.DrawString(LanguageManager.Tf("Diff_HeaderFmt", _aIndex + 1, _bIndex + 1), headerFont, headerBrush, 10, 10);
 
         // 采样两路画面
         using var bmpA = CaptureSurface(a);
         using var bmpB = CaptureSurface(b);
         if (bmpA is null || bmpB is null)
         {
-            g.DrawString("采样失败", headerFont, Brushes.OrangeRed, 10, 30);
+            g.DrawString(LanguageManager.T("Diff_SampleFail"), headerFont, Brushes.OrangeRed, 10, 30);
             return;
         }
 
@@ -98,13 +98,16 @@ public sealed class DiffOverlayView : Control
 
         using var infoFont = new Font("Microsoft YaHei UI", 8f);
         using var infoBrush = new SolidBrush(AppTheme.Colors.TextSecondary);
-        g.DrawString($"差异点: {diffCount} / {cellsX * cellsY}  ({(double)diffCount / Math.Max(1, cellsX * cellsY) * 100:0.#}%)", infoFont, infoBrush, 10, rect.Height - 18);
+        g.DrawString(LanguageManager.Tf("Diff_PercentFmt", diffCount, cellsX * cellsY, (double)diffCount / Math.Max(1, cellsX * cellsY) * 100), infoFont, infoBrush, 10, rect.Height - 18);
 
         // 图例
         using var legendFont = new Font("Consolas", 8f);
-        g.DrawString("弱差异", legendFont, Brushes.Cyan, 10, rect.Height - 32);
-        g.DrawString("强差异", legendFont, Brushes.Red, 70, rect.Height - 32);
+        g.DrawString(LanguageManager.T("Diff_LegendWeak"), legendFont, Brushes.Cyan, 10, rect.Height - 32);
+        g.DrawString(LanguageManager.T("Diff_LegendStrong"), legendFont, Brushes.Red, 70, rect.Height - 32);
     }
+
+    /// <summary>语言切换后重绘（动态文本在 OnPaint 中读取资源）。</summary>
+    public void ApplyLanguage() => Invalidate();
 
     private static Bitmap? CaptureSurface(PlayerSurface surface)
     {

@@ -26,6 +26,7 @@ public sealed class BookmarkPanel : Panel
     private readonly TextBox _noteBox;
     private readonly Button _btnAdd;
     private readonly Button _btnExport;
+    private readonly Label _title;
     private readonly Func<(long position, long frame)>? _currentPos;
     private readonly List<BookmarkItem> _items = new();
 
@@ -43,9 +44,9 @@ public sealed class BookmarkPanel : Panel
         Width = 240;
         BackColor = AppTheme.Colors.PanelBackground;
 
-        var title = new Label
+        _title = new Label
         {
-            Text = "书签",
+            Text = LanguageManager.T("Bookmark_Title"),
             Dock = DockStyle.Top,
             Height = 28,
             Font = AppTheme.Fonts.TitleFont,
@@ -58,7 +59,7 @@ public sealed class BookmarkPanel : Panel
             Dock = DockStyle.Top,
             Height = 30,
             Font = AppTheme.Fonts.BodyFont,
-            PlaceholderText = "备注内容…",
+            PlaceholderText = LanguageManager.T("Bookmark_NotePlaceholder"),
             BackColor = AppTheme.Colors.InputBackgroundAlt,
             ForeColor = AppTheme.Colors.TextPrimary,
             BorderStyle = BorderStyle.FixedSingle,
@@ -68,7 +69,7 @@ public sealed class BookmarkPanel : Panel
         {
             Dock = DockStyle.Fill,
             Height = 28,
-            Text = "＋ 添加当前帧",
+            Text = LanguageManager.T("Bookmark_Add"),
             FlatStyle = FlatStyle.Flat,
             BackColor = AppTheme.Colors.ButtonActive,
             ForeColor = AppTheme.Colors.TextPrimary,
@@ -79,7 +80,7 @@ public sealed class BookmarkPanel : Panel
         {
             Dock = DockStyle.Fill,
             Height = 28,
-            Text = "⇩ 导出…",
+            Text = LanguageManager.T("Bookmark_Export"),
             FlatStyle = FlatStyle.Flat,
             BackColor = AppTheme.Colors.ButtonSecondary,
             ForeColor = AppTheme.Colors.TextPrimary,
@@ -96,9 +97,9 @@ public sealed class BookmarkPanel : Panel
             ForeColor = AppTheme.Colors.TextPrimary,
             BorderStyle = BorderStyle.None,
         };
-        _list.Columns.Add("时间", 110);
-        _list.Columns.Add("帧号", 70);
-        _list.Columns.Add("备注", 80);
+        _list.Columns.Add(LanguageManager.T("Bookmark_Col_Time"), 110);
+        _list.Columns.Add(LanguageManager.T("Bookmark_Col_Frame"), 70);
+        _list.Columns.Add(LanguageManager.T("Bookmark_Col_Note"), 80);
 
         // 双击书签跳转
         _list.MouseDoubleClick += (_, e) =>
@@ -126,7 +127,19 @@ public sealed class BookmarkPanel : Panel
         rightBar.Controls.Add(_btnExport, 0, 0);
         rightBar.Controls.Add(_btnAdd, 1, 0);
 
-        Controls.AddRange(new Control[] { _list, rightBar, _noteBox, title });
+        Controls.AddRange(new Control[] { _list, rightBar, _noteBox, _title });
+    }
+
+    /// <summary>语言切换后刷新静态文本。</summary>
+    public void ApplyLanguage()
+    {
+        _title.Text = LanguageManager.T("Bookmark_Title");
+        _noteBox.PlaceholderText = LanguageManager.T("Bookmark_NotePlaceholder");
+        _btnAdd.Text = LanguageManager.T("Bookmark_Add");
+        _btnExport.Text = LanguageManager.T("Bookmark_Export");
+        _list.Columns[0].Text = LanguageManager.T("Bookmark_Col_Time");
+        _list.Columns[1].Text = LanguageManager.T("Bookmark_Col_Frame");
+        _list.Columns[2].Text = LanguageManager.T("Bookmark_Col_Note");
     }
 
     private void AddCurrent()
@@ -153,7 +166,7 @@ public sealed class BookmarkPanel : Panel
     {
         using var dlg = new SaveFileDialog
         {
-            Filter = "JSON|*.json|CSV|*.csv",
+            Filter = LanguageManager.T("Filter_Bookmark"),
             FileName = "bookmarks",
         };
         if (dlg.ShowDialog(FindForm()) != DialogResult.OK) return;

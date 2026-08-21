@@ -58,7 +58,7 @@ src/
 ├── 3FCompare.App/              # WinForms 主程序（多路网格 / 双步进 / 时间轴 / 设置 / 全屏 / 对比工具 / 主题）
 tests/
 ├── 3FCompare.SmokeTests/       # E3 冒烟（控制台，演示引擎全流程验证）
-├── 3FCompare.Core.Tests/       # 单元测试（FrameTimeline / SyncController / ToneMapping，24 例）
+├── 3FCompare.Core.Tests/       # 单元测试（FrameTimeline / SyncController / GridLayout / ToneMapping 等，40 例）
 third_party/
 └── fff_project/                # FFF_Project submodule（内核，MIT）
     └── FFF.Native → x64/Release/FFF.Native.dll   # 已构建（Release x64）
@@ -93,6 +93,7 @@ third_party/
 - **引擎自动探测**：同时存在 `FFF.Native.dll` 与 FFmpeg 核心 DLL（`avcodec-*.dll`）在程序目录时用真实 3FP 内核，否则回退**演示模式**（合成画面）；`--selftest` 两模式均通过 / **Engine auto-detection**: real 3FP kernel when both `FFF.Native.dll` and FFmpeg DLLs present, otherwise fallback to **demo mode** (synthetic frames); `--selftest` passes both modes
 - **真实内核已验证**：FFmpeg + libass + FFF.Native 全链路构建成功，App 真实渲染视频确认 / **Real kernel verified**: FFmpeg + libass + FFF.Native pipeline built, real video rendering confirmed.
 - **拖拽平移稳定性修复**：滚轮缩放后按住拖动跨画面边界不中断（鼠标捕获 + 不再由 MouseLeave 提前结束拖拽），多路同步平移连贯（0.1.4 新增） / **Drag-pan stability fix**: cross-surface drag without interruption via mouse capture, continuous multi-way sync pan (0.1.4)
+- **双语界面**：完整中英双语，启动应用已保存语言、语言切换即时刷新全部界面（菜单/工具栏/面板/状态栏/消息框/文件过滤器），此前英文模式仅设置对话框生效、主界面残留全中文（0.1.4 完善） / **Bilingual UI**: full zh/en support, applies saved language on startup and refreshes the entire UI on switch (menus/toolbars/panels/status/message dialogs/file filters); previously only the settings dialog honored English (0.1.4)
 
 ### 构建与运行 / Build & Run
 
@@ -119,7 +120,17 @@ dotnet run --project tests/3FCompare.SmokeTests -- &lt;视频&gt; [更多视频.
 
 ### v0.1.4-BETA（2026-08-20）
 
-高 DPI 布局与交互稳定性专项版，修复设置界面挤压/网格子菜单遮挡/同步拖拽失效三类问题，发布前全管线审查通过（构建 0 错误、24 例单测全过）。
+高 DPI 布局与交互稳定性专项版，修复设置界面挤压/网格子菜单遮挡/同步拖拽失效三类问题，并完成**完整双语界面**与**全管线审查整改**，发布前构建 0 错误、40 例单测全过。
+
+**✨ 新增（双语界面）**
+- **完整中英双语**：此前仅设置对话框实现双语，主菜单/工具栏/工具面板/状态栏/消息框/文件过滤器全为中文硬编码；现全部接入 `LanguageManager` 资源（约 100+ 中英键），添加 `LanguageChanged` 事件在切换语言时即时刷新整个界面
+- **启动应用已保存语言**：修复«保存英文后重启仍是中文»的关键 Bug —— `MainForm` 启动时应用 `settings.Language` 并刷新全部控件
+
+**🔧 管线审查整改**
+- 新增 `Core/Display/GridLayout.cs` 纯逻辑（自动网格/预设解析），`CompareGridView` 委托复用；新增 `GridLayoutTests`（单测 **24 → 40 例**）
+- `Core.csproj` 移除硬编码 `AssemblyVersion/FileVersion`，改由 SDK 从 `Version`+`VersionSuffix` 派生
+- `EngineSnapshot.State` 由 `int` 强化为 `PlayerState` 枚举（值与原生命令一一对应）
+- 构建脚本补丁标记修复：仅当全部补丁成功才标记，失败下次可重试
 
 **🐛 修复**
 - **设置界面高 DPI 挤压/冲突**：设置窗口在 150%/200% 缩放下 `TabControl` 未随 AutoScale 同步缩放、控件部分放大而按钮不缩放，导致布局错乱挤压。重构为 `TableLayoutPanel` 自适应布局（内容行 AutoSize 紧凑 + 弹性空行吸收余量），标签页控件随窗体等比缩放，不再重叠、越界

@@ -216,7 +216,7 @@ public sealed class Fff3FpEngine : IPlayerEngine
                 FrameTimeBaseDen = snap.FrameTimeBaseDenominator,
                 Decoder = (int)snap.Decoder,
                 ActualColorMode = snap.ActualColorMode,
-                State = (int)snap.State,
+                State = (PlayerState)snap.State,
             };
         }
 

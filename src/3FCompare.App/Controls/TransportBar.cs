@@ -5,6 +5,22 @@ namespace _3FCompare.App.Controls;
 /// <summary>传输栏：播放/暂停、双步进（帧/秒）、循环、速度、路数控制、HDR/SDR 切换、时间显示。</summary>
 public sealed class TransportBar : Control
 {
+    /// <summary>集中管理的按钮提示文本（走 LanguageManager 资源，切换语言时刷新）。</summary>
+    private static string Play => LanguageManager.T("Tb_Play");
+    private static string Pause => LanguageManager.T("Tb_Pause");
+    private static string Stop => LanguageManager.T("Tb_Stop");
+    private static string FramePrev => LanguageManager.T("Tb_FramePrev");
+    private static string FrameNext => LanguageManager.T("Tb_FrameNext");
+    private static string SecPrev => LanguageManager.T("Tb_SecPrev");
+    private static string SecNext => LanguageManager.T("Tb_SecNext");
+    private static string LoopOn => LanguageManager.T("Tb_LoopOn");
+    private static string LoopOff => LanguageManager.T("Tb_LoopOff");
+    private static string Speed => LanguageManager.T("Tb_Speed");
+    private static string Add => LanguageManager.T("Tb_Add");
+    private static string Remove => LanguageManager.T("Tb_Remove");
+    private static string ColorMode => LanguageManager.T("Tb_ColorMode");
+
+    // 按钮字段（ApplyLanguage 需重新设 tooltip）
     private readonly Button _btnPlay;
     private readonly Button _btnStop;
     private readonly Button _btnFramePrev;
@@ -22,24 +38,6 @@ public sealed class TransportBar : Control
 
     private bool _playing;
     private bool _loopEnabled;
-
-    /// <summary>集中管理的按钮提示文本（避免散落的 magic string）。</summary>
-    private static class Tooltips
-    {
-        public const string Play = "播放 (Space)";
-        public const string Pause = "暂停 (Space)";
-        public const string Stop = "停止";
-        public const string FramePrev = "后退一帧 (←)";
-        public const string FrameNext = "前进一帧 (→)";
-        public const string SecPrev = "后退一秒 (Shift+←)";
-        public const string SecNext = "前进一秒 (Shift+→)";
-        public const string LoopOn = "循环: 开";
-        public const string LoopOff = "循环: 关";
-        public const string Speed = "播放速度";
-        public const string Add = "加路";
-        public const string Remove = "减路";
-        public const string ColorMode = "SDR: 标准动态范围输出 | HDR: 高动态范围输出（自动检测显示器能力）";
-    }
 
     public event EventHandler? PlayPauseClicked;
     public event EventHandler? StopClicked;
@@ -70,31 +68,31 @@ public sealed class TransportBar : Control
             BackColor = AppTheme.Colors.PanelBackground,
         };
 
-        _btnPlay = MakeButton("▶", 40, Tooltips.Play);
+        _btnPlay = MakeButton("▶", 40, Play);
         _btnPlay.Click += (_, _) => PlayPauseClicked?.Invoke(this, EventArgs.Empty);
         flow.Controls.Add(_btnPlay);
 
-        _btnStop = MakeButton("■", 32, Tooltips.Stop);
+        _btnStop = MakeButton("■", 32, Stop);
         _btnStop.Click += (_, _) => StopClicked?.Invoke(this, EventArgs.Empty);
         flow.Controls.Add(_btnStop);
 
-        _btnFramePrev = MakeButton("◀◀", 36, Tooltips.FramePrev);
+        _btnFramePrev = MakeButton("◀◀", 36, FramePrev);
         _btnFramePrev.Click += (_, _) => FrameStepClicked?.Invoke(this, -1);
         flow.Controls.Add(_btnFramePrev);
 
-        _btnFrameNext = MakeButton("▶▶", 36, Tooltips.FrameNext);
+        _btnFrameNext = MakeButton("▶▶", 36, FrameNext);
         _btnFrameNext.Click += (_, _) => FrameStepClicked?.Invoke(this, +1);
         flow.Controls.Add(_btnFrameNext);
 
-        _btnSecPrev = MakeButton("◀", 28, Tooltips.SecPrev);
+        _btnSecPrev = MakeButton("◀", 28, SecPrev);
         _btnSecPrev.Click += (_, _) => SecondsStepClicked?.Invoke(this, -1);
         flow.Controls.Add(_btnSecPrev);
 
-        _btnSecNext = MakeButton("▶", 28, Tooltips.SecNext);
+        _btnSecNext = MakeButton("▶", 28, SecNext);
         _btnSecNext.Click += (_, _) => SecondsStepClicked?.Invoke(this, +1);
         flow.Controls.Add(_btnSecNext);
 
-        _btnLoop = MakeButton("🔁", 36, Tooltips.LoopOff);
+        _btnLoop = MakeButton("🔁", 36, LoopOff);
         _btnLoop.Click += (_, _) => LoopToggled?.Invoke(this, EventArgs.Empty);
         flow.Controls.Add(_btnLoop);
 
@@ -106,7 +104,7 @@ public sealed class TransportBar : Control
         _speedBox.Margin = new Padding(4, 2, 4, 2);
         _speedBox.Items.AddRange(new object[] { "0.5x", "1.0x", "2.0x", "4.0x" });
         _speedBox.SelectedIndex = 1;
-        _toolTip.SetToolTip(_speedBox, Tooltips.Speed);
+        _toolTip.SetToolTip(_speedBox, Speed);
         _speedBox.SelectedIndexChanged += (_, _) =>
         {
             if (_speedBox.SelectedItem is string s)
@@ -114,11 +112,11 @@ public sealed class TransportBar : Control
         };
         flow.Controls.Add(_speedBox);
 
-        _btnAdd = MakeButton("+", 28, Tooltips.Add);
+        _btnAdd = MakeButton("+", 28, Add);
         _btnAdd.Click += (_, _) => AddClicked?.Invoke(this, EventArgs.Empty);
         flow.Controls.Add(_btnAdd);
 
-        _btnRemove = MakeButton("−", 28, Tooltips.Remove);
+        _btnRemove = MakeButton("−", 28, Remove);
         _btnRemove.Click += (_, _) => RemoveClicked?.Invoke(this, EventArgs.Empty);
         flow.Controls.Add(_btnRemove);
 
@@ -131,7 +129,7 @@ public sealed class TransportBar : Control
         _cmbColorMode.Margin = new Padding(4, 2, 4, 2);
         _cmbColorMode.Items.AddRange(new object[] { "SDR", "HDR" });
         _cmbColorMode.SelectedIndex = 1;
-        _toolTip.SetToolTip(_cmbColorMode, Tooltips.ColorMode);
+        _toolTip.SetToolTip(_cmbColorMode, ColorMode);
         _cmbColorMode.SelectedIndexChanged += (_, _) =>
             ColorModeChanged?.Invoke(this, _cmbColorMode.SelectedIndex);
         flow.Controls.Add(_cmbColorMode);
@@ -184,7 +182,7 @@ public sealed class TransportBar : Control
         if (_playing == playing) return;
         _playing = playing;
         _btnPlay.Text = playing ? "⏸" : "▶";
-        _toolTip.SetToolTip(_btnPlay, playing ? Tooltips.Pause : Tooltips.Play);
+        _toolTip.SetToolTip(_btnPlay, playing ? Pause : Play);
     }
 
     public void SetLoop(bool enabled)
@@ -192,7 +190,7 @@ public sealed class TransportBar : Control
         if (_loopEnabled == enabled) return;
         _loopEnabled = enabled;
         _btnLoop.BackColor = enabled ? AppTheme.Colors.ButtonActive : AppTheme.Colors.ControlBackground;
-        _toolTip.SetToolTip(_btnLoop, enabled ? Tooltips.LoopOn : Tooltips.LoopOff);
+        _toolTip.SetToolTip(_btnLoop, enabled ? LoopOn : LoopOff);
     }
 
     public void SetTime(TimeSpan position, TimeSpan duration)
@@ -201,6 +199,22 @@ public sealed class TransportBar : Control
     }
 
     public void SetInfo(string info) => _infoLabel.Text = info;
+
+    /// <summary>语言切换后刷新所有按钮 Tooltip 文本。</summary>
+    public void ApplyLanguage()
+    {
+        _toolTip.SetToolTip(_btnPlay, _playing ? Pause : Play);
+        _toolTip.SetToolTip(_btnStop, Stop);
+        _toolTip.SetToolTip(_btnFramePrev, FramePrev);
+        _toolTip.SetToolTip(_btnFrameNext, FrameNext);
+        _toolTip.SetToolTip(_btnSecPrev, SecPrev);
+        _toolTip.SetToolTip(_btnSecNext, SecNext);
+        _toolTip.SetToolTip(_btnLoop, _loopEnabled ? LoopOn : LoopOff);
+        _toolTip.SetToolTip(_speedBox, Speed);
+        _toolTip.SetToolTip(_btnAdd, Add);
+        _toolTip.SetToolTip(_btnRemove, Remove);
+        _toolTip.SetToolTip(_cmbColorMode, ColorMode);
+    }
 
     public double CurrentSpeed
     {

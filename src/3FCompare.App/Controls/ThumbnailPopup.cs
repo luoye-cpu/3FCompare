@@ -66,7 +66,7 @@ public sealed class ThumbnailPopup : Form
         {
             using var f = new Font("Microsoft YaHei UI", 9f);
             using var b = new SolidBrush(AppTheme.Colors.TextMuted);
-            var s = "拖动时间轴预览帧";
+            var s = LanguageManager.T("Thumbnail_Hint");
             var sz = g.MeasureString(s, f);
             g.DrawString(s, f, b, (rect.Width - sz.Width) / 2, (rect.Height - sz.Height) / 2);
             return;

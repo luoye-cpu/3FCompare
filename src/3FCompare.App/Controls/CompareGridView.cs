@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using _3FCompare.Core.Backend;
+using _3FCompare.Core.Display;
 using _3FCompare.App.Utils;
 
 namespace _3FCompare.App.Controls;
@@ -83,21 +84,9 @@ public sealed class CompareGridView : Control
     public PlayerSurface? GetSurface(int index)
         => index >= 0 && index < _surfaces.Count ? _surfaces[index] : null;
 
-    /// <summary>布局计算：根据路数与单屏状态确定行列。</summary>
+    /// <summary>布局计算：根据路数与单屏状态确定行列（委托给 Core 纯逻辑，可单测）。</summary>
     public static (int cols, int rows) ComputeGrid(int count, bool singleView)
-    {
-        if (singleView) return (1, 1);
-        return count switch
-        {
-            1 => (1, 1),
-            2 => (2, 1),
-            3 => (3, 1),
-            4 => (2, 2),
-            5 => (3, 2),
-            6 => (3, 2),
-            _ => (3, 3), // 7,8,9
-        };
-    }
+        => GridLayout.ComputeGrid(count, singleView);
 
     /// <summary>设置网格布局预设（列×行）。路数多于容量时自动回退到 ComputeGrid。</summary>
     public void SetGridLayout(int cols, int rows)
@@ -117,12 +106,7 @@ public sealed class CompareGridView : Control
 
     /// <summary>解析最终布局：单屏 (1,1)；预设可用时用预设；否则自动计算。</summary>
     private (int cols, int rows) ResolveGrid(int count, bool singleView)
-    {
-        if (singleView) return (1, 1);
-        if (_overrideCols > 0 && _overrideRows > 0 && count <= _overrideCols * _overrideRows)
-            return (_overrideCols, _overrideRows);
-        return ComputeGrid(count, singleView);
-    }
+        => GridLayout.ResolveGrid(count, singleView, _overrideCols, _overrideRows);
 
     public void LayoutSurfaces()
     {
@@ -161,7 +145,7 @@ public sealed class CompareGridView : Control
         {
             using var brush = new SolidBrush(AppTheme.Colors.TextMuted);
             using var font = new Font("Microsoft YaHei UI", 14f);
-            var text = "点击「打开视频」或拖拽文件到此处\n支持 1~9 路对比";
+            var text = LanguageManager.T("Grid_Empty");
             e.Graphics.DrawString(text, font, brush, ClientRectangle,
                 new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center });
         }

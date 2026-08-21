@@ -7,10 +7,12 @@
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 
-    <!-- 版本号与 App 同步 -->
-    <Version>0.1.0</Version>
-    <AssemblyVersion>0.1.0.0</AssemblyVersion>
-    <FileVersion>0.1.0.0</FileVersion>
+    <!-- 版本号：与 App 保持一致，由 SDK 从 Version(+Suffix) 统一派生，
+         pack.ps1 用 -p:Version=X.Y.Z 覆盖时全链路生效。
+         不再硬编码 AssemblyVersion/FileVersion/InformationalVersion
+         （避免 0.1.2 发布时程序集版本错位的同类问题）。 -->
+    <Version>0.1.4</Version>
+    <VersionSuffix>BETA</VersionSuffix>
   </PropertyGroup>
 
 </Project>

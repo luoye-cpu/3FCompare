@@ -149,7 +149,7 @@ public sealed class SimulatedEngine : IPlayerEngine
                     FrameTimeBaseDen = (int)Math.Round(_fps),
                     Decoder = 1,
                     ActualColorMode = (uint)_options.ColorMode,
-                    State = _opened ? (_playing ? 3 : 4) : 0,
+                    State = _opened ? (_playing ? PlayerState.Playing : PlayerState.Paused) : PlayerState.Idle,
                 };
             }
         }

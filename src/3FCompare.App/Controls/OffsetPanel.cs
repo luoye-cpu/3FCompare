@@ -30,7 +30,7 @@ public sealed class OffsetPanel : Panel
 
         _info = new Label
         {
-            Text = "偏移校准（相对第 1 路）",
+            Text = LanguageManager.T("Offset_Title"),
             Dock = DockStyle.Top,
             Height = 26,
             Font = AppTheme.Fonts.TitleFont,
@@ -38,27 +38,27 @@ public sealed class OffsetPanel : Panel
         };
         _current = new Label
         {
-            Text = "偏移: 0ms (0帧@24fps)",
+            Text = LanguageManager.T("Offset_Value"),
             Dock = DockStyle.Top,
             Height = 24,
             Font = AppTheme.Fonts.MonospaceMediumFont,
             ForeColor = AppTheme.Colors.Accent,
         };
 
-        _btnAlign = MakeButton("◎ 对齐于此帧");
+        _btnAlign = MakeButton(LanguageManager.T("Offset_Align"));
         _btnAlign.Click += (_, _) => AlignRequested?.Invoke(this, EventArgs.Empty);
 
-        _btnMsMinus = MakeButton("◀ 100ms");
+        _btnMsMinus = MakeButton(LanguageManager.T("Offset_MsMinus"));
         _btnMsMinus.Click += (_, _) => OffsetNudge?.Invoke(this, -TimeSpan.TicksPerMillisecond * 100);
-        _btnMsPlus = MakeButton("100ms ▶");
+        _btnMsPlus = MakeButton(LanguageManager.T("Offset_MsPlus"));
         _btnMsPlus.Click += (_, _) => OffsetNudge?.Invoke(this, TimeSpan.TicksPerMillisecond * 100);
 
-        _btnFrameMinus = MakeButton("◀ 1帧");
+        _btnFrameMinus = MakeButton(LanguageManager.T("Offset_FrameMinus"));
         _btnFrameMinus.Click += (_, _) => OffsetNudge?.Invoke(this, -_frameTicks);
-        _btnFramePlus = MakeButton("1帧 ▶");
+        _btnFramePlus = MakeButton(LanguageManager.T("Offset_FramePlus"));
         _btnFramePlus.Click += (_, _) => OffsetNudge?.Invoke(this, _frameTicks);
 
-        _btnReset = MakeButton("↺ 归零");
+        _btnReset = MakeButton(LanguageManager.T("Offset_Reset"));
         _btnReset.Click += (_, _) => OffsetReset?.Invoke(this, EventArgs.Empty);
 
         // 布局：用 FlowLayout 简化
@@ -89,19 +89,29 @@ public sealed class OffsetPanel : Panel
         Refresh();
     }
 
+    /// <summary>语言切换后刷新静态文本。</summary>
+    public void ApplyLanguage()
+    {
+        _info.Text = LanguageManager.T("Offset_Title");
+        _btnAlign.Text = LanguageManager.T("Offset_Align");
+        _btnMsMinus.Text = LanguageManager.T("Offset_MsMinus");
+        _btnMsPlus.Text = LanguageManager.T("Offset_MsPlus");
+        _btnFrameMinus.Text = LanguageManager.T("Offset_FrameMinus");
+        _btnFramePlus.Text = LanguageManager.T("Offset_FramePlus");
+        _btnReset.Text = LanguageManager.T("Offset_Reset");
+    }
+
     /// <summary>更新显示与帧时长上下文。</summary>
     public void SetOffset(long offset100ns, double fps)
     {
         CurrentOffset = offset100ns;
         if (fps > 0) _frameTicks = (long)(TimeSpan.TicksPerSecond / fps);
         var ms = offset100ns / (double)TimeSpan.TicksPerMillisecond;
-        _current.Text = $"偏移: {ms:0.0}ms ({(double)offset100ns / _frameTicks:0.0}帧@{(fps > 0 ? fps.ToString("0.##") : "--")}fps)";
+        var fpsText = fps > 0 ? fps.ToString("0.##") : "--";
+        _current.Text = LanguageManager.Tf("Offset_ValueFmt", ms, (double)offset100ns / _frameTicks, fpsText);
     }
 
-    public void SetPlaceholder(string text)
-    {
-        _current.Text = text;
-    }
+    public void SetPlaceholder() => _current.Text = LanguageManager.T("Offset_NotSelected");
 
     private static Button MakeButton(string text) => new()
     {
