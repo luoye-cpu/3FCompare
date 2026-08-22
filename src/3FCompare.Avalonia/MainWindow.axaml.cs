@@ -8,8 +8,10 @@ using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
+using Avalonia.Media;
 using _3FCompare.App;
 using _3FCompare.Avalonia.Controls;
+using _3FCompare.Avalonia.Panels;
 using _3FCompare.Avalonia.Services;
 using _3FCompare.Core.Backend;
 using _3FCompare.Core.Settings;
@@ -39,6 +41,14 @@ public partial class MainWindow : Window
     private PixelPoint _dragOriginScreen;
     private bool _fullscreen;
 
+    // M3：侧栏与面板
+    private readonly ToolsSidebar _sidebar;
+    private readonly ProbePanel _probe;
+    private readonly BookmarkPanel _bookmarks;
+    private readonly OffsetPanel _offsetPanel;
+    private readonly MediaInfoPanel _mediaPanel;
+    private readonly AudioPanel _audioPanel;
+
     public MainWindow(AppSettings settings)
     {
         _settings = settings;
@@ -48,7 +58,7 @@ public partial class MainWindow : Window
         _realMode = _engine is Fff3FpEngine;
         _sync.StepProfile = new StepProfile { FrameStep = _settings.FrameStep, SecondsStep = _settings.SecondsStep };
         _coordinator = new PlaybackCoordinator(_engine, _sync, _settings, Grid.GetSurface);
-        _coordinator.StateChanged += (_, _) => UpdateStatus();
+        _coordinator.StateChanged += (_, _) => { UpdateStatus(); UpdatePanelsForSelection(); };
 
         StatusEngine.Text = LanguageManager.T(_realMode ? "Status_EngineReal" : "Status_EngineDemo");
 
@@ -59,6 +69,39 @@ public partial class MainWindow : Window
 
         // 默认 2 路空网格（WinForms 初始形态）
         Grid.SetCount(2, _realMode);
+
+        // ---- M3：侧栏与五面板 ----
+        _bookmarks = new BookmarkPanel(() =>
+        {
+            var master = _sync.ReadMasterSnapshot();
+            return (master?.Position100ns ?? _sync.GetMasterPosition100ns(), master?.FrameIndex ?? 0);
+        });
+        _probe = new ProbePanel();
+        _offsetPanel = new OffsetPanel();
+        _mediaPanel = new MediaInfoPanel();
+        _audioPanel = new AudioPanel();
+
+        _bookmarks.JumpRequested += pos => _sync.SeekTo(pos);
+        _offsetPanel.AlignRequested += (_, _) => OnOffsetAlign();
+        _offsetPanel.OffsetNudge += delta => OnOffsetNudge(delta);
+        _offsetPanel.OffsetReset += (_, _) => OnOffsetReset();
+
+        _sidebar = new ToolsSidebar(_probe, _bookmarks, _offsetPanel, _mediaPanel, _audioPanel);
+        _sidebar.MagnifierToggled += (_, _) =>
+        {
+            if (!_sidebar.MagnifierOn) Magnifier.HideOverlay();
+        };
+        _sidebar.CollapsedChanged += (_, _) =>
+            MainArea.ColumnDefinitions[0].Width =
+                new GridLength(_sidebar.Collapsed ? 24 : SidebarHost.Bounds.Width, GridUnitType.Pixel);
+        SidebarHost.Content = _sidebar;
+        Grid.SelectionChanged += (_, _) => UpdatePanelsForSelection();
+        UpdatePanelsForSelection();
+
+        // 探针/放大镜：隧道指针移动定位命中表面
+        CenterPanel.AddHandler(InputElement.PointerMovedEvent, OnGridPointerMoved, RoutingStrategies.Tunnel);
+
+        AbSlider.SliderChanged += _ => { /* 视觉滑块（WinForms 同语义） */ };
 
         // 轮询：16ms 播放中 / 250ms 空闲（WinForms PollSnapshots 移植）
         _pollTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
@@ -385,7 +428,7 @@ public partial class MainWindow : Window
             case Key.P when mods == KeyModifiers.None: OnToggleProbe(this, e); break;
             case Key.F6: OnToggleOffset(this, e); break;
             case Key.R when mods == KeyModifiers.None: ResetViewTransform(); break;
-            case Key.Delete: Pending("删除书签", "M3"); break;
+            case Key.Delete: _bookmarks.RemoveSelected(); break;
             case Key.D1: GrowLanes(1); break;
             case Key.D2: GrowLanes(2); break;
             case Key.D3: GrowLanes(3); break;
@@ -412,8 +455,82 @@ public partial class MainWindow : Window
 
     // ══════════ 菜单 ══════════
 
-    private void OnSaveSession(object? sender, RoutedEventArgs e) => Pending("保存会话", "M3");
-    private void OnLoadSession(object? sender, RoutedEventArgs e) => Pending("加载会话", "M3");
+    // ══════════ 菜单：文件（会话存取） ══════════
+
+    private async void OnSaveSession(object? sender, RoutedEventArgs e)
+    {
+        if (_sync.Count == 0) return;
+        var top = TopLevel.GetTopLevel(this);
+        if (top is null) return;
+        var file = await top.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            Title = LanguageManager.T("Menu_SaveSession"),
+            DefaultExtension = "3fcs",
+            SuggestedFileName = $"session_{DateTime.Now:yyyyMMdd_HHmmss}.3fcs",
+            FileTypeChoices = new[] { new FilePickerFileType("3FCompare Session") { Patterns = new[] { "*.3fcs", "*.json" } } },
+        });
+        var path = file?.TryGetLocalPath();
+        if (path is null) return;
+
+        var snapshot = new SessionSnapshot
+        {
+            GridLayout = Grid.SingleView ? 1 : (_sync.Count <= 4 ? 2 : 3),
+            Position100ns = _sync.GetMasterPosition100ns(),
+            LoopEnabled = _sync.LoopEnabled,
+            LoopStart100ns = _sync.LoopStart100ns,
+            LoopEnd100ns = _sync.LoopEnd100ns,
+            Items = _sync.Slots.Select(s => new SessionSnapshot.SessionItem
+            {
+                Path = s.Path,
+                Offset100ns = s.Offset100ns,
+                HardwareDecode = _settings.HardwareDecode,
+                AdapterIndex = _settings.PreferredAdapterIndex,
+            }).ToList(),
+        };
+        SessionSnapshot.SaveToFile(path, snapshot);
+        StatusInfo.Text = $"{LanguageManager.T("Status_ExportDone")}: {Path.GetFileName(path)}";
+    }
+
+    private async void OnLoadSession(object? sender, RoutedEventArgs e)
+    {
+        var top = TopLevel.GetTopLevel(this);
+        if (top is null) return;
+        var files = await top.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = LanguageManager.T("Menu_LoadSession"),
+            FileTypeFilter = new[] { new FilePickerFileType("3FCompare Session") { Patterns = new[] { "*.3fcs", "*.json" } } },
+        });
+        var path = files?.FirstOrDefault()?.TryGetLocalPath();
+        if (path is null) return;
+
+        var snapshot = SessionSnapshot.LoadFromFile(path);
+        if (snapshot is not { Items.Count: > 0 })
+        {
+            await Views.MessageBox.Show(this, LanguageManager.T("Msg_AppName"),
+                LanguageManager.T("Msg_SessionInvalid"), LanguageManager.T("Settings_Ok"));
+            return;
+        }
+
+        // 清空后按会话文件重开；全部打开后 Seek 到保存位置并恢复循环区间
+        foreach (var s in Grid.Surfaces) s.DetachSession();
+        _sync.Clear();
+        Grid.SetCount(0, _realMode);
+        _coordinator.OpenFiles(snapshot.Items.Select(i => i.Path!).ToList(), autoPlay: true, onAllOpened: () =>
+        {
+            _sync.SeekTo(snapshot.Position100ns);
+            for (var i = 0; i < snapshot.Items.Count && i < _sync.Count; i++)
+                _sync.Slots[i].Offset100ns = snapshot.Items[i].Offset100ns;
+            if (snapshot.LoopEnabled && snapshot.LoopEnd100ns > snapshot.LoopStart100ns)
+            {
+                _sync.LoopStart100ns = snapshot.LoopStart100ns;
+                _sync.LoopEnd100ns = snapshot.LoopEnd100ns;
+                _sync.LoopEnabled = true;
+                _transport.SetLoop(true);
+                _timeline.SetLoopRange(snapshot.LoopStart100ns, snapshot.LoopEnd100ns, true);
+            }
+        });
+    }
+
     private void OnExportFrame(object? sender, RoutedEventArgs e) => Pending("导出当前帧", "M4");
 
     private void OnExit(object? sender, RoutedEventArgs e) => Close();
@@ -424,13 +541,61 @@ public partial class MainWindow : Window
         UpdateStatus();
     }
 
-    private void OnToggleAbSlider(object? sender, RoutedEventArgs e) => Pending("A-B 滑块", "M3");
-    private void OnToggleProbe(object? sender, RoutedEventArgs e) => Pending("像素探针", "M3");
-    private void OnToggleBookmarks(object? sender, RoutedEventArgs e) => Pending("书签", "M3");
-    private void OnToggleOffset(object? sender, RoutedEventArgs e) => Pending("偏移校准", "M3");
-    private void OnToggleMediaInfo(object? sender, RoutedEventArgs e) => Pending("媒体信息", "M3");
-    private void OnToggleDiff(object? sender, RoutedEventArgs e) => Pending("差异叠加", "M3");
-    private void OnToggleAudio(object? sender, RoutedEventArgs e) => Pending("音频", "M3");
+    // ══════════ 菜单：视图（M3 面板切换） ══════════
+
+    private void OnToggleAbSlider(object? sender, RoutedEventArgs e)
+    {
+        if (AbSlider.IsVisible)
+        {
+            AbSlider.IsVisible = false;
+            Grid.IsVisible = true;
+            return;
+        }
+        if (_sync.Count < 2) return;
+        var sel = Math.Max(0, Grid.SelectedIndex);
+        AbSlider.SetPair(sel, (sel + 1) % Math.Max(2, _sync.Count));
+        AbSlider.IsVisible = true;
+        Grid.IsVisible = false;
+    }
+
+    private void OnToggleProbe(object? sender, RoutedEventArgs e) { ShowSidebar(); _sidebar.ActivateProbe(); }
+    private void OnToggleBookmarks(object? sender, RoutedEventArgs e) { ShowSidebar(); _sidebar.ActivateBookmarks(); }
+    private void OnToggleOffset(object? sender, RoutedEventArgs e) { ShowSidebar(); _sidebar.ActivateOffset(); }
+    private void OnToggleMediaInfo(object? sender, RoutedEventArgs e) { ShowSidebar(); _sidebar.ActivateMedia(); }
+    private void OnToggleAudio(object? sender, RoutedEventArgs e) { ShowSidebar(); _sidebar.ActivateAudio(); }
+
+    private async void OnToggleDiff(object? sender, RoutedEventArgs e)
+    {
+        if (_sync.Slots.Count(s => !s.Failed) < 2)
+        {
+            await Views.MessageBox.Show(this, LanguageManager.T("Msg_AppName"),
+                LanguageManager.T("Msg_DiffNeed2"), LanguageManager.T("Settings_Ok"));
+            return;
+        }
+        var sel = Math.Max(0, Grid.SelectedIndex);
+        var view = new DiffOverlayView
+        {
+            AIndex = sel,
+            BIndex = (sel + 1) % _sync.Count,
+        };
+        view.SetSessionProvider(i => _sync.Slots.ElementAtOrDefault(i)?.Session);
+        view.Resample();
+        var win = new Window
+        {
+            Title = LanguageManager.T("Menu_Diff"),
+            Width = 760, Height = 560,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Background = new SolidColorBrush(Color.FromRgb(16, 16, 18)),
+            Content = view,
+        };
+        await win.ShowDialog(this);
+    }
+
+    private void ShowSidebar()
+    {
+        SidebarHost.IsVisible = true;
+        SidebarSplitter.IsVisible = true;
+    }
 
     private void OnGridPreset(object? sender, RoutedEventArgs e)
     {
@@ -438,8 +603,13 @@ public partial class MainWindow : Window
             Grid.SetGridLayout(preset);
     }
 
-    private void OnShowGridOnly(object? sender, RoutedEventArgs e) =>
-        SidebarHost.IsVisible = !SidebarHost.IsVisible;
+    private void OnShowGridOnly(object? sender, RoutedEventArgs e)
+    {
+        // 复刻 WinForms「仅显示对比网格」：隐藏侧栏
+        var show = !SidebarHost.IsVisible;
+        SidebarHost.IsVisible = show;
+        SidebarSplitter.IsVisible = show;
+    }
 
     private void OnToggleFullscreen(object? sender, RoutedEventArgs e) => ToggleFullscreen();
 
@@ -453,10 +623,154 @@ public partial class MainWindow : Window
         TimelineHost.IsVisible = !hideChrome;
     }
 
-    private void OnOpenSettings(object? sender, RoutedEventArgs e) => Pending("设置", "M3");
+    private async void OnOpenSettings(object? sender, RoutedEventArgs e)
+    {
+        var dlg = new Views.SettingsWindow(_settings) { };
+        await dlg.ShowDialog(this);
+        if (!dlg.Changed || dlg.Result is null) return;
+
+        var result = dlg.Result;
+        // 语言即时生效（绑定自动刷新）
+        LanguageManager.SetLanguage(result.Language);
+
+        // 立即可应用的项
+        _sync.StepProfile = new StepProfile { FrameStep = result.FrameStep, SecondsStep = result.SecondsStep };
+        UpdateStatus();
+
+        // FFmpeg 路径变化 → 需重启（探测链在启动时装配）
+        if (dlg.FfmpegChanged)
+        {
+            SettingsStore.Save(result);
+            var restart = await Views.MessageBox.Show(this,
+                LanguageManager.T("Msg_AppName"),
+                LanguageManager.T("Msg_DemoModeRestartNeeded").Replace("\n", " "),
+                primaryText: LanguageManager.T("Msg_DemoModeRestartNeeded").Contains("重新启动") ? "重启 / Restart" : "Yes",
+                secondaryText: LanguageManager.T("Settings_Cancel"));
+            if (restart)
+            {
+                // 重启：以新进程拉起自身后退出
+                var exe = Environment.ProcessPath;
+                if (exe is not null)
+                {
+                    using var _ = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(exe) { UseShellExecute = true });
+                    Close();
+                    Environment.Exit(0);
+                }
+            }
+            return;
+        }
+
+        SettingsStore.Save(result);
+        CopySettings(result);
+        UpdateStatus();
+    }
+
+    private void CopySettings(AppSettings s)
+    {
+        _settings.HardwareDecode = s.HardwareDecode;
+        _settings.PreferredAdapterIndex = s.PreferredAdapterIndex;
+        _settings.ColorMode = s.ColorMode;
+        _settings.FrameStep = s.FrameStep;
+        _settings.SecondsStep = s.SecondsStep;
+        _settings.StartFullscreen = s.StartFullscreen;
+        _settings.HideChromeInFullscreen = s.HideChromeInFullscreen;
+        _settings.DefaultGridCols = s.DefaultGridCols;
+        _settings.DefaultGridRows = s.DefaultGridRows;
+        _settings.Language = s.Language;
+    }
 
     private void Pending(string what, string milestone) =>
         StatusInfo.Text = $"{what} —— {milestone} 实装";
+
+    // ══════════ M3：面板联动 ══════════
+
+    private void UpdatePanelsForSelection()
+    {
+        var slot = _sync.Slots.ElementAtOrDefault(Grid.SelectedIndex);
+        var session = slot?.Session;
+        _probe.AttachSession(session);
+        _audioPanel.AttachSession(session, session?.ReadMediaInfo());
+        _mediaPanel.ShowMediaInfo(session?.ReadMediaInfo());
+
+        if (slot is null)
+        {
+            _offsetPanel.SetPlaceholder();
+            return;
+        }
+        var master = _sync.ReadMasterSnapshot();
+        var fps = master is not null ? SyncController.EstimateFps(master) : 24;
+        _offsetPanel.SetFps(fps);
+        _offsetPanel.SetOffset(slot.Offset100ns, fps);
+    }
+
+    /// <summary>中央区指针移动（隧道）：放大镜跟随 + 探针读点（选中表面）。</summary>
+    private void OnGridPointerMoved(object? sender, PointerEventArgs e)
+    {
+        if (e.Source is not Visual src) return;
+        PlayerSurface? surface = null;
+        var v = (Visual?)src;
+        while (v is not null)
+        {
+            if (v is PlayerSurface ps) { surface = ps; break; }
+            v = v.GetVisualParent();
+        }
+        if (surface is null) return;
+        var local = e.GetPosition(surface);
+
+        if (_sidebar.MagnifierOn)
+            Magnifier.UpdateAt(e.GetPosition(CenterPanel));
+        if (ReferenceEquals(_sidebar.Active, _probe) && surface.Selected)
+            _probe.UpdatePoint((int)local.X, (int)local.Y);
+    }
+
+    // ---- 偏移校准（相对第 1 路） ----
+
+    private void OnOffsetAlign()
+    {
+        var slot = _sync.Slots.ElementAtOrDefault(Grid.SelectedIndex);
+        var master = _sync.ReadMasterSnapshot();
+        var target = slot?.Session?.ReadSnapshot();
+        if (slot is null || master is null || target is null) return;
+        slot.Offset100ns = master.Position100ns - target.Position100ns;
+        _sync.RefreshAllPositions();
+        UpdatePanelsForSelection();
+    }
+
+    private void OnOffsetNudge(long delta100ns)
+    {
+        var slot = _sync.Slots.ElementAtOrDefault(Grid.SelectedIndex);
+        if (slot is null) return;
+        slot.Offset100ns += delta100ns;
+        _sync.RefreshAllPositions();
+        UpdatePanelsForSelection();
+    }
+
+    private void OnOffsetReset()
+    {
+        var slot = _sync.Slots.ElementAtOrDefault(Grid.SelectedIndex);
+        if (slot is null) return;
+        slot.Offset100ns = 0;
+        _sync.RefreshAllPositions();
+        UpdatePanelsForSelection();
+    }
+
+    /// <summary>缺 FFmpeg/原生组件引导（WinForms MaybeExitDemoMode 对应）：
+    /// 非真实模式且非自动化 → 提示打开设置或关闭。</summary>
+    private async void MaybeExitDemoMode()
+    {
+        if (_realMode) return;
+        var args = Environment.GetCommandLineArgs();
+        if (args.Contains("--selftest") || args.Contains("--autodemo")) return;
+
+        var openSettings = await Views.MessageBox.Show(this,
+            LanguageManager.T("Msg_DemoModeTitle"),
+            LanguageManager.T("Msg_DemoModeMissingFfmpeg"),
+            primaryText: LanguageManager.T("Msg_DemoModeOpenSettings"),
+            secondaryText: LanguageManager.T("Msg_DemoModeClose"));
+        if (!openSettings) { Close(); return; }
+
+        OnOpenSettings(this, new RoutedEventArgs());
+    }
 
     // ══════════ 窗口几何记忆 ══════════
 
@@ -485,6 +799,7 @@ public partial class MainWindow : Window
     {
         if (WindowState == WindowState.Normal)
             _lastNormal = (Position, new Size(Width, Height));
+        MaybeExitDemoMode();
         base.OnOpened(e);
     }
 
@@ -602,12 +917,14 @@ public partial class MainWindow : Window
                 Log($"媒体 {media.VideoWidth}x{media.VideoHeight} @{SyncController.EstimateFps(ready):0.##}fps {media.Codec} HDR={media.IsHdr}");
 
             _step = "自动播放断言";
-            var deadline2 = DateTime.UtcNow + TimeSpan.FromSeconds(3);
+            var deadline2 = DateTime.UtcNow + TimeSpan.FromSeconds(5);
             while (DateTime.UtcNow < deadline2)
             {
                 var s = _sync.ReadMasterSnapshot();
-                if (s is { State: PlayerState.Playing }) break;
-                await System.Threading.Tasks.Task.Delay(100);
+                if (s is { State: PlayerState.Playing }) { Log($"状态={s.State} pos={TimeSpan.FromTicks(s.Position100ns):g}"); break; }
+                if ((DateTime.UtcNow - deadline2).TotalSeconds > -4.8)
+                    Log($"等待播放… 状态={s?.State} pos={TimeSpan.FromTicks(s?.Position100ns ?? 0):g}");
+                await System.Threading.Tasks.Task.Delay(200);
             }
             var final = _sync.ReadMasterSnapshot();
             Log($"状态={final?.State}");

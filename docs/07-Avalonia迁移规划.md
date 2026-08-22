@@ -93,12 +93,19 @@
       快捷键全表接真实操作；全屏 HideChromeInFullscreen；状态栏全量信息
 - 验证：--selftest 走真实管线全过（就绪等待/帧步进与秒步进位置不后退断言/媒体信息/自动播放），退出码 0
 
-### M3 — 工具面板与对话框（2 周）
-- [ ] 侧边栏 VerticalDockHost → axaml TabControl/Expander 组合 + 拖宽 Splitter
-- [ ] ProbePanel / BookmarkPanel / OffsetPanel / MediaInfoPanel / AudioPanel（axaml 化，绑定驱动）
-- [ ] AbSliderView / DiffOverlayView / MagnifierOverlay（SkiaSharp 自绘）
-- [ ] SettingsDialog → SettingsWindow.axaml（布局用 Grid+ScrollViewer，不再需要宽度塌缩 workaround）
-- [ ] PromptDialog / MessageBox 替换（Avalonia 原生对话框或自制）
+### M3 — 工具面板与对话框（2 周）✅ 2026-08-22
+- [x] 侧栏 ToolsSidebar（5 页签 + 折叠按钮 + 放大镜常驻开关 + GridSplitter 拖宽）
+- [x] ProbePanel（TryReadPixel 读数 + JSON 复制）/ BookmarkPanel（增删跳转 + JSON源生成/CSV 导出）/
+      OffsetPanel（±帧/±100ms/对齐/归零）/ MediaInfoPanel（完整技术报告）/ AudioPanel（音轨/音量/静音）
+- [x] AbSliderView（占位渐变 + 拖动分割线，WinForms 同语义）/ DiffOverlayView（96×N 网格像素采样热力图，
+      TryReadPixel 直接采样替代 WinForms 的 DrawToBitmap 采样）/ MagnifierOverlay
+      （IsHitTestVisible=false 替代 WS_EX_TRANSPARENT hack）
+- [x] SettingsWindow（7 节：语言/硬件加速+GPU枚举/步进/窗口全屏/色彩/布局/FFmpeg路径+检测测试；
+      差异检测构建新 AppSettings；FFmpeg 变更重启确认流）
+- [x] MessageBox/PromptDialog 等价（自制轻量对话框）+ MaybeExitDemoMode 缺件引导
+- [x] 会话保存/加载（.3fcs：路径/偏移/位置/循环区间恢复）
+- [x] 选中联动（探针/媒体信息/音频/偏移面板随选中表面刷新）；探针悬停读点 + 放大镜跟随（隧道指针路由）
+- 验证：构建零错误 + --selftest 全过（两轮）；面板交互细节留待 GUI 人工走查
 
 ### M4 — 浮层、抓帧与自动化（1 周）
 - [ ] ThumbnailPopup（无边框置顶 Window；合成链路直接上 SkiaSharp——基准显示位图缩放快 8.4×）

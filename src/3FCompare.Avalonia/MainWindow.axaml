@@ -50,8 +50,7 @@
 
     <!-- 底部：状态栏 -->
     <Border DockPanel.Dock="Bottom" Height="24" Background="{DynamicResource PanelBrush}"
-            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0"
-            Padding="8,0">
+            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="8,0">
       <DockPanel>
         <TextBlock DockPanel.Dock="Left" x:Name="StatusEngine" Text="—"
                    Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12"
@@ -72,16 +71,17 @@
             Background="{DynamicResource PanelBrush}"
             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" />
 
-    <!-- 右侧：工具侧栏占位（M3 实装 5 页签） -->
-    <Border DockPanel.Dock="Right" x:Name="SidebarHost" Width="240"
-            Background="{DynamicResource PanelBrush}"
-            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1,0,0,0">
-      <TextBlock Text="{loc:Loc Tab_Probe}" Foreground="{DynamicResource TextMutedBrush}"
-                 HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="13" />
-    </Border>
-
-    <!-- 中央：对比网格 -->
-    <ctrl:CompareGridView x:Name="Grid" ClipToBounds="True" />
+    <!-- 主区：侧栏 | 分隔条 | 中央网格/AB滑块/放大镜 -->
+    <Grid ColumnDefinitions="240,Auto,*" x:Name="MainArea">
+      <ContentControl x:Name="SidebarHost" Grid.Column="0" />
+      <GridSplitter x:Name="SidebarSplitter" Grid.Column="1" Width="4"
+                    ResizeDirection="Columns" Background="#50505A" MinWidth="4" />
+      <Panel Grid.Column="2" x:Name="CenterPanel">
+        <ctrl:CompareGridView x:Name="Grid" ClipToBounds="True" />
+        <ctrl:AbSliderView x:Name="AbSlider" IsVisible="False" />
+        <ctrl:MagnifierOverlay x:Name="Magnifier" />
+      </Panel>
+    </Grid>
 
   </DockPanel>
 </Window>
