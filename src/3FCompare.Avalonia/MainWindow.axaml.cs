@@ -312,7 +312,7 @@ public partial class MainWindow : Window
 
     private void WireTimeline()
     {
-        _timeline.SeekRequested += pos => _sync.SeekTo(pos);
+        _timeline.SeekRequested += pos => SafeSeek(pos);
         _timeline.AbPointSet += (pos, isA) => SetLoopPoint(pos, isA);
         _timeline.ScrubPreview += OnScrubPreview;
         _timeline.PointerReleased += (_, _) => EndScrubPreview();
@@ -320,7 +320,14 @@ public partial class MainWindow : Window
         _scrubTimer.Tick += OnScrubTimerTick;
     }
 
-    // ---- 时间轴拖动缩略图预览（WinForms 150ms 节流抓帧管线） ----
+    /// <summary>安全的 Seek：捕获异常避免反复拖动导致崩溃。</summary>
+    private void SafeSeek(long pos)
+    {
+        try { _sync.SeekTo(pos); }
+        catch (Exception ex) { Console.Error.WriteLine($"Seek 异常: {ex.Message}"); }
+    }
+
+    // ---- 时间轴拖动缩略图预览 ----
 
     private ThumbnailPopup? _thumbnail;
     private readonly DispatcherTimer _scrubTimer = new() { Interval = TimeSpan.FromMilliseconds(150) };
@@ -342,19 +349,23 @@ public partial class MainWindow : Window
     private void OnScrubTimerTick(object? sender, EventArgs e)
     {
         if (!_scrubbing) { _scrubTimer.Stop(); return; }
-        _sync.SeekTo(_scrubTarget);
+        SafeSeek(_scrubTarget);
         global::Avalonia.Threading.Dispatcher.UIThread.Post(async () =>
         {
-            await System.Threading.Tasks.Task.Delay(50); // 等 seek 生效一帧
-            if (!_scrubbing || _thumbnail is null) return;
-            var surface = Grid.GetSurface(0);
-            if (surface is null || surface.Hwnd == 0) return;
-            using var bmp = _3FCompare.App.Capture.WgcFrameCapture.CaptureWindowFrame(surface.Hwnd);
-            if (bmp is null) return;
-            var dur = _sync.GetMasterDuration100ns();
-            var ratio = dur > 0 ? (double)_scrubTarget / dur : 0;
-            var screen = _timeline.PointToScreen(new Point(ratio * _timeline.Bounds.Width, 0));
-            _thumbnail.ShowAt(screen, bmp);
+            try
+            {
+                await System.Threading.Tasks.Task.Delay(50);
+                if (!_scrubbing || _thumbnail is null) return;
+                var surface = Grid.GetSurface(0);
+                if (surface is null || surface.Hwnd == 0) return;
+                using var bmp = _3FCompare.App.Capture.WgcFrameCapture.CaptureWindowFrame(surface.Hwnd);
+                if (bmp is null) return;
+                var dur = _sync.GetMasterDuration100ns();
+                var ratio = dur > 0 ? (double)_scrubTarget / dur : 0;
+                var screen = _timeline.PointToScreen(new Point(ratio * _timeline.Bounds.Width, 0));
+                _thumbnail.ShowAt(screen, bmp);
+            }
+            catch (Exception ex) { Console.Error.WriteLine($"Scrub capture 异常: {ex.Message}"); }
         });
     }
 
