@@ -10,22 +10,30 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationManifest>app.manifest</ApplicationManifest>
 
-    <!-- NativeAOT 发布（M0 PoC-C 验证项；与 WinForms 版同规格） -->
+    <!-- NativeAOT 发布（M0 PoC-C 已验证；与 WinForms 版同规格） -->
     <PublishAot>true</PublishAot>
     <PublishSelfContained>true</PublishSelfContained>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Avalonia" Version="11.3.*" />
-    <PackageReference Include="Avalonia.Desktop" Version="11.3.*" />
-    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.*" />
-    <PackageReference Include="Avalonia.Diagnostics" Version="11.3.*" Condition="'$(Configuration)' == 'Debug'" />
+    <!-- 钉住同一版本，避免 11.3.* 浮动解析导致各包版本漂移 -->
+    <PackageReference Include="Avalonia" Version="11.3.20" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.20" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.20" />
+    <PackageReference Include="Avalonia.Diagnostics" Version="11.3.20" Condition="'$(Configuration)' == 'Debug'" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+    <!-- PoC-A GDI 绘制 + M4 WgcFrameCapture 位图路径 -->
     <PackageReference Include="System.Drawing.Common" Version="9.0.*" />
   </ItemGroup>
 
   <ItemGroup>
-    <!-- M0 PoC：直接复用 Core 层（引擎/Sync），验证 NativeControlHost 承载真实引擎 -->
+    <!-- 引擎/Sync/设置/显示布局：UI 框架无关，直接复用 -->
     <ProjectReference Include="..\3FCompare.Core\3FCompare.Core.csproj" />
+  </ItemGroup>
+
+  <!-- 双轨共享：本地化字符串单一事实源（迁移期间链接编译，M5 切换时移入本项目） -->
+  <ItemGroup>
+    <Compile Include="..\3FCompare.App\Utils\LanguageManager.cs" Link="Localization\LanguageManager.cs" />
   </ItemGroup>
 
 </Project>

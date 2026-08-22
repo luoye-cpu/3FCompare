@@ -68,12 +68,15 @@
   - ⚠ 体积预警：AOT 单文件 17.5MB（不含 ffmpeg/FFF.Native）已超 §3.3 的 15MB 红线 → 按约定
     触发重评估（M5 决策：裁剪 / 调整红线 / 接受）。
 
-### M1 — 骨架与基础设施（1 周）
-- [ ] App.axaml 主题资源（AppTheme → ResourceDictionary，深色优先）
-- [ ] LanguageManager 桥接（LocalizationConverter）
-- [ ] MainWindow 骨架：菜单栏 + 网格容器 + 底部传输栏/时间轴布局
-- [ ] MVVM 基础：CommunityToolkit.Mvvm 引入，MainViewModel 承接 MainForm 的状态字段
-- [ ] 快捷键系统（KeyBindings 替代 ProcessCmdKey；注意 IME 问题在 Avalonia 是否仍存在）
+### M1 — 骨架与基础设施（1 周）✅ 2026-08-22
+- [x] App 主题资源（AppTheme → ThemeResources 代码装配 + FluentTheme，深色优先）
+- [x] LanguageManager 桥接（链接编译共享 + Loc 索引器绑定源 + {loc:Loc Key} 标记扩展，
+      语言切换自动刷新；补齐 3 个缺失键：Msg_DemoModeMissingNative / Offset_ValueFmt / Diff_PercentFmt，
+      WinForms 版同受益）
+- [x] MainWindow 骨架：菜单栏（与 WinForms 清单逐项一致）+ 网格容器占位 + 底部传输栏/时间轴/状态栏布局 + 右侧栏占位
+- [x] MVVM 基础：CommunityToolkit.Mvvm 8.4.0，MainViewModel 承接 MainForm 状态字段
+- [x] 快捷键系统（OnKeyDown 复刻 ProcessCmdKey 全表：Space/Ctrl+S/←→/Shift+←→/↑↓/F11/Esc/O/B/P/F6/R/Delete/D1-D9）
+- [x] 窗口几何记忆（位置/尺寸/最大化，恢复时钳制工作区）
 
 ### M2 — 核心播放面（2 周）
 - [ ] PlayerSurfaceHost（NativeControlHost 封装，M0 PoC 产品化）
@@ -136,3 +139,9 @@
   （对齐 vtable 后仍返回 INVALID_CALL，裸函数指针调用正常）——Core 的 DXGI 亮度探测因此
   重写为裸 vtable 委托方案（`DxgiOutputInfo`）。此为 M0 期间唯一 Core 改动，属缺陷修复。
 - 2026-08-22: 体积实测——Avalonia AOT 单文件 17.5MB > 15MB 红线，重评估挂起至 M5。
+- 2026-08-22: M1 完成期间发现本机 .NET 11 预览运行时（11.0.100-preview.6）两个工程级坑：
+  ① App.axaml 内嵌 `<Application.Resources>/<Application.Styles>` 会使编译 XAML 按类型查找失败
+    （「No precompiled XAML found for App」）——规避：App.axaml 保持空，主题经 ThemeResources 代码装配；
+    MainWindow.axaml/控件 axaml 内容不受影响。
+  ② MSBuild 增量构建在源码编辑后误判 up-to-date（产物时间戳不更新、跑旧二进制造成误诊）——
+    规避：一律 `dotnet build --no-incremental`。

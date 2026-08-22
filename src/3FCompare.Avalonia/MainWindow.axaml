@@ -1,35 +1,93 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:loc="using:_3FCompare.Avalonia.Localization"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="500"
+        mc:Ignorable="d" d:DesignWidth="1600" d:DesignHeight="900"
         x:Class="_3FCompare.Avalonia.MainWindow"
-        Title="3FCompare – Avalonia M0 PoC"
-        Width="900" Height="560"
-        Background="#18181C">
+        Title="{loc:Loc Win_Title}"
+        Width="1600" Height="900" MinWidth="640" MinHeight="400"
+        Background="{DynamicResource BgBrush}">
 
-  <Grid RowDefinitions="Auto,*,Auto" Margin="8">
+  <DockPanel>
 
-    <!-- 顶部：操作按钮 -->
-    <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="8" Margin="0,0,0,8">
-      <Button x:Name="BtnOpen" Content="打开视频 (PoC-B)" Click="OnOpenClick" />
-      <Button x:Name="BtnPlay" Content="播放" Click="OnPlayClick" />
-      <Button x:Name="BtnGdiTest" Content="GDI 色块 (PoC-A)" Click="OnGdiTestClick" />
-    </StackPanel>
+    <!-- ══════════ 菜单栏 ══════════ -->
+    <Menu DockPanel.Dock="Top" x:Name="MenuMain">
+      <MenuItem Header="{loc:Loc Menu_File}">
+        <MenuItem Header="{loc:Loc Menu_Open}" InputGesture="Ctrl+O" Click="OnOpenVideos" />
+        <Separator />
+        <MenuItem Header="{loc:Loc Menu_SaveSession}" Click="OnSaveSession" />
+        <MenuItem Header="{loc:Loc Menu_LoadSession}" Click="OnLoadSession" />
+        <MenuItem Header="{loc:Loc Menu_ExportFrame}" Click="OnExportFrame" />
+        <Separator />
+        <MenuItem Header="{loc:Loc Menu_Exit}" Click="OnExit" />
+      </MenuItem>
+      <MenuItem Header="{loc:Loc Menu_View}">
+        <MenuItem Header="{loc:Loc Menu_ToggleSingle}" Click="OnToggleSingleMulti" />
+        <MenuItem Header="{loc:Loc Menu_AbSlider}" Click="OnToggleAbSlider" />
+        <MenuItem Header="{loc:Loc Menu_Probe}" Click="OnToggleProbe" />
+        <MenuItem Header="{loc:Loc Menu_Bookmarks}" Click="OnToggleBookmarks" />
+        <MenuItem Header="{loc:Loc Menu_Offset}" Click="OnToggleOffset" />
+        <MenuItem Header="{loc:Loc Menu_MediaInfo}" Click="OnToggleMediaInfo" />
+        <MenuItem Header="{loc:Loc Menu_Diff}" Click="OnToggleDiff" />
+        <MenuItem Header="{loc:Loc Menu_Audio}" Click="OnToggleAudio" />
+        <Separator />
+        <MenuItem Header="{loc:Loc Menu_GridLayout}">
+          <MenuItem Header="{loc:Loc Menu_Grid_2x1}" Click="OnGridPreset" Tag="2x1" />
+          <MenuItem Header="{loc:Loc Menu_Grid_2x2}" Click="OnGridPreset" Tag="2x2" />
+          <MenuItem Header="{loc:Loc Menu_Grid_3x3}" Click="OnGridPreset" Tag="3x3" />
+          <MenuItem Header="{loc:Loc Menu_Grid_Auto}" Click="OnGridPreset" Tag="auto" />
+        </MenuItem>
+        <MenuItem Header="{loc:Loc Menu_ShowGrid}" Click="OnShowGridOnly" />
+        <Separator />
+        <MenuItem Header="{loc:Loc Menu_Fullscreen}" InputGesture="F11" Click="OnToggleFullscreen" />
+      </MenuItem>
+      <MenuItem Header="{loc:Loc Menu_Settings}">
+        <MenuItem Header="{loc:Loc Menu_SettingsDialog}" Click="OnOpenSettings" />
+      </MenuItem>
+    </Menu>
 
-    <!-- 中部：NativeControlHost 承载区（M0 核心验证点） -->
-    <Border Grid.Row="1" BorderBrush="#50505A" BorderThickness="1" CornerRadius="4">
-      <Panel>
-        <ContentControl x:Name="HostContainer" HorizontalContentAlignment="Stretch"
-                        VerticalContentAlignment="Stretch" />
-        <TextBlock x:Name="Placeholder" Text="NativeControlHost 承载区"
-                   HorizontalAlignment="Center" VerticalAlignment="Center"
-                   Foreground="#8C8C96" FontSize="14" />
-      </Panel>
+    <!-- ══════════ 底部：状态栏 ══════════ -->
+    <Border DockPanel.Dock="Bottom" Height="24" Background="{DynamicResource PanelBrush}"
+            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0"
+            Padding="8,0">
+      <DockPanel>
+        <TextBlock DockPanel.Dock="Left" x:Name="StatusEngine" Text="—"
+                   Foreground="{DynamicResource TextSecondaryBrush}" FontSize="12"
+                   VerticalAlignment="Center" Margin="0,0,16,0" />
+        <TextBlock x:Name="StatusInfo" Text="—"
+                   Foreground="{DynamicResource TextMutedBrush}" FontSize="12"
+                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+      </DockPanel>
     </Border>
 
-    <!-- 底部：状态栏 -->
-    <TextBlock Grid.Row="2" x:Name="StatusText" Text="就绪" Foreground="#C8C8D2"
-               Margin="0,8,0,0" />
-  </Grid>
+    <!-- ══════════ 底部：时间轴占位（M2 TimelineView 实装） ══════════ -->
+    <Border DockPanel.Dock="Bottom" Height="34" Background="{DynamicResource CanvasDarkBrush}"
+            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0"
+            x:Name="TimelineHost" />
+
+    <!-- ══════════ 底部：传输栏占位（M2 TransportBar 实装） ══════════ -->
+    <Border DockPanel.Dock="Bottom" Height="44" Background="{DynamicResource PanelBrush}"
+            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0"
+            x:Name="TransportHost" />
+
+    <!-- ══════════ 右侧：工具侧栏占位（M3 实装 5 页签） ══════════ -->
+    <Border DockPanel.Dock="Right" Width="240" Background="{DynamicResource PanelBrush}"
+            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1,0,0,0"
+            x:Name="SidebarHost">
+      <TextBlock Text="{loc:Loc Tab_Probe}" Foreground="{DynamicResource TextMutedBrush}"
+                 HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="13" />
+    </Border>
+
+    <!-- ══════════ 中央：对比网格占位（M2 CompareGridView 实装） ══════════ -->
+    <Panel x:Name="GridArea" Background="{DynamicResource CanvasDarkBrush}" ClipToBounds="True">
+      <TextBlock Text="{loc:Loc Grid_Empty}" Foreground="{DynamicResource TextMutedBrush}"
+                 HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="16"
+                 TextAlignment="Center" />
+      <!-- M2 前的自动化承载位：selftest 模式需要子 HWND -->
+      <ContentControl x:Name="HostContainer" IsVisible="False"
+                      HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
+    </Panel>
+
+  </DockPanel>
 </Window>

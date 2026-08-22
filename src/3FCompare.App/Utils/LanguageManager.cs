@@ -77,6 +77,7 @@ public static class LanguageManager
         ["Msg_NativeLoadFailed"] = "✗ FFF.Native 加载失败",
         ["Msg_DemoModeTitle"] = "缺少必需组件",
         ["Msg_DemoModeMissingFfmpeg"] = "未找到 FFmpeg 相关 DLL（avcodec 等），无法启动真实播放引擎。",
+        ["Msg_DemoModeMissingNative"] = "FFF.Native 原生组件加载失败，无法启动真实播放引擎。",
 
         // 缺 FFmpeg 引导弹窗：自定义按钮（MessageBox 无法定制按钮文字，改用 PromptDialog）
         ["Msg_DemoModeClose"] = "关闭",
@@ -157,6 +158,7 @@ public static class LanguageManager
         ["Bookmark_Col_Note"] = "备注",
         ["Offset_Title"] = "偏移校准（相对第 1 路）",
         ["Offset_Value"] = "偏移: 0ms (0帧@24fps)",
+        ["Offset_ValueFmt"] = "偏移: {0}ms ({1:0.#}帧 @{2})",
         ["Offset_Align"] = "◎ 对齐于此帧",
         ["Offset_MsMinus"] = "◀ 100ms",
         ["Offset_MsPlus"] = "100ms ▶",
@@ -199,6 +201,7 @@ public static class LanguageManager
         ["Diff_SampleFail"] = "采样失败",
         ["Diff_LegendWeak"] = "弱差异",
         ["Diff_LegendStrong"] = "强差异",
+        ["Diff_PercentFmt"] = "差异 {0}/{1} 像素 ({2:0.0}%)",
         ["Thumbnail_Hint"] = "拖动时间轴预览帧",
         ["AbSlider_LaneFmt"] = "路 {0}",
         ["Grid_Empty"] = "点击「打开视频」或拖拽文件到此处\n支持 1~9 路对比",
@@ -257,6 +260,7 @@ public static class LanguageManager
         ["Msg_NativeLoadFailed"] = "✗ FFF.Native Load Failed",
         ["Msg_DemoModeTitle"] = "Missing Required Components",
         ["Msg_DemoModeMissingFfmpeg"] = "FFmpeg DLLs (avcodec etc.) not found. The real playback engine cannot start.",
+        ["Msg_DemoModeMissingNative"] = "FFF.Native failed to load. The real playback engine cannot start.",
 
         // Missing-FFmpeg guide dialog: custom buttons (MessageBox cannot localize button text)
         ["Msg_DemoModeClose"] = "Close",
@@ -337,6 +341,7 @@ public static class LanguageManager
         ["Bookmark_Col_Note"] = "Note",
         ["Offset_Title"] = "Offset Calibration (relative to Lane 1)",
         ["Offset_Value"] = "Offset: 0ms (0 frames @24fps)",
+        ["Offset_ValueFmt"] = "Offset: {0}ms ({1:0.#} frames @{2})",
         ["Offset_Align"] = "◎ Align Here",
         ["Offset_MsMinus"] = "◀ 100ms",
         ["Offset_MsPlus"] = "100ms ▶",
@@ -379,6 +384,7 @@ public static class LanguageManager
         ["Diff_SampleFail"] = "Sampling failed",
         ["Diff_LegendWeak"] = "Weak",
         ["Diff_LegendStrong"] = "Strong",
+        ["Diff_PercentFmt"] = "Diff {0}/{1} cells ({2:0.0}%)",
         ["Thumbnail_Hint"] = "Drag on the timeline to preview frames",
         ["AbSlider_LaneFmt"] = "Lane {0}",
         ["Grid_Empty"] = "Click Open Videos or drop files here\nSupports 1~9 way comparison",

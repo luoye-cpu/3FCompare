@@ -1,36 +1,251 @@
 using System;
 using System.IO;
-using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Interactivity;
-using Avalonia.Platform;
 using Avalonia.Platform.Storage;
+using Avalonia.VisualTree;
+using _3FCompare.Avalonia.Platform;
+using _3FCompare.Avalonia.ViewModels;
 using _3FCompare.Core.Backend;
+using _3FCompare.Core.Settings;
+using _3FCompare.App;
 
 namespace _3FCompare.Avalonia;
 
-/// <summary>M0 PoC 主窗体：
-/// PoC-A: NativeControlHost 承载 Win32 子窗口 + GDI 色块绘制 → 验证承载/焦点/DPI
-/// PoC-B: FFF.Native 真实会话输出到该子窗口 → selftest 等价验证</summary>
+/// <summary>主窗口（M1 骨架）：菜单/快捷键/窗口几何记忆/状态栏。
+/// 中央网格、传输栏、时间轴、侧栏为占位，M2/M3 实装。</summary>
 public partial class MainWindow : Window
 {
+    private readonly AppSettings _settings;
+    private readonly MainViewModel _vm = new();
+
     private HostSurface? _host;
     private IPlayerEngine? _engine;
     private IPlayerSession? _session;
     private bool _realMode;
+    private bool _fullscreen;
 
-    public MainWindow()
+    public MainWindow(AppSettings settings)
     {
+        _settings = settings;
         InitializeComponent();
-        AttachHost();
+
+        DataContext = _vm;
+        _vm.IsRealMode = _realMode = EngineFactory.IsNativeAvailable();
+        _vm.EngineLabel = LanguageManager.T(_realMode ? "Status_EngineReal" : "Status_EngineDemo");
+        StatusEngine.Text = _vm.EngineLabel;
+        StatusInfo.Text = LanguageManager.T(_realMode ? "Status_Ready" : "Status_DemoHint");
+
+        RestoreWindowGeometry();
+
+        // 拖放打开（M2 接入完整打开管线，此处先注册目标）
+        AddHandler(DragDrop.DragOverEvent, OnDragOver);
+        AddHandler(DragDrop.DropEvent, OnDrop);
 
         // 自动化 selftest 模式：进程命令行 --selftest <video>
-        // （注意：GetCommandLineArgs 返回进程原始参数，不是 StartWithClassicDesktopLifetime 转发的数组）
+        // （GetCommandLineArgs 返回进程原始参数，不是 StartWithClassicDesktopLifetime 转发的数组）
         var args = Environment.GetCommandLineArgs();
         if (args.Length >= 3 && args[1] == "--selftest")
             _ = RunSelftestAsync(args[2]);
     }
+
+    // ══════════ 窗口几何记忆（WinForms OnFormClosing 等价） ══════════
+
+    /// <summary>最近一次普通（非最大化/全屏）态的位置与尺寸。</summary>
+    private (PixelPoint Pos, Size Size)? _lastNormal;
+
+    private void RestoreWindowGeometry()
+    {
+        var screen = Screens.ScreenFromWindow(this) ?? Screens.Primary;
+        if (_settings.WindowWidth > 0 && _settings.WindowHeight > 0)
+        {
+            Width = _settings.WindowWidth;
+            Height = _settings.WindowHeight;
+            if (_settings.WindowX >= 0 && _settings.WindowY >= 0 && screen is not null)
+            {
+                // 钳制到工作区，避免恢复到已拔掉的显示器
+                var wa = screen.WorkingArea;
+                var x = Math.Clamp(_settings.WindowX, wa.X, wa.Right - 200);
+                var y = Math.Clamp(_settings.WindowY, wa.Y, wa.Bottom - 200);
+                Position = new PixelPoint(x, y);
+            }
+        }
+        if (_settings.WindowMaximized)
+            WindowState = WindowState.Maximized;
+    }
+
+    protected override void OnOpened(EventArgs e)
+    {
+        if (WindowState == WindowState.Normal)
+            _lastNormal = (Position, new Size(Width, Height));
+        base.OnOpened(e);
+    }
+
+    protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
+    {
+        base.OnPropertyChanged(change);
+        if (change.Property == WindowStateProperty && WindowState == WindowState.Normal)
+            _lastNormal = (Position, Bounds.Size);
+    }
+
+    protected override void OnClosing(WindowClosingEventArgs e)
+    {
+        var maximized = WindowState is WindowState.Maximized or WindowState.FullScreen;
+        _settings.WindowMaximized = WindowState == WindowState.Maximized;
+        var normal = _lastNormal ?? (Position, Bounds.Size);
+        if (normal.Size.Width > 0)
+        {
+            _settings.WindowX = normal.Pos.X;
+            _settings.WindowY = normal.Pos.Y;
+            _settings.WindowWidth = (int)normal.Size.Width;
+            _settings.WindowHeight = (int)normal.Size.Height;
+        }
+        SettingsStore.Save(_settings);
+        base.OnClosing(e);
+    }
+
+    // ══════════ 快捷键（WinForms ProcessCmdKey 全表复刻） ══════════
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        var mods = e.KeyModifiers;
+        switch (e.Key)
+        {
+            case Key.Space when mods == KeyModifiers.None:
+                TogglePlayPause(); break;
+            case Key.S when mods.HasFlag(KeyModifiers.Control):
+                OnExportFrame(this, e); break;
+            case Key.Left when mods == KeyModifiers.None:
+                StepFrames(-1); break;
+            case Key.Right when mods == KeyModifiers.None:
+                StepFrames(1); break;
+            case Key.Left when mods.HasFlag(KeyModifiers.Shift):
+                StepSeconds(-1); break;
+            case Key.Right when mods.HasFlag(KeyModifiers.Shift):
+                StepSeconds(1); break;
+            case Key.Up:
+                StepSeconds(10); break;
+            case Key.Down:
+                StepSeconds(-10); break;
+            case Key.F11:
+                ToggleFullscreen(); break;
+            case Key.Escape when _fullscreen:
+                ToggleFullscreen(); break;
+            case Key.O when mods == KeyModifiers.None:
+                OnOpenVideos(this, e); break;
+            case Key.B when mods == KeyModifiers.None:
+                OnToggleAbSlider(this, e); break;
+            case Key.P when mods == KeyModifiers.None:
+                OnToggleProbe(this, e); break;
+            case Key.F6:
+                OnToggleOffset(this, e); break;
+            case Key.R when mods == KeyModifiers.None:
+                ResetViewTransform(); break;
+            case Key.Delete:
+                RemoveSelectedBookmark(); break;
+            case Key.D1: GrowLanes(1); break;
+            case Key.D2: GrowLanes(2); break;
+            case Key.D3: GrowLanes(3); break;
+            case Key.D4: GrowLanes(4); break;
+            case Key.D5: GrowLanes(5); break;
+            case Key.D6: GrowLanes(6); break;
+            case Key.D7: GrowLanes(7); break;
+            case Key.D8: GrowLanes(8); break;
+            case Key.D9: GrowLanes(9); break;
+            default:
+                base.OnKeyDown(e);
+                return;
+        }
+        e.Handled = true;
+    }
+
+    // ══════════ 播放操作（M2 接 SyncController；M1 安全占位） ══════════
+
+    private void TogglePlayPause() => Pending("播放/暂停", "M2");
+    private void StepFrames(int delta) => Pending($"帧步进 {delta:+0;-0}", "M2");
+    private void StepSeconds(double delta) => Pending($"秒步进 {delta:+0.#;-0.#}", "M2");
+    private void ResetViewTransform() => Pending("视图重置", "M2");
+    private void GrowLanes(int upTo) => Pending($"路数 → {upTo}", "M2");
+    private void RemoveSelectedBookmark() => Pending("删除书签", "M3");
+
+    private void Pending(string what, string milestone) =>
+        StatusInfo.Text = $"{what} —— {milestone} 实装";
+
+    // ══════════ 菜单：文件 ══════════
+
+    private async void OnOpenVideos(object? sender, RoutedEventArgs e)
+    {
+        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = LanguageManager.T("Menu_Open"),
+            AllowMultiple = true,
+            FileTypeFilter = new[]
+            {
+                new FilePickerFileType("Media")
+                {
+                    Patterns = new[] { "*.mp4", "*.mkv", "*.mov", "*.webm", "*.avi", "*.ts", "*.m2ts", "*.flv", "*.wmv" },
+                },
+                FilePickerFileTypes.All,
+            },
+        });
+        if (files is not { Count: > 0 }) return;
+        // M2：接入多路打开管线（PlaybackCoordinator.OpenFiles）
+        var paths = string.Join(", ", files.Select(f => Path.GetFileName(f.TryGetLocalPath() ?? f.Name)));
+        StatusInfo.Text = $"已选择（M2 打开管线实装）：{paths}";
+    }
+
+    private void OnSaveSession(object? sender, RoutedEventArgs e) => Pending("保存会话", "M3");
+    private void OnLoadSession(object? sender, RoutedEventArgs e) => Pending("加载会话", "M3");
+    private void OnExportFrame(object? sender, RoutedEventArgs e) => Pending("导出当前帧", "M4");
+
+    private void OnExit(object? sender, RoutedEventArgs e) => Close();
+
+    // ══════════ 菜单：视图 ══════════
+
+    private void OnToggleSingleMulti(object? sender, RoutedEventArgs e) => Pending("单屏/多屏", "M2");
+    private void OnToggleAbSlider(object? sender, RoutedEventArgs e) => Pending("A-B 滑块", "M3");
+    private void OnToggleProbe(object? sender, RoutedEventArgs e) => Pending("像素探针", "M3");
+    private void OnToggleBookmarks(object? sender, RoutedEventArgs e) => Pending("书签", "M3");
+    private void OnToggleOffset(object? sender, RoutedEventArgs e) => Pending("偏移校准", "M3");
+    private void OnToggleMediaInfo(object? sender, RoutedEventArgs e) => Pending("媒体信息", "M3");
+    private void OnToggleDiff(object? sender, RoutedEventArgs e) => Pending("差异叠加", "M3");
+    private void OnToggleAudio(object? sender, RoutedEventArgs e) => Pending("音频", "M3");
+    private void OnGridPreset(object? sender, RoutedEventArgs e) => Pending("网格布局", "M2");
+
+    private void OnShowGridOnly(object? sender, RoutedEventArgs e)
+    {
+        // 复刻 WinForms「仅显示对比网格」：隐藏右侧工具栏（M3 起为完整侧栏切换）
+        SidebarHost.IsVisible = !SidebarHost.IsVisible;
+    }
+
+    private void OnToggleFullscreen(object? sender, RoutedEventArgs e) => ToggleFullscreen();
+
+    private void ToggleFullscreen()
+    {
+        _fullscreen = !_fullscreen;
+        WindowState = _fullscreen ? WindowState.FullScreen : WindowState.Normal;
+        // HideChromeInFullscreen：全屏时隐藏菜单/传输/时间轴（M2 接 settings 开关）
+    }
+
+    // ══════════ 菜单：设置 ══════════
+
+    private void OnOpenSettings(object? sender, RoutedEventArgs e) => Pending("设置", "M3");
+
+    // ══════════ 拖放（M2 接完整打开管线） ══════════
+
+    private void OnDragOver(object? sender, DragEventArgs e) =>
+        e.DragEffects = e.Data.Contains(DataFormats.Files) ? DragDropEffects.Copy : DragDropEffects.None;
+
+    private void OnDrop(object? sender, DragEventArgs e)
+    {
+        if (!e.Data.Contains(DataFormats.Files)) return;
+        var files = e.Data.GetFiles();
+        // M2：OpenFiles(files, autoPlay: true)
+    }
+
+    // ══════════ 自动化 selftest（M0 通路保持；M4 移植 --screentest/--autodemo） ══════════
 
     /// <summary>当前执行到的步骤名（自动化卡死诊断用）。</summary>
     private static volatile string _step = "启动";
@@ -41,7 +256,6 @@ public partial class MainWindow : Window
         Console.Out.Flush();
     }
 
-    /// <summary>PoC-B 自动化流程：等承载就绪→打开视频→等就绪→Play→验证状态→退出。</summary>
     private async System.Threading.Tasks.Task RunSelftestAsync(string videoPath)
     {
         // 看门狗：任一步骤卡死 25s 则带诊断信息退出（不无限挂起）
@@ -63,10 +277,17 @@ public partial class MainWindow : Window
         });
         try
         {
-            // 等 NativeControlHost 附件完成（AttachedToVisualTree 触发后 HWND 才有效）
             _step = "等HWND";
+            _host = new HostSurface();
+            // 折叠的 ContentControl 不会实例化子内容，自动化模式先置可见
+            HostContainer.IsVisible = true;
+            HostContainer.Content = _host;
             for (var i = 0; i < 50 && (_host?.Hwnd ?? 0) == 0; i++)
+            {
+                if (i % 10 == 0)
+                    Log($"等待中 i={i} HostVisible={HostContainer.IsVisible} Root={_host.GetVisualRoot() != null}");
                 await System.Threading.Tasks.Task.Delay(100);
+            }
             if ((_host?.Hwnd ?? 0) == 0)
                 throw new InvalidOperationException("子窗口 HWND 未创建（NativeControlHost 附件失败）");
 
@@ -84,13 +305,12 @@ public partial class MainWindow : Window
                 OutputWindow = _host.Hwnd,
                 HardwareDecode = false,
             });
-            Log("会话已创建 ✓（含 DXGI 显示器探测）");
+            Log("会话已创建 ✓");
 
             _step = "OpenAsync";
             await _session.OpenAsync(videoPath);
             Log("Open 调用返回");
 
-            // 等待后端真正就绪（与 WinForms 版相同的 3FP 异步 Open 时序处理）
             _step = "等就绪";
             var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
             while (DateTime.UtcNow < deadline)
@@ -125,187 +345,9 @@ public partial class MainWindow : Window
         }
         finally
         {
-            // 注意：Close() 在窗口未完全显示时不会终止 ClassicDesktopLifetime，
-            // 自动化模式直接强制退出，保证退出码与不挂起
+            // Close() 在窗口未完全显示时不会终止 ClassicDesktopLifetime，自动化模式直接强制退出
             Console.Out.Flush();
             Environment.Exit(Program.SelftestResult.Code);
         }
     }
-
-    // ---------- PoC-A: 承载子窗口 ----------
-
-    private void AttachHost()
-    {
-        _host = new HostSurface();
-        HostContainer.Content = _host;
-        StatusText.Text = $"PoC-A: 子窗口 HWND={_host.Hwnd} 已创建";
-    }
-
-    private void OnGdiTestClick(object? sender, RoutedEventArgs e)
-    {
-        if (_host is null || _host.Hwnd == 0) { StatusText.Text = "PoC-A 失败：无有效 HWND"; return; }
-        _host.DrawTestPattern();
-        StatusText.Text = "PoC-A ✓ GDI 色块已绘制到子窗口（若可见则承载成功）";
-    }
-
-    // ---------- PoC-B: 真实引擎接入 ----------
-
-    private async void OnOpenClick(object? sender, RoutedEventArgs e)
-    {
-        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
-        {
-            Title = "选择测试视频",
-            AllowMultiple = false,
-        });
-        if (files is { Count: > 0 })
-            OpenVideo(files[0].TryGetLocalPath() ?? "");
-    }
-
-    private async void OpenVideo(string path)
-    {
-        try
-        {
-            BtnOpen.IsEnabled = false;
-            _engine ??= EngineFactory.Create();
-            _realMode = _engine is Fff3FpEngine;
-            StatusText.Text = $"打开中… (模式={( _realMode ? "真实" : "演示" )})";
-
-            var hwnd = _host?.Hwnd ?? 0;
-            _session?.Dispose();
-            _session = _engine.CreateSession(new EngineSessionOptions
-            {
-                OutputWindow = hwnd,
-                HardwareDecode = false,
-            });
-
-            await _session.OpenAsync(path);
-
-            // 等待后端真正就绪（3FP 的 Open 是异步入队，与 WinForms 版相同的时序问题）
-            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
-            while (DateTime.UtcNow < deadline)
-            {
-                var snap = _session.ReadSnapshot();
-                if (snap.State is PlayerState.Ready or PlayerState.Playing or PlayerState.Paused) break;
-                if (snap.State == PlayerState.Failed) throw new IOException("内核打开失败");
-                await Task.Delay(100);
-            }
-
-            var snap2 = _session.ReadSnapshot();
-            StatusText.Text = $"PoC-B: 就绪 ✓ 状态={snap2.State} 时长={TimeSpan.FromTicks(snap2.Duration100ns):hh\\:mm\\:ss}";
-            BtnPlay.IsEnabled = true;
-        }
-        catch (Exception ex)
-        {
-            StatusText.Text = $"PoC-B ✗ {ex.Message}";
-        }
-        finally
-        {
-            BtnOpen.IsEnabled = true;
-        }
-    }
-
-    private void OnPlayClick(object? sender, RoutedEventArgs e)
-    {
-        try
-        {
-            _session?.Play();
-            var snap = _session!.ReadSnapshot();
-            StatusText.Text = $"播放指令已发 → 状态={snap.State}（Playing 即 PoC-B 全过）";
-        }
-        catch (Exception ex)
-        {
-            StatusText.Text = $"播放失败: {ex.Message}";
-        }
-    }
-}
-
-/// <summary>Win32 子窗口承载器：NativeControlHost 创建真实 HWND，
-/// 供原生 D3D 输出或 GDI 直接绘制。M0 核心验证对象。</summary>
-public sealed class HostSurface : NativeControlHost
-{
-    private IntPtr _hwnd;
-
-    public nint Hwnd => _hwnd;
-
-    public HostSurface()
-    {
-        // AttachedToLogicalTree 后才有顶层窗口，此时再创建子 HWND
-        AttachedToVisualTree += (_, _) =>
-        {
-            _hwnd = CreateChildWindow();
-            // NativeControlHost 的子控件定位由 QueryContinueChild/平台实现处理；
-            // PoC 阶段子窗口尺寸固定，后续 M2 再做跟随布局。
-        };
-        DetachedFromVisualTree += (_, _) => DestroyWindow(_hwnd);
-    }
-
-    /// <summary>创建子窗口并返回其 HWND（父 = Avalonia 顶层窗口）。</summary>
-    private IntPtr CreateChildWindow()
-    {
-        var topLevel = TopLevel.GetTopLevel(this);
-        var parent = topLevel?.TryGetPlatformHandle()?.Handle ?? GetActiveWindow();
-        if (parent == IntPtr.Zero)
-            throw new InvalidOperationException("无法获取 Avalonia 顶层 HWND");
-
-        const uint WS_CHILD = 0x40000000, WS_VISIBLE = 0x10000000, WS_CLIPSIBLINGS = 0x04000000;
-        var hwnd = CreateWindowExW(
-            0, "STATIC", null, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-            0, 0, 800, 450, parent, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
-
-        if (hwnd == IntPtr.Zero)
-            throw new InvalidOperationException($"CreateWindowEx 失败: {Marshal.GetLastWin32Error()}");
-        return hwnd;
-    }
-
-    /// <summary>PoC-A：GDI 绘制测试色块（渐变 + 文字），验证子窗口可见性与 DPI 缩放。</summary>
-    public void DrawTestPattern()
-    {
-        if (_hwnd == IntPtr.Zero) return;
-        var hdc = GetDC(_hwnd);
-        try
-        {
-            if (!GetClientRect(_hwnd, out var rc)) return;
-            int w = rc.Right - rc.Left, h = rc.Bottom - rc.Top;
-
-            using var g = System.Drawing.Graphics.FromHdc(hdc);
-            using var brush = new System.Drawing.Drawing2D.LinearGradientBrush(
-                new System.Drawing.Rectangle(0, 0, w, h),
-                System.Drawing.Color.FromArgb(30, 90, 200),
-                System.Drawing.Color.FromArgb(15, 15, 20), 45f);
-            g.FillRectangle(brush, 0, 0, w, h);
-            g.DrawString($"HWND 承载成功  {w}x{h}",
-                new System.Drawing.Font("Segoe UI", 16),
-                System.Drawing.Brushes.White, 24, 24);
-        }
-        finally
-        {
-            ReleaseDC(_hwnd, hdc);
-        }
-    }
-
-    // ---- Win32 P/Invoke（自声明，避免依赖 Avalonia internal API）----
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern IntPtr CreateWindowExW(
-        uint exStyle, string className, string? windowName, uint style,
-        int x, int y, int width, int height,
-        IntPtr parent, IntPtr menu, IntPtr instance, IntPtr param);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr GetActiveWindow();
-
-    [DllImport("user32.dll")]
-    private static extern bool DestroyWindow(IntPtr hwnd);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr GetDC(IntPtr hwnd);
-
-    [DllImport("user32.dll")]
-    private static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RECT { public int Left, Top, Right, Bottom; }
-
-    [DllImport("user32.dll")]
-    private static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
 }
