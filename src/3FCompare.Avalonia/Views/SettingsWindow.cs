@@ -68,6 +68,7 @@ public sealed class SettingsWindow : Window
         _vrrTearing.IsChecked = current.VrrTearingPresent;
         _vrrPacing.Content = LanguageManager.T("Vrr_PacingEnabled");
         _vrrPacing.IsChecked = current.VrrPacingEnabled;
+        ToolTip.SetTip(_vrrPacing, LanguageManager.T("Vrr_PacingHint"));
         _colorMode.Items.Add(LanguageManager.T("Color_SDR"));
         _colorMode.Items.Add(LanguageManager.T("Color_HDRAuto"));
         _colorMode.SelectedIndex = current.ColorMode == ColorModeSetting.MapToHdr ? 1 : 0;
@@ -88,7 +89,8 @@ public sealed class SettingsWindow : Window
         stack.Children.Add(Section(LanguageManager.T("Window_StartFullscreen"),
             Row(_startFullscreen, _hideChrome)));
         stack.Children.Add(Section(LanguageManager.T("Vrr_SectionTitle"),
-            Row(_vrrTearing, _vrrPacing), Hint(LanguageManager.T("Vrr_TearingHint"))));
+            _vrrTearing, _vrrPacing,
+            Hint(LanguageManager.T("Vrr_TearingHint")), Hint(LanguageManager.T("Vrr_PacingHint"))));
         stack.Children.Add(Section(LanguageManager.T("Status_Color"),
             Row(_colorMode)));
         stack.Children.Add(Section(LanguageManager.T("Layout_DefaultCols"),

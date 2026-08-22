@@ -12,28 +12,30 @@ public sealed class ThemeResources : global::Avalonia.Controls.ResourceDictionar
 {
     public ThemeResources()
     {
-        AddColor("BgColor", 24, 24, 28);
-        AddColor("PanelColor", 30, 30, 36);
-        AddColor("TextPrimaryColor", 255, 255, 255);
-        AddColor("TextSecondaryColor", 200, 200, 210);
-        AddColor("AccentColor", 255, 200, 64);
-        AddColor("SuccessColor", 100, 200, 100);
-        AddColor("WarningColor", 255, 180, 50);
-        AddColor("ErrorColor", 255, 100, 100);
-        AddColor("CanvasColor", 18, 18, 20);
-        AddColor("CanvasDarkColor", 10, 10, 12);
-        AddColor("ControlBgColor", 40, 40, 46);
-        AddColor("ControlBgLightColor", 45, 45, 52);
-        AddColor("InputBgColor", 36, 36, 42);
-        AddColor("InputBgAltColor", 50, 50, 58);
-        AddColor("ButtonActiveColor", 60, 90, 60);
-        AddColor("ButtonSecondaryColor", 60, 60, 66);
-        AddColor("BorderColor", 80, 80, 90);
-        AddColor("TextMutedColor", 140, 140, 150);
-        AddColor("SelectedBorderColor", 64, 160, 255);
-        AddColor("UnselectedBorderColor", 60, 60, 70);
-        AddColor("MarkerAColor", 255, 100, 100);
-        AddColor("MarkerBColor", 100, 100, 255);
+        // 颜色名与 XAML 画笔键名 {DynamicResource XxxBrush} 对应 ——
+        // AddColor 存入颜色 + 派生画笔 (s+"Brush")
+        AddColor("Bg", 24, 24, 28);             // → BgBrush
+        AddColor("Panel", 30, 30, 36);           // → PanelBrush
+        AddColor("TextPrimary", 255, 255, 255);  // → TextPrimaryBrush
+        AddColor("TextSecondary", 200, 200, 210); // → TextSecondaryBrush
+        AddColor("Accent", 255, 200, 64);         // → AccentBrush
+        AddColor("Success", 100, 200, 100);       // → SuccessBrush
+        AddColor("Warning", 255, 180, 50);        // → WarningBrush
+        AddColor("Error", 255, 100, 100);         // → ErrorBrush
+        AddColor("Canvas", 18, 18, 20);           // → CanvasBrush
+        AddColor("CanvasDark", 10, 10, 12);       // → CanvasDarkBrush
+        AddColor("ControlBg", 40, 40, 46);        // → ControlBgBrush
+        AddColor("ControlBgLight", 45, 45, 52);   // → ControlBgLightBrush
+        AddColor("InputBg", 36, 36, 42);          // → InputBgBrush
+        AddColor("InputBgAlt", 50, 50, 58);       // → InputBgAltBrush
+        AddColor("ButtonActive", 60, 90, 60);     // → ButtonActiveBrush
+        AddColor("ButtonSecondary", 60, 60, 66);  // → ButtonSecondaryBrush
+        AddColor("Border", 80, 80, 90);           // → BorderBrush
+        AddColor("TextMuted", 140, 140, 150);     // → TextMutedBrush
+        AddColor("SelectedBorder", 64, 160, 255); // → SelectedBorderBrush
+        AddColor("UnselectedBorder", 60, 60, 70); // → UnselectedBorderBrush
+        AddColor("MarkerA", 255, 100, 100);       // → MarkerABrush
+        AddColor("MarkerB", 100, 100, 255);       // → MarkerBBrush
 
         // 派生画笔（每个 Color 键派生同名 Brush 后缀键）
         foreach (var key in Keys.ToList())
