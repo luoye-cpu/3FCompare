@@ -1,14 +1,28 @@
 using Avalonia;
 using System;
 using System.IO;
+using System.Runtime.InteropServices;
 
 namespace _3FCompare;
 
 internal static class Program
 {
+    // 将子目录加入 DLL 搜索路径，使 ffmpeg 等 DLL 可从 exe 同级子目录加载
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool SetDllDirectory(string? lpPathName);
+
     [STAThread]
     public static void Main(string[] args)
     {
+        // 添加 ffmpeg 子目录到 DLL 搜索路径（发布包结构：ffmpeg/*.dll 与 exe 分开放置）
+        try
+        {
+            var ffmpegDir = Path.Combine(AppContext.BaseDirectory, "ffmpeg");
+            if (Directory.Exists(ffmpegDir))
+                SetDllDirectory(ffmpegDir);
+        }
+        catch { /* 忽略失败（非核心功能）*/ }
+
         // 内嵌 FFF.Native.dll 自解压（EmbedFffNative 发布形态；已存在则跳过）
         try
         {

@@ -135,8 +135,11 @@ public static partial class NativeRuntime
         {
             var appDir = AppContext.BaseDirectory;
             if (!Directory.Exists(appDir)) return false;
+            // 检查 exe 同级目录以及 ffmpeg/ 子目录（发布包结构）
             return Directory.GetFiles(appDir, "avcodec-*.dll").Length > 0
-                || Directory.GetFiles(appDir, "avcodec*.dll").Length > 0;
+                || Directory.GetFiles(appDir, "avcodec*.dll").Length > 0
+                || Directory.GetFiles(Path.Combine(appDir, "ffmpeg"), "avcodec-*.dll").Length > 0
+                || Directory.GetFiles(Path.Combine(appDir, "ffmpeg"), "avcodec*.dll").Length > 0;
         }
         catch
         {

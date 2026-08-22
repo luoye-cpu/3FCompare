@@ -73,13 +73,15 @@ function Invoke-Pack([string]$mode) {
     # Step 2/3: 复制 PLAN + FFmpeg 运行时 + 生成使用说明 (仅完整版)
     if ($mode -eq "full") {
         Write-Host "`n[2/4] 复制 PLAN 组件包 / Copy PLAN bundle..." -ForegroundColor Yellow
-        # 1) 将 FFmpeg DLL 复制到 exe 同级目录（FFF.Native Delay-Load 必需）
+        # 1) 将 FFmpeg DLL 复制到 ffmpeg/ 子目录（启动时 Program.SetDllDirectory 加入搜索路径）
+        $FfmpegDest = "$OutputDir\ffmpeg"
+        New-Item -ItemType Directory -Force -Path $FfmpegDest | Out-Null
         $FfmpegSrc = "$PublishDir\PLAN\ffmpeg-full"
         if (Test-Path $FfmpegSrc) {
             $ffDlls = @(Get-ChildItem "$FfmpegSrc\*.dll" -ErrorAction SilentlyContinue)
             if ($ffDlls.Count -gt 0) {
-                $ffDlls | ForEach-Object { Copy-Item $_.FullName $OutputDir -Force }
-                Write-Host "   ✅ FFmpeg DLL 已复制到程序目录（$($ffDlls.Count) 个）" -ForegroundColor Green
+                $ffDlls | ForEach-Object { Copy-Item $_.FullName "$FfmpegDest" -Force }
+                Write-Host "   ✅ FFmpeg DLL 已复制到 ffmpeg/ 子目录（$($ffDlls.Count) 个）" -ForegroundColor Green
             }
         } else {
             Write-Host "   ⚠️ FFmpeg 源目录不存在: $FfmpegSrc / FFmpeg source not found" -ForegroundColor Yellow
@@ -119,7 +121,7 @@ function Invoke-Pack([string]$mode) {
 📁 文件结构 / File Structure
   3FCompare.exe    — 主程序（NativeAOT 单文件，内嵌播放器内核）
                          Main executable (NativeAOT, embedded player kernel)
-  av*.dll / sw*.dll    — FFmpeg 编解码引擎（已在程序目录，无需配置）/ FFmpeg decoding engine (in program directory, no configuration needed)
+  av*.dll / sw*.dll    — FFmpeg 编解码引擎（在 ffmpeg/ 子目录）/ FFmpeg decoding engine (in ffmpeg/ subdirectory)
   ass-9.dll            — 字幕渲染引擎 / Subtitle rendering engine
   PLAN/ffmpeg-full/    — FFmpeg 归档副本（备份，通常无需使用）/ FFmpeg archive copy (backup, usually not needed)
 
@@ -136,8 +138,8 @@ function Invoke-Pack([string]$mode) {
 
 ❓ 常见问题 / FAQ
   Q: 提示"FFmpeg 不可用"？/ "FFmpeg unavailable"?
-  A: 完整版已内置 FFmpeg（DLL 在程序目录），通常不会出现此提示。
-     Full version includes FFmpeg DLLs in the program directory.
+  A: 完整版已内置 FFmpeg（DLL 在 ffmpeg/ 子目录），通常不会出现此提示。
+     Full version includes FFmpeg DLLs in the ffmpeg/ subdirectory.
      若出现，请打开设置（F25）→ FFmpeg 路径 → 选择程序目录或 PLAN/ffmpeg-full/，
      点击"测试探测"验证后保存。
      Otherwise, open Settings (F25) → FFmpeg Path → select program dir or PLAN/ffmpeg-full/,
