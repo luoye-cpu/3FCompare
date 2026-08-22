@@ -50,13 +50,12 @@ function Invoke-Pack([string]$mode) {
     if (Test-Path $OutputDir) { Remove-Item -Recurse -Force $OutputDir }
     New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
-    # Step 1: NativeAOT 发布（内嵌 FFF.Native.dll）/ NativeAOT publish (embedded FFF.Native.dll)
+    # Step 1: NativeAOT 发布（FFF.Native 已内嵌于 exe）/ NativeAOT publish (FFF.Native embedded in exe)
     Write-Host "`n[1/4] dotnet publish (NativeAOT)..." -ForegroundColor Yellow
     dotnet publish $AppProject `
         -c Release -r $Rid `
         -p:PublishAot=true `
         -p:SelfContained=true `
-        -p:EmbedFffNative=true `
         -p:Version=$Version `
         -o $OutputDir
     if ($LASTEXITCODE -ne 0) { throw "[$mode] 发布失败 / Publish failed" }

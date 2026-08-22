@@ -23,7 +23,7 @@ internal static class Program
         }
         catch { /* 忽略失败（非核心功能）*/ }
 
-        // 内嵌 FFF.Native.dll 自解压（EmbedFffNative 发布形态；已存在则跳过）
+        // 内嵌 FFF.Native.dll 自解压（3FP 播放器内核）
         try
         {
             _3FCompare.Core.Backend.NativeRuntime.ExtractEmbeddedDll(
@@ -32,6 +32,14 @@ internal static class Program
                     : null);
         }
         catch { /* 非内嵌形态（精简版/开发运行）：忽略 */ }
+
+        // 内嵌 Avalonia 原生 DLL 自解压（libSkiaSharp.dll / libHarfBuzzSharp.dll）
+        try
+        {
+            ExtractEmbedded("libSkiaSharp.dll");
+            ExtractEmbedded("libHarfBuzzSharp.dll");
+        }
+        catch { /* 忽略失败 */ }
 
         // --selftest <video>：打开→等就绪→步进断言→自动播放断言（WinForms 版语义一致）
         if (args.Length >= 2 && args[0] == "--selftest")
@@ -129,5 +137,18 @@ internal static class Program
         using var ms = new System.IO.MemoryStream();
         s.CopyTo(ms);
         return ms.ToArray();
+    }
+
+    /// <summary>将嵌入的资源 DLL 提取到应用目录（供 P/Invoke 加载）。</summary>
+    private static void ExtractEmbedded(string dllName)
+    {
+        var target = Path.Combine(AppContext.BaseDirectory, dllName);
+        if (File.Exists(target)) return; // 已存在则跳过
+        var asm = System.Reflection.Assembly.GetExecutingAssembly();
+        using var stream = asm.GetManifestResourceStream(dllName);
+        if (stream is null) return; // 未嵌入（开发运行或非内嵌发布）
+        var data = new byte[stream.Length];
+        stream.ReadExactly(data, 0, data.Length);
+        File.WriteAllBytes(target, data);
     }
 }

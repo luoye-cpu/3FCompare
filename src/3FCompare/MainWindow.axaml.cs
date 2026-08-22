@@ -453,11 +453,19 @@ public partial class MainWindow : Window
     /// <summary>PR 时间码的秒内帧号（1 起；帧率由快照时间基估算，缺省 24）。</summary>
     private static int FrameInSecond(EngineSnapshot snap)
     {
-        var fps = SyncController.EstimateFps(snap);
-        if (fps <= 0) return 0;
+        // 原生帧索引（0 起）
+        if (snap.FrameIndex >= 0)
+        {
+            var fps = SyncController.EstimateFps(snap);
+            if (fps <= 0) return 0;
+            return (int)(snap.FrameIndex % Math.Max(1, (int)Math.Round(fps)));
+        }
+        // 回退：从位置计算，0 起
+        var frameRate = SyncController.EstimateFps(snap);
+        if (frameRate <= 0) return 0;
         var sec = TimeSpan.TicksPerSecond;
         var frac = (double)(snap.Position100ns % sec) / sec;
-        return Math.Clamp((int)Math.Floor(frac * fps) + 1, 1, (int)Math.Round(fps));
+        return Math.Clamp((int)Math.Floor(frac * frameRate), 0, (int)Math.Round(frameRate) - 1);
     }
 
     private void UpdateStatus()

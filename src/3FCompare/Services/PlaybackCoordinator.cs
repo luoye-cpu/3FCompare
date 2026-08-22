@@ -123,6 +123,13 @@ public sealed class PlaybackCoordinator
                 surface.FileName = Path.GetFileName(path);
                 if (_realMode)
                     await WaitForOpenCompletionAsync(slot, surface);
+                // 播放中拖入新视频：同步到主时间轴当前位置
+                if (!slot.Failed && _sync.Count > 1)
+                {
+                    var masterPos = _sync.GetMasterPosition100ns();
+                    if (masterPos > 0)
+                        slot.Session.Seek(masterPos + slot.Offset100ns);
+                }
                 TryAutoPlayAfterOpen();
             }
         }

@@ -31,17 +31,27 @@
     <ProjectReference Include="..\3FCompare.Core\3FCompare.Core.csproj" />
   </ItemGroup>
 
-  <!-- 嵌入 FFF.Native.dll 实现单文件发布（完整版用；精简版发布时不包含此资源） -->
-  <ItemGroup Condition="'$(EmbedFffNative)' == 'true'">
+  <!-- 嵌入 FFF.Native.dll 实现单文件发布（3FP 播放器内核，始终内嵌） -->
+  <ItemGroup>
     <EmbeddedResource Include="..\..\third_party\fff_project\FFF.Native\x64\Release\FFF.Native.dll"
                       LogicalName="FFF.Native.dll" />
   </ItemGroup>
 
+  <!-- 嵌入 SkiaSharp 与 HarfBuzzSharp 原生 DLL，实现单文件发布（版本号与 deps.json 中的 resolved 版本一致） -->
+  <ItemGroup Condition="'$(NuGetPackageRoot)' != ''">
+    <EmbeddedResource Include="$(NuGetPackageRoot)skiasharp.nativeassets.win32\2.88.9\runtimes\win-x64\native\libSkiaSharp.dll"
+                      LogicalName="libSkiaSharp.dll" />
+    <EmbeddedResource Include="$(NuGetPackageRoot)harfbuzzsharp.nativeassets.win32\8.3.1.1\runtimes\win-x64\native\libHarfBuzzSharp.dll"
+                      LogicalName="libHarfBuzzSharp.dll" />
+  </ItemGroup>
+
   <!-- 本地化字符串与窗口帧捕获（自 App 项目迁入；命名空间保持 _3FCompare.App[.Capture] 不变以零改动引用） -->
 
-  <!-- 发布后删除 WGL 模式下不需要的 ANGLE DLL（节省 ~5.4MB） -->
+  <!-- 发布后删除多余的 DLL（已内嵌到 exe，无需单独分发） -->
   <Target Name="RemoveUnusedNativeDlls" AfterTargets="Publish">
     <Delete Files="$(PublishDir)av_libglesv2.dll" Condition="Exists('$(PublishDir)av_libglesv2.dll')" />
+    <Delete Files="$(PublishDir)libSkiaSharp.dll" Condition="Exists('$(PublishDir)libSkiaSharp.dll')" />
+    <Delete Files="$(PublishDir)libHarfBuzzSharp.dll" Condition="Exists('$(PublishDir)libHarfBuzzSharp.dll')" />
   </Target>
 
 </Project>

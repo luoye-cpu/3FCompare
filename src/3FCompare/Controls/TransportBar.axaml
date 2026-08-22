@@ -9,10 +9,10 @@
 
     <Button Grid.Column="0" x:Name="BtnPlayPause" Width="36" Height="28" Click="OnPlayPause" Content="▶" />
     <Button Grid.Column="1" x:Name="BtnStop" Width="36" Height="28" Click="OnStop" Content="■" Margin="4,0,0,0" />
-    <Button Grid.Column="2" x:Name="BtnFramePrev" Width="32" Height="28" Click="OnFramePrev" Content="◀◀" Margin="4,0,0,0" />
-    <Button Grid.Column="3" x:Name="BtnFrameNext" Width="32" Height="28" Click="OnFrameNext" Content="▶▶" Margin="4,0,0,0" />
-    <Button Grid.Column="4" x:Name="BtnSecPrev" Width="32" Height="28" Click="OnSecPrev" Content="◀" Margin="8,0,0,0" />
-    <Button Grid.Column="5" x:Name="BtnSecNext" Width="32" Height="28" Click="OnSecNext" Content="▶" Margin="4,0,0,0" />
+    <Button Grid.Column="2" x:Name="BtnFramePrev" Width="32" Height="28" Click="OnFramePrev" Content="◀" Margin="4,0,0,0" />
+    <Button Grid.Column="3" x:Name="BtnFrameNext" Width="32" Height="28" Click="OnFrameNext" Content="▶" Margin="4,0,0,0" />
+    <Button Grid.Column="4" x:Name="BtnSecPrev" Width="32" Height="28" Click="OnSecPrev" Content="◀◀" Margin="8,0,0,0" />
+    <Button Grid.Column="5" x:Name="BtnSecNext" Width="32" Height="28" Click="OnSecNext" Content="▶▶" Margin="4,0,0,0" />
     <Button Grid.Column="6" x:Name="BtnLoop" Width="36" Height="28" Click="OnLoop" Content="🔁" Margin="8,0,0,0" />
     <Button Grid.Column="7" x:Name="BtnAdd" Width="32" Height="28" Click="OnAdd" Content="+" Margin="8,0,0,0" />
     <Button Grid.Column="8" x:Name="BtnRemove" Width="32" Height="28" Click="OnRemove" Content="−" Margin="4,0,0,0" />
