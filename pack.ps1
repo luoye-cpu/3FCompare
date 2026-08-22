@@ -113,11 +113,11 @@ function Invoke-Pack([string]$mode) {
 
 🚀 快速开始 / Quick Start
   1. 解压所有文件到任意目录（保持文件夹结构完整）/ Extract to any directory
-  2. 双击运行 3FCompare.Avalonia.exe / Double-click 3FCompare.Avalonia.exe
+  2. 双击运行 3FCompare.exe / Double-click 3FCompare.exe
   3. 拖入视频文件即可开始对比 / Drag video files to start comparison
 
 📁 文件结构 / File Structure
-  3FCompare.Avalonia.exe    — 主程序（NativeAOT 单文件，内嵌播放器内核）
+  3FCompare.exe    — 主程序（NativeAOT 单文件，内嵌播放器内核）
                          Main executable (NativeAOT, embedded player kernel)
   av*.dll / sw*.dll    — FFmpeg 编解码引擎（已在程序目录，无需配置）/ FFmpeg decoding engine (in program directory, no configuration needed)
   ass-9.dll            — 字幕渲染引擎 / Subtitle rendering engine

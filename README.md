@@ -55,7 +55,7 @@
 src/
 ├── 3FCompare.slnx              # 解决方案（.NET 11 新格式）
 ├── 3FCompare.Core/             # 后端抽象 / 3FP P/Invoke / 演示引擎 / 同步 / 设置 / GPU 枚举 / DXGI 显示器能力
-├── 3FCompare.Avalonia/         # Avalonia 主程序（多路网格 / 双步进 / 时间轴 / 设置 / 全屏 / 对比工具 / 主题；
+├── 3FCompare/         # Avalonia 主程序（多路网格 / 双步进 / 时间轴 / 设置 / 全屏 / 对比工具 / 主题；
 │                               #   2026-08-22 由 WinForms 迁移而来，WinForms 版归档于 tag `winforms-final`）
 tests/
 ├── 3FCompare.SmokeTests/       # E3 冒烟（控制台，演示引擎全流程验证）
@@ -68,7 +68,7 @@ third_party/
 ```
 
 **里程碑状态 / Milestone**: ✅ 真实 3FP 内核全链路已验证（FFmpeg 解码 → D3D 渲染 → App 显示） / Real 3FP kernel pipeline verified (FFmpeg decode → D3D render → App display).
-✅ **NativeAOT 已启用 / Enabled**: `dotnet publish -c Release -r win-x64` → 原生单文件 `3FCompare.Avalonia.exe`
+✅ **NativeAOT 已启用 / Enabled**: `dotnet publish -c Release -r win-x64` → 原生单文件 `3FCompare.exe`
 （含 Skia/ANGLE 原生栈约 21MB；完整版内嵌 FFF.Native），
 真实视频渲染 + `--selftest` / `--screentest` 均验证通过；精简版 7z 分发 9.3MB。
 迁移纪要见 [docs/07-Avalonia迁移规划.md](docs/07-Avalonia迁移规划.md)。
@@ -108,10 +108,10 @@ powershell -ExecutionPolicy Bypass -File tools/构建全部.ps1
 dotnet test  tests/3FCompare.Core.Tests
 
 # 运行应用（有 FFF.Native 时真实模式，无则演示模式） / Run (real mode with FFF.Native, demo mode otherwise)
-dotnet run --project src/3FCompare.Avalonia
+dotnet run --project src/3FCompare
 
 # 演示模式体验（任意文件，合成画面） / Demo mode: any file, synthetic frames
-dotnet run --project src/3FCompare.Avalonia -- --autodemo &lt;文件...&gt;
+dotnet run --project src/3FCompare -- --autodemo &lt;文件...&gt;
 
 # E3 冒烟（真实/演示自动切换） / E3 smoke test (auto real/demo mode)
 dotnet run --project tests/3FCompare.SmokeTests -- &lt;视频&gt; [更多视频...]
