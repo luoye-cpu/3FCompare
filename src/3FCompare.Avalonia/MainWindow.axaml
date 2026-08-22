@@ -1,6 +1,7 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:loc="using:_3FCompare.Avalonia.Localization"
+        xmlns:ctrl="using:_3FCompare.Avalonia.Controls"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d" d:DesignWidth="1600" d:DesignHeight="900"
@@ -11,7 +12,7 @@
 
   <DockPanel>
 
-    <!-- ══════════ 菜单栏 ══════════ -->
+    <!-- 菜单栏 -->
     <Menu DockPanel.Dock="Top" x:Name="MenuMain">
       <MenuItem Header="{loc:Loc Menu_File}">
         <MenuItem Header="{loc:Loc Menu_Open}" InputGesture="Ctrl+O" Click="OnOpenVideos" />
@@ -47,7 +48,7 @@
       </MenuItem>
     </Menu>
 
-    <!-- ══════════ 底部：状态栏 ══════════ -->
+    <!-- 底部：状态栏 -->
     <Border DockPanel.Dock="Bottom" Height="24" Background="{DynamicResource PanelBrush}"
             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0"
             Padding="8,0">
@@ -61,33 +62,26 @@
       </DockPanel>
     </Border>
 
-    <!-- ══════════ 底部：时间轴占位（M2 TimelineView 实装） ══════════ -->
-    <Border DockPanel.Dock="Bottom" Height="34" Background="{DynamicResource CanvasDarkBrush}"
-            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0"
-            x:Name="TimelineHost" />
+    <!-- 底部：时间轴 -->
+    <Border DockPanel.Dock="Bottom" x:Name="TimelineHost" Height="34"
+            Background="{DynamicResource CanvasDarkBrush}"
+            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" />
 
-    <!-- ══════════ 底部：传输栏占位（M2 TransportBar 实装） ══════════ -->
-    <Border DockPanel.Dock="Bottom" Height="44" Background="{DynamicResource PanelBrush}"
-            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0"
-            x:Name="TransportHost" />
+    <!-- 底部：传输栏 -->
+    <Border DockPanel.Dock="Bottom" x:Name="TransportHost" Height="44"
+            Background="{DynamicResource PanelBrush}"
+            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" />
 
-    <!-- ══════════ 右侧：工具侧栏占位（M3 实装 5 页签） ══════════ -->
-    <Border DockPanel.Dock="Right" Width="240" Background="{DynamicResource PanelBrush}"
-            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1,0,0,0"
-            x:Name="SidebarHost">
+    <!-- 右侧：工具侧栏占位（M3 实装 5 页签） -->
+    <Border DockPanel.Dock="Right" x:Name="SidebarHost" Width="240"
+            Background="{DynamicResource PanelBrush}"
+            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1,0,0,0">
       <TextBlock Text="{loc:Loc Tab_Probe}" Foreground="{DynamicResource TextMutedBrush}"
                  HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="13" />
     </Border>
 
-    <!-- ══════════ 中央：对比网格占位（M2 CompareGridView 实装） ══════════ -->
-    <Panel x:Name="GridArea" Background="{DynamicResource CanvasDarkBrush}" ClipToBounds="True">
-      <TextBlock Text="{loc:Loc Grid_Empty}" Foreground="{DynamicResource TextMutedBrush}"
-                 HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="16"
-                 TextAlignment="Center" />
-      <!-- M2 前的自动化承载位：selftest 模式需要子 HWND -->
-      <ContentControl x:Name="HostContainer" IsVisible="False"
-                      HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
-    </Panel>
+    <!-- 中央：对比网格 -->
+    <ctrl:CompareGridView x:Name="Grid" ClipToBounds="True" />
 
   </DockPanel>
 </Window>

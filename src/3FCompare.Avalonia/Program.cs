@@ -27,7 +27,7 @@ internal static class Program
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"selftest: 异常 {ex.Message}");
+            Console.Error.WriteLine($"selftest: 异常 {ex}");
             exitCode = 2;
         }
         Environment.Exit(exitCode);

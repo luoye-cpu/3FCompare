@@ -78,13 +78,20 @@
 - [x] 快捷键系统（OnKeyDown 复刻 ProcessCmdKey 全表：Space/Ctrl+S/←→/Shift+←→/↑↓/F11/Esc/O/B/P/F6/R/Delete/D1-D9）
 - [x] 窗口几何记忆（位置/尺寸/最大化，恢复时钳制工作区）
 
-### M2 — 核心播放面（2 周）
-- [ ] PlayerSurfaceHost（NativeControlHost 封装，M0 PoC 产品化）
-- [ ] CompareGridView（ItemsControl + UniformGrid 布局，SetGridLayout 预设逻辑复用 Core.Display.GridLayout）
-- [ ] SyncController 接线：OpenFiles/自动播放等待逻辑照搬（WaitForOpenCompletionAsync 是纯逻辑，几乎原样迁移）
-- [ ] TransportBar（axaml 组合按钮 + 绑定）
-- [ ] TimelineView（SkiaSharp 自绘控件：刻度/播放头/循环区间/ScrubPreview 事件）
-- [ ] 轮询快照机制移植（DispatcherTimer 替代 WinForms Timer）
+### M2 — 核心播放面（2 周）✅ 2026-08-22
+- [x] PlayerSurfaceHost：NativeControlHost 生产版——`CreateNativeControlCore` 托管定位/尺寸/DPI；
+      子窗口 `WS_EX_TRANSPARENT` 使输入穿透回 Avalonia（解决 airspace 吞输入，滚轮/拖拽/点击直达）；
+      覆盖层经子类化 WndProc GDI 画于 WM_PAINT（与 WinForms 相同的 D3D 窗口信息层模式）
+- [x] CompareGridView：自定义 Control + Core.Display.GridLayout 布局复用、点击选中、单屏模式、
+      2x1/2x2/3x3/Auto 预设、空态本地化提示
+- [x] SyncController 接线：PlaybackCoordinator 完整移植（OpenFiles 9 路钳制 / WaitForOpenCompletionAsync
+      15s 轮询 / TryAutoPlayAfterOpen 计数+回调队列 / EngineEvent Dispatcher 编组 / 失败路标记）
+- [x] TransportBar（axaml 组合：双步进/循环/加减路/倍速/色彩模式/HH:MM:SS:FF 时间码）
+- [x] TimelineView（DrawingContext 自绘：刻度/播放头/循环区间/ScrubPreview 节流/右键设 A/B/A/B 键）
+- [x] 轮询快照（DispatcherTimer 16/250ms 自适应、TickLoop 回绕、真实模式伪倍速纠正 Seek）
+- [x] 文件打开（FilePicker 多选）+ 拖放；滚轮缩放（1.15/格，1..32）+ 拖拽平移广播 SetViewTransform；
+      快捷键全表接真实操作；全屏 HideChromeInFullscreen；状态栏全量信息
+- 验证：--selftest 走真实管线全过（就绪等待/帧步进与秒步进位置不后退断言/媒体信息/自动播放），退出码 0
 
 ### M3 — 工具面板与对话框（2 周）
 - [ ] 侧边栏 VerticalDockHost → axaml TabControl/Expander 组合 + 拖宽 Splitter
