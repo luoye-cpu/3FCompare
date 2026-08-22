@@ -27,6 +27,11 @@ public sealed class AppSettings
 
     public int DefaultGridRows { get; set; } = 1;
 
+    /// <summary>VRR 低延迟呈现（内核扩展，F27）：tearing=true 时 Present(0, ALLOW_TEARING)，
+    /// 让 G-SYNC/FreeSync 显示器按自身节奏扫描输出。默认 false = VSync 锁定（无撕裂，
+    /// 盯帧对比推荐）。显示器链不支持时自动回退 VSync。</summary>
+    public bool VrrTearingPresent { get; set; }
+
     /// <summary>窗口记忆：上次位置/尺寸/最大化状态（F27 窗口模式管理）。</summary>
     public int WindowX { get; set; } = -1;
 

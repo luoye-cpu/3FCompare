@@ -174,6 +174,14 @@
   VRR 路径**（Present(1,0) VSync 锁定、无 ALLOW_TEARING，A8/A9 结论不变）。
   注意：fff_project 已非 submodule（普通 clone），`tools/更新内核.ps1` 的 submodule 分支失效需手工 pull；
   `tools/patches/` 为空，无补丁冲突风险。
+- 2026-08-22: **VRR 补丁落地（docs/03 §6 首个自研内核补丁）**。`FFF3FP_SetPresentConfig(player, enableTearing)`：
+  交换链在系统支持时恒带 `ALLOW_TEARING` 创建标记（运行时切换无需重建链），开启后
+  `Present(0, DXGI_PRESENT_ALLOW_TEARING)` 让 G-SYNC/FreeSync 显示器按自身节奏扫描输出。
+  Core 透传：`IPlayerSession.SetPresentConfig` / `EngineSessionOptions.TearingPresent` /
+  `AppSettings.VrrTearingPresent` + 设置窗「VRR 低延迟呈现」开关（默认关，盯帧对比推荐关）。
+  补丁文件 `tools/patches/0001-vrr-tearing-present-config.patch`（151 行 / 6 文件，已应用并打标记）。
+  实测：本机显示链报告支持撕裂，selftest 全程跑撕裂路径全绿；screentest 正常。
+  未做（A9 部分）：逐媒体帧率的刷新率调谐。
 - 2026-08-22: M1 完成期间发现本机 .NET 11 预览运行时（11.0.100-preview.6）两个工程级坑：
   ① App.axaml 内嵌 `<Application.Resources>/<Application.Styles>` 会使编译 XAML 按类型查找失败
     （「No precompiled XAML found for App」）——规避：App.axaml 保持空，主题经 ThemeResources 代码装配；

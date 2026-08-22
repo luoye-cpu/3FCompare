@@ -222,6 +222,10 @@ internal static partial class Fff3FpNative
         uint colorMode, float sdrPeakNits, float hdrPeakNits, float sdrPaperWhiteNits,
         uint forceHdrOutput);
 
+    // 3FCompare 扩展（VRR 低延迟呈现）：1 = Present(0, ALLOW_TEARING)，0 = VSync 锁定
+    [LibraryImport(DllName)]
+    internal static partial FffResult FFF3FP_SetPresentConfig(nint player, uint enableTearing);
+
     // ---- 读取 ----
 
     [LibraryImport(DllName)]

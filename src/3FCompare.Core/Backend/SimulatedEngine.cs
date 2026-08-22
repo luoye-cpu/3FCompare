@@ -131,6 +131,8 @@ public sealed class SimulatedEngine : IPlayerEngine
 
         public void SetColorMode(ColorMode mode) { /* 演示模式略过 */ }
 
+        public bool SetPresentConfig(bool tearing) => !tearing; // 演示模式无呈现链，仅"关闭"语义成立
+
         public void SetViewTransform(float zoom, float panX, float panY) { /* 演示模式略过 */ }
 
         public EngineSnapshot ReadSnapshot()

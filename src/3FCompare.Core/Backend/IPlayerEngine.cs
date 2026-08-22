@@ -41,6 +41,11 @@ public interface IPlayerSession : IDisposable
     /// <summary>设置色彩模式（MapToSdr/RawHdrAsSdr/MapToHdr）。运行时切换 HDR/SDR。</summary>
     void SetColorMode(ColorMode mode);
 
+    /// <summary>设置呈现节奏（内核扩展：VRR/G-SYNC 低延迟路径）。
+    /// tearing=true 选择 Present(0, ALLOW_TEARING)（显示器按自身节奏扫描输出）；
+    /// false 保持 VSync 锁定。显示器/驱动不支持时静默保持 VSync（返回值仅提示）。</summary>
+    bool SetPresentConfig(bool tearing);
+
     /// <summary>设置视口变换（缩放 + 平移）。zoom=1.0 表示适应窗口；
     /// panX/panY 为相对未缩放视频框的归一化偏移 [-1,1]。</summary>
     void SetViewTransform(float zoom, float panX, float panY);
@@ -77,6 +82,11 @@ public sealed record EngineSessionOptions
     /// 绕过显示器 HDR 能力门控（针对亮度字段缺失的电视/虚拟显示器）；
     /// 不影响"SDR 源强制回 SDR"的内容门控。默认 false = 按显示器探测结果自动降级。</summary>
     public bool ForceHdrOutput { get; init; }
+
+    /// <summary>VRR 低延迟呈现（内核扩展）： tearing=true 选择 Present(0, ALLOW_TEARING)，
+    /// 让 G-SYNC/FreeSync 显示器按自身节奏扫描输出；false 保持 VSync 锁定（无撕裂）。
+    /// 显示器链不支持时静默保持 VSync。盯帧对比场景建议保持 false。</summary>
+    public bool TearingPresent { get; init; }
 }
 
 /// <summary>解码适配器信息（用于多显卡指定，F26/A11）。</summary>

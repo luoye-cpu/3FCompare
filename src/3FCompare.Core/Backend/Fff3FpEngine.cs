@@ -50,8 +50,10 @@ public sealed class Fff3FpEngine : IPlayerEngine
 
         session.AttachHandle(handle);
 
-        // 创建会话后立即设置智能参数
+        // 创建会话后立即设置智能参数与呈现节奏
         session.ApplyToneMappingParameters(options.ColorMode, options.OutputWindow, options.ForceHdrOutput);
+        if (options.TearingPresent)
+            session.SetPresentConfig(true); // 不支持时静默保持 VSync（返回值忽略）
 
         return session;
     }
@@ -192,6 +194,15 @@ public sealed class Fff3FpEngine : IPlayerEngine
                 _options.ForceHdrOutput ? 1u : 0u);
             if (result != FffResult.Success)
                 throw new EngineException((int)result, $"SetColorMode 失败: {result}");
+        }
+
+        /// <summary>设置呈现节奏（内核扩展：VRR/G-SYNC 低延迟路径）。
+        /// 返回 false 表示显示器链不支持撕裂（已静默保持 VSync 锁定）。</summary>
+        public bool SetPresentConfig(bool tearing)
+        {
+            ThrowIfDisposed();
+            var result = Fff3FpNative.FFF3FP_SetPresentConfig(_handle, tearing ? 1u : 0u);
+            return result == FffResult.Success;
         }
 
         public void SetViewTransform(float zoom, float panX, float panY)

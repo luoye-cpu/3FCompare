@@ -83,6 +83,7 @@ public sealed class PlaybackCoordinator
                     HardwareDecode = _settings.HardwareDecode,
                     PreferredAdapterIndex = _settings.PreferredAdapterIndex,
                     ColorMode = (ColorMode)_settings.ColorMode,
+                    TearingPresent = _settings.VrrTearingPresent,
                 });
                 surface.AttachSession(session);
                 _sync.AddSlot(session, path);

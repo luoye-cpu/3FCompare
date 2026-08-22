@@ -24,6 +24,7 @@ public sealed class SettingsWindow : Window
     private readonly NumericUpDown _secStep = new() { Minimum = 1, Maximum = 1200, Increment = 0.5m, FormatString = "0.#" };
     private readonly CheckBox _startFullscreen = new();
     private readonly CheckBox _hideChrome = new() { IsChecked = true };
+    private readonly CheckBox _vrrTearing = new();
     private readonly ComboBox _colorMode = new();
     private readonly NumericUpDown _cols = new() { Minimum = 1, Maximum = 3, Increment = 1 };
     private readonly NumericUpDown _rows = new() { Minimum = 1, Maximum = 3, Increment = 1 };
@@ -61,6 +62,9 @@ public sealed class SettingsWindow : Window
         _startFullscreen.IsChecked = current.StartFullscreen;
         _hideChrome.Content = LanguageManager.T("Window_HideChrome");
         _hideChrome.IsChecked = current.HideChromeInFullscreen;
+        _vrrTearing.Content = LanguageManager.T("Vrr_TearingPresent");
+        ToolTip.SetTip(_vrrTearing, LanguageManager.T("Vrr_TearingHint"));
+        _vrrTearing.IsChecked = current.VrrTearingPresent;
         _colorMode.Items.Add(LanguageManager.T("Color_SDR"));
         _colorMode.Items.Add(LanguageManager.T("Color_HDRAuto"));
         _colorMode.SelectedIndex = current.ColorMode == ColorModeSetting.MapToHdr ? 1 : 0;
@@ -80,6 +84,8 @@ public sealed class SettingsWindow : Window
                 Label(LanguageManager.T("Stepping_StepBySecond")), _secStep)));
         stack.Children.Add(Section(LanguageManager.T("Window_StartFullscreen"),
             Row(_startFullscreen, _hideChrome)));
+        stack.Children.Add(Section(LanguageManager.T("Vrr_SectionTitle"),
+            Row(_vrrTearing), Hint(LanguageManager.T("Vrr_TearingHint"))));
         stack.Children.Add(Section(LanguageManager.T("Status_Color"),
             Row(_colorMode)));
         stack.Children.Add(Section(LanguageManager.T("Layout_DefaultCols"),
@@ -162,12 +168,14 @@ public sealed class SettingsWindow : Window
         var color = _colorMode.SelectedIndex == 1 ? ColorModeSetting.MapToHdr : ColorModeSetting.MapToSdr;
         var cols = (int)(_cols.Value ?? 2);
         var rows = (int)(_rows.Value ?? 1);
+        var vrrTearing = _vrrTearing.IsChecked == true;
         var ffmpeg = string.IsNullOrWhiteSpace(_ffmpegDir.Text) ? null : _ffmpegDir.Text.Trim();
 
         var changed = lang != _orig.Language || hw != _orig.HardwareDecode || adapter != _orig.PreferredAdapterIndex
             || frame != _orig.FrameStep || Math.Abs(sec - _orig.SecondsStep) > 0.001
             || startFs != _orig.StartFullscreen || hideChrome != _orig.HideChromeInFullscreen
             || color != _orig.ColorMode || cols != _orig.DefaultGridCols || rows != _orig.DefaultGridRows
+            || vrrTearing != _orig.VrrTearingPresent
             || ffmpeg != _orig.FfmpegDirectory;
         FfmpegChanged = ffmpeg != _orig.FfmpegDirectory;
 
@@ -186,6 +194,7 @@ public sealed class SettingsWindow : Window
                 HideChromeInFullscreen = hideChrome,
                 DefaultGridCols = cols,
                 DefaultGridRows = rows,
+                VrrTearingPresent = vrrTearing,
                 WindowX = _orig.WindowX, WindowY = _orig.WindowY,
                 WindowWidth = _orig.WindowWidth, WindowHeight = _orig.WindowHeight,
                 WindowMaximized = _orig.WindowMaximized,

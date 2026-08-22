@@ -218,6 +218,10 @@ public static class LanguageManager
         ["Filter_Bookmark"] = "JSON|*.json|CSV|*.csv",
         ["Audio_TrackFmt"] = "轨 {0}: {1} ({2}ch)",
         ["Audio_NoTrack"] = "无音轨",
+        // VRR 呈现（内核扩展 F27）
+        ["Vrr_SectionTitle"] = "VRR / 可变刷新率",
+        ["Vrr_TearingPresent"] = "VRR 低延迟呈现 (G-SYNC/FreeSync，实验)",
+        ["Vrr_TearingHint"] = "开启后以 Present(0+ALLOW_TEARING) 呈现，让 G-SYNC/FreeSync 显示器按自身节奏扫描输出（可消除 24fps 内容的 3:2 抖动）。显示器或驱动不支持时自动回退 VSync 锁定。盯帧逐帧对比建议关闭。对新打开的会话生效。",
     };
 
     // 英文文本
@@ -401,6 +405,10 @@ public static class LanguageManager
         ["Filter_Bookmark"] = "JSON|*.json|CSV|*.csv",
         ["Audio_TrackFmt"] = "Track {0}: {1} ({2}ch)",
         ["Audio_NoTrack"] = "No Audio Track",
+        // VRR present (kernel extension F27)
+        ["Vrr_SectionTitle"] = "VRR / Variable Refresh Rate",
+        ["Vrr_TearingPresent"] = "VRR low-latency present (G-SYNC/FreeSync, experimental)",
+        ["Vrr_TearingHint"] = "When enabled, frames are presented with Present(0+ALLOW_TEARING) so a G-SYNC/FreeSync display scans out on its own schedule (removes 3:2 judder for 24fps content). Falls back to vsync lock when the display chain does not support tearing. Recommended off for frame-by-frame comparison. Applies to newly opened sessions.",
     };
 
     public static string T(string key)

@@ -869,6 +869,7 @@ public partial class MainWindow : Window
         _settings.HideChromeInFullscreen = s.HideChromeInFullscreen;
         _settings.DefaultGridCols = s.DefaultGridCols;
         _settings.DefaultGridRows = s.DefaultGridRows;
+        _settings.VrrTearingPresent = s.VrrTearingPresent;
         _settings.Language = s.Language;
     }
 
@@ -1088,6 +1089,11 @@ public partial class MainWindow : Window
             }
             if (_realMode && _sync.ReadMasterSnapshot() is not { State: PlayerState.Playing })
                 throw new InvalidOperationException($"自动播放未启动（状态={_sync.ReadMasterSnapshot()?.State}）");
+
+            // VRR 呈现路径覆盖：开启撕裂模式并记录支持状态（不支持则静默回退 VSync）
+            _step = "VRR 呈现";
+            var vrrSupported = _sync.Slots[0].Session.SetPresentConfig(true);
+            Log($"VRR 撕裂呈现: {(vrrSupported ? "显示器链支持 ✓" : "不支持 → 保持 VSync 锁定")}");
 
             // 帧步进 +1：位置不得后退（真实模式）
             _step = "帧步进";
