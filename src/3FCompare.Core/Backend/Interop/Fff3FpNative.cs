@@ -58,7 +58,7 @@ internal enum FffPlayerState : uint
     Closed = 7,
 }
 
-/// <summary>FFF3FPConfiguration 序列表（字段布局需在拿到 fork 工程后对照 FFF.Player.Api.h 校准）。</summary>
+/// <summary>FFF3FPConfiguration 序列表（对照 FFF.Player.Api.h v12 逐字段对齐）。</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal struct Fff3FpConfiguration
 {
@@ -73,7 +73,8 @@ internal struct Fff3FpConfiguration
     public nint AudioEndpointIdUtf8;
     public nint EventCallback;
     public nint EventCallbackContext;
-    public uint VideoScalingQuality; // 新增 v11: 0=Balanced, 1=HighQuality
+    public uint VideoScalingQuality; // FFF3FPVideoScalingQuality: 0=Balanced, 1=HighQuality
+    public uint ForceHdrOutput;      // 新增 v12: 非 0 = 强制尝试 scRGB HDR 链（绕过显示器能力门控）
 }
 
 /// <summary>FFF3FPSnapshot 完整布局（对照 FFF.Player.Api.h v8，逐字段对齐）。</summary>
@@ -218,7 +219,8 @@ internal static partial class Fff3FpNative
 
     [LibraryImport(DllName)]
     internal static partial FffResult FFF3FP_SetColorMode(nint player,
-        uint colorMode, float sdrPeakNits, float hdrPeakNits, float sdrPaperWhiteNits);
+        uint colorMode, float sdrPeakNits, float hdrPeakNits, float sdrPaperWhiteNits,
+        uint forceHdrOutput);
 
     // ---- 读取 ----
 

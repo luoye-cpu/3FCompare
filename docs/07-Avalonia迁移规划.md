@@ -167,6 +167,13 @@
 - 2026-08-22: **迁移完成（M0–M5 单日全通过）**。WinForms 版删除前归档 tag `winforms-final`。
   双轨链接的 LanguageManager/WgcFrameCapture 迁入 Avalonia 项目。AbSlider/DiffOverlay 与 WinForms
   保持同样的「占位画面/直接采样」语义（真实 D3D 内容合成进对比视图留待内核共享纹理接口，属后续增强）。
+- 2026-08-22: **内核升级至上游 2026.8.20（2fbd242）**，API 契约 v11→v12：`FFF3FPConfiguration` 新增
+  `forceHdrOutput` 字段、`FFF3FP_SetColorMode` 新增第 4 参数；Core 互操作同步（`EngineSessionOptions.ForceHdrOutput`
+  默认 false，UI 暴露留作后续）。新内核语义：绕过显示器 HDR 能力门控（针对亮度字段缺失的电视），
+  且亮度字段缺失不再阻断 scRGB 链进入（部分电视上报 PQ 桌面但亮度全 0）。**确认最新内核仍无任何
+  VRR 路径**（Present(1,0) VSync 锁定、无 ALLOW_TEARING，A8/A9 结论不变）。
+  注意：fff_project 已非 submodule（普通 clone），`tools/更新内核.ps1` 的 submodule 分支失效需手工 pull；
+  `tools/patches/` 为空，无补丁冲突风险。
 - 2026-08-22: M1 完成期间发现本机 .NET 11 预览运行时（11.0.100-preview.6）两个工程级坑：
   ① App.axaml 内嵌 `<Application.Resources>/<Application.Styles>` 会使编译 XAML 按类型查找失败
     （「No precompiled XAML found for App」）——规避：App.axaml 保持空，主题经 ThemeResources 代码装配；

@@ -72,6 +72,11 @@ public sealed record EngineSessionOptions
 
     /// <summary>色彩模式（映射 SDR / 原始 HDR / PQ HDR）。</summary>
     public ColorMode ColorMode { get; init; } = ColorMode.MapToSdr;
+
+    /// <summary>强制尝试 scRGB HDR 输出（内核 v12）。
+    /// 绕过显示器 HDR 能力门控（针对亮度字段缺失的电视/虚拟显示器）；
+    /// 不影响"SDR 源强制回 SDR"的内容门控。默认 false = 按显示器探测结果自动降级。</summary>
+    public bool ForceHdrOutput { get; init; }
 }
 
 /// <summary>解码适配器信息（用于多显卡指定，F26/A11）。</summary>

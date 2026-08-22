@@ -8,7 +8,7 @@ namespace _3FCompare.Core.Backend;
 /// <summary>3FP 后端适配器（基于 fork 的 FFF.Native，MIT）。</summary>
 public sealed class Fff3FpEngine : IPlayerEngine
 {
-    private const uint ConfigVersion = 11;
+    private const uint ConfigVersion = 12;
 
     public IReadOnlyList<AdapterInfo> EnumerateAdapters()
     {
@@ -38,6 +38,7 @@ public sealed class Fff3FpEngine : IPlayerEngine
             EventCallback = session.Callback,
             EventCallbackContext = session.CallbackContext,
             VideoScalingQuality = 1, // HighQuality
+            ForceHdrOutput = options.ForceHdrOutput ? 1u : 0u, // v12：强制尝试 scRGB HDR 链
         };
 
         var result = Fff3FpNative.FFF3FP_Create(in config, out var handle);
@@ -50,7 +51,7 @@ public sealed class Fff3FpEngine : IPlayerEngine
         session.AttachHandle(handle);
 
         // 创建会话后立即设置智能参数
-        session.ApplyToneMappingParameters(options.ColorMode, options.OutputWindow);
+        session.ApplyToneMappingParameters(options.ColorMode, options.OutputWindow, options.ForceHdrOutput);
 
         return session;
     }
@@ -187,7 +188,8 @@ public sealed class Fff3FpEngine : IPlayerEngine
                 : null;
             var config = ToneMappingParameters.Calculate(mode, displayCapabilities, contentIsHdr);
 
-            var result = Fff3FpNative.FFF3FP_SetColorMode(_handle, (uint)mode, config.SdrPeakNits, config.HdrPeakNits, config.PaperWhiteNits);
+            var result = Fff3FpNative.FFF3FP_SetColorMode(_handle, (uint)mode, config.SdrPeakNits, config.HdrPeakNits, config.PaperWhiteNits,
+                _options.ForceHdrOutput ? 1u : 0u);
             if (result != FffResult.Success)
                 throw new EngineException((int)result, $"SetColorMode 失败: {result}");
         }
@@ -428,7 +430,7 @@ public sealed class Fff3FpEngine : IPlayerEngine
         }
 
         /// <summary>应用智能色调映射参数（调用3FP SetColorMode）。</summary>
-        public void ApplyToneMappingParameters(ColorMode colorMode, nint outputWindow)
+        public void ApplyToneMappingParameters(ColorMode colorMode, nint outputWindow, bool forceHdrOutput = false)
         {
             // 获取显示器能力
             var displayCapabilities = DisplayCapabilities.ReadForWindow(outputWindow);
@@ -441,7 +443,8 @@ public sealed class Fff3FpEngine : IPlayerEngine
             var config = ToneMappingParameters.Calculate(colorMode, displayCapabilities, contentIsHdr);
 
             // 调用3FP的SetColorMode API
-            var result = Fff3FpNative.FFF3FP_SetColorMode(_handle, (uint)colorMode, config.SdrPeakNits, config.HdrPeakNits, config.PaperWhiteNits);
+            var result = Fff3FpNative.FFF3FP_SetColorMode(_handle, (uint)colorMode, config.SdrPeakNits,
+                config.HdrPeakNits, config.PaperWhiteNits, forceHdrOutput ? 1u : 0u);
             if (result != FffResult.Success && result != FffResult.NotSupported)
             {
                 // 忽略 NotSupported（3FP可能不支持某些模式）
