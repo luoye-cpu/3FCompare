@@ -39,4 +39,9 @@
 
   <!-- 本地化字符串与窗口帧捕获（自 App 项目迁入；命名空间保持 _3FCompare.App[.Capture] 不变以零改动引用） -->
 
+  <!-- 发布后删除 WGL 模式下不需要的 ANGLE DLL（节省 ~5.4MB） -->
+  <Target Name="RemoveUnusedNativeDlls" AfterTargets="Publish">
+    <Delete Files="$(PublishDir)av_libglesv2.dll" Condition="Exists('$(PublishDir)av_libglesv2.dll')" />
+  </Target>
+
 </Project>
