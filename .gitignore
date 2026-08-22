@@ -60,3 +60,4 @@ testmedia/tools/*/obj/
 
 # 发布产物（NativeAOT + 第三方 DLL，190+ MB）
 publish/
+.zcode/

@@ -5,14 +5,14 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Platform;
+using Avalonia.Platform.Storage;
 using _3FCompare.Core.Backend;
 
 namespace _3FCompare.Avalonia;
 
 /// <summary>M0 PoC 主窗体：
 /// PoC-A: NativeControlHost 承载 Win32 子窗口 + GDI 色块绘制 → 验证承载/焦点/DPI
-/// PoC-B: FFF.Native 真实会话输出到该子窗口 → selftest 等价验证
-/// </summary>
+/// PoC-B: FFF.Native 真实会话输出到该子窗口 → selftest 等价验证</summary>
 public partial class MainWindow : Window
 {
     private HostSurface? _host;
@@ -32,58 +32,96 @@ public partial class MainWindow : Window
             _ = RunSelftestAsync(args[2]);
     }
 
-    /// <summary>PoC-B 自动化流程：等承载就绪→打开视频→等就绪→Play→验证状态→截图→关闭。</summary>
+    /// <summary>当前执行到的步骤名（自动化卡死诊断用）。</summary>
+    private static volatile string _step = "启动";
+
+    private static void Log(string msg)
+    {
+        Console.WriteLine($"{DateTime.Now:HH:mm:ss.fff} selftest[{_step}]: {msg}");
+        Console.Out.Flush();
+    }
+
+    /// <summary>PoC-B 自动化流程：等承载就绪→打开视频→等就绪→Play→验证状态→退出。</summary>
     private async System.Threading.Tasks.Task RunSelftestAsync(string videoPath)
     {
+        // 看门狗：任一步骤卡死 25s 则带诊断信息退出（不无限挂起）
+        _ = System.Threading.Tasks.Task.Run(async () =>
+        {
+            var last = _step; var stable = 0;
+            while (true)
+            {
+                await System.Threading.Tasks.Task.Delay(1000);
+                stable = _step == last ? stable + 1 : 0;
+                last = _step;
+                if (stable >= 25)
+                {
+                    Console.Error.WriteLine($"selftest: 看门狗触发 ✗ 卡在步骤 [{_step}] 超过 25s");
+                    Console.Error.Flush();
+                    Environment.Exit(3);
+                }
+            }
+        });
         try
         {
             // 等 NativeControlHost 附件完成（AttachedToVisualTree 触发后 HWND 才有效）
+            _step = "等HWND";
             for (var i = 0; i < 50 && (_host?.Hwnd ?? 0) == 0; i++)
                 await System.Threading.Tasks.Task.Delay(100);
             if ((_host?.Hwnd ?? 0) == 0)
                 throw new InvalidOperationException("子窗口 HWND 未创建（NativeControlHost 附件失败）");
 
-            Console.WriteLine($"selftest: 子窗口 HWND={_host.Hwnd} ✓");
-            Console.WriteLine($"selftest: 打开 {videoPath}");
+            Log($"子窗口 HWND={_host.Hwnd} ✓");
+            Log($"打开 {videoPath}");
 
+            _step = "EngineFactory";
             _engine = EngineFactory.Create();
             _realMode = _engine is Fff3FpEngine;
-            Console.WriteLine($"selftest: 模式={( _realMode ? "真实(FFF.Native)" : "演示(Simulated)" )}");
+            Log($"模式={( _realMode ? "真实(FFF.Native)" : "演示(Simulated)" )}");
 
+            _step = "CreateSession";
             _session = _engine.CreateSession(new EngineSessionOptions
             {
                 OutputWindow = _host.Hwnd,
                 HardwareDecode = false,
             });
+            Log("会话已创建 ✓（含 DXGI 显示器探测）");
+
+            _step = "OpenAsync";
             await _session.OpenAsync(videoPath);
+            Log("Open 调用返回");
 
             // 等待后端真正就绪（与 WinForms 版相同的 3FP 异步 Open 时序处理）
+            _step = "等就绪";
             var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
             while (DateTime.UtcNow < deadline)
             {
                 var snap = _session.ReadSnapshot();
+                Log($"轮询 State={snap.State}");
                 if (snap.State is PlayerState.Ready or PlayerState.Playing or PlayerState.Paused) break;
                 if (snap.State == PlayerState.Failed)
                     throw new IOException("内核打开失败");
                 await System.Threading.Tasks.Task.Delay(100);
             }
 
+            _step = "Play";
             _session.Play();
+            _step = "Play后等500ms";
             await System.Threading.Tasks.Task.Delay(500);
             var final = _session.ReadSnapshot();
             var dur = TimeSpan.FromTicks(final.Duration100ns);
-            Console.WriteLine($"selftest: 状态={final.State} 时长={dur:hh\\:mm\\:ss} 帧号={final.FrameIndex}");
+            Log($"状态={final.State} 时长={dur:hh\\:mm\\:ss} 帧号={final.FrameIndex}");
 
             if (final.State != PlayerState.Playing)
                 throw new InvalidOperationException($"播放未启动（状态={final.State}）");
 
             Program.SelftestResult = (0, "全部通过");
-            Console.WriteLine("selftest: 全部通过 ✓");
+            Log("全部通过 ✓");
         }
         catch (Exception ex)
         {
             Program.SelftestResult = (2, ex.Message);
-            Console.Error.WriteLine($"selftest: 失败 ✗ {ex.Message}");
+            Console.Error.WriteLine($"selftest[步骤{_step}]: 失败 ✗ {ex.Message}");
+            Console.Error.Flush();
         }
         finally
         {
@@ -112,16 +150,15 @@ public partial class MainWindow : Window
 
     // ---------- PoC-B: 真实引擎接入 ----------
 
-    private void OnOpenClick(object? sender, RoutedEventArgs e)
+    private async void OnOpenClick(object? sender, RoutedEventArgs e)
     {
-        var dlg = new OpenFileDialog { Title = "选择测试视频", AllowMultiple = false };
-        dlg.ShowAsync(this).ContinueWith(t =>
+        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            var files = t.Result;
-            if (files is not { Length: > 0 }) return;
-            var path = files[0];
-            global::Avalonia.Threading.Dispatcher.UIThread.Post(() => OpenVideo(path));
+            Title = "选择测试视频",
+            AllowMultiple = false,
         });
+        if (files is { Count: > 0 })
+            OpenVideo(files[0].TryGetLocalPath() ?? "");
     }
 
     private async void OpenVideo(string path)

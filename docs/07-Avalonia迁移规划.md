@@ -1,6 +1,6 @@
 # 3FCompare Avalonia 迁移规划
 
-> 状态：规划中（未开工）｜创建：2026-08-22
+> 状态：**M0 已完成（go）**｜创建：2026-08-22｜M0 验收：2026-08-22
 > 前置阅读：`docs/02-系统架构.md`、本文档第三节「硬约束」
 
 ## 1. 迁移动机与目标
@@ -55,12 +55,18 @@
 
 ## 5. 里程碑分解
 
-### M0 — PoC 验证周（1 周，决定 go/no-go）
-- [ ] 新建 `src/3FCompare.Avalonia` 试验项目（不动现有 App）
-- [ ] PoC-A：NativeControlHost 包裹 Win32 子窗口，内部用 GDI 画个色块 → 验证承载/焦点/DPI
-- [ ] PoC-B：把 FFF.Native 真实会话输出到该子窗口，selftest 跑通 Playing
-- [ ] PoC-C：AOT publish 该试验项目并运行
-- [ ] **决策点**：三项全过 → 继续 M1；R1 失败 → 评估内核改造 or 终止迁移
+### M0 — PoC 验证周（1 周，决定 go/no-go）✅ 2026-08-22 全过（go）
+- [x] 新建 `src/3FCompare.Avalonia` 试验项目（不动现有 App）
+- [x] PoC-A：NativeControlHost 包裹 Win32 子窗口，内部用 GDI 画个色块 → 验证承载/焦点/DPI
+- [x] PoC-B：把 FFF.Native 真实会话输出到该子窗口，selftest 跑通 Playing（Debug + AOT 双验证，退出码 0）
+- [x] PoC-C：AOT publish 该试验项目并运行（`dotnet publish -r win-x64` 单文件 17.5MB，真实模式 Playing）
+- [x] **决策点**：三项全过 → **继续 M1**
+  - 过程发现并修复 Core 缺陷：`DxgiOutputInfo` ComImport 分发在 .NET 11 下调用 DXGI 返回
+    INVALID_CALL，旧循环仅对 NOT_FOUND 跳出 → 无限循环（表现为打开媒体卡死）。已改为裸
+    vtable 委托调用 + 迭代硬上限。WinForms 版亮度探测此前从未真正生效（静默 null），同修复受益。
+    诊断工具：`tools/DxgiInteropProbe`。
+  - ⚠ 体积预警：AOT 单文件 17.5MB（不含 ffmpeg/FFF.Native）已超 §3.3 的 15MB 红线 → 按约定
+    触发重评估（M5 决策：裁剪 / 调整红线 / 接受）。
 
 ### M1 — 骨架与基础设施（1 周）
 - [ ] App.axaml 主题资源（AppTheme → ResourceDictionary，深色优先）
@@ -125,3 +131,8 @@
 
 - 2026-08-22: 规划创建。基于 renderbench 基准结论（矢量绘制收益小、位图合成收益大），
   自绘控件统一选型 SkiaSharp 而非 axaml Shape 混搭，保持绘制代码风格一致。
+- 2026-08-22: M0 验收通过（go）。三项 PoC 全过；selftest 补充分步日志 + 25s 看门狗（退出码 3 = 卡死诊断）。
+  关键发现：.NET 11（11.0.100-preview.6）内置 COM 互送对 DXGI ComImport 接口分发损坏
+  （对齐 vtable 后仍返回 INVALID_CALL，裸函数指针调用正常）——Core 的 DXGI 亮度探测因此
+  重写为裸 vtable 委托方案（`DxgiOutputInfo`）。此为 M0 期间唯一 Core 改动，属缺陷修复。
+- 2026-08-22: 体积实测——Avalonia AOT 单文件 17.5MB > 15MB 红线，重评估挂起至 M5。

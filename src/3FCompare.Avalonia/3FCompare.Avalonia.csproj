@@ -9,6 +9,10 @@
     <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+
+    <!-- NativeAOT 发布（M0 PoC-C 验证项；与 WinForms 版同规格） -->
+    <PublishAot>true</PublishAot>
+    <PublishSelfContained>true</PublishSelfContained>
   </PropertyGroup>
 
   <ItemGroup>
