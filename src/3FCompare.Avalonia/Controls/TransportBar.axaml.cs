@@ -31,6 +31,8 @@ public partial class TransportBar : UserControl
         foreach (var s in Speeds)
             ComboSpeed.Items.Add($"{s:0.#}x");
         ComboSpeed.SelectedIndex = 1;
+        ComboColorMode.Items.Clear();
+        ComboColorMode.Items.Add(LanguageManager.T("Color_Auto"));
         ComboColorMode.Items.Add("SDR");
         ComboColorMode.Items.Add("HDR");
         ComboColorMode.SelectedIndex = 0;

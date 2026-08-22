@@ -247,7 +247,23 @@ public partial class MainWindow : Window
 
     private void OnColorModeChanged(object? sender, int index)
     {
-        var mode = index == 1 ? ColorMode.MapToHdr : ColorMode.MapToSdr;
+        ColorMode mode;
+        switch (index)
+        {
+            case 0: // Auto
+                var surface = Grid.GetSurface(0);
+                var caps = surface?.Hwnd != 0
+                    ? _3FCompare.Core.Display.DisplayCapabilities.ReadForWindow(surface.Hwnd) : null;
+                mode = _3FCompare.Core.Settings.ColorModeHelper.Resolve(
+                    _3FCompare.Core.Settings.ColorModeSetting.Auto, caps);
+                break;
+            case 2: // HDR
+                mode = ColorMode.MapToHdr;
+                break;
+            default: // SDR
+                mode = ColorMode.MapToSdr;
+                break;
+        }
         foreach (var slot in _sync.Slots)
         {
             try { slot.Session.SetColorMode(mode); } catch { /* 演示模式无操作 */ }

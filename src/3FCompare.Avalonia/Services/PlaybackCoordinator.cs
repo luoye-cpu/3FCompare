@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using Avalonia.Threading;
 using _3FCompare.Avalonia.Controls;
 using _3FCompare.Core.Backend;
+using _3FCompare.Core.Display;
 using _3FCompare.Core.Settings;
 using _3FCompare.Core.Sync;
 
@@ -77,12 +78,16 @@ public sealed class PlaybackCoordinator
                         throw new InvalidOperationException("输出窗口 HWND 未创建");
                 }
 
+                // 解析 Auto 色彩模式：根据显示器能力自动选择 HDR/SDR
+                var resolvedColorMode = _3FCompare.Core.Settings.ColorModeHelper.Resolve(
+                    _settings.ColorMode,
+                    hwnd != 0 ? _3FCompare.Core.Display.DisplayCapabilities.ReadForWindow(hwnd) : null);
                 var session = _engine.CreateSession(new EngineSessionOptions
                 {
                     OutputWindow = hwnd,
                     HardwareDecode = _settings.HardwareDecode,
                     PreferredAdapterIndex = _settings.PreferredAdapterIndex,
-                    ColorMode = (ColorMode)_settings.ColorMode,
+                    ColorMode = resolvedColorMode,
                     TearingPresent = _settings.VrrTearingPresent,
                     PacingEnabled = _settings.VrrPacingEnabled,
                 });

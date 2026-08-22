@@ -11,7 +11,9 @@ public sealed class AppSettings
     /// <summary>手动指定的 FFmpeg DLL 目录（null/空白 = 自动检测：FFMPEG_DIR → PATH → 应用目录）。</summary>
     public string? FfmpegDirectory { get; set; }
 
-    public ColorModeSetting ColorMode { get; set; } = ColorModeSetting.MapToHdr;
+    /// <summary>色彩模式：Auto=0 表示根据显示器能力自动选择 HDR/SDR。
+    /// 旧值：MapToSdr=0→新 Auto=0 冲突，故 Auto 设为 3 保持向后兼容。</summary>
+    public ColorModeSetting ColorMode { get; set; } = ColorModeSetting.Auto;
 
     /// <summary>按帧步进步长（F12），默认 1。</summary>
     public int FrameStep { get; set; } = 1;
@@ -56,4 +58,20 @@ public enum ColorModeSetting
     MapToSdr = 0,
     RawHdrAsSdr = 1,
     MapToHdr = 2,
+    /// <summary>根据显示器能力自动选择 HDR 或 SDR（默认值，兼容旧序列化值 3）。</summary>
+    Auto = 3,
+}
+
+public static class ColorModeHelper
+{
+    /// <summary>将 ColorModeSetting 解析为内核 ColorMode。
+    /// Auto 模式下根据显示器能力自动选择：HDR 显示器→MapToHdr，否则 MapToSdr。
+    /// displayCaps 为 null 时视为无 HDR 能力。</summary>
+    public static _3FCompare.Core.Backend.ColorMode Resolve(
+        ColorModeSetting setting, _3FCompare.Core.Display.DisplayLuminanceCapabilities? displayCaps)
+    {
+        if (setting != ColorModeSetting.Auto)
+            return (_3FCompare.Core.Backend.ColorMode)setting;
+        return displayCaps?.Supported == true ? _3FCompare.Core.Backend.ColorMode.MapToHdr : _3FCompare.Core.Backend.ColorMode.MapToSdr;
+    }
 }

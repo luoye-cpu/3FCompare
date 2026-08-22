@@ -69,9 +69,11 @@ public sealed class SettingsWindow : Window
         _vrrPacing.Content = LanguageManager.T("Vrr_PacingEnabled");
         _vrrPacing.IsChecked = current.VrrPacingEnabled;
         ToolTip.SetTip(_vrrPacing, LanguageManager.T("Vrr_PacingHint"));
+        _colorMode.Items.Add(LanguageManager.T("Color_Auto"));
         _colorMode.Items.Add(LanguageManager.T("Color_SDR"));
         _colorMode.Items.Add(LanguageManager.T("Color_HDRAuto"));
-        _colorMode.SelectedIndex = current.ColorMode == ColorModeSetting.MapToHdr ? 1 : 0;
+        _colorMode.SelectedIndex = current.ColorMode == ColorModeSetting.Auto ? 0
+            : current.ColorMode == ColorModeSetting.MapToHdr ? 2 : 1;
         _cols.Value = current.DefaultGridCols;
         _rows.Value = current.DefaultGridRows;
         _ffmpegDir.Text = current.FfmpegDirectory ?? string.Empty;
@@ -170,7 +172,12 @@ public sealed class SettingsWindow : Window
         var sec = (double)(_secStep.Value ?? 1.0m);
         var startFs = _startFullscreen.IsChecked == true;
         var hideChrome = _hideChrome.IsChecked == true;
-        var color = _colorMode.SelectedIndex == 1 ? ColorModeSetting.MapToHdr : ColorModeSetting.MapToSdr;
+        var color = _colorMode.SelectedIndex switch
+        {
+            0 => ColorModeSetting.Auto,
+            2 => ColorModeSetting.MapToHdr,
+            _ => ColorModeSetting.MapToSdr,
+        };
         var cols = (int)(_cols.Value ?? 2);
         var rows = (int)(_rows.Value ?? 1);
         var vrrTearing = _vrrTearing.IsChecked == true;

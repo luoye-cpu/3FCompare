@@ -49,6 +49,7 @@ public static class LanguageManager
 
         // 色彩
         ["Color_ColorMode"] = "色彩模式：",
+        ["Color_Auto"] = "自动 (根据显示器能力)",
         ["Color_SDR"] = "SDR 输出",
         ["Color_HDRAuto"] = "HDR 输出 (自动检测)",
 
@@ -242,6 +243,7 @@ public static class LanguageManager
         ["Window_HideChrome"] = "Hide Timeline/Toolbar in Fullscreen",
 
         ["Color_ColorMode"] = "Color Mode:",
+        ["Color_Auto"] = "Auto (based on display)",
         ["Color_SDR"] = "SDR Output",
         ["Color_HDRAuto"] = "HDR Output (Auto Detect)",
 
