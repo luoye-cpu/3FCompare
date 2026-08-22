@@ -115,6 +115,7 @@ public partial class MainWindow : Window
 
         AddHandler(DragDrop.DragOverEvent, OnDragOver);
         AddHandler(DragDrop.DropEvent, OnDrop);
+        DragDrop.SetAllowDrop(this, true); // 启用窗口拖放
 
         // 自动化 selftest / screentest 模式（GetCommandLineArgs 返回进程原始参数）
         var args = Environment.GetCommandLineArgs();

@@ -77,7 +77,7 @@
       <GridSplitter x:Name="SidebarSplitter" Grid.Column="1" Width="4"
                     ResizeDirection="Columns" Background="#50505A" MinWidth="4" />
       <Panel Grid.Column="2" x:Name="CenterPanel">
-        <ctrl:CompareGridView x:Name="Grid" ClipToBounds="True" />
+        <ctrl:CompareGridView x:Name="Grid" DragDrop.AllowDrop="True" ClipToBounds="True" />
         <ctrl:AbSliderView x:Name="AbSlider" IsVisible="False" />
         <ctrl:MagnifierOverlay x:Name="Magnifier" />
       </Panel>
