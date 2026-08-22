@@ -6,6 +6,6 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="C:\PLAN\3FCompare\src\3FCompare.Core\3FCompare.Core.csproj" />
+    <ProjectReference Include="..\..\..\src\3FCompare.Core\3FCompare.Core.csproj" />
   </ItemGroup>
 </Project>

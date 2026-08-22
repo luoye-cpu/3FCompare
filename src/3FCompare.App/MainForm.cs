@@ -14,6 +14,7 @@ public sealed class MainForm : Form, IMessageFilter
     private readonly bool _realMode;
     private readonly IPlayerEngine _engine;
     private readonly SyncController _sync = new();
+    private bool _demoNoticeShown;
 
     // WM_MOUSEWHEEL：全局消息过滤，绕过 WinForms「仅焦点控件接收滚轮」的限制，
     // 让鼠标悬停在任一画面（PlayerSurface）上滚动时都能缩放。
@@ -49,6 +50,14 @@ public sealed class MainForm : Form, IMessageFilter
     private bool _isPlaying;
     private bool _abViewVisible;
 
+    // ---- 打开完成自动播放（对齐上游 FFF.Player 的「打开完成 → 播放」契约）----
+    // 3FP 后端 Open 只进入 Ready 状态，普通视频不自动渲染首帧；
+    // 必须等所有路 OpenAsync 完成后统一 Play() 启动渲染循环，否则真实模式首帧空白。
+    private int _pendingAutoPlay;
+    // 打开完成后的恢复回调队列（如会话 Seek）：支持多批 OpenFiles 重叠调用，
+    // 全部路打开完成后按入队顺序依次执行，再统一启动播放
+    private readonly Queue<Action> _onAllOpenedCallbacks = new();
+
     // 播放速度（真实模式伪变速；A2 落地前）。
     private double _playbackSpeed = 1.0;
 
@@ -61,7 +70,8 @@ public sealed class MainForm : Form, IMessageFilter
     private float _viewZoom = 1.0f;
     private float _viewPanX;
     private float _viewPanY;
-    private Point _dragStart;
+    private Point _dragStart;          // surface 本地起点 (保留兼容)
+    private Point _dragOriginScreen;   // 屏幕坐标累积起点 —— 跨 surface 时 x/y 无夹断抖动
     private bool _dragging;
 
     /// <summary>右侧工具区布局容器：顶部标签条 + 内容区 + 折叠按钮。
@@ -411,17 +421,17 @@ public sealed class MainForm : Form, IMessageFilter
         };
         _chkMagnifier.CheckedChanged += (_, _) =>
         {
-            foreach (var s in _grid.Surfaces)
+            if (_chkMagnifier.Checked)
             {
-                if (_chkMagnifier.Checked)
-                {
-                    if (!s.Controls.Contains(_magnifier)) s.Controls.Add(_magnifier);
-                    _magnifier.BringToFront();
-                }
-                else
-                {
-                    _magnifier.HideMagnifier();
-                }
+                // 放大镜是‘显示层’覆盖物：挂到网格 (而非每个 surface) 一次，
+                // 使用 WS_EX_TRANSPARENT 穿透鼠标；避免把同一实例重复 Add 到
+                // 多个 surface（Controls.Add 会改绑父控件，只保留最后一次）。
+                if (_magnifier.Parent is null) _grid.Controls.Add(_magnifier);
+                _magnifier.BringToFront();
+            }
+            else
+            {
+                _magnifier.HideMagnifier();
             }
         };
 
@@ -509,7 +519,7 @@ public sealed class MainForm : Form, IMessageFilter
         DragDrop += (_, e) =>
         {
             if (e.Data?.GetData(DataFormats.FileDrop) is string[] files && files.Length > 0)
-                OpenFiles(files);
+                OpenFiles(files, autoPlay: true);
         };
 
         // 初始 2 路（M0 起步，可加至 9）
@@ -538,6 +548,101 @@ public sealed class MainForm : Form, IMessageFilter
 
         // 应用已保存语言（覆盖菜单/面板的默认中文初值，处理启动即为英文的情形）
         RefreshAllUiLanguage();
+
+        // 未识别到 FFmpeg/FFF.Native 时：普通启动弹提示后关闭软件（不进入演示模式）；
+        // 自动化命令行模式（--selftest/--screentest/--autodemo）保留演示能力，不弹不关。
+        Shown += (_, _) => MaybeExitDemoMode();
+    }
+
+    /// <summary>普通启动的必需组件检测：非真实模式（缺 FFmpeg/FFF.Native）→ 弹引导对话框：
+    /// 「打开设置…」直接跳转 FFmpeg 路径分区设置路径（保存后提示重启生效）；
+    /// 「关闭」退出。自动化模式（--selftest/--screentest/--autodemo）跳过，避免阻塞测试。
+    /// 引擎探测是构造期一次性（_realMode 只读），设置 FFmpeg 路径后须重启才加载真实引擎。</summary>
+    private void MaybeExitDemoMode()
+    {
+        if (_realMode || _demoNoticeShown) return;
+        var args = Environment.GetCommandLineArgs();
+        if (args.Any(a => a is "--selftest" or "--screentest" or "--autodemo")) return;
+
+        _demoNoticeShown = true;
+        var missingNative = NativeRuntime.IsFfmpegAvailable();
+        var msg = LanguageManager.T(
+            missingNative ? "Msg_DemoModeMissingNative" : "Msg_DemoModeMissingFfmpeg");
+
+        using var guide = new PromptDialog(LanguageManager.T("Msg_DemoModeTitle"), msg)
+        {
+            PrimaryText = LanguageManager.T("Msg_DemoModeClose"),
+            SecondaryText = LanguageManager.T("Msg_DemoModeOpenSettings"),
+        };
+
+        var result = guide.ShowDialog(this);
+
+        if (result == DialogResult.No && guide.SecondaryClicked)
+        {
+            // 「打开设置…」：打开设置并聚焦 FFmpeg 路径分区；用户保存路径后面临重启
+            var ok = OpenSettingsAndReturn(focusFfmpeg: true);
+            var after = _settings.FfmpegDirectory;
+
+            // 设置后 FFmpeg 路径非空 → 需重启使引擎探测链重新生效（_realMode 构造期已定）
+            if (ok && !string.IsNullOrWhiteSpace(after))
+            {
+                ConfirmRestart();
+            }
+            else
+            {
+                Close(); // 取消/未设路径都不能在本进程启用真实引擎
+            }
+        }
+        else
+        {
+            Close(); // 点了「关闭」
+        }
+    }
+
+    /// <summary>弹「设置已保存，需重启生效」确认框；确定 → 立即重启应用（引擎重新探测）。</summary>
+    private void ConfirmRestart()
+    {
+        var restart = MessageBox.Show(this,
+            LanguageManager.T("Msg_DemoModeRestartNeeded"),
+            LanguageManager.T("Msg_DemoModeTitle"),
+            MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+        if (restart == DialogResult.Yes)
+        {
+            Close();
+            Application.Restart();
+        }
+        else
+        {
+            Close();
+        }
+    }
+
+    /// <summary>打开设置对话框并应用保存结果，返回是否按了「确定」（而非取消）。
+    /// <paramref name="focusFfmpeg"/>：打开时定位并高亮 FFmpeg 路径分区。</summary>
+    private bool OpenSettingsAndReturn(bool focusFfmpeg = false)
+    {
+        using var dlg = new SettingsDialog(_settings, focusFfmpeg);
+        if (dlg.ShowDialog() != DialogResult.OK) return false;
+
+        _settings.HardwareDecode = dlg.Result.HardwareDecode;
+        _settings.PreferredAdapterIndex = dlg.Result.PreferredAdapterIndex;
+        _settings.FrameStep = dlg.Result.FrameStep;
+        _settings.SecondsStep = dlg.Result.SecondsStep;
+        _settings.StartFullscreen = dlg.Result.StartFullscreen;
+        _settings.HideChromeInFullscreen = dlg.Result.HideChromeInFullscreen;
+        _settings.ColorMode = dlg.Result.ColorMode;
+        _settings.DefaultGridCols = dlg.Result.DefaultGridCols;
+        _settings.DefaultGridRows = dlg.Result.DefaultGridRows;
+        _settings.FfmpegDirectory = dlg.Result.FfmpegDirectory;
+        _settings.Language = dlg.Result.Language;
+        SettingsStore.Save(_settings);
+
+        LanguageManager.SetLanguage(_settings.Language);
+        UpdateMenuLanguage();
+
+        NativeRuntime.SetFfmpegDirectory(_settings.FfmpegDirectory);
+        _sync.StepProfile = new StepProfile { FrameStep = _settings.FrameStep, SecondsStep = _settings.SecondsStep };
+        return true;
     }
 
     /// <summary>刷新全部界面语言（菜单、状态栏、放大镜、侧边栏标签、各工具面板、传输栏）。
@@ -839,14 +944,8 @@ public sealed class MainForm : Form, IMessageFilter
 
     private void OpenFilesDeferred(IReadOnlyList<string> files)
     {
-        OpenFiles(files.ToArray());
-        BeginInvoke(() =>
-        {
-            // 等打开完成后播放（演示模式立即生效）
-            _sync.Play();
-            _isPlaying = true;
-            _transport.SetPlaying(true);
-        });
+        // 打开完成自动播放统一由 OpenFiles/_pendingAutoPlay 机制接管
+        OpenFiles(files.ToArray(), autoPlay: true);
     }
 
     private void OpenVideos()
@@ -857,14 +956,27 @@ public sealed class MainForm : Form, IMessageFilter
             Multiselect = true,
         };
         if (dlg.ShowDialog(this) == DialogResult.OK)
-            OpenFiles(dlg.FileNames);
+            OpenFiles(dlg.FileNames, autoPlay: true);
     }
 
-    private void OpenFiles(string[] files)
+    /// <summary>打开文件（创建会话 + 异步 OpenAsync）。
+    /// autoPlay=true 时在全部路打开完成后统一 Play()，对齐上游 FFF.Player
+    /// 「打开完成 → 播放」契约：3FP 后端 Open 只进入 Ready 状态，
+    /// 普通视频不自动渲染首帧，必须启动播放才会出画面。</summary>
+    /// <param name="autoPlay">全部路打开完成后自动播放（渲染首帧）。</param>
+    /// <param name="onAllOpened">全部路打开完成后的额外回调（如会话恢复位置），
+    /// 在 autoPlay 播放启动之前执行。</param>
+    private void OpenFiles(string[] files, bool autoPlay = false, Action? onAllOpened = null)
     {
         var count = Math.Min(files.Length, 9 - _sync.Count);
-        if (count <= 0) return;
+        if (count <= 0)
+        {
+            onAllOpened?.Invoke();
+            return;
+        }
         _grid.SetCount(_sync.Count + count);
+        if (autoPlay) _pendingAutoPlay += count;
+        if (onAllOpened is not null) _onAllOpenedCallbacks.Enqueue(onAllOpened); // 打开完成后回调（自动播放前执行）
 
         var realSurface = _realMode;
         for (var i = 0; i < count; i++)
@@ -917,16 +1029,93 @@ public sealed class MainForm : Form, IMessageFilter
             };
 
             await slot.Session.OpenAsync(path);
-            surface.FileName = Path.GetFileName(path);
+            if (!IsDisposed)
+            {
+                surface.FileName = Path.GetFileName(path);
+                // 真实模式：FFF3FP_Open 仅 Enqueue(DoOpen)，OpenAsync 返回时后端仍是 Opening，
+                // 此时 Play() 会得 InvalidState 被吞。必须先等 3FP 真正就绪（OpenCompleted / Ready）。
+                if (_realMode)
+                    await WaitForOpenCompletionAsync(slot, surface);
+                // 打开完成 → 首帧渲染：全部路就绪后统一启动播放（3FP 后端 Open 不渲染首帧）
+                TryAutoPlayAfterOpen();
+            }
         }
         catch (Exception ex)
         {
             slot.Failed = true;
             slot.Error = ex.Message;
-            surface.IsFailed = true;
-            surface.ErrorText = ex.Message;
+            if (!IsDisposed)
+            {
+                surface.IsFailed = true;
+                surface.ErrorText = ex.Message;
+                TryAutoPlayAfterOpen(); // 失败路也计入完成，避免卡住
+            }
+            else if (_pendingAutoPlay > 0)
+            {
+                _pendingAutoPlay = 0; // 窗体已关闭：放弃待播放计数
+            }
         }
         UpdateStatus();
+    }
+
+    /// <summary>真实模式等待 3FP 后端打开真正完成（就绪）。
+    /// 根因：FFF3FP_Open 仅把 DoOpen 入队（Enqueue）后立即返回 Success（PlayerApi.cpp），
+    /// OpenAsync 的 Task 完成时后端仍是 Opening；此阶段 Play() 返回 InvalidState。
+    /// 因此这里轮询快照直到 Ready/Playing/Paused（最长 15s），失败(Failed)也视为完成。</summary>
+    private async Task WaitForOpenCompletionAsync(SyncController.SyncSlot slot, PlayerSurface surface)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
+        while (DateTime.UtcNow < deadline && !IsDisposed)
+        {
+            try
+            {
+                var snap = slot.Session.ReadSnapshot();
+                if (IsReadyState(snap.State))
+                    return; // 已就绪（Ready/Playing/Paused）：可以 Play
+                if (snap.State == PlayerState.Failed)
+                {
+                    slot.Failed = true;
+                    slot.Error = "内核打开失败";
+                    surface.IsFailed = true;
+                    surface.ErrorText = slot.Error;
+                    return;
+                }
+            }
+            catch
+            {
+                // 快照读取失败：继续等
+            }
+            await Task.Delay(100);
+        }
+        if (!IsDisposed)
+        {
+            // 超时未就绪：标记失败但仍放行（TryAutoPlayAfterOpen 会尝试 Play）
+            slot.Failed = true;
+            slot.Error = "打开超时（后端未就绪）";
+            surface.IsFailed = true;
+            surface.ErrorText = slot.Error;
+        }
+    }
+
+    /// <summary>打开完成计数递减；全部打开完成后：先按序执行恢复回调（如会话位置），
+    /// 再统一 Play()。Play 内部会跳过 Failed 槽，因此超时/失败路不会阻塞其余路播放；
+    /// 仅当存在可播放槽位时才回显「播放中」状态。</summary>
+    private void TryAutoPlayAfterOpen()
+    {
+        if (_pendingAutoPlay <= 0) return;
+        if (--_pendingAutoPlay > 0) return;
+
+        // 打开完成后先恢复（如会话 Seek 到保存位置），再启动播放
+        while (_onAllOpenedCallbacks.Count > 0)
+            _onAllOpenedCallbacks.Dequeue().Invoke();
+
+        _sync.Play();
+        var anyPlayable = _sync.Slots.Any(s => !s.Failed);
+        if (anyPlayable)
+        {
+            _isPlaying = true;
+            _transport.SetPlaying(true);
+        }
     }
 
     private void HandleEngineEvent(SyncController.SyncSlot slot, PlayerSurface surface, EngineEvent evt)
@@ -994,9 +1183,12 @@ public sealed class MainForm : Form, IMessageFilter
             // MouseMove 仍持续派发到按下时的 surface，跨路同步拖动不中断。
             if (_dragging && _viewZoom > 1.001f)
             {
-                var dx = e.X - _dragStart.X;
-                var dy = e.Y - _dragStart.Y;
-                _dragStart = e.Location;
+                // 累积屏幕坐标 delta：跨过 sibling surface 边界时 client 坐标系
+                // 可能抖动，屏幕坐标平滑衔接，水平拖拽不再丢帧。
+                var cur = surface.PointToScreen(e.Location);
+                var dx = cur.X - _dragOriginScreen.X;
+                var dy = cur.Y - _dragOriginScreen.Y;
+                _dragOriginScreen = cur;
                 var scale = 2.0f / Math.Max(surface.Width, surface.Height);
                 _viewPanX = Math.Clamp(_viewPanX + dx * scale, -1f, 1f);
                 _viewPanY = Math.Clamp(_viewPanY + dy * scale, -1f, 1f);
@@ -1017,6 +1209,7 @@ public sealed class MainForm : Form, IMessageFilter
             {
                 _dragging = true;
                 _dragStart = e.Location;
+                _dragOriginScreen = surface.PointToScreen(e.Location); // 屏幕累积起点
                 // 捕获鼠标：指针移出 surface 后仍持续收到 MouseMove/MouseUp，
                 // 保证多路同步拖动稳定（坐标系始终相对本 surface，不产生跳变）。
                 surface.Capture = true;
@@ -1045,6 +1238,8 @@ public sealed class MainForm : Form, IMessageFilter
         _viewZoom = 1.0f;
         _viewPanX = 0f;
         _viewPanY = 0f;
+        _dragStart = Point.Empty;
+        _dragOriginScreen = Point.Empty;
         _dragging = false;
         ApplyViewTransform();
     }
@@ -1368,30 +1563,14 @@ public sealed class MainForm : Form, IMessageFilter
 
     // ---------- 设置 ----------
 
-    private void OpenSettings()
+    /// <summary>打开设置对话框（菜单入口，不聚焦特定分区）。</summary>
+    private void OpenSettings() => OpenSettingsAndReturn(false);
+
+    /// <param name="focusFfmpeg">为真则打开设置时自动滚动并高亮 FFmpeg 路径分区
+    /// （未检测到 FFmpeg 的引导弹窗使用）。</param>
+    private void OpenSettings(bool focusFfmpeg = false)
     {
-        using var dlg = new SettingsDialog(_settings);
-        if (dlg.ShowDialog() == DialogResult.OK)
-        {
-            _settings.HardwareDecode = dlg.Result.HardwareDecode;
-            _settings.PreferredAdapterIndex = dlg.Result.PreferredAdapterIndex;
-            _settings.FrameStep = dlg.Result.FrameStep;
-            _settings.SecondsStep = dlg.Result.SecondsStep;
-            _settings.StartFullscreen = dlg.Result.StartFullscreen;
-            _settings.HideChromeInFullscreen = dlg.Result.HideChromeInFullscreen;
-            _settings.ColorMode = dlg.Result.ColorMode;
-            _settings.DefaultGridCols = dlg.Result.DefaultGridCols;
-            _settings.DefaultGridRows = dlg.Result.DefaultGridRows;
-            _settings.FfmpegDirectory = dlg.Result.FfmpegDirectory;
-            _settings.Language = dlg.Result.Language;
-            SettingsStore.Save(_settings);
-
-            LanguageManager.SetLanguage(_settings.Language);
-            UpdateMenuLanguage();
-
-            NativeRuntime.SetFfmpegDirectory(_settings.FfmpegDirectory);
-            _sync.StepProfile = new StepProfile { FrameStep = _settings.FrameStep, SecondsStep = _settings.SecondsStep };
-        }
+        OpenSettingsAndReturn(focusFfmpeg);
     }
 
     private void UpdateMenuLanguage()
@@ -1565,17 +1744,20 @@ public sealed class MainForm : Form, IMessageFilter
 
         _sync.Clear();
         _grid.SetCount(0);
-        OpenFiles(snap.Items.Select(x => x.Path).Where(p => !string.IsNullOrEmpty(p)).ToArray()!);
-
-        if (snap.Position100ns > 0) _sync.SeekTo(snap.Position100ns);
-        if (snap.LoopEnabled)
+        var paths = snap.Items.Select(x => x.Path).Where(p => !string.IsNullOrEmpty(p)).Select(p => p!).ToArray();
+        // 全部路打开完成（自动播放前）先恢复会话位置与循环区间
+        OpenFiles(paths, autoPlay: true, onAllOpened: () =>
         {
-            _sync.LoopEnabled = true;
-            _sync.LoopStart100ns = snap.LoopStart100ns;
-            _sync.LoopEnd100ns = snap.LoopEnd100ns;
-            _timeline.SetLoopRange(snap.LoopStart100ns, snap.LoopEnd100ns);
-            _transport.SetLoop(true);
-        }
+            if (snap.Position100ns > 0) _sync.SeekTo(snap.Position100ns);
+            if (snap.LoopEnabled)
+            {
+                _sync.LoopEnabled = true;
+                _sync.LoopStart100ns = snap.LoopStart100ns;
+                _sync.LoopEnd100ns = snap.LoopEnd100ns;
+                _timeline.SetLoopRange(snap.LoopStart100ns, snap.LoopEnd100ns);
+                _transport.SetLoop(true);
+            }
+        });
     }
 
     // ---------- 轮询 ----------
@@ -1635,9 +1817,13 @@ public sealed class MainForm : Form, IMessageFilter
             {
                 var screenPos = _timeline.PointToScreen(_timeline.PointToClient(Control.MousePosition));
                 screenPos = new Point(screenPos.X, _timeline.PointToScreen(Point.Empty).Y - 6);
+                // 所有权转移给 ThumbnailPopup（ShowAt 内部 Dispose 旧帧并接管新帧），此处不再 Dispose
                 _thumbnail.ShowAt(screenPos, bmp);
             }
-            bmp?.Dispose();
+            else
+            {
+                bmp?.Dispose();
+            }
 
             // 恢复原位置（若仍在拖动，下个节流周期继续跟随）
             if (!_timeline.IsScrubbing)
@@ -1666,7 +1852,10 @@ public sealed class MainForm : Form, IMessageFilter
             // 拖动缩略图预览期间不覆盖播放头位置（保留 ScrubPreview 预览位置）
             if (!_timeline.IsScrubbing)
                 _timeline.SetPosition(master.Position100ns);
-            _transport.SetTime(TimeSpan.FromTicks(master.Position100ns), TimeSpan.FromTicks(master.Duration100ns));
+            _transport.SetTime(
+                TimeSpan.FromTicks(master.Position100ns),
+                TimeSpan.FromTicks(master.Duration100ns),
+                FrameInSecond(master));
         }
 
         // 播放状态回显（若被原生事件改变）
@@ -1721,6 +1910,18 @@ public sealed class MainForm : Form, IMessageFilter
         _statusInfo.Text = $"{mode}模式 | 路数 {_sync.Count}/9 | {LanguageManager.T("Status_Steps")}: {_sync.StepProfile.FrameStep}帧/{_sync.StepProfile.SecondsStep:0.#}秒" +
             (failed > 0 ? $" | {failed} 路失败" : string.Empty) +
             (runtimeError is not null ? $" | ⚠ {runtimeError}" : string.Empty);
+    }
+
+    /// <summary>计算当前秒内的帧号（PR 时间码 HH:MM:SS:FF 的 FF，1 起）。
+    /// 帧率从快照时间基估算（SyncController.EstimateFps，缺省 24）。
+    /// 位置整秒时帧号=1（PR 惯例：每秒从第 1 帧开始）。</summary>
+    private static int FrameInSecond(EngineSnapshot snap)
+    {
+        var fps = SyncController.EstimateFps(snap);
+        if (fps <= 0) return 0;
+        var sec = TimeSpan.TicksPerSecond;
+        var frac = (double)(snap.Position100ns % sec) / sec; // 秒内进度 0..~1
+        return Math.Clamp((int)Math.Floor(frac * fps) + 1, 1, (int)Math.Round(fps));
     }
 
     // ---------- 快捷键 ----------

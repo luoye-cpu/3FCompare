@@ -140,7 +140,7 @@ public sealed class TransportBar : Control
             Margin = new Padding(12, 6, 4, 0),
             ForeColor = AppTheme.Colors.TextPrimary,
             Font = AppTheme.Fonts.MonospaceMediumFont,
-            Text = "00:00:00.000 / 00:00:00.000",
+            Text = "00:00:00:00 / 00:00:00",
         };
         flow.Controls.Add(_timeLabel);
 
@@ -193,9 +193,15 @@ public sealed class TransportBar : Control
         _toolTip.SetToolTip(_btnLoop, enabled ? LoopOn : LoopOff);
     }
 
-    public void SetTime(TimeSpan position, TimeSpan duration)
+    /// <summary>更新时间码显示。PR 风格：HH:MM:SS:FF（小时:分:秒:当前秒内帧号）。</summary>
+    /// <param name="position">当前播放位置。</param>
+    /// <param name="duration">总时长。</param>
+    /// <param name="frameInSecond">当前秒内的帧号（1 起，如 24fps 下为 1..24）。</param>
+    public void SetTime(TimeSpan position, TimeSpan duration, int frameInSecond)
     {
-        _timeLabel.Text = $"{position:hh\\:mm\\:ss\\.fff} / {duration:hh\\:mm\\:ss\\.fff}";
+        var p = $"{position:hh\\:mm\\:ss}:{frameInSecond:00}";
+        var d = $"{duration:hh\\:mm\\:ss}";
+        _timeLabel.Text = $"{p} / {d}";
     }
 
     public void SetInfo(string info) => _infoLabel.Text = info;

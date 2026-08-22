@@ -26,7 +26,14 @@ public sealed class ThumbnailPopup : Form
 
     public void ShowAt(Point screenPos, Bitmap? frame)
     {
-        _frame = frame;
+        // 接管 Bitmap 所有权：旧帧由本窗体释放，避免调用方 Dispose 后出现悬挂引用
+        // （调用方 PerformScrubCapture 每次抓帧后立即 Dispose(bmp)，若直接保存引用，
+        //  下次 Invalidate 触发 OnPaint 时读取 _frame.Width 会抛 ArgumentException）
+        if (!ReferenceEquals(_frame, frame))
+        {
+            _frame?.Dispose();
+            _frame = frame;
+        }
         Location = new Point(screenPos.X - Width / 2, Math.Max(0, screenPos.Y - Height - 8));
         ApplyVisibility(_frame is not null);
     }
@@ -35,6 +42,17 @@ public sealed class ThumbnailPopup : Form
     {
         _hideTimer.Stop();
         ApplyVisibility(false);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _frame?.Dispose();
+            _frame = null;
+            _hideTimer.Dispose();
+        }
+        base.Dispose(disposing);
     }
 
     private void ApplyVisibility(bool visible)

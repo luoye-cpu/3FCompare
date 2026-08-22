@@ -1,0 +1,35 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="500"
+        x:Class="_3FCompare.Avalonia.MainWindow"
+        Title="3FCompare – Avalonia M0 PoC"
+        Width="900" Height="560"
+        Background="#18181C">
+
+  <Grid RowDefinitions="Auto,*,Auto" Margin="8">
+
+    <!-- 顶部：操作按钮 -->
+    <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="8" Margin="0,0,0,8">
+      <Button x:Name="BtnOpen" Content="打开视频 (PoC-B)" Click="OnOpenClick" />
+      <Button x:Name="BtnPlay" Content="播放" Click="OnPlayClick" />
+      <Button x:Name="BtnGdiTest" Content="GDI 色块 (PoC-A)" Click="OnGdiTestClick" />
+    </StackPanel>
+
+    <!-- 中部：NativeControlHost 承载区（M0 核心验证点） -->
+    <Border Grid.Row="1" BorderBrush="#50505A" BorderThickness="1" CornerRadius="4">
+      <Panel>
+        <ContentControl x:Name="HostContainer" HorizontalContentAlignment="Stretch"
+                        VerticalContentAlignment="Stretch" />
+        <TextBlock x:Name="Placeholder" Text="NativeControlHost 承载区"
+                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                   Foreground="#8C8C96" FontSize="14" />
+      </Panel>
+    </Border>
+
+    <!-- 底部：状态栏 -->
+    <TextBlock Grid.Row="2" x:Name="StatusText" Text="就绪" Foreground="#C8C8D2"
+               Margin="0,8,0,0" />
+  </Grid>
+</Window>

@@ -75,6 +75,13 @@ public static class LanguageManager
         ["Msg_AutoDetectFailed"] = "当前未找到 FFmpeg",
         ["Msg_NativeLoadSuccess"] = "✓ FFF.Native 加载成功，FFmpeg 可用",
         ["Msg_NativeLoadFailed"] = "✗ FFF.Native 加载失败",
+        ["Msg_DemoModeTitle"] = "缺少必需组件",
+        ["Msg_DemoModeMissingFfmpeg"] = "未找到 FFmpeg 相关 DLL（avcodec 等），无法启动真实播放引擎。",
+
+        // 缺 FFmpeg 引导弹窗：自定义按钮（MessageBox 无法定制按钮文字，改用 PromptDialog）
+        ["Msg_DemoModeClose"] = "关闭",
+        ["Msg_DemoModeOpenSettings"] = "打开设置…",
+        ["Msg_DemoModeRestartNeeded"] = "FFmpeg 路径设置已保存。\n\n重新启动后才会加载新的 FFmpeg 探测链。\n\n是否立即重新启动？",
 
         // ---- 窗口 / 状态栏 / 菜单 / 侧边栏（0.1.4 双语完善新增）----
         ["Win_Title"] = "3FCompare – ICAT 类视频盯帧对比",
@@ -248,6 +255,13 @@ public static class LanguageManager
         ["Msg_AutoDetectFailed"] = "FFmpeg Not Found",
         ["Msg_NativeLoadSuccess"] = "✓ FFF.Native Loaded Successfully, FFmpeg Available",
         ["Msg_NativeLoadFailed"] = "✗ FFF.Native Load Failed",
+        ["Msg_DemoModeTitle"] = "Missing Required Components",
+        ["Msg_DemoModeMissingFfmpeg"] = "FFmpeg DLLs (avcodec etc.) not found. The real playback engine cannot start.",
+
+        // Missing-FFmpeg guide dialog: custom buttons (MessageBox cannot localize button text)
+        ["Msg_DemoModeClose"] = "Close",
+        ["Msg_DemoModeOpenSettings"] = "Open Settings…",
+        ["Msg_DemoModeRestartNeeded"] = "FFmpeg path saved.\n\nThe app must restart to load the new FFmpeg detection chain.\n\nRestart now?",
 
         // ---- 窗口 / 状态栏 / 菜单 / 侧边栏（0.1.4 双语完善新增）----
         ["Win_Title"] = "3FCompare – ICAT Video Frame Comparison",
