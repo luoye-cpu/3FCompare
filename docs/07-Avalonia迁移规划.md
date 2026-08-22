@@ -107,11 +107,16 @@
 - [x] 选中联动（探针/媒体信息/音频/偏移面板随选中表面刷新）；探针悬停读点 + 放大镜跟随（隧道指针路由）
 - 验证：构建零错误 + --selftest 全过（两轮）；面板交互细节留待 GUI 人工走查
 
-### M4 — 浮层、抓帧与自动化（1 周）
-- [ ] ThumbnailPopup（无边框置顶 Window；合成链路直接上 SkiaSharp——基准显示位图缩放快 8.4×）
-- [ ] WgcFrameCapture 接线验证（PrintWindow 对 Avalonia 窗口的捕获行为需实测）
-- [ ] --selftest / --screentest / --autodemo 命令行模式移植（退出码语义保持一致）
-- [ ] 拖放打开文件（DragDrop API 差异适配）
+### M4 — 浮层、抓帧与自动化（1 周）✅ 2026-08-22
+- [x] ThumbnailPopup（无边框置顶 + 250ms 自动隐藏 + GDI→WriteableBitmap 位图合成）；
+      时间轴拖动 150ms 节流抓帧预览管线接入
+- [x] WgcFrameCapture 链接编译（纯 Win32 与 UI 框架无关）；--screentest 实测抓到真实
+      D3D 画面 + GDI 覆盖层共存（1.4MB PNG，视觉确认通过）
+- [x] 帧导出 Ctrl+S（WgcFrameCapture → TryReadPixel 逐像素采样退路，WinForms 同款语义）
+- [x] --selftest / --screentest（>1000B 判过）/ --autodemo 全部移植，退出码语义与 WinForms 一致
+      （注：selftest 的自动播放断言须在步进断言**之前**——StepFrame 会暂停播放，与 WinForms 行为一致）
+- [x] 拖放打开（M2 已含）
+- 验证：selftest 两轮通过、screentest 产出 PNG 视觉确认、autodemo 双路 10s 存活冒烟
 
 ### M5 — 打包发布与切换（1 周）
 - [ ] pack.ps1 适配：Avalonia AOT 单文件产物路径、EmbedFffNative 资源嵌入方式复核

@@ -113,10 +113,75 @@ public partial class MainWindow : Window
         AddHandler(DragDrop.DragOverEvent, OnDragOver);
         AddHandler(DragDrop.DropEvent, OnDrop);
 
-        // 自动化 selftest（走真实打开管线）
+        // 自动化 selftest / screentest 模式（GetCommandLineArgs 返回进程原始参数）
         var args = Environment.GetCommandLineArgs();
         if (args.Length >= 3 && args[1] == "--selftest")
             _ = RunSelftestAsync(args[2]);
+        else if (args.Length >= 4 && args[1] == "--screentest")
+            _ = RunScreentestAsync(args[2], args[3]);
+    }
+
+    /// <summary>--autodemo：窗口显示后自动打开并播放。</summary>
+    public void AutoOpenFiles(string[] files)
+    {
+        Opened += (_, _) =>
+        {
+            Grid.SetCount(Math.Max(1, Math.Min(9, files.Length)), _realMode);
+            _coordinator.OpenFiles(files, autoPlay: true);
+        };
+    }
+
+    /// <summary>--screentest：打开→就绪+500ms 渲染→抓表面 0→存 PNG（>1000B 判过）。</summary>
+    private async System.Threading.Tasks.Task RunScreentestAsync(string input, string outputPng)
+    {
+        var code = 1;
+        try
+        {
+            _step = "screentest 打开";
+            Grid.SetCount(1, _realMode);
+            Console.WriteLine($"screentest: 打开 {input} ({(_realMode ? "真实" : "演示")})");
+            _coordinator.OpenFiles(new[] { input }, autoPlay: true);
+
+            _step = "screentest 等就绪";
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
+            while (DateTime.UtcNow < deadline)
+            {
+                var snap = _sync.ReadMasterSnapshot();
+                if (snap is not null && PlaybackCoordinator.IsReadyState(snap.State)) break;
+                await System.Threading.Tasks.Task.Delay(100);
+            }
+            _step = "screentest 渲染等待";
+            await System.Threading.Tasks.Task.Delay(500);
+
+            _step = "screentest 抓帧";
+            var surface = Grid.GetSurface(0);
+            System.Drawing.Bitmap? bmp = null;
+            if (surface is not null && surface.Hwnd != 0)
+                bmp = _3FCompare.App.Capture.WgcFrameCapture.CaptureWindowFrame(surface.Hwnd);
+            bmp ??= CapturePixelSampled(_sync.Slots.FirstOrDefault()?.Session);
+
+            if (bmp is not null)
+            {
+                using (bmp)
+                    bmp.Save(outputPng, System.Drawing.Imaging.ImageFormat.Png);
+                var size = new FileInfo(outputPng).Length;
+                Console.WriteLine($"screentest: PNG {size} bytes");
+                code = size > 1000 ? 0 : 1;
+            }
+            else
+            {
+                Console.Error.WriteLine("screentest: 抓帧失败");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"screentest: 失败 {ex.Message}");
+        }
+        finally
+        {
+            Console.Out.Flush();
+            Environment.Exit(code);
+        }
     }
 
     // ══════════ 打开 / 拖放 ══════════
@@ -233,7 +298,56 @@ public partial class MainWindow : Window
     {
         _timeline.SeekRequested += pos => _sync.SeekTo(pos);
         _timeline.AbPointSet += (pos, isA) => SetLoopPoint(pos, isA);
-        _timeline.ScrubPreview += pos => { /* M4：缩略图预览管线 */ };
+        _timeline.ScrubPreview += OnScrubPreview;
+        _timeline.PointerReleased += (_, _) => EndScrubPreview();
+        _timeline.PointerCaptureLost += (_, _) => EndScrubPreview();
+        _scrubTimer.Tick += OnScrubTimerTick;
+    }
+
+    // ---- 时间轴拖动缩略图预览（WinForms 150ms 节流抓帧管线） ----
+
+    private ThumbnailPopup? _thumbnail;
+    private readonly DispatcherTimer _scrubTimer = new() { Interval = TimeSpan.FromMilliseconds(150) };
+    private long _scrubTarget, _preScrubPos;
+    private bool _scrubbing;
+
+    private void OnScrubPreview(long pos)
+    {
+        if (!_scrubbing)
+        {
+            _scrubbing = true;
+            _preScrubPos = _sync.GetMasterPosition100ns();
+            _thumbnail ??= new ThumbnailPopup();
+        }
+        _scrubTarget = pos;
+        if (!_scrubTimer.IsEnabled) _scrubTimer.Start();
+    }
+
+    private void OnScrubTimerTick(object? sender, EventArgs e)
+    {
+        if (!_scrubbing) { _scrubTimer.Stop(); return; }
+        _sync.SeekTo(_scrubTarget);
+        global::Avalonia.Threading.Dispatcher.UIThread.Post(async () =>
+        {
+            await System.Threading.Tasks.Task.Delay(50); // 等 seek 生效一帧
+            if (!_scrubbing || _thumbnail is null) return;
+            var surface = Grid.GetSurface(0);
+            if (surface is null || surface.Hwnd == 0) return;
+            using var bmp = _3FCompare.App.Capture.WgcFrameCapture.CaptureWindowFrame(surface.Hwnd);
+            if (bmp is null) return;
+            var dur = _sync.GetMasterDuration100ns();
+            var ratio = dur > 0 ? (double)_scrubTarget / dur : 0;
+            var screen = _timeline.PointToScreen(new Point(ratio * _timeline.Bounds.Width, 0));
+            _thumbnail.ShowAt(screen, bmp);
+        });
+    }
+
+    private void EndScrubPreview()
+    {
+        if (!_scrubbing) return;
+        _scrubbing = false;
+        _scrubTimer.Stop();
+        _thumbnail?.Hide();
     }
 
     /// <summary>设置 A/B 循环点（自动补全另一点：设 A 时若 B 未设则 B=结尾，反之亦然）。</summary>
@@ -531,7 +645,86 @@ public partial class MainWindow : Window
         });
     }
 
-    private void OnExportFrame(object? sender, RoutedEventArgs e) => Pending("导出当前帧", "M4");
+    private async void OnExportFrame(object? sender, RoutedEventArgs e)
+    {
+        var surface = Grid.GetSurface(Math.Max(0, Grid.SelectedIndex));
+        if (surface is null || _sync.Count == 0)
+        {
+            await Views.MessageBox.Show(this, LanguageManager.T("Msg_AppName"),
+                LanguageManager.T("Msg_SelectMedia"), LanguageManager.T("Settings_Ok"));
+            return;
+        }
+
+        var top = TopLevel.GetTopLevel(this);
+        if (top is null) return;
+        var file = await top.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            Title = LanguageManager.T("Menu_ExportFrame"),
+            SuggestedFileName = $"frame_{DateTime.Now:yyyyMMdd_HHmmss}.png",
+            FileTypeChoices = new[] { new FilePickerFileType("PNG") { Patterns = new[] { "*.png" } } },
+        });
+        var path = file?.TryGetLocalPath();
+        if (path is null) return;
+
+        // 抓帧：WgcFrameCapture（BitBlt/PrintWindow）→ 失败回退逐像素采样（WinForms 同退路）
+        System.Drawing.Bitmap? bmp = null;
+        try
+        {
+            if (surface.Hwnd != 0)
+                bmp = _3FCompare.App.Capture.WgcFrameCapture.CaptureWindowFrame(surface.Hwnd);
+            bmp ??= CapturePixelSampled(_sync.Slots.ElementAtOrDefault(Grid.SelectedIndex)?.Session);
+        }
+        catch (Exception ex)
+        {
+            await Views.MessageBox.Show(this, LanguageManager.T("Msg_AppName"),
+                $"{LanguageManager.T("Msg_CaptureFail")}: {ex.Message}", LanguageManager.T("Settings_Ok"));
+            return;
+        }
+
+        if (bmp is null)
+        {
+            await Views.MessageBox.Show(this, LanguageManager.T("Msg_AppName"),
+                LanguageManager.T("Msg_CaptureUnavailable"), LanguageManager.T("Settings_Ok"));
+            return;
+        }
+
+        using (bmp)
+            bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+        StatusInfo.Text = $"{LanguageManager.T("Status_ExportDone")}: {Path.GetFileName(path)}";
+    }
+
+    /// <summary>逐像素采样重建帧（WgcFrameCapture 不可用时的退路，~320px 宽）。</summary>
+    private static System.Drawing.Bitmap? CapturePixelSampled(IPlayerSession? session)
+    {
+        if (session is null) return null;
+        try
+        {
+            var media = session.ReadMediaInfo();
+            var srcW = media?.VideoWidth ?? 0;
+            var srcH = media?.VideoHeight ?? 0;
+            if (srcW <= 0 || srcH <= 0) return null;
+            var w = Math.Min(320, srcW);
+            var h = (int)Math.Round((double)srcH * w / srcW);
+            var bmp = new System.Drawing.Bitmap(w, h);
+            for (var y = 0; y < h; y++)
+            {
+                for (var x = 0; x < w; x++)
+                {
+                    if (!session.TryReadPixel((int)((x + 0.5) / w * srcW), (int)((y + 0.5) / h * srcH), out var s))
+                        return null;
+                    bmp.SetPixel(x, y, System.Drawing.Color.FromArgb(
+                        To8(s.A), To8(s.R), To8(s.G), To8(s.B)));
+                }
+            }
+            return bmp;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static int To8(float v) => Math.Clamp((int)Math.Round(v * 255f), 0, 255);
 
     private void OnExit(object? sender, RoutedEventArgs e) => Close();
 
@@ -884,6 +1077,18 @@ public partial class MainWindow : Window
                 throw new InvalidOperationException($"未就绪（状态={ready?.State}）");
             Log($"就绪 ✓ 时长={TimeSpan.FromTicks(ready.Duration100ns):hh\\:mm\\:ss}");
 
+            // 自动播放断言（打开完成→统一 Play 契约；须在步进前验证——步进会暂停播放）
+            _step = "自动播放断言";
+            var deadline2 = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+            while (DateTime.UtcNow < deadline2)
+            {
+                var s = _sync.ReadMasterSnapshot();
+                if (s is { State: PlayerState.Playing }) { Log($"播放中 pos={TimeSpan.FromTicks(s.Position100ns):g}"); break; }
+                await System.Threading.Tasks.Task.Delay(100);
+            }
+            if (_realMode && _sync.ReadMasterSnapshot() is not { State: PlayerState.Playing })
+                throw new InvalidOperationException($"自动播放未启动（状态={_sync.ReadMasterSnapshot()?.State}）");
+
             // 帧步进 +1：位置不得后退（真实模式）
             _step = "帧步进";
             if (_realMode)
@@ -915,21 +1120,6 @@ public partial class MainWindow : Window
             var media = _sync.Slots[0].Session.ReadMediaInfo();
             if (media is not null)
                 Log($"媒体 {media.VideoWidth}x{media.VideoHeight} @{SyncController.EstimateFps(ready):0.##}fps {media.Codec} HDR={media.IsHdr}");
-
-            _step = "自动播放断言";
-            var deadline2 = DateTime.UtcNow + TimeSpan.FromSeconds(5);
-            while (DateTime.UtcNow < deadline2)
-            {
-                var s = _sync.ReadMasterSnapshot();
-                if (s is { State: PlayerState.Playing }) { Log($"状态={s.State} pos={TimeSpan.FromTicks(s.Position100ns):g}"); break; }
-                if ((DateTime.UtcNow - deadline2).TotalSeconds > -4.8)
-                    Log($"等待播放… 状态={s?.State} pos={TimeSpan.FromTicks(s?.Position100ns ?? 0):g}");
-                await System.Threading.Tasks.Task.Delay(200);
-            }
-            var final = _sync.ReadMasterSnapshot();
-            Log($"状态={final?.State}");
-            if (_realMode && final is not { State: PlayerState.Playing })
-                throw new InvalidOperationException($"自动播放未启动（状态={final?.State}）");
 
             Log("全部通过 ✓");
             code = 0;

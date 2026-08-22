@@ -1,5 +1,6 @@
 using Avalonia;
 using System;
+using System.IO;
 
 namespace _3FCompare.Avalonia;
 
@@ -8,12 +9,36 @@ internal static class Program
     [STAThread]
     public static void Main(string[] args)
     {
-        // --selftest <video>：自动化验证（打开→等就绪→Play→截图→退出码），与 WinForms 版语义一致
+        // --selftest <video>：打开→等就绪→步进断言→自动播放断言（WinForms 版语义一致）
         if (args.Length >= 2 && args[0] == "--selftest")
         {
             RunSelftest(args[1]);
             return;
         }
+        // --screentest <input> <png>：打开→就绪+500ms→抓表面0→存 PNG（>1000B 判过）
+        if (args.Length >= 3 && args[0] == "--screentest")
+        {
+            RunScreentest(args[1], args[2]);
+            return;
+        }
+        // --autodemo <files...>：自动打开并播放（演示/巡检模式）
+        if (args.Length >= 3 && args[0] == "--autodemo")
+        {
+            AutodemoFiles = args[1..];
+            var exitCode = 1;
+            try
+            {
+                BuildAvaloniaApp().StartWithClassicDesktopLifetime(new[] { "--autodemo-internal" });
+                exitCode = 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"autodemo: 异常 {ex}");
+                exitCode = 2;
+            }
+            Environment.Exit(exitCode);
+        }
+
         BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }
 
@@ -33,8 +58,36 @@ internal static class Program
         Environment.Exit(exitCode);
     }
 
-    /// <summary>selftest 结果（由 MainWindow 在自动化流程结束时写入）。</summary>
+    private static void RunScreentest(string input, string outputPng)
+    {
+        var exitCode = 1;
+        try
+        {
+            if (!File.Exists(input))
+            {
+                Console.Error.WriteLine($"screentest: 文件不存在 {input}");
+                Environment.Exit(2);
+            }
+            BuildAvaloniaApp().StartWithClassicDesktopLifetime(
+                new[] { "--screentest-internal", input, outputPng });
+            exitCode = ScreentestResult;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"screentest: 异常 {ex}");
+            exitCode = 2;
+        }
+        Environment.Exit(exitCode);
+    }
+
+    /// <summary>selftest 结果（由 MainWindow 自动化流程写入）。</summary>
     public static (int Code, string Message) SelftestResult;
+
+    /// <summary>autodemo 待打开文件（App 创建主窗时消费）。</summary>
+    public static string[]? AutodemoFiles;
+
+    /// <summary>screentest 结果（0=成功 >1000B；1=失败；由 MainWindow 写入）。</summary>
+    public static int ScreentestResult = 1;
 
     public static AppBuilder BuildAvaloniaApp()
         => AppBuilder.Configure<App>()

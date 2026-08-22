@@ -28,7 +28,10 @@ public class App : Application
         {
             var settings = SettingsStore.Load();
             LanguageManager.SetLanguage(settings.Language);
-            desktop.MainWindow = new MainWindow(settings);
+            var win = new MainWindow(settings);
+            if (Program.AutodemoFiles is { Length: > 0 })
+                win.AutoOpenFiles(Program.AutodemoFiles);
+            desktop.MainWindow = win;
         }
 
         base.OnFrameworkInitializationCompleted();
