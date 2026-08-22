@@ -31,6 +31,12 @@
     <ProjectReference Include="..\3FCompare.Core\3FCompare.Core.csproj" />
   </ItemGroup>
 
+  <!-- 嵌入 FFF.Native.dll 实现单文件发布（完整版用；精简版发布时不包含此资源） -->
+  <ItemGroup Condition="'$(EmbedFffNative)' == 'true'">
+    <EmbeddedResource Include="..\..\third_party\fff_project\FFF.Native\x64\Release\FFF.Native.dll"
+                      LogicalName="FFF.Native.dll" />
+  </ItemGroup>
+
   <!-- 双轨共享：本地化字符串单一事实源（迁移期间链接编译，M5 切换时移入本项目） -->
   <ItemGroup>
     <Compile Include="..\3FCompare.App\Utils\LanguageManager.cs" Link="Localization\LanguageManager.cs" />

@@ -98,11 +98,10 @@ public sealed class ProbePanel : StackPanel
     public void CopyToClipboard()
     {
         if (!_hasSample) return;
-        var json = JsonSerializer.Serialize(new
-        {
-            x = _lastX, y = _lastY, r = _last.R, g = _last.G, b = _last.B, a = _last.A,
-            bitDepth = _last.BitDepth,
-        }, new JsonSerializerOptions { WriteIndented = true });
+        // 手工拼接（NativeAOT：匿名类型反射序列化不可用）
+        var json = string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"{{\n  \"x\": {_lastX},\n  \"y\": {_lastY},\n  \"r\": {_last.R:0.######},\n  \"g\": {_last.G:0.######}," +
+            $"\n  \"b\": {_last.B:0.######},\n  \"a\": {_last.A:0.######},\n  \"bitDepth\": {_last.BitDepth}\n}}");
         TopLevel.GetTopLevel(this)?.Clipboard?.SetTextAsync(json);
     }
 }

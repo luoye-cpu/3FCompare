@@ -9,6 +9,16 @@ internal static class Program
     [STAThread]
     public static void Main(string[] args)
     {
+        // 内嵌 FFF.Native.dll 自解压（EmbedFffNative 发布形态；已存在则跳过）
+        try
+        {
+            _3FCompare.Core.Backend.NativeRuntime.ExtractEmbeddedDll(
+                name => System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream(name) is { } s
+                    ? ReadAll(s)
+                    : null);
+        }
+        catch { /* 非内嵌形态（精简版/开发运行）：忽略 */ }
+
         // --selftest <video>：打开→等就绪→步进断言→自动播放断言（WinForms 版语义一致）
         if (args.Length >= 2 && args[0] == "--selftest")
         {
@@ -93,4 +103,11 @@ internal static class Program
         => AppBuilder.Configure<App>()
             .UsePlatformDetect()
             .LogToTrace();
+
+    private static byte[] ReadAll(System.IO.Stream s)
+    {
+        using var ms = new System.IO.MemoryStream();
+        s.CopyTo(ms);
+        return ms.ToArray();
+    }
 }
