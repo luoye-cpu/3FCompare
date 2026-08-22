@@ -115,7 +115,13 @@ internal static class Program
 
     public static AppBuilder BuildAvaloniaApp()
         => AppBuilder.Configure<AppEntry>()
-            .UsePlatformDetect()
+            .UseWin32()
+            .With(new Win32PlatformOptions
+            {
+                // 使用 WGL（OpenGL）替代 ANGLE（OpenGL ES→D3D），避免依赖 av_libglesv2.dll
+                RenderingMode = new[] { Win32RenderingMode.Wgl, Win32RenderingMode.Software },
+            })
+            .UseSkia()
             .LogToTrace();
 
     private static byte[] ReadAll(System.IO.Stream s)
