@@ -25,6 +25,7 @@ public sealed class SettingsWindow : Window
     private readonly CheckBox _startFullscreen = new();
     private readonly CheckBox _hideChrome = new() { IsChecked = true };
     private readonly CheckBox _vrrTearing = new();
+    private readonly CheckBox _vrrPacing = new();
     private readonly ComboBox _colorMode = new();
     private readonly NumericUpDown _cols = new() { Minimum = 1, Maximum = 3, Increment = 1 };
     private readonly NumericUpDown _rows = new() { Minimum = 1, Maximum = 3, Increment = 1 };
@@ -65,6 +66,8 @@ public sealed class SettingsWindow : Window
         _vrrTearing.Content = LanguageManager.T("Vrr_TearingPresent");
         ToolTip.SetTip(_vrrTearing, LanguageManager.T("Vrr_TearingHint"));
         _vrrTearing.IsChecked = current.VrrTearingPresent;
+        _vrrPacing.Content = LanguageManager.T("Vrr_PacingEnabled");
+        _vrrPacing.IsChecked = current.VrrPacingEnabled;
         _colorMode.Items.Add(LanguageManager.T("Color_SDR"));
         _colorMode.Items.Add(LanguageManager.T("Color_HDRAuto"));
         _colorMode.SelectedIndex = current.ColorMode == ColorModeSetting.MapToHdr ? 1 : 0;
@@ -85,7 +88,7 @@ public sealed class SettingsWindow : Window
         stack.Children.Add(Section(LanguageManager.T("Window_StartFullscreen"),
             Row(_startFullscreen, _hideChrome)));
         stack.Children.Add(Section(LanguageManager.T("Vrr_SectionTitle"),
-            Row(_vrrTearing), Hint(LanguageManager.T("Vrr_TearingHint"))));
+            Row(_vrrTearing, _vrrPacing), Hint(LanguageManager.T("Vrr_TearingHint"))));
         stack.Children.Add(Section(LanguageManager.T("Status_Color"),
             Row(_colorMode)));
         stack.Children.Add(Section(LanguageManager.T("Layout_DefaultCols"),
@@ -169,13 +172,14 @@ public sealed class SettingsWindow : Window
         var cols = (int)(_cols.Value ?? 2);
         var rows = (int)(_rows.Value ?? 1);
         var vrrTearing = _vrrTearing.IsChecked == true;
+        var vrrPacing = _vrrPacing.IsChecked == true;
         var ffmpeg = string.IsNullOrWhiteSpace(_ffmpegDir.Text) ? null : _ffmpegDir.Text.Trim();
 
         var changed = lang != _orig.Language || hw != _orig.HardwareDecode || adapter != _orig.PreferredAdapterIndex
             || frame != _orig.FrameStep || Math.Abs(sec - _orig.SecondsStep) > 0.001
             || startFs != _orig.StartFullscreen || hideChrome != _orig.HideChromeInFullscreen
             || color != _orig.ColorMode || cols != _orig.DefaultGridCols || rows != _orig.DefaultGridRows
-            || vrrTearing != _orig.VrrTearingPresent
+            || vrrTearing != _orig.VrrTearingPresent || vrrPacing != _orig.VrrPacingEnabled
             || ffmpeg != _orig.FfmpegDirectory;
         FfmpegChanged = ffmpeg != _orig.FfmpegDirectory;
 
@@ -195,6 +199,7 @@ public sealed class SettingsWindow : Window
                 DefaultGridCols = cols,
                 DefaultGridRows = rows,
                 VrrTearingPresent = vrrTearing,
+                VrrPacingEnabled = vrrPacing,
                 WindowX = _orig.WindowX, WindowY = _orig.WindowY,
                 WindowWidth = _orig.WindowWidth, WindowHeight = _orig.WindowHeight,
                 WindowMaximized = _orig.WindowMaximized,

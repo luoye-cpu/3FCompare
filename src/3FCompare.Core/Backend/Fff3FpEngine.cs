@@ -54,6 +54,8 @@ public sealed class Fff3FpEngine : IPlayerEngine
         session.ApplyToneMappingParameters(options.ColorMode, options.OutputWindow, options.ForceHdrOutput);
         if (options.TearingPresent)
             session.SetPresentConfig(true); // 不支持时静默保持 VSync（返回值忽略）
+        if (options.PacingEnabled)
+            session.SetPacingConfig(true);
 
         return session;
     }
@@ -202,6 +204,15 @@ public sealed class Fff3FpEngine : IPlayerEngine
         {
             ThrowIfDisposed();
             var result = Fff3FpNative.FFF3FP_SetPresentConfig(_handle, tearing ? 1u : 0u);
+            return result == FffResult.Success;
+        }
+
+        /// <summary>媒体率呈现节奏（内核扩展 A9）：抑制叠加层固定周期重翻转，
+        /// 使呈现节奏跟随源视频帧率。返回 false 表示不支持。</summary>
+        public bool SetPacingConfig(bool pacing)
+        {
+            ThrowIfDisposed();
+            var result = Fff3FpNative.FFF3FP_SetPacingConfig(_handle, pacing ? 1u : 0u);
             return result == FffResult.Success;
         }
 

@@ -46,6 +46,11 @@ public interface IPlayerSession : IDisposable
     /// false 保持 VSync 锁定。显示器/驱动不支持时静默保持 VSync（返回值仅提示）。</summary>
     bool SetPresentConfig(bool tearing);
 
+    /// <summary>媒体率呈现节奏（内核扩展 A9）：
+    /// pacing=true 抑制叠加层固定周期的重翻转，使呈现节奏跟随源视频帧率而非叠加层帧率。
+    /// 对 VRR 显示器消除 3:2 抖动；对 VSync 锁定显示器无害。需配合 SetPresentConfig(true) 发挥完整效果。</summary>
+    bool SetPacingConfig(bool pacing);
+
     /// <summary>设置视口变换（缩放 + 平移）。zoom=1.0 表示适应窗口；
     /// panX/panY 为相对未缩放视频框的归一化偏移 [-1,1]。</summary>
     void SetViewTransform(float zoom, float panX, float panY);
@@ -87,6 +92,10 @@ public sealed record EngineSessionOptions
     /// 让 G-SYNC/FreeSync 显示器按自身节奏扫描输出；false 保持 VSync 锁定（无撕裂）。
     /// 显示器链不支持时静默保持 VSync。盯帧对比场景建议保持 false。</summary>
     public bool TearingPresent { get; init; }
+
+    /// <summary>媒体率呈现节奏（内核扩展 A9）：pacing=true 抑制叠加层固定周期的重翻转，
+    /// 使呈现节奏跟随源视频帧率。需 TearingPresent=true 发挥完整效果。</summary>
+    public bool PacingEnabled { get; init; }
 }
 
 /// <summary>解码适配器信息（用于多显卡指定，F26/A11）。</summary>

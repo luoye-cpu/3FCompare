@@ -226,6 +226,10 @@ internal static partial class Fff3FpNative
     [LibraryImport(DllName)]
     internal static partial FffResult FFF3FP_SetPresentConfig(nint player, uint enableTearing);
 
+    // 3FCompare 扩展（A9 媒体率呈现节奏）：1 = 抑制叠加层周期性重翻转
+    [LibraryImport(DllName)]
+    internal static partial FffResult FFF3FP_SetPacingConfig(nint player, uint enablePacing);
+
     // ---- 读取 ----
 
     [LibraryImport(DllName)]

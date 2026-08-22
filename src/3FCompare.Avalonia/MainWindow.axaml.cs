@@ -870,6 +870,7 @@ public partial class MainWindow : Window
         _settings.DefaultGridCols = s.DefaultGridCols;
         _settings.DefaultGridRows = s.DefaultGridRows;
         _settings.VrrTearingPresent = s.VrrTearingPresent;
+        _settings.VrrPacingEnabled = s.VrrPacingEnabled;
         _settings.Language = s.Language;
     }
 
@@ -1094,6 +1095,11 @@ public partial class MainWindow : Window
             _step = "VRR 呈现";
             var vrrSupported = _sync.Slots[0].Session.SetPresentConfig(true);
             Log($"VRR 撕裂呈现: {(vrrSupported ? "显示器链支持 ✓" : "不支持 → 保持 VSync 锁定")}");
+
+            // A9 媒体率呈现节奏覆盖
+            _step = "VRR 节奏";
+            var pacingSupported = _sync.Slots[0].Session.SetPacingConfig(true);
+            Log($"VRR 媒体率节奏: {(pacingSupported ? "已启用 ✓" : "不支持")}");
 
             // 帧步进 +1：位置不得后退（真实模式）
             _step = "帧步进";

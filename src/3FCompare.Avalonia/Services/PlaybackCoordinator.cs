@@ -84,6 +84,7 @@ public sealed class PlaybackCoordinator
                     PreferredAdapterIndex = _settings.PreferredAdapterIndex,
                     ColorMode = (ColorMode)_settings.ColorMode,
                     TearingPresent = _settings.VrrTearingPresent,
+                    PacingEnabled = _settings.VrrPacingEnabled,
                 });
                 surface.AttachSession(session);
                 _sync.AddSlot(session, path);

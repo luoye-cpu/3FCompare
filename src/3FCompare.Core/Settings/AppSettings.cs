@@ -32,6 +32,10 @@ public sealed class AppSettings
     /// 盯帧对比推荐）。显示器链不支持时自动回退 VSync。</summary>
     public bool VrrTearingPresent { get; set; }
 
+    /// <summary>媒体率呈现节奏（内核扩展 A9）：pacing=true 时抑制叠加层固定周期重翻转，
+    /// 使呈现节奏跟随源视频帧率。需 VrrTearingPresent=true 发挥完整效果。</summary>
+    public bool VrrPacingEnabled { get; set; }
+
     /// <summary>窗口记忆：上次位置/尺寸/最大化状态（F27 窗口模式管理）。</summary>
     public int WindowX { get; set; } = -1;
 
