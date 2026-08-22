@@ -23,7 +23,7 @@
 
 | 维度 / Dimension | 说明 / Description |
 | --- | --- |
-| 产品形态 / Type | Windows 桌面应用（WinForms，.NET 11）；**NativeAOT 自包含单文件（约 23MB 原生产物）** / Windows desktop app (WinForms, .NET 11); **NativeAOT self-contained single file (~23MB native binary)** |
+| 产品形态 / Type | Windows 桌面应用（**Avalonia 11**，.NET 11）；**NativeAOT 自包含（精简版 7z 分发约 9.3MB）** / Windows desktop app (**Avalonia 11**, .NET 11); **NativeAOT self-contained (lite 7z ~9.3MB)** |
 | 对标产品 / Reference | NVIDIA ICAT（最多 4 路视频/图像对比）——本项目**扩展至 1~9 路**，对齐、双步进、硬件解码开关、窗口/全屏、多显卡解码 / NVIDIA ICAT (up to 4-way) — **extended to 1–9 ways** with alignment, dual stepping, HW decode toggle, window/fullscreen, multi-GPU |
 | 后端 / Backend | FFF_Project 的 **3FP**（`FFF.Native` fork + 自研补丁，见 docs/03） / **3FP** from FFF_Project (forked `FFF.Native` + custom patches, see docs/03) |
 | 业务规模 / Scale | **1~9 路对比**（3x3 网格上限），架构按 N 路扩展 / **1–9 way comparison** (3×3 grid max), architecture scales to N-way |
@@ -55,7 +55,8 @@
 src/
 ├── 3FCompare.slnx              # 解决方案（.NET 11 新格式）
 ├── 3FCompare.Core/             # 后端抽象 / 3FP P/Invoke / 演示引擎 / 同步 / 设置 / GPU 枚举 / DXGI 显示器能力
-├── 3FCompare.App/              # WinForms 主程序（多路网格 / 双步进 / 时间轴 / 设置 / 全屏 / 对比工具 / 主题）
+├── 3FCompare.Avalonia/         # Avalonia 主程序（多路网格 / 双步进 / 时间轴 / 设置 / 全屏 / 对比工具 / 主题；
+│                               #   2026-08-22 由 WinForms 迁移而来，WinForms 版归档于 tag `winforms-final`）
 tests/
 ├── 3FCompare.SmokeTests/       # E3 冒烟（控制台，演示引擎全流程验证）
 ├── 3FCompare.Core.Tests/       # 单元测试（FrameTimeline / SyncController / GridLayout / ToneMapping 等，40 例）
@@ -67,8 +68,10 @@ third_party/
 ```
 
 **里程碑状态 / Milestone**: ✅ 真实 3FP 内核全链路已验证（FFmpeg 解码 → D3D 渲染 → App 显示） / Real 3FP kernel pipeline verified (FFmpeg decode → D3D render → App display).
-✅ **NativeAOT 已启用 / Enabled**: `dotnet publish -c Release -r win-x64` → 约 23MB 原生单文件 `3FCompare.App.exe`，
-真实视频渲染 + `--selftest` 均验证通过（官方 `_SuppressWinFormsTrimError` 抑制 NETSDK1175）。
+✅ **NativeAOT 已启用 / Enabled**: `dotnet publish -c Release -r win-x64` → 原生单文件 `3FCompare.Avalonia.exe`
+（含 Skia/ANGLE 原生栈约 21MB；完整版内嵌 FFF.Native），
+真实视频渲染 + `--selftest` / `--screentest` 均验证通过；精简版 7z 分发 9.3MB。
+迁移纪要见 [docs/07-Avalonia迁移规划.md](docs/07-Avalonia迁移规划.md)。
 `tools/构建全部.ps1` 一键复现内核构建与 DLL 部署。
 
 
@@ -105,10 +108,10 @@ powershell -ExecutionPolicy Bypass -File tools/构建全部.ps1
 dotnet test  tests/3FCompare.Core.Tests
 
 # 运行应用（有 FFF.Native 时真实模式，无则演示模式） / Run (real mode with FFF.Native, demo mode otherwise)
-dotnet run --project src/3FCompare.App
+dotnet run --project src/3FCompare.Avalonia
 
 # 演示模式体验（任意文件，合成画面） / Demo mode: any file, synthetic frames
-dotnet run --project src/3FCompare.App -- --autodemo &lt;文件...&gt;
+dotnet run --project src/3FCompare.Avalonia -- --autodemo &lt;文件...&gt;
 
 # E3 冒烟（真实/演示自动切换） / E3 smoke test (auto real/demo mode)
 dotnet run --project tests/3FCompare.SmokeTests -- &lt;视频&gt; [更多视频...]

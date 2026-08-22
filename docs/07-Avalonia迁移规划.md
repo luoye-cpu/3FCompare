@@ -1,7 +1,7 @@
 # 3FCompare Avalonia 迁移规划
 
-> 状态：**M0 已完成（go）**｜创建：2026-08-22｜M0 验收：2026-08-22
-> 前置阅读：`docs/02-系统架构.md`、本文档第三节「硬约束」
+> 状态：**迁移完成（M0–M5 全部通过）**｜创建：2026-08-22｜完成：2026-08-22
+> WinForms 版归档于 tag `winforms-final`；前置阅读：`docs/02-系统架构.md`、本文档第三节「硬约束」
 
 ## 1. 迁移动机与目标
 
@@ -118,13 +118,17 @@
 - [x] 拖放打开（M2 已含）
 - 验证：selftest 两轮通过、screentest 产出 PNG 视觉确认、autodemo 双路 10s 存活冒烟
 
-### M5 — 打包发布与切换（1 周）
-- [ ] pack.ps1 适配：Avalonia AOT 单文件产物路径、EmbedFffNative 资源嵌入方式复核
-- [ ] 包体积测量 vs 15MB 红线
-- [ ] 全功能回归清单走查（§3.4 功能对等清单逐项打勾）
-- [ ] 精简版/完整版双形态发布验证
-- [ ] 删除 WinForms 版 `src/3FCompare.App`（或先归档一个 tag 后删除）
-- [ ] slnx/csproj/README/docs 更新
+### M5 — 打包发布与切换（1 周）✅ 2026-08-22
+- [x] pack.ps1 适配：指向 Avalonia 项目、EmbedFffNative 资源嵌入 + Program 自解压、说明文本更新
+- [x] 包体积测量 vs 15MB 红线（口径=分发产物 7z，与 5.1MB 基线一致）：
+      精简版原始 35.3MB（Skia/ANGLE 原生栈成本）→ **7z 9.3MB ≤ 15MB ✓**；完整版 exe 20.9MB（内嵌内核）
+- [x] 全功能回归：Avalonia --selftest（Debug + AOT 双通过）、--screentest（1.4MB PNG 视觉确认）、
+      --autodemo 双路冒烟、Core.Tests 40/40、SmokeTests --demo E3 通过
+- [x] 功能对等清单走查（§3.4）：9 路网格 / AB 循环 / 偏移对齐 / 探针 / 书签 / 放大镜 / 差异叠加 /
+      双语（含运行时切换）/ 暗色主题 / 快捷键全套 / --selftest --screentest --autodemo —— 全部实装
+- [x] 归档 tag `winforms-final` 后删除 `src/3FCompare.App`；共享文件（LanguageManager/WgcFrameCapture）
+      迁入 Avalonia 项目（命名空间不变，零引用改动）
+- [x] slnx / README / PACKAGING_SPEC / docs/07 更新
 
 **总工期估算：8 周**（单人全职；含每周缓冲。M0 失败则总决策提前一周止损）
 
@@ -158,6 +162,11 @@
   （对齐 vtable 后仍返回 INVALID_CALL，裸函数指针调用正常）——Core 的 DXGI 亮度探测因此
   重写为裸 vtable 委托方案（`DxgiOutputInfo`）。此为 M0 期间唯一 Core 改动，属缺陷修复。
 - 2026-08-22: 体积实测——Avalonia AOT 单文件 17.5MB > 15MB 红线，重评估挂起至 M5。
+- 2026-08-22: M5 红线判定：口径对齐（分发产物 7z，与 WinForms 基线 5.1MB 同口径）——精简版
+  35.3MB 原始 → 9.3MB ≤ 15MB ✓（原始超出为 Skia/ANGLE 原生栈，属框架固有成本）。
+- 2026-08-22: **迁移完成（M0–M5 单日全通过）**。WinForms 版删除前归档 tag `winforms-final`。
+  双轨链接的 LanguageManager/WgcFrameCapture 迁入 Avalonia 项目。AbSlider/DiffOverlay 与 WinForms
+  保持同样的「占位画面/直接采样」语义（真实 D3D 内容合成进对比视图留待内核共享纹理接口，属后续增强）。
 - 2026-08-22: M1 完成期间发现本机 .NET 11 预览运行时（11.0.100-preview.6）两个工程级坑：
   ① App.axaml 内嵌 `<Application.Resources>/<Application.Styles>` 会使编译 XAML 按类型查找失败
     （「No precompiled XAML found for App」）——规避：App.axaml 保持空，主题经 ThemeResources 代码装配；

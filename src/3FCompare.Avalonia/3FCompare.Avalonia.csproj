@@ -37,11 +37,6 @@
                       LogicalName="FFF.Native.dll" />
   </ItemGroup>
 
-  <!-- 双轨共享：本地化字符串单一事实源（迁移期间链接编译，M5 切换时移入本项目） -->
-  <ItemGroup>
-    <Compile Include="..\3FCompare.App\Utils\LanguageManager.cs" Link="Localization\LanguageManager.cs" />
-    <!-- 纯 Win32 GDI 帧捕获（与 UI 框架无关，链接复用） -->
-    <Compile Include="..\3FCompare.App\Capture\WgcFrameCapture.cs" Link="Platform\WgcFrameCapture.cs" />
-  </ItemGroup>
+  <!-- 本地化字符串与窗口帧捕获（自 App 项目迁入；命名空间保持 _3FCompare.App[.Capture] 不变以零改动引用） -->
 
 </Project>

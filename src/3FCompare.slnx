@@ -1,5 +1,4 @@
 <Solution>
-  <Project Path="3FCompare.App/3FCompare.App.csproj" />
   <Project Path="3FCompare.Avalonia/3FCompare.Avalonia.csproj" />
   <Project Path="3FCompare.Core/3FCompare.Core.csproj" />
   <Project Path="../testmedia/tools/renderbench/renderbench.csproj" />

@@ -39,7 +39,7 @@ External tool components are placed in the `PLAN/` subdirectory; the app points 
 
 ```
 3FCompare-v0.1.0-x64-full/
-├── 3FCompare.App.exe                    ← 主程序（NativeAOT 单文件，内嵌 FFF.Native）
+├── 3FCompare.Avalonia.exe                    ← 主程序（NativeAOT 单文件，内嵌 FFF.Native）
 ├── PLAN/                                ← 外部组件根目录
 │   ├── ffmpeg-full/                     ← FFmpeg 预编译 DLL 包（内核配套版本）
 │   │   ├── avcodec-63.dll               ← FFmpeg 编解码库
@@ -103,7 +103,7 @@ External tool components are placed in the `PLAN/` subdirectory; the app points 
 
 ```powershell
 # Windows x64 精简版（NativeAOT，内嵌 FFF.Native）/ Lite (NativeAOT, embedded FFF.Native)
-dotnet publish src/3FCompare.App/3FCompare.App.csproj `
+dotnet publish src/3FCompare.Avalonia/3FCompare.Avalonia.csproj `
     -c Release -r win-x64 `
     -p:PublishAot=true `
     -p:SelfContained=true `
@@ -111,7 +111,7 @@ dotnet publish src/3FCompare.App/3FCompare.App.csproj `
     -o publish/build/3FCompare-v0.1.0-x64/
 
 # Windows x64 完整版（NativeAOT，另需复制 PLAN/ 目录）/ Full (NativeAOT, plus PLAN/ copy)
-dotnet publish src/3FCompare.App/3FCompare.App.csproj `
+dotnet publish src/3FCompare.Avalonia/3FCompare.Avalonia.csproj `
     -c Release -r win-x64 `
     -p:PublishAot=true `
     -p:SelfContained=true `
@@ -183,13 +183,13 @@ Invoke-7zMax 'a -t7z -mx9 -md=3840m -mfb=273 -ms=on -mmt=1 "out.7z" *'
 
 🚀 快速开始 / Quick Start
   1. 解压所有文件到任意目录 / Extract all files to any directory
-  2. 双击运行 3FCompare.App.exe / Double-click 3FCompare.App.exe
+  2. 双击运行 3FCompare.Avalonia.exe / Double-click 3FCompare.Avalonia.exe
   3. 首次使用：打开设置（F25）→ FFmpeg 路径 → 指向 PLAN/ffmpeg-full/
      First run: Settings (F25) → FFmpeg Path → point to PLAN/ffmpeg-full/
   4. 拖入视频文件即可开始对比 / Drag video files to start comparison
 
 📁 文件结构 / File Structure
-  3FCompare.App.exe  — 主程序（NativeAOT 单文件，内嵌播放器内核）
+  3FCompare.Avalonia.exe  — 主程序（NativeAOT 单文件，内嵌播放器内核）
                        Main executable (NativeAOT, embedded player kernel)
   PLAN/              — 外部组件包（完整版含）/ External component bundle (full version)
     └── ffmpeg-full/ — FFmpeg 编解码引擎（必需）/ FFmpeg decoding engine (required)
@@ -248,7 +248,7 @@ Invoke-7zMax 'a -t7z -mx9 -md=3840m -mfb=273 -ms=on -mmt=1 "out.7z" *'
 
 ### 5.1 版本号位置 / Version Location
 
-`src/3FCompare.App/3FCompare.App.csproj`:
+`src/3FCompare.Avalonia/3FCompare.Avalonia.csproj`:
 ```xml
 <Version>0.1.4</Version>
 <VersionSuffix>BETA</VersionSuffix>
