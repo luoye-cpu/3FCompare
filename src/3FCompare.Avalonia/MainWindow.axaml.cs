@@ -91,9 +91,12 @@ public partial class MainWindow : Window
         {
             if (!_sidebar.MagnifierOn) Magnifier.HideOverlay();
         };
-        _sidebar.CollapsedChanged += (_, _) =>
-            MainArea.ColumnDefinitions[0].Width =
-                new GridLength(_sidebar.Collapsed ? 24 : SidebarHost.Bounds.Width, GridUnitType.Pixel);
+        _sidebar.CollapsedChanged += collapsed =>
+        {
+            MainArea.ColumnDefinitions[0].Width = new GridLength(
+                collapsed ? 24 : _sidebar.ExpandedWidth, GridUnitType.Pixel);
+            SidebarSplitter.IsVisible = !collapsed;
+        };
         SidebarHost.Content = _sidebar;
         Grid.SelectionChanged += (_, _) => UpdatePanelsForSelection();
         UpdatePanelsForSelection();
@@ -813,7 +816,7 @@ public partial class MainWindow : Window
 
     private void ShowSidebar()
     {
-        SidebarHost.IsVisible = true;
+        _sidebar.Expand();
         SidebarSplitter.IsVisible = true;
     }
 
@@ -825,10 +828,10 @@ public partial class MainWindow : Window
 
     private void OnShowGridOnly(object? sender, RoutedEventArgs e)
     {
-        // 复刻 WinForms「仅显示对比网格」：隐藏侧栏
-        var show = !SidebarHost.IsVisible;
-        SidebarHost.IsVisible = show;
-        SidebarSplitter.IsVisible = show;
+        if (_sidebar.Collapsed)
+            _sidebar.Expand();
+        else
+            _sidebar.ToggleCollapse();
     }
 
     private void OnToggleFullscreen(object? sender, RoutedEventArgs e) => ToggleFullscreen();

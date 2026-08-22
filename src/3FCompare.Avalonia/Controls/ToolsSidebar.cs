@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
@@ -9,13 +10,20 @@ using _3FCompare.Avalonia.Panels;
 namespace _3FCompare.Avalonia.Controls;
 
 /// <summary>右侧工具侧栏（WinForms VerticalDockHost 对应）：
-/// 顶部折叠按钮 + 5 页签（探针/书签/偏移/媒体/音频）+ 放大镜常驻开关 + 内容区。</summary>
+/// 顶部折叠按钮 + 5 页签（探针/书签/偏移/媒体/音频）+ 放大镜常驻开关 + 内容区。
+/// 折叠/展开时通过 CollapsedChanged 事件告知宿主（MainWindow）调整 Grid 列宽，
+/// 自身记录展开宽度（默认 240px），避免用 Bounds.Width（折叠后为 24px）导致展开回不去。</summary>
 public sealed class ToolsSidebar : UserControl
 {
     private readonly CheckBox _magnifierCheck = new() { FontSize = 11 };
     private readonly ContentControl _content = new();
     private readonly List<(Button Tab, Control Panel)> _tabs = new();
     private Control? _active;
+    /// <summary>展开时的宽度（像素），折叠后记录此值供恢复。</summary>
+    public const double DefaultExpandedWidth = 240;
+    private double _expandedWidth = DefaultExpandedWidth;
+    /// <summary>当前展开宽度（只读，供宿主在折叠展开时恢复）。</summary>
+    public double ExpandedWidth => _expandedWidth;
 
     /// <summary>激活页签变化（MainWindow 据此刷新面板会话绑定）。</summary>
     public event EventHandler? ActiveToolChanged;
@@ -30,30 +38,32 @@ public sealed class ToolsSidebar : UserControl
     public event EventHandler? MagnifierToggled;
 
     public bool Collapsed { get; private set; }
-    public event EventHandler? CollapsedChanged;
+    /// <summary>折叠/展开状态变化时触发，宿主应据此调整 Grid 列宽。</summary>
+    public event Action<bool>? CollapsedChanged;
 
     public ToolsSidebar(ProbePanel probe, BookmarkPanel bookmarks, OffsetPanel offset, MediaInfoPanel media, AudioPanel audio)
     {
         Probe = probe; Bookmarks = bookmarks; Offset = offset; Media = media; Audio = audio;
 
-        var collapse = new Button { Height = 20, FontSize = 10, Content = "▶", HorizontalAlignment = HorizontalAlignment.Right };
+        var collapse = new Button { Height = 20, FontSize = 10, Content = "◀", HorizontalAlignment = HorizontalAlignment.Right };
+        ToolTip.SetTip(collapse, "折叠/展开");
         collapse.Click += (_, _) => ToggleCollapse();
 
-        var tabsRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2, Margin = new global::Avalonia.Thickness(4, 2) };
+        var tabsRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2, Margin = new Thickness(4, 2) };
         foreach (var (key, panel) in new[]
                  {
                      ("Tab_Probe", (Control)probe), ("Tab_Bookmarks", bookmarks),
                      ("Tab_Offset", offset), ("Tab_Media", media), ("Tab_Audio", audio),
                  })
         {
-            var tab = new Button { Height = 24, FontSize = 11, Padding = new global::Avalonia.Thickness(8, 0), Content = LanguageManager.T(key) };
+            var tab = new Button { Height = 24, FontSize = 11, Padding = new Thickness(8, 0), Content = LanguageManager.T(key) };
             tab.Click += (_, _) => Activate(panel);
             _tabs.Add((tab, panel));
             tabsRow.Children.Add(tab);
         }
 
         _magnifierCheck.Content = LanguageManager.T("Mag_Magnifier");
-        _magnifierCheck.Margin = new global::Avalonia.Thickness(6, 4);
+        _magnifierCheck.Margin = new Thickness(6, 4);
         _magnifierCheck.IsCheckedChanged += (_, _) => MagnifierToggled?.Invoke(this, EventArgs.Empty);
 
         var top = new StackPanel { Orientation = Orientation.Vertical };
@@ -73,11 +83,28 @@ public sealed class ToolsSidebar : UserControl
                 _magnifierCheck.Content = LanguageManager.T("Mag_Magnifier"));
     }
 
-    private void ToggleCollapse()
+    /// <summary>切换折叠/展开状态。宿主应监听 CollapsedChanged 事件调整列宽。</summary>
+    public void ToggleCollapse()
     {
         Collapsed = !Collapsed;
-        CollapsedChanged?.Invoke(this, EventArgs.Empty);
+        CollapsedChanged?.Invoke(Collapsed);
     }
+
+    /// <summary>展开侧栏（恢复展开宽度）。</summary>
+    public void Expand()
+    {
+        if (!Collapsed) return;
+        Collapsed = false;
+        CollapsedChanged?.Invoke(false);
+    }
+
+    /// <summary>设置展开宽度（由宿主在首次布局或拖动分隔条后更新）。</summary>
+    public void UpdateExpandedWidth(double width)
+    {
+        if (width >= MinWidth) _expandedWidth = width;
+    }
+
+    private const double MinWidth = 100;
 
     public void Activate(Control panel)
     {
