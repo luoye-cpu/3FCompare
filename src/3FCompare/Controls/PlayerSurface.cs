@@ -204,8 +204,10 @@ public sealed class PlayerSurface : NativeControlHost
     private static readonly System.Drawing.SolidBrush BrushD3DTagBg = new(System.Drawing.Color.FromArgb(160, 0, 120, 0));
     private static readonly System.Drawing.Font FontOverlay = new("Microsoft YaHei UI", 9f);
     private static readonly System.Drawing.Font FontTag = new("Segoe UI", 8f);
-    private static readonly Dictionary<int, System.Drawing.Font> _bigFontCache = new();
+        private static readonly Dictionary<int, System.Drawing.Font> _bigFontCache = new();
     private static readonly Dictionary<int, System.Drawing.Font> _timeFontCache = new();
+    private static readonly Dictionary<(int hue, int w, int h), System.Drawing.Drawing2D.LinearGradientBrush?> _gradCache = new();
+    private static readonly object _gradCacheLock = new();
 
     private void PaintSelf()
     {
@@ -240,10 +242,17 @@ public sealed class PlayerSurface : NativeControlHost
             return;
         }
         var hue = (_index * 47) % 360;
-        using var brush = new System.Drawing.Drawing2D.LinearGradientBrush(
-            rect, ColorFromHsv(hue, 0.55f, 0.35f), ColorFromHsv((hue + 60) % 360, 0.65f, 0.18f),
-            System.Drawing.Drawing2D.LinearGradientMode.ForwardDiagonal);
-        g.FillRectangle(brush, rect);
+        int rw = rect.Width, rh = rect.Height;
+        // 渐变刷按 (hue, w, h) 缓存：同尺寸同色相不重复创建 GDI 渐变对象
+        lock (_gradCacheLock)
+        {
+            var key = (hue, rw, rh);
+            if (!_gradCache.TryGetValue(key, out var cached) || cached is null)
+                _gradCache[key] = cached = new System.Drawing.Drawing2D.LinearGradientBrush(
+                    rect, ColorFromHsv(hue, 0.55f, 0.35f), ColorFromHsv((hue + 60) % 360, 0.65f, 0.18f),
+                    System.Drawing.Drawing2D.LinearGradientMode.ForwardDiagonal);
+            g.FillRectangle(cached, rect);
+        }
 
         var frame = _lastSnapshot?.FrameIndex ?? 0;
         var pos = _lastSnapshot?.Position100ns ?? 0;
