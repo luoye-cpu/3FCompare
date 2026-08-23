@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
@@ -70,6 +71,13 @@ public partial class MainWindow : Window
 
         // 默认 2 路空网格（WinForms 初始形态）
         Grid.SetCount(2, _realMode);
+        Grid.SurfaceCreated += s =>
+        {
+            s.WheelZoom += ApplyZoom;
+            s.SurfacePressed += OnSurfacePress;
+            s.SurfaceMoved += OnSurfaceMove;
+            s.SurfaceReleased += OnSurfaceRelease;
+        };
 
         // ---- M3：侧栏与五面板 ----
         _bookmarks = new BookmarkPanel(() =>
@@ -494,81 +502,101 @@ public partial class MainWindow : Window
             (runtimeError is not null ? $" | ⚠ {runtimeError}" : string.Empty);
     }
 
-    // ══════════ 视图变换：滚轮缩放 / 拖拽平移（所有表面共享，广播到全部会话） ══════════
+// ══════════ 视图变换：缩放/平移（WndProc 鼠标事件驱动） ══════════
 
-    /// <summary>光标位置命中测试：检查窗口坐标是否落在任何可见表面内。
-    /// 不依赖 e.Source 视觉树命中（NativeControlHost 的子 HWND 可能导致
-    /// Avalonia 命中测试跳过该控件），改用直接几何计算。</summary>
+    /// <summary>为新创建的表面订阅鼠标事件（由 CompareGridView.SetCount 后调用）。</summary>
+    /// <summary>光标位置命中测试（探针/放大镜/选中用）。</summary>
     private PlayerSurface? HitSurfaceAt(Point windowPos)
     {
         foreach (var s in Grid.Surfaces)
         {
             if (!s.IsVisible) continue;
-            var topLeft = s.TranslatePoint(new Point(0, 0), this);
-            if (topLeft is not { } tl) continue;
-            var rect = new Rect(tl, new Size(s.Bounds.Width, s.Bounds.Height));
-            if (rect.Contains(windowPos)) return s;
+            var tl = s.TranslatePoint(new Point(0, 0), this);
+            if (tl is not { } origin) continue;
+            if (new Rect(origin, new Size(s.Bounds.Width, s.Bounds.Height)).Contains(windowPos)) return s;
         }
         return null;
     }
 
-    protected override void OnPointerWheelChanged(PointerWheelEventArgs e)
+    private void WireSurfaces()
     {
-        base.OnPointerWheelChanged(e);
-        var pos = e.GetPosition(this);
-        if (HitSurfaceAt(pos) is not null)
+        foreach (var s in Grid.Surfaces)
         {
-            var factor = e.Delta.Y > 0 ? 1.15f : 1f / 1.15f;
-            _viewZoom = Math.Clamp(_viewZoom * factor, 1f, 32f);
-            ApplyViewTransform();
-            e.Handled = true;
+            s.WheelZoom -= ApplyZoom;
+            s.WheelZoom += ApplyZoom;
+            s.SurfacePressed -= OnSurfacePress;
+            s.SurfacePressed += OnSurfacePress;
+            s.SurfaceMoved -= OnSurfaceMove;
+            s.SurfaceMoved += OnSurfaceMove;
+            s.SurfaceReleased -= OnSurfaceRelease;
+            s.SurfaceReleased += OnSurfaceRelease;
         }
     }
 
-    protected override void OnPointerMoved(PointerEventArgs e)
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out System.Drawing.Point pt);
+
+    private bool _panDragging;
+    private int _panLastX, _panLastY;
+
+    private void ApplyZoom(float factor)
     {
-        base.OnPointerMoved(e);
-        if (!_dragging || _viewZoom <= 1.001f) return;
-        // 窗口坐标增量累积：不依赖命中表面，跨表面边界平滑拖动
-        var cur = e.GetPosition(this);
-        var dx = cur.X - _lastDragPos.X;
-        var dy = cur.Y - _lastDragPos.Y;
-        _lastDragPos = cur;
-        var scale = 2.0f / (float)Math.Max(this.Bounds.Width, this.Bounds.Height);
-        _viewPanX = Math.Clamp(_viewPanX + (float)(dx * scale), -1f, 1f);
-        _viewPanY = Math.Clamp(_viewPanY + (float)(dy * scale), -1f, 1f);
+        _viewZoom = Math.Clamp(_viewZoom * factor, 1f, 32f);
         ApplyViewTransform();
-        e.Handled = true;
     }
 
-    protected override void OnPointerPressed(PointerPressedEventArgs e)
+    /// <summary>左键按下：放大中→开始平移；未放大→记录位置用于选中。</summary>
+    private void OnSurfacePress(double x, double y)
     {
-        base.OnPointerPressed(e);
-        if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
+        if (_viewZoom > 1.001f)
         {
-            var pos = e.GetPosition(this);
-            if (_viewZoom > 1.001f && HitSurfaceAt(pos) is not null)
-            {
-                _dragging = true;
-                _lastDragPos = pos;
-                e.Pointer.Capture(this); // 捕获指针：移出窗口仍持续接收 Move/Release
-            }
+            _panDragging = true;
+            GetCursorPos(out var pt);
+            _panLastX = pt.X;
+            _panLastCursorY = pt.Y;
         }
     }
 
-    protected override void OnPointerReleased(PointerReleasedEventArgs e)
+    /// <summary>鼠标移动：拖拽平移中持续更新偏移。</summary>
+    private void OnSurfaceMove(double x, double y)
     {
-        base.OnPointerReleased(e);
-        // 点击检测：按下-释放位移小于阈值 → 选中表面
-        var up = e.GetPosition(this);
-        if (Math.Abs(up.X - _pressStartPos.X) < 4 && Math.Abs(up.Y - _pressStartPos.Y) < 4 && HitSurfaceAt(up) is { } clickedSurface)
+        if (!_panDragging) return;
+        GetCursorPos(out var pt);
+        var dx = pt.X - _panLastX;
+        var dy = pt.Y - _panLastCursorY;
+        _panLastX = pt.X;
+        _panLastCursorY = pt.Y;
+        var scale = 2.0f / (float)Math.Max(Bounds.Width, Bounds.Height);
+        _viewPanX = Math.Clamp(_viewPanX + dx * scale, -1f, 1f);
+        _viewPanY = Math.Clamp(_viewPanY + dy * scale, -1f, 1f);
+        ApplyViewTransform();
+    }
+
+    /// <summary>左键释放：结束平移或触发选中。</summary>
+    private void OnSurfaceRelease(double x, double y)
+    {
+        if (_panDragging)
         {
-            Grid.SelectedIndex = clickedSurface.Index;
+            _panDragging = false;
+            return;
+        }
+        // 未放大时的点击 → 选中表面（通过窗口坐标命中）
+        var pos = e_GetCursorPositionInWindow();
+        if (HitSurfaceAt(pos) is { } clicked)
+        {
+            Grid.SelectedIndex = clicked.Index;
             UpdatePanelsForSelection();
         }
-        _dragging = false;
-        e.Pointer.Capture(null);
     }
+
+    /// <summary>获取光标在窗口内的相对坐标。</summary>
+    private Point e_GetCursorPositionInWindow()
+    {
+        GetCursorPos(out var pt);
+        return new Point(pt.X - Position.X, pt.Y - Position.Y);
+    }
+
+    private int _panLastCursorY;
 
     private void ApplyViewTransform()
     {

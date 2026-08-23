@@ -1,6 +1,6 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
-using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Platform;
@@ -8,12 +8,10 @@ using _3FCompare.Core.Backend;
 
 namespace _3FCompare.Controls;
 
-/// <summary>单路视频表面（NativeControlHost 生产版，M2）。
-/// - 承载 Win32 子 HWND：真实模式交给 3FP 会话作 D3D11 输出窗口；演示模式 GDI 自绘合成画面。
-/// - 子窗口带 WS_EX_TRANSPARENT：鼠标输入穿透回 Avalonia 层（解决原生子窗口「airspace」
-///   吞输入问题），滚轮/点击/拖拽均以 Avalonia 事件到达本控件。
-/// - 覆盖层（选中边框/[n] 文件名/D3D11 标记/错误）经子类化 WndProc 用 GDI 画在 WM_PAINT
-///   ——与 WinForms PlayerSurface 相同的「D3D 窗口上画信息层」模式。</summary>
+/// <summary>单路视频表面（NativeControlHost 生产版）。
+/// - 子 HWND：真实模式交给 3FP 会话作 D3D11 输出窗口；演示模式 GDI 自绘合成画面。
+/// - 鼠标输入：不依赖 Avalonia 事件路由（NativeControlHost 子 HWND 不可靠），
+///   直接在子类化 WndProc 中处理 Win32 鼠标消息并暴露为 C# 事件。</summary>
 public sealed class PlayerSurface : NativeControlHost
 {
     private readonly int _index;
@@ -25,15 +23,28 @@ public sealed class PlayerSurface : NativeControlHost
     private string _fileName = string.Empty;
     private EngineSnapshot? _lastSnapshot;
 
-    private nint _hwnd;                 // 子窗口（由 CreateNativeControlCore 创建）
-    private nint _origWndProc;          // 原窗口过程（STATIC 默认）
-    private readonly WndProcDelegate _subclassProc; // 防 GC
+    private nint _hwnd;
+    private nint _origWndProc;
+    private readonly WndProcDelegate _subclassProc;
 
     private delegate nint WndProcDelegate(nint hwnd, uint msg, nint wParam, nint lParam);
 
-        private const uint WM_PAINT = 0x000F;
+    // ---- 鼠标事件（由 WndProc 转发，MainWindow 订阅处理缩放/平移/选中）----
+    /// <summary>滚轮缩放。delta > 0 = 放大。</summary>
+    public event Action<float>? WheelZoom;
+    /// <summary>左键按下（表面相对坐标）。</summary>
+    public event Action<double, double>? SurfacePressed;
+    /// <summary>鼠标移动（表面相对坐标；拖动期间持续触发）。</summary>
+    public event Action<double, double>? SurfaceMoved;
+    /// <summary>左键释放（表面相对坐标）。</summary>
+    public event Action<double, double>? SurfaceReleased;
+
+    private const uint WM_PAINT = 0x000F;
     private const uint WM_ERASEBKGND = 0x0014;
-    private const uint WM_NCHITTEST = 0x0084;
+    private const uint WM_LBUTTONDOWN = 0x0201;
+    private const uint WM_LBUTTONUP = 0x0202;
+    private const uint WM_MOUSEMOVE = 0x0200;
+    private const uint WM_MOUSEWHEEL = 0x020A;
 
     // ---- 共享视图变换状态（MainWindow.ApplyViewTransform 更新，各表面读取绘制小地图）----
     public static float SharedZoom { get; set; } = 1f;
@@ -68,25 +79,20 @@ public sealed class PlayerSurface : NativeControlHost
         set { _fileName = value; InvalidateOverlay(); }
     }
 
-        /// <summary>选中状态由 MainWindow 统一管理（HitSurfaceAt 几何命中）。</summary>
     public PlayerSurface(int index, bool realMode)
     {
         _index = index;
         _realMode = realMode;
         _subclassProc = SubclassedWndProc;
-        Cursor = new Cursor(StandardCursorType.Hand);
         Focusable = false;
     }
 
-    // ---------- 子窗口生命周期（NativeControlHost 托管定位/尺寸/DPI） ----------
+    // ---------- 子窗口生命周期 ----------
 
     protected override IPlatformHandle? CreateNativeControlCore(IPlatformHandle parent)
     {
         const uint WS_CHILD = 0x40000000, WS_VISIBLE = 0x10000000, WS_CLIPSIBLINGS = 0x04000000;
-        const uint WS_EX_TRANSPARENT = 0x00000020; // 输入穿透：鼠标事件落回 Avalonia 层
-
-        _hwnd = CreateWindowExW(
-            WS_EX_TRANSPARENT, "STATIC", null,
+        _hwnd = CreateWindowExW(0, "STATIC", null,
             WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
             0, 0, 640, 360,
             parent.Handle, nint.Zero, nint.Zero, nint.Zero);
@@ -106,7 +112,6 @@ public sealed class PlayerSurface : NativeControlHost
         _hwnd = nint.Zero;
     }
 
-    /// <summary>等待子 HWND 就绪（NativeControlHost 附件后由平台层创建）。</summary>
     public async System.Threading.Tasks.Task<nint> EnsureHwndAsync(int timeoutMs = 5000)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromMilliseconds(timeoutMs);
@@ -117,60 +122,71 @@ public sealed class PlayerSurface : NativeControlHost
 
     // ---------- 会话绑定 / 快照 ----------
 
-    public void AttachSession(IPlayerSession session)
-    {
-        _session = session;
-        InvalidateOverlay();
-    }
-
-    public void DetachSession()
-    {
-        _session = null;
-        InvalidateOverlay();
-    }
+    public void AttachSession(IPlayerSession session) { _session = session; InvalidateOverlay(); }
+    public void DetachSession() { _session = null; InvalidateOverlay(); }
 
     public void UpdateSnapshot(EngineSnapshot? snapshot)
     {
-        // 演示模式：同帧跳过重绘（脏检查）
+        // 演示模式脏检查：同帧同位置跳过重绘
         if (!_realMode && snapshot is not null && _lastSnapshot is not null &&
             snapshot.FrameIndex == _lastSnapshot.FrameIndex &&
-            snapshot.Position100ns == _lastSnapshot.Position100ns)
-            return;
+            snapshot.Position100ns == _lastSnapshot.Position100ns) return;
         _lastSnapshot = snapshot;
-        // 真实模式仅状态性覆盖层变化才需要重绘
-        if (!_realMode || _failed)
-            InvalidateOverlay();
+        if (!_realMode || _failed) InvalidateOverlay();
     }
 
-    /// <summary>请求重画覆盖层（GDI，走 WM_PAINT）。</summary>
     public void InvalidateOverlay()
     {
-        if (_hwnd != nint.Zero)
-            InvalidateRect(_hwnd, nint.Zero, false);
+        if (_hwnd != nint.Zero) InvalidateRect(_hwnd, nint.Zero, false);
     }
 
-    // ---------- 输入（子窗口输入穿透，Avalonia 事件直达本控件） ----------
-
-        // ---------- GDI 绘制（WM_PAINT，WinForms PlayerSurface 移植） ----------
-    // 注意：指针事件由 MainWindow 统一处理（HitSurfaceAt 几何命中），
-    // PlayerSurface 不注册任何 Avalonia 指针处理，避免与 MainWindow 竞争。
+    // ---------- WndProc：鼠标消息直接处理 + GDI 绘制 ----------
 
     private nint SubclassedWndProc(nint hwnd, uint msg, nint wParam, nint lParam)
     {
         switch (msg)
         {
-            case WM_NCHITTEST:
-                return -1; // HTTRANSPARENT：鼠标穿透到父窗口（Avalonia 层）
             case WM_ERASEBKGND:
-                return 1; // 不擦背景（避免闪烁/遮 D3D）
+                return 1;
             case WM_PAINT:
                 PaintSelf();
                 return 0;
+            case WM_LBUTTONDOWN:
+            {
+                var x = (short)(lParam & 0xFFFF);
+                var y = (short)((lParam >> 16) & 0xFFFF);
+                SurfacePressed?.Invoke(x, y);
+                SetCapture(hwnd); // 捕获鼠标：移出子窗口仍持续接收 Move/Up
+                return 0;
+            }
+            case WM_LBUTTONUP:
+            {
+                var x = (short)(lParam & 0xFFFF);
+                var y = (short)((lParam >> 16) & 0xFFFF);
+                SurfaceReleased?.Invoke(x, y);
+                ReleaseCapture();
+                return 0;
+            }
+            case WM_MOUSEMOVE:
+            {
+                var x = (short)(lParam & 0xFFFF);
+                var y = (short)((lParam >> 16) & 0xFFFF);
+                SurfaceMoved?.Invoke(x, y);
+                return 0;
+            }
+            case WM_MOUSEWHEEL:
+            {
+                var delta = (short)((wParam >> 16) & 0xFFFF);
+                var factor = delta > 0 ? 1.15f : 1f / 1.15f;
+                WheelZoom?.Invoke(factor);
+                return 0;
+            }
         }
         return CallWindowProcW(_origWndProc, hwnd, msg, wParam, lParam);
     }
 
-        // ---- GDI 对象缓存（静态共享，避免每次 WM_PAINT 分配/释放） ----
+    // ---------- GDI 绘制（WM_PAINT） ----------
+
     private static readonly System.Drawing.SolidBrush BrushPanelBg = new(System.Drawing.Color.FromArgb(30, 30, 36));
     private static readonly System.Drawing.SolidBrush BrushTextWhite = new(System.Drawing.Color.FromArgb(220, 255, 255, 255));
     private static readonly System.Drawing.SolidBrush BrushTextShadow = new(System.Drawing.Color.FromArgb(120, 0, 0, 0));
@@ -179,7 +195,6 @@ public sealed class PlayerSurface : NativeControlHost
     private static readonly System.Drawing.SolidBrush BrushD3DTagBg = new(System.Drawing.Color.FromArgb(160, 0, 120, 0));
     private static readonly System.Drawing.Font FontOverlay = new("Microsoft YaHei UI", 9f);
     private static readonly System.Drawing.Font FontTag = new("Segoe UI", 8f);
-    // 按尺寸缓存的动态字体（key = rounded size）
     private static readonly Dictionary<int, System.Drawing.Font> _bigFontCache = new();
     private static readonly Dictionary<int, System.Drawing.Font> _timeFontCache = new();
 
@@ -215,12 +230,9 @@ public sealed class PlayerSurface : NativeControlHost
             g.FillRectangle(BrushPanelBg, rect);
             return;
         }
-
         var hue = (_index * 47) % 360;
         using var brush = new System.Drawing.Drawing2D.LinearGradientBrush(
-            rect,
-            ColorFromHsv(hue, 0.55f, 0.35f),
-            ColorFromHsv((hue + 60) % 360, 0.65f, 0.18f),
+            rect, ColorFromHsv(hue, 0.55f, 0.35f), ColorFromHsv((hue + 60) % 360, 0.65f, 0.18f),
             System.Drawing.Drawing2D.LinearGradientMode.ForwardDiagonal);
         g.FillRectangle(brush, rect);
 
@@ -262,42 +274,11 @@ public sealed class PlayerSurface : NativeControlHost
             g.DrawString(label, FontOverlay, BrushTextShadow, new System.Drawing.PointF(10, 10));
             g.DrawString(label, FontOverlay, BrushTextWhite, new System.Drawing.PointF(9, 9));
         }
-
-                if (_realMode)
+        if (_realMode)
         {
             g.FillRectangle(BrushD3DTagBg, rect.Right - 44, 6, 38, 18);
             g.DrawString("D3D11", FontTag, System.Drawing.Brushes.White, rect.Right - 42, 8);
         }
-
-        // 放大后右上角小地图：显示当前可视区域在整个画面中的位置
-        if (_selected && SharedZoom > 1.01f)
-            PaintMinimap(g, rect);
-    }
-
-    private void PaintMinimap(System.Drawing.Graphics g, System.Drawing.Rectangle rect)
-    {
-        const int mapW = 64, mapH = 36;
-        int mx = rect.Right - mapW - 10, my = 30;
-        var zoom = SharedZoom;
-
-        // 全帧轮廓
-        using var bgBrush = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(100, 20, 20, 24));
-        using var borderPen = new System.Drawing.Pen(System.Drawing.Color.FromArgb(140, 140, 150), 1f);
-        g.FillRectangle(bgBrush, mx, my, mapW, mapH);
-        g.DrawRectangle(borderPen, mx, my, mapW, mapH);
-
-        // 可视区域（归一化 pan [-1,1] → [0,1] 映射到全帧坐标）
-        float visW = Math.Min(1f, 1f / zoom);
-        float visH = Math.Min(1f, 1f / zoom);
-        float cx = (SharedPanX + 1f) / 2f;   // 0=左 1=右
-        float cy = (SharedPanY + 1f) / 2f;
-        float vx = Math.Clamp(cx - visW / 2f, 0f, 1f - visW) * mapW;
-        float vy = Math.Clamp(cy - visH / 2f, 0f, 1f - visH) * mapH;
-
-        using var visBrush = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(120, 255, 200, 64));
-        g.FillRectangle(visBrush, mx + vx, my + vy, visW * mapW, visH * mapH);
-        using var visPen = new System.Drawing.Pen(System.Drawing.Color.FromArgb(255, 200, 64), 1f);
-        g.DrawRectangle(visPen, mx + vx, my + vy, visW * mapW, visH * mapH);
     }
 
     private static System.Drawing.Color ColorFromHsv(float h, float s, float v)
@@ -307,31 +288,24 @@ public sealed class PlayerSurface : NativeControlHost
         var m = v - c;
         (float r, float g, float b) = h switch
         {
-            < 60 => (c, x, 0f),
-            < 120 => (x, c, 0f),
-            < 180 => (0f, c, x),
-            < 240 => (0f, x, c),
-            < 300 => (x, 0f, c),
-            _ => (c, 0f, x),
+            < 60 => (c, x, 0f), < 120 => (x, c, 0f), < 180 => (0f, c, x),
+            < 240 => (0f, x, c), < 300 => (x, 0f, c), _ => (c, 0f, x),
         };
         return System.Drawing.Color.FromArgb((int)((r + m) * 255), (int)((g + m) * 255), (int)((b + m) * 255));
     }
 
-    // ---------- Win32 ----------
-
+    // ---- Win32 ----
     private const int GWLP_WNDPROC = -4;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct PAINTSTRUCT { public nint HDC; public bool fErase; public RECT rcPaint; public bool fRestore; public bool fIncUpdate; public byte bReserved1, bReserved2, bReserved3, bReserved4, bReserved5, bReserved6, bReserved7, bReserved8; }
+    private struct PAINTSTRUCT { public nint HDC; public bool fErase; public RECT rcPaint; public bool fRestore; public bool fIncUpdate; }
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern nint CreateWindowExW(
-        uint exStyle, string className, string? windowName, uint style,
-        int x, int y, int width, int height,
-        nint parent, nint menu, nint instance, nint param);
+    private static extern nint CreateWindowExW(uint exStyle, string className, string? windowName, uint style,
+        int x, int y, int width, int height, nint parent, nint menu, nint instance, nint param);
 
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
     private static extern nint SetWindowLongPtr(nint hwnd, int index, nint newProc);
@@ -339,18 +313,11 @@ public sealed class PlayerSurface : NativeControlHost
     [DllImport("user32.dll", EntryPoint = "CallWindowProcW")]
     private static extern nint CallWindowProcW(nint prevProc, nint hwnd, uint msg, nint wParam, nint lParam);
 
-    [DllImport("user32.dll")]
-    private static extern bool DestroyWindow(nint hwnd);
-
-    [DllImport("user32.dll")]
-    private static extern bool InvalidateRect(nint hwnd, nint rect, bool erase);
-
-    [DllImport("user32.dll")]
-    private static extern bool GetClientRect(nint hwnd, out RECT rect);
-
-    [DllImport("user32.dll")]
-    private static extern nint BeginPaint(nint hwnd, ref PAINTSTRUCT ps);
-
-    [DllImport("user32.dll")]
-    private static extern bool EndPaint(nint hwnd, ref PAINTSTRUCT ps);
+    [DllImport("user32.dll")] private static extern bool DestroyWindow(nint hwnd);
+    [DllImport("user32.dll")] private static extern bool InvalidateRect(nint hwnd, nint rect, bool erase);
+    [DllImport("user32.dll")] private static extern bool GetClientRect(nint hwnd, out RECT rect);
+    [DllImport("user32.dll")] private static extern nint BeginPaint(nint hwnd, ref PAINTSTRUCT ps);
+    [DllImport("user32.dll")] private static extern bool EndPaint(nint hwnd, ref PAINTSTRUCT ps);
+    [DllImport("user32.dll")] private static extern nint SetCapture(nint hwnd);
+    [DllImport("user32.dll")] private static extern bool ReleaseCapture();
 }
