@@ -1,0 +1,25 @@
+# 默认 LF 换行（仓库内统一，Windows 检出时自动转 CRLF 可配）
+* text=auto eol=lf
+
+# 二进制文件显式标记（不可合并/不转换）
+*.dll binary
+*.exe binary
+*.lib binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.bmp binary
+*.mp4 binary
+*.mkv binary
+*.3fcs binary
+
+# 文本类文件
+*.cs text eol=lf
+*.csproj text eol=lf
+*.slnx text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.ps1 text eol=lf
+*.gitignore text eol=lf
+*.gitmodules text eol=lf
+*.sh text eol=lf

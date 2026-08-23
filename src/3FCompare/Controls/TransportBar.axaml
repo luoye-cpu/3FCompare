@@ -1,0 +1,32 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignWidth="900" d:DesignHeight="44"
+             x:Class="_3FCompare.Controls.TransportBar">
+
+  <Grid ColumnDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,*,Auto,Auto" Margin="8,4">
+
+    <Button Grid.Column="0" x:Name="BtnPlayPause" Width="36" Height="28" Click="OnPlayPause" Content="▶" />
+    <Button Grid.Column="1" x:Name="BtnStop" Width="36" Height="28" Click="OnStop" Content="■" Margin="4,0,0,0" />
+    <Button Grid.Column="2" x:Name="BtnFramePrev" Width="32" Height="28" Click="OnFramePrev" Content="◀" Margin="4,0,0,0" />
+    <Button Grid.Column="3" x:Name="BtnFrameNext" Width="32" Height="28" Click="OnFrameNext" Content="▶" Margin="4,0,0,0" />
+    <Button Grid.Column="4" x:Name="BtnSecPrev" Width="32" Height="28" Click="OnSecPrev" Content="◀◀" Margin="8,0,0,0" />
+    <Button Grid.Column="5" x:Name="BtnSecNext" Width="32" Height="28" Click="OnSecNext" Content="▶▶" Margin="4,0,0,0" />
+    <Button Grid.Column="6" x:Name="BtnLoop" Width="36" Height="28" Click="OnLoop" Content="🔁" Margin="8,0,0,0" />
+    <Button Grid.Column="7" x:Name="BtnAdd" Width="32" Height="28" Click="OnAdd" Content="+" Margin="8,0,0,0" />
+    <Button Grid.Column="8" x:Name="BtnRemove" Width="32" Height="28" Click="OnRemove" Content="−" Margin="4,0,0,0" />
+
+    <ComboBox Grid.Column="9" x:Name="ComboSpeed" Width="72" Height="28" Margin="8,0,0,0"
+              SelectionChanged="OnSpeedChanged" />
+    <ComboBox Grid.Column="10" x:Name="ComboColorMode" Width="88" Height="28" Margin="4,0,0,0"
+              SelectionChanged="OnColorModeChanged" />
+
+    <TextBlock Grid.Column="11" x:Name="TextTime" Margin="12,0,0,0" VerticalAlignment="Center"
+               FontFamily="Consolas" FontSize="13"
+               Foreground="#FFC8C8D2" Text="00:00:00:00 / 00:00:00" />
+
+    <TextBlock Grid.Column="13" x:Name="TextInfo" Margin="8,0,0,0" VerticalAlignment="Center"
+               FontSize="12" Foreground="#8C8C96" Text="" />
+  </Grid>
+</UserControl>

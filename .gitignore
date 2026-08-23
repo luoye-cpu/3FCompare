@@ -1,0 +1,67 @@
+# Build —— bin/ obj/ 为全局规则，自动覆盖 src/ 与 tests/ 下所有项目
+bin/
+obj/
+artifacts/
+*.user
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Windows / 编辑器杂项
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.orig
+*.rej
+*.tmp
+*.bak
+*~
+
+# Native (FFF.Native fork 构建产物)
+x64/
+*.lib
+*.exp
+*.pdb
+*.ilk
+
+# FFmpeg / libass 第三方二进制（不纳入仓库）
+third_party/ffmpeg/
+third_party/libass/
+third_party/vcpkg_installed/
+*.dll
+
+# Test paths
+TestResults/
+*.trx
+
+# 本地日志
+logs/
+*.log
+
+# 内核（FFF_Project，已解除 submodule 跟踪）
+# 整个目录不入库：第三方源码 + 构建产物，依赖 tools/构建全部.ps1 重新获取/构建。
+# 对内核的自研补丁单独存放于 tools/patches/*.patch（入库跟踪），由 tools/更新内核.ps1 自动重打。
+third_party/fff_project/
+
+# 测试媒体目录规范（testmedia/）：
+#   media/  测试视频素材（*.mp4 等实际媒体文件，体积大不入库）
+#   tmp/    临时产物（截图/pid/selftest 输出等，可随时删除）
+#   tools/  测试辅助小工具（enumtest 等，入库跟踪）
+#   *.ps1   测试操作脚本（入库跟踪）
+testmedia/media/
+testmedia/tmp/
+testmedia/tools/*/bin/
+testmedia/tools/*/obj/
+
+# 发布产物（NativeAOT + 第三方 DLL，190+ MB）
+publish/
+.zcode/
+publish/
+.zcode/
+testmedia/media/
+third_party/LakeUI/
