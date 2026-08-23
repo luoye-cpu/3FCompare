@@ -38,10 +38,9 @@ public partial class MainWindow : Window
     private double _playbackSpeed = 1.0;
     private long _lastShownPos;
     private float _viewZoom = 1f, _viewPanX, _viewPanY;
-    private bool _dragging;
-    private Point _lastDragPos;
-    private Point _pressStartPos;
     private bool _fullscreen;
+    /// <summary>平移节流：上次 ApplyViewTransform 时间。</summary>
+    private long _lastPanApplyTicks;
 
     // M3：侧栏与面板
     private readonly ToolsSidebar _sidebar;
@@ -69,15 +68,17 @@ public partial class MainWindow : Window
         WireTransport();
         WireTimeline();
 
-        // 默认 2 路空网格（WinForms 初始形态）
-        Grid.SetCount(2, _realMode);
+        // SurfaceCreated 必须在 SetCount 之前注册（否则初始表面缺少事件绑定）
         Grid.SurfaceCreated += s =>
         {
-            s.WheelZoom += ApplyZoom;
+            
             s.SurfacePressed += OnSurfacePress;
             s.SurfaceMoved += OnSurfaceMove;
             s.SurfaceReleased += OnSurfaceRelease;
         };
+
+        // 默认 2 路空网格（WinForms 初始形态）
+        Grid.SetCount(2, _realMode);
 
         // ---- M3：侧栏与五面板 ----
         _bookmarks = new BookmarkPanel(() =>
@@ -502,9 +503,8 @@ public partial class MainWindow : Window
             (runtimeError is not null ? $" | ⚠ {runtimeError}" : string.Empty);
     }
 
-// ══════════ 视图变换：缩放/平移（WndProc 鼠标事件驱动） ══════════
+// ══════════ 视图变换：缩放/平移 ══════════
 
-    /// <summary>为新创建的表面订阅鼠标事件（由 CompareGridView.SetCount 后调用）。</summary>
     /// <summary>光标位置命中测试（探针/放大镜/选中用）。</summary>
     private PlayerSurface? HitSurfaceAt(Point windowPos)
     {
@@ -521,11 +521,8 @@ public partial class MainWindow : Window
     protected override void OnPointerWheelChanged(PointerWheelEventArgs e)
     {
         base.OnPointerWheelChanged(e);
-        // WM_MOUSEWHEEL 发给焦点窗口（Avalonia），经视觉树路由到命中控件。
-        // NativeControlHost 的子 HWND 不拦截滚轮（滚轮跟随焦点而非光标），
-        // 因此 Avalonia 层的覆写可以正确接收。仅在中央面板区域内缩放。
-        var pos = e.GetPosition(this);
-        if (HitSurfaceAt(pos) is not null)
+        // WM_MOUSEWHEEL 发给焦点窗口，经 Avalonia 视觉树路由。唯一滚轮处理器。
+        if (HitSurfaceAt(e.GetPosition(this)) is not null)
         {
             var factor = e.Delta.Y > 0 ? 1.15f : 1f / 1.15f;
             _viewZoom = Math.Clamp(_viewZoom * factor, 1f, 32f);
@@ -534,42 +531,11 @@ public partial class MainWindow : Window
         }
     }
 
-    private void WireSurfaces()
-    {
-        foreach (var s in Grid.Surfaces)
-        {
-            // 缩放：通过 Avalonia 路由（WM_MOUSEWHEEL 发给焦点窗口后经视觉树分发）
-            s.PointerWheelChanged -= OnSurfaceWheel;
-            s.PointerWheelChanged += OnSurfaceWheel;
-            // 平移/选中：通过 WndProc 直接处理（WM_LBUTTONDOWN 等发给光标下窗口）
-            s.SurfacePressed -= OnSurfacePress;
-            s.SurfacePressed += OnSurfacePress;
-            s.SurfaceMoved -= OnSurfaceMove;
-            s.SurfaceMoved += OnSurfaceMove;
-            s.SurfaceReleased -= OnSurfaceRelease;
-            s.SurfaceReleased += OnSurfaceRelease;
-        }
-    }
-
-    /// <summary>滚轮缩放（Avalonia 层处理）。</summary>
-    private void OnSurfaceWheel(object? sender, PointerWheelEventArgs e)
-    {
-        var factor = e.Delta.Y > 0 ? 1.15f : 1f / 1.15f;
-        ApplyZoom(factor);
-        e.Handled = true;
-    }
-
     [DllImport("user32.dll")]
     private static extern bool GetCursorPos(out System.Drawing.Point pt);
 
     private bool _panDragging;
     private int _panLastX, _panLastY;
-
-    private void ApplyZoom(float factor)
-    {
-        _viewZoom = Math.Clamp(_viewZoom * factor, 1f, 32f);
-        ApplyViewTransform();
-    }
 
     /// <summary>左键按下（WndProc 转发）：放大中→开始平移。</summary>
     private void OnSurfacePress(double x, double y)
@@ -621,6 +587,10 @@ public partial class MainWindow : Window
         PlayerSurface.SharedZoom = _viewZoom;
         PlayerSurface.SharedPanX = _viewPanX;
         PlayerSurface.SharedPanY = _viewPanY;
+        // 节流：平移拖动时限制 P/Invoke 频率至 ~30Hz
+        var now = Environment.TickCount64;
+        if (now - _lastPanApplyTicks < 30 && _panDragging) return;
+        _lastPanApplyTicks = now;
         try { _sync.SetViewTransform(_viewZoom, _viewPanX, _viewPanY); }
         catch (Exception ex) { Console.WriteLine($"ApplyViewTransform: {ex.Message}"); }
         // 触发所有表面重绘（小地图更新）
@@ -628,11 +598,11 @@ public partial class MainWindow : Window
             s.InvalidateOverlay();
     }
 
+
     private void ResetViewTransform()
     {
         _viewZoom = 1f;
         _viewPanX = _viewPanY = 0f;
-        _dragging = false;
         ApplyViewTransform();
     }
 
