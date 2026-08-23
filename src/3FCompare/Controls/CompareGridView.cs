@@ -24,6 +24,8 @@ public sealed class CompareGridView : Control
     private int? _presetCols, _presetRows;
 
     public event EventHandler? SelectionChanged;
+    /// <summary>新表面创建时触发（MainWindow 订阅以绑定鼠标/缩放事件）。</summary>
+    public event Action<PlayerSurface>? SurfaceCreated;
 
     public IReadOnlyList<PlayerSurface> Surfaces => _surfaces;
     public int Count => _surfaces.Count;
@@ -77,7 +79,8 @@ public sealed class CompareGridView : Control
             {
                 Width = double.NaN, Height = double.NaN,
             };
-            // 选中由 MainWindow 统一处理
+                        // 选中由 MainWindow 统一处理
+            SurfaceCreated?.Invoke(s);
             _surfaces.Add(s);
             VisualChildren.Add(s);
             LogicalChildren.Add(s);

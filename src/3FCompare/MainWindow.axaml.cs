@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
@@ -37,10 +38,9 @@ public partial class MainWindow : Window
     private double _playbackSpeed = 1.0;
     private long _lastShownPos;
     private float _viewZoom = 1f, _viewPanX, _viewPanY;
-    private bool _dragging;
-    private Point _lastDragPos;
-    private Point _pressStartPos;
     private bool _fullscreen;
+    /// <summary>平移节流：上次 ApplyViewTransform 时间。</summary>
+    private long _lastPanApplyTicks;
 
     // M3：侧栏与面板
     private readonly ToolsSidebar _sidebar;
@@ -67,6 +67,15 @@ public partial class MainWindow : Window
         TimelineHost.Child = _timeline;
         WireTransport();
         WireTimeline();
+
+        // SurfaceCreated 必须在 SetCount 之前注册（否则初始表面缺少事件绑定）
+        Grid.SurfaceCreated += s =>
+        {
+            
+            s.SurfacePressed += OnSurfacePress;
+            s.SurfaceMoved += OnSurfaceMove;
+            s.SurfaceReleased += OnSurfaceRelease;
+        };
 
         // 默认 2 路空网格（WinForms 初始形态）
         Grid.SetCount(2, _realMode);
@@ -494,20 +503,17 @@ public partial class MainWindow : Window
             (runtimeError is not null ? $" | ⚠ {runtimeError}" : string.Empty);
     }
 
-    // ══════════ 视图变换：滚轮缩放 / 拖拽平移（所有表面共享，广播到全部会话） ══════════
+// ══════════ 视图变换：缩放/平移 ══════════
 
-    /// <summary>光标位置命中测试：检查窗口坐标是否落在任何可见表面内。
-    /// 不依赖 e.Source 视觉树命中（NativeControlHost 的子 HWND 可能导致
-    /// Avalonia 命中测试跳过该控件），改用直接几何计算。</summary>
+    /// <summary>光标位置命中测试（探针/放大镜/选中用）。</summary>
     private PlayerSurface? HitSurfaceAt(Point windowPos)
     {
         foreach (var s in Grid.Surfaces)
         {
             if (!s.IsVisible) continue;
-            var topLeft = s.TranslatePoint(new Point(0, 0), this);
-            if (topLeft is not { } tl) continue;
-            var rect = new Rect(tl, new Size(s.Bounds.Width, s.Bounds.Height));
-            if (rect.Contains(windowPos)) return s;
+            var tl = s.TranslatePoint(new Point(0, 0), this);
+            if (tl is not { } origin) continue;
+            if (new Rect(origin, new Size(s.Bounds.Width, s.Bounds.Height)).Contains(windowPos)) return s;
         }
         return null;
     }
@@ -515,8 +521,8 @@ public partial class MainWindow : Window
     protected override void OnPointerWheelChanged(PointerWheelEventArgs e)
     {
         base.OnPointerWheelChanged(e);
-        var pos = e.GetPosition(this);
-        if (HitSurfaceAt(pos) is not null)
+        // WM_MOUSEWHEEL 发给焦点窗口，经 Avalonia 视觉树路由。唯一滚轮处理器。
+        if (HitSurfaceAt(e.GetPosition(this)) is not null)
         {
             var factor = e.Delta.Y > 0 ? 1.15f : 1f / 1.15f;
             _viewZoom = Math.Clamp(_viewZoom * factor, 1f, 32f);
@@ -525,49 +531,55 @@ public partial class MainWindow : Window
         }
     }
 
-    protected override void OnPointerMoved(PointerEventArgs e)
-    {
-        base.OnPointerMoved(e);
-        if (!_dragging || _viewZoom <= 1.001f) return;
-        // 窗口坐标增量累积：不依赖命中表面，跨表面边界平滑拖动
-        var cur = e.GetPosition(this);
-        var dx = cur.X - _lastDragPos.X;
-        var dy = cur.Y - _lastDragPos.Y;
-        _lastDragPos = cur;
-        var scale = 2.0f / (float)Math.Max(this.Bounds.Width, this.Bounds.Height);
-        _viewPanX = Math.Clamp(_viewPanX + (float)(dx * scale), -1f, 1f);
-        _viewPanY = Math.Clamp(_viewPanY + (float)(dy * scale), -1f, 1f);
-        ApplyViewTransform();
-        e.Handled = true;
-    }
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out System.Drawing.Point pt);
 
-    protected override void OnPointerPressed(PointerPressedEventArgs e)
+    private bool _panDragging;
+    private int _panLastX, _panLastY;
+
+    /// <summary>左键按下（WndProc 转发）：放大中→开始平移。</summary>
+    private void OnSurfacePress(double x, double y)
     {
-        base.OnPointerPressed(e);
-        if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
+        if (_viewZoom > 1.001f)
         {
-            var pos = e.GetPosition(this);
-            if (_viewZoom > 1.001f && HitSurfaceAt(pos) is not null)
-            {
-                _dragging = true;
-                _lastDragPos = pos;
-                e.Pointer.Capture(this); // 捕获指针：移出窗口仍持续接收 Move/Release
-            }
+            _panDragging = true;
+            GetCursorPos(out var pt);
+            _panLastX = pt.X;
+            _panLastY = pt.Y;
         }
     }
 
-    protected override void OnPointerReleased(PointerReleasedEventArgs e)
+    /// <summary>鼠标移动（WndProc 转发）：拖拽平移中持续更新偏移。</summary>
+    private void OnSurfaceMove(double x, double y)
     {
-        base.OnPointerReleased(e);
-        // 点击检测：按下-释放位移小于阈值 → 选中表面
-        var up = e.GetPosition(this);
-        if (Math.Abs(up.X - _pressStartPos.X) < 4 && Math.Abs(up.Y - _pressStartPos.Y) < 4 && HitSurfaceAt(up) is { } clickedSurface)
+        if (!_panDragging) return;
+        GetCursorPos(out var pt);
+        var dx = pt.X - _panLastX;
+        var dy = pt.Y - _panLastY;
+        _panLastX = pt.X;
+        _panLastY = pt.Y;
+        var scale = 2.0f / (float)Math.Max(Bounds.Width, Bounds.Height);
+        _viewPanX = Math.Clamp(_viewPanX + dx * scale, -1f, 1f);
+        _viewPanY = Math.Clamp(_viewPanY + dy * scale, -1f, 1f);
+        ApplyViewTransform();
+    }
+
+    /// <summary>左键释放（WndProc 转发）：结束平移或触发选中。</summary>
+    private void OnSurfaceRelease(double x, double y)
+    {
+        if (_panDragging)
         {
-            Grid.SelectedIndex = clickedSurface.Index;
+            _panDragging = false;
+            return;
+        }
+        // 未放大时的点击 → 选中表面
+        GetCursorPos(out var pt);
+        var windowPos = new Point(pt.X - Position.X, pt.Y - Position.Y);
+        if (HitSurfaceAt(windowPos) is { } clicked)
+        {
+            Grid.SelectedIndex = clicked.Index;
             UpdatePanelsForSelection();
         }
-        _dragging = false;
-        e.Pointer.Capture(null);
     }
 
     private void ApplyViewTransform()
@@ -575,6 +587,10 @@ public partial class MainWindow : Window
         PlayerSurface.SharedZoom = _viewZoom;
         PlayerSurface.SharedPanX = _viewPanX;
         PlayerSurface.SharedPanY = _viewPanY;
+        // 节流：平移拖动时限制 P/Invoke 频率至 ~30Hz
+        var now = Environment.TickCount64;
+        if (now - _lastPanApplyTicks < 30 && _panDragging) return;
+        _lastPanApplyTicks = now;
         try { _sync.SetViewTransform(_viewZoom, _viewPanX, _viewPanY); }
         catch (Exception ex) { Console.WriteLine($"ApplyViewTransform: {ex.Message}"); }
         // 触发所有表面重绘（小地图更新）
@@ -582,11 +598,11 @@ public partial class MainWindow : Window
             s.InvalidateOverlay();
     }
 
+
     private void ResetViewTransform()
     {
         _viewZoom = 1f;
         _viewPanX = _viewPanY = 0f;
-        _dragging = false;
         ApplyViewTransform();
     }
 

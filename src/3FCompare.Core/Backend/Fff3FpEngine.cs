@@ -111,6 +111,7 @@ public sealed class Fff3FpEngine : IPlayerEngine
         {
             ArgumentNullException.ThrowIfNull(localPath);
             ThrowIfDisposed();
+            InvalidateMediaInfoCache();
 
             // 简化版打开：同步调用原生 Open，异步包装（上游托管层用异步线程 + 取消队列；骨架阶段先同步）。
             return Task.Run(() =>
@@ -244,9 +245,13 @@ public sealed class Fff3FpEngine : IPlayerEngine
             };
         }
 
+        private EngineMediaInfo? _cachedMediaInfo;
+
+        /// <summary>读取媒体信息（结果缓存：媒体元数据在 Open 后不变，无需每次 P/Invoke + JSON 解析）。</summary>
         public EngineMediaInfo? ReadMediaInfo()
         {
             ThrowIfDisposed();
+            if (_cachedMediaInfo is not null) return _cachedMediaInfo;
             var required = 0u;
             var result = Fff3FpNative.FFF3FP_GetMediaInfo(_handle, 0, 0, out required);
             if (result == FffResult.BufferTooSmall && required > 0 && required <= 4 * 1024 * 1024)
@@ -260,13 +265,17 @@ public sealed class Fff3FpEngine : IPlayerEngine
                         if (result == FffResult.Success)
                         {
                             var json = DecodeNulTerminatedUtf8(buffer);
-                            return ParseMediaInfoJson(json);
+                            _cachedMediaInfo = ParseMediaInfoJson(json);
+                            return _cachedMediaInfo;
                         }
                     }
                 }
             }
             return null;
         }
+
+        /// <summary>清除媒体信息缓存（Open 新文件后调用）。</summary>
+        public void InvalidateMediaInfoCache() => _cachedMediaInfo = null;
 
         private static string DecodeNulTerminatedUtf8(byte[] buffer)
         {
