@@ -185,6 +185,15 @@ public sealed class PlayerSurface : NativeControlHost
         return CallWindowProcW(_origWndProc, hwnd, msg, wParam, lParam);
     }
 
+    /// <summary>Avalonia 层滚轮处理：WM_MOUSEWHEEL 发给焦点窗口后经视觉树路由到此。</summary>
+    protected override void OnPointerWheelChanged(PointerWheelEventArgs e)
+    {
+        base.OnPointerWheelChanged(e);
+        var factor = e.Delta.Y > 0 ? 1.15f : 1f / 1.15f;
+        WheelZoom?.Invoke(factor);
+        e.Handled = true;
+    }
+
     // ---------- GDI 绘制（WM_PAINT） ----------
 
     private static readonly System.Drawing.SolidBrush BrushPanelBg = new(System.Drawing.Color.FromArgb(30, 30, 36));

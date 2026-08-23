@@ -522,8 +522,10 @@ public partial class MainWindow : Window
     {
         foreach (var s in Grid.Surfaces)
         {
-            s.WheelZoom -= ApplyZoom;
-            s.WheelZoom += ApplyZoom;
+            // 缩放：通过 Avalonia 路由（WM_MOUSEWHEEL 发给焦点窗口后经视觉树分发）
+            s.PointerWheelChanged -= OnSurfaceWheel;
+            s.PointerWheelChanged += OnSurfaceWheel;
+            // 平移/选中：通过 WndProc 直接处理（WM_LBUTTONDOWN 等发给光标下窗口）
             s.SurfacePressed -= OnSurfacePress;
             s.SurfacePressed += OnSurfacePress;
             s.SurfaceMoved -= OnSurfaceMove;
@@ -531,6 +533,14 @@ public partial class MainWindow : Window
             s.SurfaceReleased -= OnSurfaceRelease;
             s.SurfaceReleased += OnSurfaceRelease;
         }
+    }
+
+    /// <summary>滚轮缩放（Avalonia 层处理）。</summary>
+    private void OnSurfaceWheel(object? sender, PointerWheelEventArgs e)
+    {
+        var factor = e.Delta.Y > 0 ? 1.15f : 1f / 1.15f;
+        ApplyZoom(factor);
+        e.Handled = true;
     }
 
     [DllImport("user32.dll")]
@@ -545,7 +555,7 @@ public partial class MainWindow : Window
         ApplyViewTransform();
     }
 
-    /// <summary>左键按下：放大中→开始平移；未放大→记录位置用于选中。</summary>
+    /// <summary>左键按下（WndProc 转发）：放大中→开始平移。</summary>
     private void OnSurfacePress(double x, double y)
     {
         if (_viewZoom > 1.001f)
@@ -553,26 +563,26 @@ public partial class MainWindow : Window
             _panDragging = true;
             GetCursorPos(out var pt);
             _panLastX = pt.X;
-            _panLastCursorY = pt.Y;
+            _panLastY = pt.Y;
         }
     }
 
-    /// <summary>鼠标移动：拖拽平移中持续更新偏移。</summary>
+    /// <summary>鼠标移动（WndProc 转发）：拖拽平移中持续更新偏移。</summary>
     private void OnSurfaceMove(double x, double y)
     {
         if (!_panDragging) return;
         GetCursorPos(out var pt);
         var dx = pt.X - _panLastX;
-        var dy = pt.Y - _panLastCursorY;
+        var dy = pt.Y - _panLastY;
         _panLastX = pt.X;
-        _panLastCursorY = pt.Y;
+        _panLastY = pt.Y;
         var scale = 2.0f / (float)Math.Max(Bounds.Width, Bounds.Height);
         _viewPanX = Math.Clamp(_viewPanX + dx * scale, -1f, 1f);
         _viewPanY = Math.Clamp(_viewPanY + dy * scale, -1f, 1f);
         ApplyViewTransform();
     }
 
-    /// <summary>左键释放：结束平移或触发选中。</summary>
+    /// <summary>左键释放（WndProc 转发）：结束平移或触发选中。</summary>
     private void OnSurfaceRelease(double x, double y)
     {
         if (_panDragging)
@@ -580,23 +590,15 @@ public partial class MainWindow : Window
             _panDragging = false;
             return;
         }
-        // 未放大时的点击 → 选中表面（通过窗口坐标命中）
-        var pos = e_GetCursorPositionInWindow();
-        if (HitSurfaceAt(pos) is { } clicked)
+        // 未放大时的点击 → 选中表面
+        GetCursorPos(out var pt);
+        var windowPos = new Point(pt.X - Position.X, pt.Y - Position.Y);
+        if (HitSurfaceAt(windowPos) is { } clicked)
         {
             Grid.SelectedIndex = clicked.Index;
             UpdatePanelsForSelection();
         }
     }
-
-    /// <summary>获取光标在窗口内的相对坐标。</summary>
-    private Point e_GetCursorPositionInWindow()
-    {
-        GetCursorPos(out var pt);
-        return new Point(pt.X - Position.X, pt.Y - Position.Y);
-    }
-
-    private int _panLastCursorY;
 
     private void ApplyViewTransform()
     {
