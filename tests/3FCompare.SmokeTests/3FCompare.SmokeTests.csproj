@@ -1,0 +1,29 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <RootNamespace>_3FCompare.SmokeTests</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\3FCompare.Core\3FCompare.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 冒烟运行时把 3rd_party FFmpeg DLL 组与 FFF.Native 拷贝到输出目录（若存在）
+         由 tools 脚本负责准备；不存在时冒烟会因找不到 DLL 失败（预期，用于检测环境） -->
+    <None Include="..\..\third_party\ffmpeg\**\*.dll"
+          Link="%(RecursiveDir)%(Filename)%(Extension)"
+          Condition="Exists('..\..\third_party\ffmpeg')"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\third_party\fff_native\*.dll"
+          Link="%(Filename)%(Extension)"
+          Condition="Exists('..\..\third_party\fff_native')"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

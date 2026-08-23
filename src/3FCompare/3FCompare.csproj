@@ -1,0 +1,57 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net11.0-windows</TargetFramework>
+    <RootNamespace>_3FCompare</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+
+    <!-- NativeAOT 发布（M0 PoC-C 已验证；与 WinForms 版同规格） -->
+    <PublishAot>true</PublishAot>
+    <PublishSelfContained>true</PublishSelfContained>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 钉住同一版本，避免 11.3.* 浮动解析导致各包版本漂移 -->
+    <PackageReference Include="Avalonia" Version="11.3.20" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.20" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.20" />
+    <PackageReference Include="Avalonia.Diagnostics" Version="11.3.20" Condition="'$(Configuration)' == 'Debug'" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+    <!-- PoC-A GDI 绘制 + M4 WgcFrameCapture 位图路径 -->
+    <PackageReference Include="System.Drawing.Common" Version="9.0.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 引擎/Sync/设置/显示布局：UI 框架无关，直接复用 -->
+    <ProjectReference Include="..\3FCompare.Core\3FCompare.Core.csproj" />
+  </ItemGroup>
+
+  <!-- 嵌入 FFF.Native.dll 实现单文件发布（3FP 播放器内核，始终内嵌） -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\third_party\fff_project\FFF.Native\x64\Release\FFF.Native.dll"
+                      LogicalName="FFF.Native.dll" />
+  </ItemGroup>
+
+  <!-- 嵌入 SkiaSharp 与 HarfBuzzSharp 原生 DLL，实现单文件发布（版本号与 deps.json 中的 resolved 版本一致） -->
+  <ItemGroup Condition="'$(NuGetPackageRoot)' != ''">
+    <EmbeddedResource Include="$(NuGetPackageRoot)skiasharp.nativeassets.win32\2.88.9\runtimes\win-x64\native\libSkiaSharp.dll"
+                      LogicalName="libSkiaSharp.dll" />
+    <EmbeddedResource Include="$(NuGetPackageRoot)harfbuzzsharp.nativeassets.win32\8.3.1.1\runtimes\win-x64\native\libHarfBuzzSharp.dll"
+                      LogicalName="libHarfBuzzSharp.dll" />
+  </ItemGroup>
+
+  <!-- 本地化字符串与窗口帧捕获（自 App 项目迁入；命名空间保持 _3FCompare.App[.Capture] 不变以零改动引用） -->
+
+  <!-- 发布后删除多余的 DLL（已内嵌到 exe，无需单独分发） -->
+  <Target Name="RemoveUnusedNativeDlls" AfterTargets="Publish">
+    <Delete Files="$(PublishDir)av_libglesv2.dll" Condition="Exists('$(PublishDir)av_libglesv2.dll')" />
+    <Delete Files="$(PublishDir)libSkiaSharp.dll" Condition="Exists('$(PublishDir)libSkiaSharp.dll')" />
+    <Delete Files="$(PublishDir)libHarfBuzzSharp.dll" Condition="Exists('$(PublishDir)libHarfBuzzSharp.dll')" />
+  </Target>
+
+</Project>
