@@ -518,6 +518,22 @@ public partial class MainWindow : Window
         return null;
     }
 
+    protected override void OnPointerWheelChanged(PointerWheelEventArgs e)
+    {
+        base.OnPointerWheelChanged(e);
+        // WM_MOUSEWHEEL 发给焦点窗口（Avalonia），经视觉树路由到命中控件。
+        // NativeControlHost 的子 HWND 不拦截滚轮（滚轮跟随焦点而非光标），
+        // 因此 Avalonia 层的覆写可以正确接收。仅在中央面板区域内缩放。
+        var pos = e.GetPosition(this);
+        if (HitSurfaceAt(pos) is not null)
+        {
+            var factor = e.Delta.Y > 0 ? 1.15f : 1f / 1.15f;
+            _viewZoom = Math.Clamp(_viewZoom * factor, 1f, 32f);
+            ApplyViewTransform();
+            e.Handled = true;
+        }
+    }
+
     private void WireSurfaces()
     {
         foreach (var s in Grid.Surfaces)
