@@ -37,7 +37,7 @@ public static class LanguageManager
         // 硬件加速
         ["Hardware_EnableHardwareDecode"] = "启用硬件解码 (GPU)",
         ["Hardware_DecodeGPU"] = "解码 GPU：",
-        ["Hardware_GPUAuto"] = "系统默认",
+        ["Hardware_GpuHint"] = "当前版本暂不支持指定 GPU（固定使用系统默认）",
 
         // 步进
         ["Stepping_StepByFrame"] = "按帧步进步长：",
@@ -48,7 +48,6 @@ public static class LanguageManager
         ["Window_HideChrome"] = "全屏时隐藏时间轴/工具栏",
 
         // 色彩
-        ["Color_ColorMode"] = "色彩模式：",
         ["Color_Auto"] = "自动 (根据显示器能力)",
         ["Color_SDR"] = "SDR 输出",
         ["Color_HDRAuto"] = "HDR 输出 (自动检测)",
@@ -74,11 +73,8 @@ public static class LanguageManager
         ["Msg_ValidateFailed"] = "✗ 目录无效",
         ["Msg_AutoDetectSuccess"] = "✓ 自动检测到：",
         ["Msg_AutoDetectFailed"] = "当前未找到 FFmpeg",
-        ["Msg_NativeLoadSuccess"] = "✓ FFF.Native 加载成功，FFmpeg 可用",
-        ["Msg_NativeLoadFailed"] = "✗ FFF.Native 加载失败",
         ["Msg_DemoModeTitle"] = "缺少必需组件",
         ["Msg_DemoModeMissingFfmpeg"] = "未找到 FFmpeg 相关 DLL（avcodec 等），无法启动真实播放引擎。",
-        ["Msg_DemoModeMissingNative"] = "FFF.Native 原生组件加载失败，无法启动真实播放引擎。",
 
         // 缺 FFmpeg 引导弹窗：自定义按钮（MessageBox 无法定制按钮文字，改用 PromptDialog）
         ["Msg_DemoModeClose"] = "关闭",
@@ -143,20 +139,13 @@ public static class LanguageManager
         ["Tb_ColorMode"] = "SDR: 标准动态范围输出 | HDR: 高动态范围输出（自动检测显示器能力）",
         ["Probe_Title"] = "像素探针",
         ["Probe_Coord"] = "坐标: --",
-        ["Probe_Mode"] = "色彩模式: --",
         ["Probe_Hint"] = "鼠标悬停视频面以读取像素\n（显示颜色管理前码值）",
         ["Probe_ReadFail"] = "读取失败",
         ["Probe_Bits"] = "码值(8位)",
-        ["Probe_MapSdr"] = "映射SDR",
-        ["Probe_RawHdr"] = "原始HDR",
-        ["Probe_PeakHdr"] = "峰值HDR",
         ["Bookmark_Title"] = "书签",
         ["Bookmark_NotePlaceholder"] = "备注内容…",
         ["Bookmark_Add"] = "＋ 添加当前帧",
         ["Bookmark_Export"] = "⇩ 导出…",
-        ["Bookmark_Col_Time"] = "时间",
-        ["Bookmark_Col_Frame"] = "帧号",
-        ["Bookmark_Col_Note"] = "备注",
         ["Offset_Title"] = "偏移校准（相对第 1 路）",
         ["Offset_Value"] = "偏移: 0ms (0帧@24fps)",
         ["Offset_ValueFmt"] = "偏移: {0}ms ({1:0.#}帧 @{2})",
@@ -197,7 +186,6 @@ public static class LanguageManager
         ["Audio_Hint"] = "音轨选择对真实 3FP 会话生效；演示模式为占位。",
         ["Timeline_SetA"] = "设为 A 点",
         ["Timeline_SetB"] = "设为 B 点",
-        ["Diff_Need2"] = "差异叠加：需要至少 2 路已打开的媒体",
         ["Diff_HeaderFmt"] = "差异热力图  [{0}] vs [{1}]  （点击刷新）",
         ["Diff_SampleFail"] = "采样失败",
         ["Diff_LegendWeak"] = "弱差异",
@@ -212,12 +200,6 @@ public static class LanguageManager
         ["Msg_CaptureFail"] = "截图失败",
         ["Msg_SessionInvalid"] = "会话文件无效或为空",
         ["Msg_AppName"] = "3FCompare",
-        ["Filter_Media"] = "媒体文件|*.mp4;*.mkv;*.mov;*.webm;*.avi;*.ts;*.m2ts;*.flv;*.wmv|所有文件|*.*",
-        ["Filter_All"] = "所有文件|*.*",
-        ["Filter_Png"] = "PNG 图像|*.png",
-        ["Filter_Session"] = "3FCompare 会话|*.3fcs;*.json",
-        ["Filter_Bookmark"] = "JSON|*.json|CSV|*.csv",
-        ["Audio_TrackFmt"] = "轨 {0}: {1} ({2}ch)",
         ["Audio_NoTrack"] = "无音轨",
         // VRR 呈现（内核扩展 F27）
         ["Vrr_SectionTitle"] = "VRR / 可变刷新率",
@@ -228,6 +210,7 @@ public static class LanguageManager
         ["Scrub_PreviewEnabled"] = "时间轴拖动缩略图预览",
         ["Scrub_SectionTitle"] = "时间轴预览",
         ["Scrub_PreviewHint"] = "拖动时间轴时每 150ms 抓帧显示弹窗。低配设备可关闭，关闭后仅更新时间码和播放头。",
+        ["Zoom_Minimap"] = "缩放小地图",
     };
 
     // 英文文本
@@ -237,7 +220,7 @@ public static class LanguageManager
 
         ["Hardware_EnableHardwareDecode"] = "Enable Hardware Decode (GPU)",
         ["Hardware_DecodeGPU"] = "Decode GPU:",
-        ["Hardware_GPUAuto"] = "System Default",
+        ["Hardware_GpuHint"] = "This version does not support GPU selection (uses system default)",
 
         ["Stepping_StepByFrame"] = "Frame Step Size:",
         ["Stepping_StepBySecond"] = "Second Step Size:",
@@ -245,7 +228,6 @@ public static class LanguageManager
         ["Window_StartFullscreen"] = "Start in Fullscreen Mode",
         ["Window_HideChrome"] = "Hide Timeline/Toolbar in Fullscreen",
 
-        ["Color_ColorMode"] = "Color Mode:",
         ["Color_Auto"] = "Auto (based on display)",
         ["Color_SDR"] = "SDR Output",
         ["Color_HDRAuto"] = "HDR Output (Auto Detect)",
@@ -267,11 +249,8 @@ public static class LanguageManager
         ["Msg_ValidateFailed"] = "✗ Invalid Directory",
         ["Msg_AutoDetectSuccess"] = "✓ Auto Detect: ",
         ["Msg_AutoDetectFailed"] = "FFmpeg Not Found",
-        ["Msg_NativeLoadSuccess"] = "✓ FFF.Native Loaded Successfully, FFmpeg Available",
-        ["Msg_NativeLoadFailed"] = "✗ FFF.Native Load Failed",
         ["Msg_DemoModeTitle"] = "Missing Required Components",
         ["Msg_DemoModeMissingFfmpeg"] = "FFmpeg DLLs (avcodec etc.) not found. The real playback engine cannot start.",
-        ["Msg_DemoModeMissingNative"] = "FFF.Native failed to load. The real playback engine cannot start.",
 
         // Missing-FFmpeg guide dialog: custom buttons (MessageBox cannot localize button text)
         ["Msg_DemoModeClose"] = "Close",
@@ -336,20 +315,13 @@ public static class LanguageManager
         ["Tb_ColorMode"] = "SDR: Standard Dynamic Range | HDR: High Dynamic Range (auto-detect display)",
         ["Probe_Title"] = "Pixel Probe",
         ["Probe_Coord"] = "Coord: --",
-        ["Probe_Mode"] = "Color Mode: --",
         ["Probe_Hint"] = "Hover over a video surface to read pixels\n(pre-colormanaged values)",
         ["Probe_ReadFail"] = "Read failed",
         ["Probe_Bits"] = "8-bit values",
-        ["Probe_MapSdr"] = "Map SDR",
-        ["Probe_RawHdr"] = "Raw HDR",
-        ["Probe_PeakHdr"] = "Peak HDR",
         ["Bookmark_Title"] = "Bookmarks",
         ["Bookmark_NotePlaceholder"] = "Note…",
         ["Bookmark_Add"] = "＋ Add Current Frame",
         ["Bookmark_Export"] = "⇩ Export…",
-        ["Bookmark_Col_Time"] = "Time",
-        ["Bookmark_Col_Frame"] = "Frame",
-        ["Bookmark_Col_Note"] = "Note",
         ["Offset_Title"] = "Offset Calibration (relative to Lane 1)",
         ["Offset_Value"] = "Offset: 0ms (0 frames @24fps)",
         ["Offset_ValueFmt"] = "Offset: {0}ms ({1:0.#} frames @{2})",
@@ -390,7 +362,6 @@ public static class LanguageManager
         ["Audio_Hint"] = "Track selection applies to real 3FP sessions; no-op in demo mode.",
         ["Timeline_SetA"] = "Set A Point",
         ["Timeline_SetB"] = "Set B Point",
-        ["Diff_Need2"] = "Diff overlay requires at least 2 opened media",
         ["Diff_HeaderFmt"] = "Diff Heatmap  [{0}] vs [{1}]  (click to refresh)",
         ["Diff_SampleFail"] = "Sampling failed",
         ["Diff_LegendWeak"] = "Weak",
@@ -405,12 +376,6 @@ public static class LanguageManager
         ["Msg_CaptureFail"] = "Capture failed",
         ["Msg_SessionInvalid"] = "Invalid or empty session file",
         ["Msg_AppName"] = "3FCompare",
-        ["Filter_Media"] = "Media files|*.mp4;*.mkv;*.mov;*.webm;*.avi;*.ts;*.m2ts;*.flv;*.wmv|All files|*.*",
-        ["Filter_All"] = "All files|*.*",
-        ["Filter_Png"] = "PNG image|*.png",
-        ["Filter_Session"] = "3FCompare Session|*.3fcs;*.json",
-        ["Filter_Bookmark"] = "JSON|*.json|CSV|*.csv",
-        ["Audio_TrackFmt"] = "Track {0}: {1} ({2}ch)",
         ["Audio_NoTrack"] = "No Audio Track",
         // VRR present (kernel extension F27)
         ["Vrr_SectionTitle"] = "VRR / Variable Refresh Rate",
@@ -421,6 +386,7 @@ public static class LanguageManager
         ["Scrub_PreviewEnabled"] = "Timeline scrub thumbnail preview",
         ["Scrub_SectionTitle"] = "Timeline Preview",
         ["Scrub_PreviewHint"] = "Captures frames every 150ms during timeline drag to show a popup preview. Disable on low-end devices; only the timecode and playhead update when disabled.",
+        ["Zoom_Minimap"] = "Zoom minimap",
     };
 
     public static string T(string key)

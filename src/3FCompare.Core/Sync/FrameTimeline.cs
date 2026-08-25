@@ -19,8 +19,11 @@ public static class FrameTimeline
     /// <summary>按秒步进目标时间（clamp 到 [0, duration]）。</summary>
     public static long StepBySeconds(long current100ns, long duration100ns, double seconds)
     {
-        var delta = (long)(seconds * TicksPerSecond);
-        return Clamp(current100ns + delta, duration100ns);
+        var delta = seconds * TicksPerSecond;
+        // 防止极大值在 (long) 转换时溢出为负值（UI 输入受限但 API 应健壮）
+        if (delta > long.MaxValue) return duration100ns;
+        if (delta < long.MinValue) return 0;
+        return Clamp(current100ns + (long)delta, duration100ns);
     }
 
     private static long Clamp(long value, long duration100ns)

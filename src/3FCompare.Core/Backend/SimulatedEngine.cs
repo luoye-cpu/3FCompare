@@ -16,7 +16,7 @@ public sealed class SimulatedEngine : IPlayerEngine
     private sealed class SimSession : IPlayerSession
     {
         private readonly EngineSessionOptions _options;
-        private readonly long _duration100ns = 10 * TimeSpan.TicksPerSecond; // 10 分钟
+        private readonly long _duration100ns = 10 * TimeSpan.TicksPerSecond; // 10秒
         private readonly double _fps = 24.0;
         private readonly int _hue; // 每路不同色相
         private static int s_nextHue;
@@ -153,12 +153,16 @@ public sealed class SimulatedEngine : IPlayerEngine
                     Decoder = 1,
                     ActualColorMode = (uint)_options.ColorMode,
                     State = _opened ? (_playing ? PlayerState.Playing : PlayerState.Paused) : PlayerState.Idle,
+                    PresentedVideoFrames = _frameIndex,
+                    SwapChainPresents = _frameIndex,
                 };
             }
         }
 
         public EngineMediaInfo? ReadMediaInfo()
-            => new()
+        {
+            if (!_opened) return null;
+            return new()
             {
                 Path = _path,
                 VideoWidth = 1920,
@@ -167,6 +171,7 @@ public sealed class SimulatedEngine : IPlayerEngine
                 Codec = "simulated",
                 IsHdr = false,
             };
+        }
 
         public bool TryReadPixel(int x, int y, out PixelSample sample)
         {
@@ -174,10 +179,25 @@ public sealed class SimulatedEngine : IPlayerEngine
             return true;
         }
 
+        public bool TryReadPixelRegion(int x, int y, int width, int height,
+            float[] buffer, out uint outputBitDepth)
+        {
+            outputBitDepth = 8;
+            for (var i = 0; i < buffer.Length; i += 4)
+            {
+                buffer[i] = 0.5f;
+                buffer[i + 1] = 0.5f;
+                buffer[i + 2] = 0.5f;
+                buffer[i + 3] = 1f;
+            }
+            return true;
+        }
+
         public void Dispose()
         {
             if (_disposed) return;
             _disposed = true;
+            EngineEvent = null; // 脱离回调，防止释放后仍在触发
         }
 
         private void AdvanceClockLocked()

@@ -8,7 +8,8 @@ namespace _3FCompare.Core.Backend;
 /// <summary>3FP 后端适配器（基于 fork 的 FFF.Native，MIT）。</summary>
 public sealed class Fff3FpEngine : IPlayerEngine
 {
-    private const uint ConfigVersion = 12;
+    // 内核 2026.8.24（8c48643）起 PlayerApiVersion=13（FFF3FP_Create 严格校验）。
+    private const uint ConfigVersion = 13;
 
     public IReadOnlyList<AdapterInfo> EnumerateAdapters()
     {
@@ -91,7 +92,14 @@ public sealed class Fff3FpEngine : IPlayerEngine
         private void OnEngineEvent(nint contextPtr, uint eventType, nint detailJsonUtf8)
         {
             // 校验 context 仍是本会话（防御性）
-            if (GCHandle.FromIntPtr(contextPtr).Target is not Fff3FpSession) return;
+            try
+            {
+                if (GCHandle.FromIntPtr(contextPtr).Target is not Fff3FpSession) return;
+            }
+            catch
+            {
+                return; // 已释放/非法句柄，静默忽略
+            }
 
             var json = detailJsonUtf8 == 0
                 ? string.Empty
@@ -179,19 +187,17 @@ public sealed class Fff3FpEngine : IPlayerEngine
 
         /// <summary>设置色彩模式（运行时切换 HDR/SDR）。
         /// 使用智能参数计算（ToneMappingParameters），避免固定的 100 nits 导致 BT.2390 曲线失效。</summary>
-        public void SetColorMode(ColorMode mode)
-        {
-            ThrowIfDisposed();
+public void SetColorMode(ColorMode mode)
+	        {
+	            ThrowIfDisposed();
 
-            // 获取当前媒体信息，判断是否为 HDR 内容
-            var mediaInfo = ReadMediaInfo();
-            var contentIsHdr = mediaInfo?.IsHdr ?? false;
+	            // 获取当前媒体信息，判断是否为 HDR 内容
+	            var mediaInfo = ReadMediaInfo();
+	            var contentIsHdr = mediaInfo?.IsHdr ?? false;
 
-            // 智能计算参数（与创建会话时一致：从输出窗口读取真实显示器能力）
-            var displayCapabilities = _outputWindow != 0
-                ? DisplayCapabilities.ReadForWindow(_outputWindow)
-                : null;
-            var config = ToneMappingParameters.Calculate(mode, displayCapabilities, contentIsHdr);
+	            // 智能计算参数（使用会话缓存的显示器能力，避免重复 DXGI 枚举）
+	            var displayCapabilities = GetDisplayCapabilities();
+	            var config = ToneMappingParameters.Calculate(mode, displayCapabilities, contentIsHdr);
 
             var result = Fff3FpNative.FFF3FP_SetColorMode(_handle, (uint)mode, config.SdrPeakNits, config.HdrPeakNits, config.PaperWhiteNits,
                 _options.ForceHdrOutput ? 1u : 0u);
@@ -239,19 +245,55 @@ public sealed class Fff3FpEngine : IPlayerEngine
                 RawFramePts = snap.FramePts,
                 FrameTimeBaseNum = snap.FrameTimeBaseNumerator,
                 FrameTimeBaseDen = snap.FrameTimeBaseDenominator,
+                // 媒体帧率：来自媒体信息 nominalFrameRate（缓存命中时零开销）。
+                // 快照的 frameTimeBase 是流时间基（如 1/15360），不是帧率，勿混用。
+                FrameRate = _cachedMediaInfo?.FrameRate ?? 0,
                 Decoder = (int)snap.Decoder,
                 ActualColorMode = snap.ActualColorMode,
                 State = (PlayerState)snap.State,
+                PresentedVideoFrames = (long)snap.PresentedVideoFrames,
+                SwapChainPresents = (long)snap.SwapChainPresents,
+                TimelineGeneration = snap.TimelineGeneration,
             };
         }
 
-        private EngineMediaInfo? _cachedMediaInfo;
+private EngineMediaInfo? _cachedMediaInfo;
+	        private DisplayLuminanceCapabilities? _cachedDisplayCaps;
+	        private DateTime _cachedDisplayCapsAt;
+	        private static readonly TimeSpan _displayCapsTtl = TimeSpan.FromSeconds(5);
 
-        /// <summary>读取媒体信息（结果缓存：媒体元数据在 Open 后不变，无需每次 P/Invoke + JSON 解析）。</summary>
+	        /// <summary>获取显示器能力（5s TTL 缓存：与 DisplayCapabilities 静态缓存对齐，
+	        /// 用户中途开关 Windows HDR 后最多 5s 感知，不再会话级永不过期）。</summary>
+	        private DisplayLuminanceCapabilities? GetDisplayCapabilities()
+	        {
+	            if (_cachedDisplayCaps is not null &&
+	                DateTime.UtcNow - _cachedDisplayCapsAt < _displayCapsTtl)
+	                return _cachedDisplayCaps;
+	            _cachedDisplayCaps = _outputWindow != 0
+	                ? DisplayCapabilities.ReadForWindow(_outputWindow) : null;
+	            _cachedDisplayCapsAt = DateTime.UtcNow;
+	            return _cachedDisplayCaps;
+	        }
+
+	        /// <summary>读取媒体信息（结果缓存：媒体元数据在 Open 后不变，无需每次 P/Invoke + JSON 解析）。
+    /// 引擎未就绪时返回 null 且不写入缓存，避免换片间隙读到旧数据。</summary>
         public EngineMediaInfo? ReadMediaInfo()
         {
             ThrowIfDisposed();
             if (_cachedMediaInfo is not null) return _cachedMediaInfo;
+
+            // 引擎未就绪时不缓存，避免跨越换片窗口读到旧数据
+            try
+            {
+                var snap = ReadSnapshot();
+                var state = snap.State;
+                if (state is not (PlayerState.Ready or PlayerState.Playing or PlayerState.Paused))
+                    return null;
+            }
+            catch
+            {
+                return null;
+            }
             var required = 0u;
             var result = Fff3FpNative.FFF3FP_GetMediaInfo(_handle, 0, 0, out required);
             if (result == FffResult.BufferTooSmall && required > 0 && required <= 4 * 1024 * 1024)
@@ -338,10 +380,15 @@ public sealed class Fff3FpEngine : IPlayerEngine
                     height = GetInt(video, "height") ?? 0;
                     codec = GetString(video, "codec") ?? GetString(video, "codec_name") ?? "unknown";
 
-                    // 帧率：优先 nominalFrameRateNum/Den，其次 averageFrameRate*
+                    // 帧率：优先 nominalFrameRateNum/Den，其次 averageFrameRate*。
+                    // 防御：时间基类数值（如 15360）混入 fps 位时钳制到合理范围。
                     var fpsNum = GetInt(video, "nominalFrameRateNumerator") ?? GetInt(video, "averageFrameRateNumerator") ?? 0;
                     var fpsDen = GetInt(video, "nominalFrameRateDenominator") ?? GetInt(video, "averageFrameRateDenominator") ?? 1;
-                    if (fpsNum > 0 && fpsDen > 0) fps = (double)fpsNum / fpsDen;
+                    if (fpsNum > 0 && fpsDen > 0)
+                    {
+                        fps = (double)fpsNum / fpsDen;
+                        if (fps is < 1.0 or > 480.0) fps = 0; // 异常值视为未知
+                    }
 
                     isHdr = GetBool(video, "hdr") ||
                             string.Equals(GetString(video, "hdrFormat"), "HDR10", StringComparison.OrdinalIgnoreCase) ||
@@ -460,11 +507,33 @@ public sealed class Fff3FpEngine : IPlayerEngine
             return true;
         }
 
-        /// <summary>应用智能色调映射参数（调用3FP SetColorMode）。</summary>
-        public void ApplyToneMappingParameters(ColorMode colorMode, nint outputWindow, bool forceHdrOutput = false)
+        /// <summary>3FCompare patch (0004)：单次 GPU staging 拷贝读取整块区域。</summary>
+        public bool TryReadPixelRegion(int x, int y, int width, int height,
+            float[] buffer, out uint outputBitDepth)
         {
-            // 获取显示器能力
-            var displayCapabilities = DisplayCapabilities.ReadForWindow(outputWindow);
+            ThrowIfDisposed();
+            outputBitDepth = 0;
+            if (width <= 0 || height <= 0 || buffer.Length < width * height * 4)
+                return false;
+            var result = Fff3FpNative.FFF3FP_ReadVideoPixelRegion(_handle,
+                (uint)Math.Max(0, x), (uint)Math.Max(0, y),
+                (uint)width, (uint)height, buffer, (uint)buffer.Length, out var bits);
+            if (result != FffResult.Success)
+                return false;
+            outputBitDepth = bits;
+            return true;
+        }
+
+/// <summary>应用智能色调映射参数（调用3FP SetColorMode）。</summary>
+	        public void ApplyToneMappingParameters(ColorMode colorMode, nint outputWindow, bool forceHdrOutput = false)
+	        {
+	            // 更新输出窗口引用（CreateSession 时传入，运行时不变但保留以防后续扩展）
+	            _outputWindow = outputWindow;
+	            // 输出窗口变化时清除显示器能力缓存
+	            _cachedDisplayCaps = null;
+
+	            // 获取显示器能力（使用会话缓存，避免重复 DXGI 枚举）
+	            var displayCapabilities = GetDisplayCapabilities();
 
             // 获取当前媒体信息，判断是否为 HDR 内容
             var mediaInfo = ReadMediaInfo();

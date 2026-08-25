@@ -72,21 +72,37 @@ public class StepProfileTests
 public class SyncControllerTests
 {
     [Fact]
-    public void EstimateFps_UsesTimeBase()
+    public void EstimateFps_UsesSnapshotFrameRate()
     {
+        // 修复后：优先用快照携带的媒体帧率（来自媒体信息 nominalFrameRate）
+        var snap = new _3FCompare.Core.Backend.EngineSnapshot
+        {
+            Position100ns = 0,
+            Duration100ns = TimeSpan.FromMinutes(1).Ticks,
+            FrameIndex = 0,
+            FrameRate = 25.0,
+        };
+        Assert.Equal(25.0, SyncController.EstimateFps(snap));
+    }
+
+    [Fact]
+    public void EstimateFps_TimeBaseIsNotFps_FallsBackToDefault()
+    {
+        // 回归测试：frameTimeBase 是流时间基（如 MP4 的 1/15360），不是帧率。
+        // 旧实现直接 Den/Num 把 4K H.264 (tbn=15360) 算成 15360fps —— 已修复为回退默认值。
         var snap = new _3FCompare.Core.Backend.EngineSnapshot
         {
             Position100ns = 0,
             Duration100ns = TimeSpan.FromMinutes(1).Ticks,
             FrameIndex = 0,
             FrameTimeBaseNum = 1,
-            FrameTimeBaseDen = 25,
+            FrameTimeBaseDen = 15360,
         };
-        Assert.Equal(25.0, SyncController.EstimateFps(snap));
+        Assert.Equal(24.0, SyncController.EstimateFps(snap));
     }
 
     [Fact]
-    public void EstimateFps_Fallback24_WhenNoTimeBase()
+    public void EstimateFps_NoData_FallsBackTo24()
     {
         var snap = new _3FCompare.Core.Backend.EngineSnapshot
         {

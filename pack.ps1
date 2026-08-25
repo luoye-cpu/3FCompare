@@ -1,11 +1,11 @@
 # 3FCompare 打包脚本 — 2 版本发布（全部 NativeAOT 编译）
 # 3FCompare Build & Pack Script — 2 variants (all NativeAOT)
 # 用法 / Usage:
-#   精简版 (不含 PLAN) / Lite (no PLAN):        .\pack.ps1 -Version "0.1.0" -Mode app
-#   完整版 (含 PLAN/ffmpeg-full) / Full (with PLAN): .\pack.ps1 -Version "0.1.0" -Mode full
-#   一键全部 2 个版本 / Both variants:         .\pack.ps1 -Version "0.1.0" -Mode all (default)
+#   精简版 (不含 PLAN) / Lite (no PLAN):        .\pack.ps1 -Version "0.2.0" -Mode app
+#   完整版 (含 PLAN/ffmpeg-full) / Full (with PLAN): .\pack.ps1 -Version "0.2.0" -Mode full
+#   一键全部 2 个版本 / Both variants:         .\pack.ps1 -Version "0.2.0" -Mode all (default)
 param(
-    [string]$Version = "0.1.0",
+    [string]$Version = "0.2.0",
     [ValidateSet("app", "full", "all")]
     [string]$Mode = "all",
     [switch]$NoCompress   # 跳过 7z 压缩（调试时快速验证打包逻辑）/ Skip 7z compression (debug)
@@ -15,7 +15,7 @@ $ErrorActionPreference = "Stop"
 $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PublishDir = "$ProjectDir\publish"
 $BuildDir = "$ProjectDir\publish\build"
-$AppProject = "$ProjectDir\src\3FCompare.Avalonia\3FCompare.Avalonia.csproj"
+$AppProject = "$ProjectDir\src\3FCompare\3FCompare.csproj"
 $PlanSource = "$PublishDir\PLAN"
 
 # 架构

@@ -19,16 +19,6 @@ internal enum FffResult : int
     NotSupported = -7,
 }
 
-/// <summary>显示器HDR能力（对应3FP的HdrDisplayCapabilities）。</summary>
-[StructLayout(LayoutKind.Sequential)]
-internal struct HdrDisplayCapabilities
-{
-    public bool supported;              // 是否支持HDR
-    public float minimumNits;           // 最小亮度（nits）
-    public float maximumNits;           // 峰值亮度（nits）
-    public float maximumFullFrameNits;  // 全帧最大亮度（nits）
-}
-
 /// <summary>解码模式（FFF3FPDecodeMode）。</summary>
 internal enum FffDecodeMode : uint
 {
@@ -246,4 +236,10 @@ internal static partial class Fff3FpNative
     [LibraryImport(DllName)]
     internal static partial FffResult FFF3FP_ReadVideoPixel(nint player,
         ref Fff3FpVideoPixelProbe probe);
+
+    // 3FCompare patch (0004): batch pixel readback (single GPU staging copy).
+    [LibraryImport(DllName)]
+    internal static partial FffResult FFF3FP_ReadVideoPixelRegion(nint player,
+        uint x, uint y, uint width, uint height,
+        float[] dst, uint dstFloatCount, out uint outputBitDepth);
 }

@@ -1,0 +1,182 @@
+diff --git a/FFF.Native/3FP/Render/VideoRenderer.cpp b/FFF.Native/3FP/Render/VideoRenderer.cpp
+index 80fc9c4..16fff03 100644
+--- a/FFF.Native/3FP/Render/VideoRenderer.cpp
++++ b/FFF.Native/3FP/Render/VideoRenderer.cpp
+@@ -1785,6 +1785,22 @@ void PlayerVideoRenderer::ConfigureHdrStream(const AVCodecParameters* parameters
+     hdrProcessor_.ConfigureStream(parameters);
+ }
+ 
++FFFResult PlayerVideoRenderer::SetPresentConfig(const bool enableTearing) noexcept {
++    // Pacing preference only: no chain work here. The capability flag was set at
++    // chain creation, so the toggle takes effect on the very next Present.
++    tearingRequested_.store(enableTearing, std::memory_order_relaxed);
++    return !enableTearing || tearingSupported_.load(std::memory_order_relaxed)
++        ? FFFResult::Success
++        : FFFResult::NotSupported;
++}
++
++FFFResult PlayerVideoRenderer::SetPacingConfig(const bool enablePacing) noexcept {
++    // Media-rate presentation pacing for VRR (A9): the timed-text thread
++    // suppresses periodic keepalive presents; no chain work required.
++    pacingEnabled_.store(enablePacing, std::memory_order_relaxed);
++    return FFFResult::Success;
++}
++
+ FFFResult PlayerVideoRenderer::ForceSdrOutputForSdrSource() noexcept {
+     std::lock_guard deviceLock(deviceMutex_);
+     requestedMode_ = FFF3FPColorMode::MapToSdr;
+@@ -2018,6 +2034,22 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
+     description.SampleDesc.Count = 1; description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+     description.BufferCount = 2; description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+     description.AlphaMode = DXGI_ALPHA_MODE_IGNORE; description.Scaling = DXGI_SCALING_NONE;
++    // VRR capability (3FCompare extension): when the OS supports tearing, carry
++    // the creation flag unconditionally so the pacing mode can toggle at runtime
++    // without recreating the chain; the default remains vsync-locked Present(1,0).
++    {
++        ComPtr<IDXGIFactory5> factory5;
++        BOOL allowTearing = FALSE;
++        if (SUCCEEDED(factory.As(&factory5)) &&
++            SUCCEEDED(factory5->CheckFeatureSupport(
++                DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allowTearing, sizeof(allowTearing))) &&
++            allowTearing) {
++            tearingSupported_.store(true, std::memory_order_relaxed);
++            description.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
++        } else {
++            tearingSupported_.store(false, std::memory_order_relaxed);
++        }
++    }
+     ComPtr<IDXGISwapChain1> chain1;
+     const auto result = factory->CreateSwapChainForHwnd(device_, window_, &description, nullptr, nullptr, &chain1);
+     if (FAILED(result) || FAILED(chain1->QueryInterface(IID_PPV_ARGS(&swapChain_)))) {
+@@ -2603,9 +2635,21 @@ FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidt
+     const std::uint32_t outputHeight, ID3D11ShaderResourceView** views) noexcept {
+     if (views == nullptr || outputWidth == 0 || outputHeight == 0)
+         return FFFResult::InvalidArgument;
++    // 3FCompare patch (P2): quantize the scale-chain cache key. Zoom changes
++    // the destination size by a few pixels per wheel tick; without quantization
++    // every tick rebuilt the whole halving chain (multiple FP16 render targets
++    // for 4K/8K sources), which stalled the decode thread under deviceMutex_.
++    // Quantizing to 64px buckets keeps visual quality (the final draw still
++    // samples to the exact destination rect) while consecutive zoom steps hit
++    // the cached chain.
++    const auto quantize = [](std::uint32_t value) noexcept {
++        return std::max<std::uint32_t>(1u, (value + 63u) & ~63u);
++    };
++    const auto cacheWidth = quantize(outputWidth);
++    const auto cacheHeight = quantize(outputHeight);
+     const auto generation = videoGeneration_.load(std::memory_order_acquire);
+-    if (scaledVideoGeneration_ == generation && scaledOutputWidth_ == outputWidth &&
+-        scaledOutputHeight_ == outputHeight) {
++    if (scaledVideoGeneration_ == generation && scaledOutputWidth_ == cacheWidth &&
++        scaledOutputHeight_ == cacheHeight) {
+         std::copy(std::begin(scaledSourceViews_), std::end(scaledSourceViews_), views);
+         return FFFResult::Success;
+     }
+@@ -2621,8 +2665,8 @@ FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidt
+             (sourceWidth_ + (1u << sourceChromaWidthShift_) - 1) >> sourceChromaWidthShift_;
+         const auto planeHeight = plane == 0 ? sourceHeight_ :
+             (sourceHeight_ + (1u << sourceChromaHeightShift_) - 1) >> sourceChromaHeightShift_;
+-        const auto targetWidth = std::min(planeWidth, outputWidth);
+-        const auto targetHeight = std::min(planeHeight, outputHeight);
++        const auto targetWidth = std::min(planeWidth, cacheWidth);
++        const auto targetHeight = std::min(planeHeight, cacheHeight);
+         const auto format = sourceInputLayout_ == 0 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
+             (sourceInputLayout_ == 2 && plane == 1 ? DXGI_FORMAT_R16G16_FLOAT :
+                 DXGI_FORMAT_R16_FLOAT);
+@@ -2656,8 +2700,8 @@ FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidt
+         scaledSourceViews_[plane] = currentView;
+     }
+     scaledVideoGeneration_ = generation;
+-    scaledOutputWidth_ = outputWidth;
+-    scaledOutputHeight_ = outputHeight;
++    scaledOutputWidth_ = cacheWidth;
++    scaledOutputHeight_ = cacheHeight;
+     std::copy(std::begin(scaledSourceViews_), std::end(scaledSourceViews_), views);
+     return FFFResult::Success;
+ }
+@@ -2866,6 +2910,17 @@ void PlayerVideoRenderer::TimedTextThread() noexcept {
+             RequestRecoveryIfDeviceLost();
+             continue;
+         }
++        // 3FCompare VRR pacing (A9): when pacing is enabled and neither the video
++        // nor the overlay has changed, skip the present. The VRR display holds the
++        // last scanned-out frame; the next signal (new video frame or overlay
++        // change) will wake us. This prevents the timed-text thread from adding
++        // extra flips that would break the media frame rate cadence on VRR displays.
++        if (pacingEnabled_ && !videoChanged &&
++            !(presentationGeneration_ != observedPresentationGeneration)) {
++            observedPresentationGeneration = presentationGeneration_;
++            observedVideoGeneration = videoGeneration_.load();
++            continue;
++        }
+         const auto presentationStart = std::chrono::steady_clock::now();
+         const auto result = PresentTimedText();
+         if (result != FFFResult::Success) {
+@@ -4263,7 +4318,14 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
+     const std::uint64_t renderedVideoGeneration) noexcept {
+     if (chain == nullptr) return FFFResult::InvalidState;
+     const auto start = std::chrono::steady_clock::now();
+-    const auto present = chain->Present(1, 0);
++    // VRR pacing (3FCompare extension): tearing mode presents immediately and
++    // lets a G-SYNC/FreeSync display scan out on its own schedule; the default
++    // stays vsync-locked. DXGI_PRESENT_ALLOW_TEARING requires SyncInterval 0.
++    const bool tornPresent = tearingRequested_.load(std::memory_order_relaxed) &&
++        tearingSupported_.load(std::memory_order_relaxed);
++    const auto present = tornPresent
++        ? chain->Present(0, DXGI_PRESENT_ALLOW_TEARING)
++        : chain->Present(1, 0);
+     presentWait100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
+         std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count() / 100));
+     if (present == DXGI_ERROR_DEVICE_REMOVED || present == DXGI_ERROR_DEVICE_RESET ||
+@@ -4289,23 +4351,38 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
+ }
+ 
+ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
+-    std::unique_lock deviceLock(deviceMutex_);
++    // 3FCompare patch (P1): fast-path swap-chain check before taking
++    // deviceMutex_. EnsureSwapChain must run under deviceMutex_ (it touches
++    // device state), but on the steady-state path (chain exists, size matches,
++    // mode stable) it is a no-op that still costs a client-rect probe and an
++    // HDR-support cache check while blocking the decode thread. Probe the
++    // cheap invariants lock-free first; only fall back to the full call when
++    // something may actually have changed.
+     const auto lyricsLayout = lyricsLayoutEnabled_.load(std::memory_order_acquire);
+     if (window_ == nullptr || (!hasCachedVideo_ && swapChain_ == nullptr && !lyricsLayout))
+         return FFFResult::Success;
+-    const auto chainResult = EnsureSwapChain(hasCachedVideo_ ? sourceWidth_ : 1,
+-        hasCachedVideo_ ? sourceHeight_ : 1, hasCachedVideo_ ? sourceBitDepth_ : 8);
+-    if (chainResult != FFFResult::Success || swapChain_ == nullptr) return chainResult;
+-    if (!hasCachedVideo_) {
+-        const auto pipelineResult = EnsurePipeline(1, 1, 0, 8, 0, 0, false);
+-        if (pipelineResult != FFFResult::Success) return pipelineResult;
+-        cachedVideoSettings_ = {};
+-        cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
+-        cachedVideoSettings_.sdrPeak = sdrPeakNits_;
+-        cachedVideoSettings_.hdrPeak = sdrPeakNits_;
+-        cachedVideoSettings_.paperWhite = paperWhiteNits_;
+-        cachedVideoSettings_.targetPeak = hdrProcessor_.State().targetPeakNits;
++    RECT client{};
++    const bool chainUpToDate = hasCachedVideo_ && swapChain_ != nullptr &&
++        GetClientRect(window_, &client) &&
++        static_cast<std::uint32_t>(std::max<LONG>(1, client.right - client.left)) == swapWidth_ &&
++        static_cast<std::uint32_t>(std::max<LONG>(1, client.bottom - client.top)) == swapHeight_;
++    if (!chainUpToDate) {
++        std::lock_guard deviceLock(deviceMutex_);
++        const auto chainResult = EnsureSwapChain(hasCachedVideo_ ? sourceWidth_ : 1,
++            hasCachedVideo_ ? sourceHeight_ : 1, hasCachedVideo_ ? sourceBitDepth_ : 8);
++        if (chainResult != FFFResult::Success || swapChain_ == nullptr) return chainResult;
++        if (!hasCachedVideo_) {
++            const auto pipelineResult = EnsurePipeline(1, 1, 0, 8, 0, 0, false);
++            if (pipelineResult != FFFResult::Success) return pipelineResult;
++            cachedVideoSettings_ = {};
++            cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
++            cachedVideoSettings_.sdrPeak = sdrPeakNits_;
++            cachedVideoSettings_.hdrPeak = sdrPeakNits_;
++            cachedVideoSettings_.paperWhite = paperWhiteNits_;
++            cachedVideoSettings_.targetPeak = hdrProcessor_.State().targetPeakNits;
++        }
+     }
++    std::unique_lock deviceLock(deviceMutex_);
+     std::unique_lock presentLock(presentMutex_);
+     ComPtr<ID3D11Texture2D> backBuffer;
+     ComPtr<ID3D11RenderTargetView> backBufferTarget;

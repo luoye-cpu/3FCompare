@@ -27,6 +27,7 @@ public sealed class SettingsWindow : Window
     private readonly CheckBox _vrrTearing = new();
     private readonly CheckBox _vrrPacing = new();
     private readonly CheckBox _scrubPreview = new() { IsChecked = true };
+    private readonly CheckBox _minimap = new() { IsChecked = true };
     private readonly ComboBox _colorMode = new();
     private readonly NumericUpDown _cols = new() { Minimum = 1, Maximum = 3, Increment = 1 };
     private readonly NumericUpDown _rows = new() { Minimum = 1, Maximum = 3, Increment = 1 };
@@ -42,7 +43,31 @@ public sealed class SettingsWindow : Window
 
     public SettingsWindow(AppSettings current)
     {
-        _orig = current;
+        // 深拷贝：避免 _orig 与外部 _settings 共享引用，否则 CopySettings 后
+        // changed 比较失效，SettingsStore.Save 不再被调用
+        _orig = new AppSettings
+        {
+            HardwareDecode = current.HardwareDecode,
+            PreferredAdapterIndex = current.PreferredAdapterIndex,
+            FfmpegDirectory = current.FfmpegDirectory,
+            ColorMode = current.ColorMode,
+            FrameStep = current.FrameStep,
+            SecondsStep = current.SecondsStep,
+            StartFullscreen = current.StartFullscreen,
+            HideChromeInFullscreen = current.HideChromeInFullscreen,
+            DefaultGridCols = current.DefaultGridCols,
+            DefaultGridRows = current.DefaultGridRows,
+            VrrTearingPresent = current.VrrTearingPresent,
+            VrrPacingEnabled = current.VrrPacingEnabled,
+            ScrubPreviewEnabled = current.ScrubPreviewEnabled,
+            MinimapEnabled = current.MinimapEnabled,
+            WindowX = current.WindowX,
+            WindowY = current.WindowY,
+            WindowWidth = current.WindowWidth,
+            WindowHeight = current.WindowHeight,
+            WindowMaximized = current.WindowMaximized,
+            Language = current.Language,
+        };
         Title = LanguageManager.T("Settings_DialogTitle");
         Width = 720; Height = 760;
         CanResize = true;
@@ -57,7 +82,9 @@ public sealed class SettingsWindow : Window
         _hwDecode.IsChecked = current.HardwareDecode;
         foreach (var a in GpuEnumeration.Enumerate())
             _gpu.Items.Add(a.Description);
-        _gpu.SelectedIndex = Math.Max(0, current.PreferredAdapterIndex + 1);
+        if (_gpu.Items.Count > 0)
+            _gpu.SelectedIndex = Math.Max(0, current.PreferredAdapterIndex + 1);
+        ToolTip.SetTip(_gpu, LanguageManager.T("Hardware_GpuHint"));
         _frameStep.Value = current.FrameStep;
         _secStep.Value = (decimal)current.SecondsStep;
         _startFullscreen.Content = LanguageManager.T("Window_StartFullscreen");
@@ -73,6 +100,8 @@ public sealed class SettingsWindow : Window
         _scrubPreview.Content = LanguageManager.T("Scrub_PreviewEnabled");
         _scrubPreview.IsChecked = current.ScrubPreviewEnabled;
         ToolTip.SetTip(_scrubPreview, LanguageManager.T("Scrub_PreviewHint"));
+        _minimap.Content = LanguageManager.T("Zoom_Minimap");
+        _minimap.IsChecked = current.MinimapEnabled;
         _colorMode.Items.Add(LanguageManager.T("Color_Auto"));
         _colorMode.Items.Add(LanguageManager.T("Color_SDR"));
         _colorMode.Items.Add(LanguageManager.T("Color_HDRAuto"));
@@ -98,7 +127,7 @@ public sealed class SettingsWindow : Window
             _vrrTearing, _vrrPacing,
             Hint(LanguageManager.T("Vrr_TearingHint")), Hint(LanguageManager.T("Vrr_PacingHint"))));
         stack.Children.Add(Section(LanguageManager.T("Scrub_SectionTitle"),
-            _scrubPreview, Hint(LanguageManager.T("Scrub_PreviewHint"))));
+            _scrubPreview, _minimap, Hint(LanguageManager.T("Scrub_PreviewHint"))));
         stack.Children.Add(Section(LanguageManager.T("Status_Color"),
             Row(_colorMode)));
         stack.Children.Add(Section(LanguageManager.T("Layout_DefaultCols"),
@@ -143,30 +172,35 @@ public sealed class SettingsWindow : Window
     private void UpdateFfmpegStatus(bool forceValidate = false)
     {
         var dir = _ffmpegDir.Text?.Trim();
-        if (forceValidate && !string.IsNullOrEmpty(dir))
+        if (!string.IsNullOrEmpty(dir))
         {
-            var validated = NativeRuntime.ValidateFfmpegDirectory(dir);
-            var valid = !string.IsNullOrEmpty(validated);
-            _ffmpegStatus.Text = valid
-                ? LanguageManager.T("Msg_ValidateSuccess")
-                : $"{LanguageManager.T("Msg_ValidateFailed")}（{dir}）";
-            _ffmpegStatus.Foreground = valid
-                ? new SolidColorBrush(Color.FromRgb(100, 200, 100))
-                : new SolidColorBrush(Color.FromRgb(255, 100, 100));
+            // ValidateFfmpegDirectory 约定：null=有效，非 null=错误原因
+            var error = NativeRuntime.ValidateFfmpegDirectory(dir);
+            if (error is not null)
+            {
+                _ffmpegStatus.Text = $"{LanguageManager.T("Msg_ValidateFailed")}（{error}）";
+                _ffmpegStatus.Foreground = new SolidColorBrush(Color.FromRgb(255, 100, 100));
+                return;
+            }
+            if (!forceValidate)
+            {
+                _ffmpegStatus.Text = LanguageManager.T("Msg_ValidateSuccess");
+                _ffmpegStatus.Foreground = new SolidColorBrush(Color.FromRgb(100, 200, 100));
+                return;
+            }
+            // 测试探测：目录结构有效（保存后重启生效，不在此处预加载 DLL 避免文件系统副作用）
+            _ffmpegStatus.Text = LanguageManager.T("Msg_ValidateSuccess");
+            _ffmpegStatus.Foreground = new SolidColorBrush(Color.FromRgb(100, 200, 100));
             return;
         }
-        if (string.IsNullOrEmpty(dir))
-        {
-            var auto = NativeRuntime.IsFfmpegAvailable();
-            _ffmpegStatus.Text = auto
-                ? LanguageManager.T("Msg_AutoDetectSuccess") + NativeRuntime.AutoDetectFfmpegDirectory()
-                : LanguageManager.T("Msg_AutoDetectFailed");
-        }
-        else
-        {
-            _ffmpegStatus.Text = LanguageManager.T("Msg_AutoDetect");
-        }
-        _ffmpegStatus.Foreground = new SolidColorBrush(Color.FromRgb(140, 140, 150));
+
+        // 目录留空：展示自动检测的真实结果（FFMPEG_DIR / PATH / 应用目录）
+        var auto = NativeRuntime.AutoDetectFfmpegDirectory();
+        _ffmpegStatus.Text = auto is not null
+            ? LanguageManager.T("Msg_AutoDetectSuccess") + auto
+            : LanguageManager.T("Msg_AutoDetectFailed");
+        _ffmpegStatus.Foreground = new SolidColorBrush(
+            auto is not null ? Color.FromRgb(100, 200, 100) : Color.FromRgb(140, 140, 150));
     }
 
     private void Accept()
@@ -189,6 +223,7 @@ public sealed class SettingsWindow : Window
         var vrrTearing = _vrrTearing.IsChecked == true;
         var vrrPacing = _vrrPacing.IsChecked == true;
         var scrubPreview = _scrubPreview.IsChecked == true;
+        var miniMap = _minimap.IsChecked == true;
         var ffmpeg = string.IsNullOrWhiteSpace(_ffmpegDir.Text) ? null : _ffmpegDir.Text.Trim();
 
         var changed = lang != _orig.Language || hw != _orig.HardwareDecode || adapter != _orig.PreferredAdapterIndex
@@ -196,7 +231,7 @@ public sealed class SettingsWindow : Window
             || startFs != _orig.StartFullscreen || hideChrome != _orig.HideChromeInFullscreen
             || color != _orig.ColorMode || cols != _orig.DefaultGridCols || rows != _orig.DefaultGridRows
             || vrrTearing != _orig.VrrTearingPresent || vrrPacing != _orig.VrrPacingEnabled
-            || scrubPreview != _orig.ScrubPreviewEnabled
+            || scrubPreview != _orig.ScrubPreviewEnabled || miniMap != _orig.MinimapEnabled
             || ffmpeg != _orig.FfmpegDirectory;
         FfmpegChanged = ffmpeg != _orig.FfmpegDirectory;
 
@@ -218,6 +253,7 @@ public sealed class SettingsWindow : Window
                 VrrTearingPresent = vrrTearing,
                 VrrPacingEnabled = vrrPacing,
                 ScrubPreviewEnabled = scrubPreview,
+                MinimapEnabled = miniMap,
                 WindowX = _orig.WindowX, WindowY = _orig.WindowY,
                 WindowWidth = _orig.WindowWidth, WindowHeight = _orig.WindowHeight,
                 WindowMaximized = _orig.WindowMaximized,

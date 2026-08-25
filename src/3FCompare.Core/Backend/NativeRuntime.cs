@@ -4,11 +4,12 @@ using System.Runtime.InteropServices;
 namespace _3FCompare.Core.Backend;
 
 /// <summary>原生运行时路径管理：手动指定 FFmpeg DLL 目录、自释放嵌入的 FFF.Native.dll。
-/// 原理：将用户目录中的 FFmpeg DLL 复制到应用目录（与 FFF.Native 同级），
-/// 使内核的 Delay-Load 在应用目录中直接命中。最可靠的方式。
-/// 兼容 NativeAOT：仅 P/Invoke + P/Invoke Source Generator。</summary>
+/// 将指定目录加入 DLL 搜索路径（通过 SetDllDirectory），不再复制 DLL 到应用目录。</summary>
 public static partial class NativeRuntime
 {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool SetDllDirectoryW(string? lpPathName);
+
     /// <summary>当前生效的 FFmpeg 目录（null = 未手动指定，走自动检测）。</summary>
     public static string? FfmpegDirectory { get; private set; }
 
@@ -60,12 +61,12 @@ public static partial class NativeRuntime
     }
 
     /// <summary>设置 FFmpeg DLL 搜索目录（null/空白 = 清除手动设置，恢复自动检测）。
-    /// 将用户目录中的 FFmpeg DLL 复制到应用目录，确保内核 Delay-Load 可命中。</summary>
+    /// 将指定目录加入 DLL 搜索路径，使内核 Delay-Load 可命中（不再复制 DLL 到应用目录）。</summary>
     public static void SetFfmpegDirectory(string? directory)
     {
         FfmpegDirectory = string.IsNullOrWhiteSpace(directory) ? null : directory.Trim();
         if (FfmpegDirectory is not null)
-            CopyDlls(FfmpegDirectory);
+            SetDllDirectoryW(FfmpegDirectory);
     }
 
     /// <summary>自动探测 FFmpeg 目录：FFMPEG_DIR 环境变量 → PATH 逐项（含 bin/bin64）→ 应用目录。
@@ -124,8 +125,8 @@ public static partial class NativeRuntime
         return null;
     }
 
-    /// <summary>检测应用目录是否已具备 FFmpeg 核心 DLL（avcodec-*.dll）。
-    /// 3FP 内核通过 Delay-Load 从应用目录解析 FFmpeg（CopyDlls 复制到应用目录）。
+    /// <summary>检测应用目录、ffmpeg 子目录或手动指定的 FfmpegDirectory 是否已具备 FFmpeg 核心 DLL（avcodec-*.dll）。
+    /// 3FP 内核通过 Delay-Load 从 DLL 搜索路径（应用目录 + SetDllDirectory 目录 + 系统路径）解析 FFmpeg。
     /// 用于引擎可用性探测：仅有 FFF.Native 而没有 FFmpeg 时不能使用真实模式
     /// （否则打开视频时 FFmpeg Delay-Load 失败会导致原生崩溃）。
     /// </summary>
@@ -135,14 +136,44 @@ public static partial class NativeRuntime
         {
             var appDir = AppContext.BaseDirectory;
             if (!Directory.Exists(appDir)) return false;
-            // 检查 exe 同级目录以及 ffmpeg/ 子目录（发布包结构）
-            return Directory.GetFiles(appDir, "avcodec-*.dll").Length > 0
-                || Directory.GetFiles(appDir, "avcodec*.dll").Length > 0
-                || Directory.GetFiles(Path.Combine(appDir, "ffmpeg"), "avcodec-*.dll").Length > 0
-                || Directory.GetFiles(Path.Combine(appDir, "ffmpeg"), "avcodec*.dll").Length > 0;
+            // 检查 exe 同级目录
+            if (Directory.GetFiles(appDir, "avcodec-*.dll").Length > 0
+                || Directory.GetFiles(appDir, "avcodec*.dll").Length > 0)
+            {
+                Console.Error.WriteLine($"[NativeRuntime] IsFfmpegAvailable: found in appDir");
+                return true;
+            }
+            // 检查 ffmpeg/ 子目录
+            var ffmpegSubDir = Path.Combine(appDir, "ffmpeg");
+            if (Directory.Exists(ffmpegSubDir))
+            {
+                if (Directory.GetFiles(ffmpegSubDir, "avcodec-*.dll").Length > 0
+                    || Directory.GetFiles(ffmpegSubDir, "avcodec*.dll").Length > 0)
+                {
+                    // 关键：找到后必须把该目录加入 DLL 搜索路径，否则 FFF.Native 的
+                    // Delay-Load 解析不到 avcodec → 打开媒体时原生崩溃 0xC0005FFE。
+                    // （此前只返回 true 未注册路径，MainWindow 仅在 false 分支才注册。）
+                    SetDllDirectoryW(ffmpegSubDir);
+                    Console.Error.WriteLine($"[NativeRuntime] IsFfmpegAvailable: found in ffmpeg/ subdir, registered search path");
+                    return true;
+                }
+            }
+            // 检查手动指定的 FfmpegDirectory
+            if (FfmpegDirectory is not null && Directory.Exists(FfmpegDirectory))
+            {
+                if (Directory.GetFiles(FfmpegDirectory, "avcodec-*.dll").Length > 0
+                    || Directory.GetFiles(FfmpegDirectory, "avcodec*.dll").Length > 0)
+                {
+                    Console.Error.WriteLine($"[NativeRuntime] IsFfmpegAvailable: found in FfmpegDirectory='{FfmpegDirectory}'");
+                    return true;
+                }
+            }
+            Console.Error.WriteLine($"[NativeRuntime] IsFfmpegAvailable: NOT found (FfmpegDirectory='{FfmpegDirectory}')");
+            return false;
         }
-        catch
+        catch (Exception ex)
         {
+            Console.Error.WriteLine($"[NativeRuntime] IsFfmpegAvailable exception: {ex.Message}");
             return false;
         }
     }

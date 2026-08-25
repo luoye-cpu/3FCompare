@@ -11,7 +11,7 @@
          pack.ps1 用 -p:Version=X.Y.Z 覆盖时全链路生效。
          不再硬编码 AssemblyVersion/FileVersion/InformationalVersion
          （避免 0.1.2 发布时程序集版本错位的同类问题）。 -->
-    <Version>0.1.4</Version>
+    <Version>0.2.0</Version>
     <VersionSuffix>BETA</VersionSuffix>
   </PropertyGroup>
 

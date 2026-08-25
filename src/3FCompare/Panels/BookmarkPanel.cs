@@ -27,9 +27,6 @@ public sealed class BookmarkPanel : StackPanel
     private readonly TextBox _note = new();
     private readonly Func<(long Position, long Frame)> _currentGetter;
 
-    /// <summary>列表变化通知（MainWindow 同步 Delete 键删除）。</summary>
-    public event EventHandler? ItemsChanged;
-
     /// <summary>双击跳转请求。</summary>
     public event Action<long>? JumpRequested;
 
@@ -39,7 +36,7 @@ public sealed class BookmarkPanel : StackPanel
         Margin = new global::Avalonia.Thickness(10);
         Spacing = 8;
 
-        _note.Watermark = LanguageManager.T("Bookmark_NotePlaceholder");
+        _note.PlaceholderText = LanguageManager.T("Bookmark_NotePlaceholder");
         _note.Height = 26;
 
         _list.MinHeight = 200;
@@ -74,7 +71,6 @@ public sealed class BookmarkPanel : StackPanel
         Items.Add(new BookmarkItem(pos, frame, _note.Text ?? string.Empty));
         _note.Text = string.Empty;
         RefreshList();
-        ItemsChanged?.Invoke(this, EventArgs.Empty);
     }
 
     public List<BookmarkItem> Items { get; } = new();
@@ -93,7 +89,6 @@ public sealed class BookmarkPanel : StackPanel
         if (_list.SelectedIndex < 0 || _list.SelectedIndex >= Items.Count) return false;
         Items.RemoveAt(_list.SelectedIndex);
         RefreshList();
-        ItemsChanged?.Invoke(this, EventArgs.Empty);
         return true;
     }
 

@@ -23,7 +23,9 @@ public sealed class ThumbnailPopup : Window
 
     public ThumbnailPopup()
     {
-        SystemDecorations = SystemDecorations.None;
+        // Avalonia 12：WindowDecorations 是新 API；旧 SystemDecorations 已废弃。
+        // 此处直接给依赖属性赋值（WindowDecorationsProperty），避开废弃的 CLR 包装器（CS0618）。
+        SetCurrentValue(WindowDecorationsProperty, global::Avalonia.Controls.WindowDecorations.None);
         ShowActivated = false;
         Topmost = true;
         ShowInTaskbar = false;
@@ -67,6 +69,24 @@ public sealed class ThumbnailPopup : Window
         if (!IsVisible) Show();
         _hideTimer.Stop();
         _hideTimer.Start();
+    }
+
+    /// <summary>3FCompare 优化项⑤：把抓帧结果缩放到预览宽度（GDI StretchBlt 一次完成，
+    /// 避免全尺寸 4K 位图跨线程传输与 GPU 上传）。</summary>
+    public static System.Drawing.Bitmap? ScaleTo(System.Drawing.Bitmap src, int maxWidth)
+    {
+        try
+        {
+            if (src.Width <= maxWidth) return new System.Drawing.Bitmap(src);
+            var w = maxWidth;
+            var h = Math.Max(1, (int)Math.Round((double)src.Height * w / src.Width));
+            var dst = new System.Drawing.Bitmap(w, h);
+            using var g = System.Drawing.Graphics.FromImage(dst);
+            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Bilinear;
+            g.DrawImage(src, new System.Drawing.Rectangle(0, 0, w, h));
+            return dst;
+        }
+        catch { return null; }
     }
 
     /// <summary>复用 WriteableBitmap：同尺寸直接锁写像素，不同尺寸才重新分配。</summary>

@@ -64,6 +64,12 @@ public interface IPlayerSession : IDisposable
     /// <summary>读取某像素（颜色管理前原生缓冲）。</summary>
     bool TryReadPixel(int x, int y, out PixelSample sample);
 
+    /// <summary>批量读取像素区域（3FCompare patch 0004）：单次 GPU staging 拷贝，
+    /// buffer 长度须 ≥ width*height*4（RGBA 归一化浮点，行优先）。
+    /// 返回 false 表示引擎不支持（演示模式由实现填充默认值则返回 true）。</summary>
+    bool TryReadPixelRegion(int x, int y, int width, int height,
+        float[] buffer, out uint outputBitDepth);
+
     /// <summary>引擎事件（原生工作线程回调；消费者须自行调度到 UI 线程）。</summary>
     event EventHandler<EngineEvent>? EngineEvent;
 }
@@ -135,9 +141,18 @@ public sealed record EngineSnapshot
     public long RawFramePts { get; init; }
     public int FrameTimeBaseNum { get; init; }
     public int FrameTimeBaseDen { get; init; }
+    /// <summary>媒体帧率（fps）。来自媒体信息 nominalFrameRate；0 = 未知。</summary>
+    public double FrameRate { get; init; }
     public int Decoder { get; init; }
     public uint ActualColorMode { get; init; }
     public PlayerState State { get; init; } = PlayerState.Ready;
+    /// <summary>已呈现视频帧计数（诊断渲染管线是否停滞）。</summary>
+    public long PresentedVideoFrames { get; init; }
+    /// <summary>SwapChain Present 调用计数（诊断 D3D11 呈现是否正常）。</summary>
+    public long SwapChainPresents { get; init; }
+    /// <summary>时间轴代数：仅在真实 demuxer seek 成功后递增。
+    /// 用于判定 Seek/StepFrame 是否真正生效（3FCompare 优化项⑤）。</summary>
+    public ulong TimelineGeneration { get; init; }
 }
 
 /// <summary>媒体信息（从 3FP GetMediaInfo JSON 反序列化，F3 媒体信息面板）。</summary>
