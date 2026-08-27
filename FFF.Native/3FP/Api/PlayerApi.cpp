@@ -4,9 +4,14 @@
 #include "3FP/Render/VideoRenderer.h"
 
 #include <cmath>
+#include <atomic>
 
 namespace {
 constexpr std::uint32_t PlayerApiVersion = 13;
+
+// 3FCompare extension (F-LOG): process-wide native log sink.
+std::atomic<FFF3FPLogCallback> g_logSink{nullptr};
+std::atomic<void*> g_logContext{nullptr};
 
 FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t outputSize,
     std::uint32_t* requiredSize) noexcept {
@@ -16,6 +21,22 @@ FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t o
     if (output == nullptr || outputSize < bytes) return FFFResult::BufferTooSmall;
     std::memcpy(output, value.c_str(), bytes); return FFFResult::Success;
 }
+}
+
+void FFF3FP_SetLogCallback(FFF3FPLogCallback callback, void* context) noexcept {
+    g_logContext.store(context, std::memory_order_release);
+    g_logSink.store(callback, std::memory_order_release);
+}
+
+// 3FCompare (F-LOG): internal sink invoker. Called via FFF3FP_Log() wrapper
+// above; kept non-exported (static-ish) — the public surface is the callback
+// install function and managed code routing.
+void FFF3FP_KernelLogImpl(const char* utf8Line) noexcept {
+    if (utf8Line == nullptr) return;
+    const auto sink = g_logSink.load(std::memory_order_acquire);
+    if (sink == nullptr) return;
+    const auto ctx = g_logContext.load(std::memory_order_acquire);
+    sink(ctx, utf8Line);
 }
 
 std::uint32_t FFF3FP_GetApiVersion() noexcept { return PlayerApiVersion; }
@@ -61,6 +82,16 @@ FFFResult FFF3FP_SetColorMode(const FFF3FPHandle player, const FFF3FPColorMode m
         static_cast<PlayerSession*>(player)->SetColorMode(mode, sdr, hdr, paper, forceHdr != 0) :
         FFFResult::InvalidArgument;
 }
+FFFResult FFF3FP_SetPresentConfig(const FFF3FPHandle player, const std::uint32_t enableTearing) noexcept {
+    return player && enableTearing <= 1 ?
+        static_cast<PlayerSession*>(player)->SetPresentConfig(enableTearing != 0) :
+        FFFResult::InvalidArgument;
+}
+FFFResult FFF3FP_SetPacingConfig(const FFF3FPHandle player, const std::uint32_t enablePacing) noexcept {
+    return player && enablePacing <= 1 ?
+        static_cast<PlayerSession*>(player)->SetPacingConfig(enablePacing != 0) :
+        FFFResult::InvalidArgument;
+}
 FFFResult FFF3FP_SetOutputWindow(const FFF3FPHandle player, void* window) noexcept { return player ? static_cast<PlayerSession*>(player)->SetOutputWindow(window) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SetViewTransform(const FFF3FPHandle player, const float zoom,
     const float panX, const float panY) noexcept {
@@ -88,6 +119,15 @@ FFFResult FFF3FP_GetSnapshot(const FFF3FPHandle player, FFF3FPSnapshot* snapshot
 FFFResult FFF3FP_ReadVideoPixel(const FFF3FPHandle player,
     FFF3FPVideoPixelProbe* probe) noexcept {
     return player && probe ? static_cast<PlayerSession*>(player)->ReadVideoPixel(*probe) :
+        FFFResult::InvalidArgument;
+}
+// 3FCompare patch (0004): batch pixel readback (single staging copy + Map).
+FFFResult FFF3FP_ReadVideoPixelRegion(const FFF3FPHandle player,
+    const std::uint32_t x, const std::uint32_t y, const std::uint32_t width,
+    const std::uint32_t height, float* dst, const std::uint32_t dstFloatCount,
+    std::uint32_t* outputBitDepth) noexcept {
+    return player ? static_cast<PlayerSession*>(player)->ReadVideoPixelRegion(
+        x, y, width, height, dst, dstFloatCount, outputBitDepth) :
         FFFResult::InvalidArgument;
 }
 FFFResult FFF3FP_GetAudioPeakLevels(const FFF3FPHandle player,

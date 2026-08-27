@@ -48,6 +48,8 @@ public:
     FFFResult SetExternalAudioOffset(std::int64_t offset100ns) noexcept;
     FFFResult SetColorMode(FFF3FPColorMode mode, float sdrPeakNits,
         float hdrPeakNits, float paperWhiteNits, bool forceHdrOutput) noexcept;
+    FFFResult SetPresentConfig(bool enableTearing) noexcept;
+    FFFResult SetPacingConfig(bool enablePacing) noexcept;
     FFFResult SetOutputWindow(void* outputWindow) noexcept;
     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
     FFFResult Set360View(bool enabled, float yaw, float pitch, float fovY) noexcept;
@@ -57,6 +59,10 @@ public:
     FFFResult SetTimedTextLayer(const FFF3FPTimedTextLayer& layer) noexcept;
     FFFResult GetSnapshot(FFF3FPSnapshot& snapshot) const noexcept;
     FFFResult ReadVideoPixel(FFF3FPVideoPixelProbe& probe) noexcept;
+    // 3FCompare patch (0004)
+    FFFResult ReadVideoPixelRegion(std::uint32_t x, std::uint32_t y,
+        std::uint32_t width, std::uint32_t height, float* dst,
+        std::uint32_t dstFloatCount, std::uint32_t* outputBitDepth) noexcept;
     FFFResult GetAudioPeakLevels(FFF3FPAudioPeakLevels& levels) const noexcept;
     FFFResult GetTimedTextStatus(FFF3FPTimedTextStatus& status) noexcept;
     FFFResult GetDanmakuStatus(FFF3FPTimedTextStatus& status) noexcept;
