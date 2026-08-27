@@ -119,6 +119,15 @@ public:
     FFFResult Set360View(bool enabled, float yaw, float pitch, float fovY) noexcept;
     FFFResult SetColorMode(FFF3FPColorMode mode, float sdrPeakNits,
         float hdrPeakNits, float paperWhiteNits, bool forceHdrOutput = false) noexcept;
+    // VRR pacing preference (3FCompare extension). Returns NotSupported when
+    // tearing is requested but the display chain cannot do it; the renderer
+    // keeps the vsync path either way and retries on the next chain creation.
+    FFFResult SetPresentConfig(bool enableTearing) noexcept;
+    // Media-rate presentation pacing for VRR (A9): when enabled, the timed-text
+    // thread suppresses the periodic presents that would add extra flips beyond
+    // the source video frame rate. Overlay-only updates still present (at their
+    // own rate); the silent-keepalive path is eliminated.
+    FFFResult SetPacingConfig(bool enablePacing) noexcept;
     FFFResult ForceSdrOutputForSdrSource() noexcept;
     void ConfigureHdrStream(const AVCodecParameters* parameters) noexcept;
     FFFResult Render(const AVFrame* frame, bool limitToNativeSize = false,
@@ -127,6 +136,10 @@ public:
     FFFResult CreateD3D11HardwareDeviceContext(AVBufferRef** context) noexcept;
     FFFResult PresentTimedText() noexcept;
     FFFResult ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept;
+    // 3FCompare patch (0004): batch pixel readback for thumbnail capture.
+    FFFResult ReadPixelRegion(std::uint32_t x, std::uint32_t y,
+        std::uint32_t width, std::uint32_t height, float* dst,
+        std::uint32_t dstFloatCount, std::uint32_t* outputBitDepth) noexcept;
     FFFResult SetTimedTextLayer(TimedTextRenderLayer layer, TimedTextLayerSlot slot) noexcept;
     FFFResult GetTimedTextStatus(FFF3FPTimedTextStatus& status, TimedTextLayerSlot slot) noexcept;
     bool DeviceRecoveryRequested() const noexcept;
@@ -198,7 +211,7 @@ private:
     FFFResult EnsureDevice() noexcept;
     std::uint32_t PreferredOutputBitDepth(std::uint32_t sourceBitDepth, bool hdr) noexcept;
     FFFResult EnsureSwapChain(std::uint32_t width, std::uint32_t height,
-        std::uint32_t sourceBitDepth) noexcept;
+        std::uint32_t sourceBitDepth, bool fromPresenter = false) noexcept;
     FFFResult CreateSwapChain(std::uint32_t width, std::uint32_t height,
         bool hdr, std::uint32_t outputBits) noexcept;
     FFFResult ReconfigureSwapChain(bool hdr, std::uint32_t outputBits) noexcept;
@@ -238,10 +251,10 @@ private:
         std::uint32_t inputLayout = 0;
         float sampleScale = 1, yOffset = 0, yScale = 1;
         float cOffset = 0.5f, cScale = 1, kr = 0.2126f, kb = 0.0722f;
-        float chromaOffsetX = 0, chromaOffsetY = 0, padding1 = 0, padding2 = 0;
+        float chromaOffsetX = 0, chromaOffsetY = 0, viewPanX = 0, viewPanY = 0;
         std::uint32_t projection360 = 0;
         float viewYaw = 0, viewPitch = 0, viewFovY = 90;
-        float viewAspect = 1, padding3 = 0, padding4 = 0, padding5 = 0;
+        float viewAspect = 1, viewZoom = 1, padding4 = 0, padding5 = 0;
     };
     FFFResult EnsureTimedTextResources(TimedTextLayerSlot slot) noexcept;
     FFFResult EnsureD2DContext() noexcept;
@@ -333,6 +346,15 @@ private:
     std::uint32_t swapHeight_;
     bool swapHdr_;
     std::uint32_t swapOutputBits_;
+    // 3FCompare patch (0003): single-owner swap-chain resize. The decode thread
+    // may not ResizeBuffers an actively presented chain (DXGI_ERROR_INVALID_CALL
+    // when a stale buffer reference is still outstanding), which surfaced as the
+    // maximize/restore -> Failed rebuild race. When a size change is detected on
+    // an existing chain, the decoding path only records the target size here;
+    // the timed-text presenter performs the real resize under presentMutex_
+    // (EnsureSwapChain(..., fromPresenter=true)). 0,0 means no resize pending.
+    std::atomic<std::uint32_t> pendingSwapWidth_{0};
+    std::atomic<std::uint32_t> pendingSwapHeight_{0};
     std::uint32_t sourceWidth_;
     std::uint32_t sourceHeight_;
     std::uint32_t sourceInputLayout_;
@@ -378,6 +400,11 @@ private:
     std::atomic<float> view360FovYBits_;
     float sourcePeakNits_;
     HdrProcessor hdrProcessor_;
+    // 3FCompare perf (P1): dedupe per-frame SetHDRMetaData DWM round-trips.
+    // Reset when the swap chain is (re)created so a fresh chain always receives
+    // the current metadata at least once.
+    DXGI_HDR_METADATA_HDR10 lastHdrMetadata_{};
+    bool hdrMetadataPushed_{ false };
     std::vector<std::uint8_t> convertedRgb_;
     mutable std::mutex deviceMutex_;
     mutable std::mutex presentMutex_;
@@ -436,6 +463,17 @@ private:
     std::atomic<std::uint64_t> coverBackdropBlurSettingsGeneration_;
     std::atomic<bool> deviceRecoveryRequested_;
     std::function<void()> recoveryCallback_;
+    // VRR state (3FCompare extension). tearingRequested_/Supported_ control the
+    // Present(0, ALLOW_TEARING) path; pacingEnabled_ controls the media-rate
+    // presentation cadence (A9): when set, the timed-text thread skips presents
+    // that would add extra flips beyond the source video frame rate on VRR displays.
+    std::atomic<bool> tearingRequested_{ false };
+    std::atomic<bool> tearingSupported_{ false };
+    // Media-rate presentation pacing for VRR (A9): when enabled, the timed-text
+    // thread only presents when a new video frame or overlay change actually
+    // arrives, suppressing the periodic keepalive presents that would otherwise
+    // break the source frame rate cadence on a VRR display.
+    std::atomic<bool> pacingEnabled_{ false };
     HMONITOR hdrMonitor_;
     bool hdrSupportValid_;
     bool hdrSupported_;

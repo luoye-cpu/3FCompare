@@ -13,6 +13,8 @@ extern "C" {
 }
 
 #include <d3dcompiler.h>
+#include <cstdio>
+#include <cctype>
 #include <d2d1effects.h>
 #include <d2d1helper.h>
 #include <roapi.h>
@@ -327,9 +329,9 @@ cbuffer Settings : register(b0) {
     float SourceWidth; float SourceHeight; float OutputWidth; float OutputHeight;
     uint InputLayout; float SampleScale; float YOffset; float YScale;
     float COffset; float CScale; float Kr; float Kb;
-    float2 ChromaOffset; float2 Padding;
+    float2 ChromaOffset; float2 ViewPan;
     uint Projection360; float ViewYaw; float ViewPitch; float ViewFovY;
-    float ViewAspect; float3 ViewPadding;
+    float ViewAspect; float ViewZoom; float2 ViewPadding;
 };
 Texture2D<float4> Source : register(t0);
 Texture2D<float4> ChromaU : register(t1);
@@ -571,8 +573,17 @@ float2 EquirectangularUv(float2 uv) {
         saturate(0.5-latitude/3.141592653589793));
 }
 float4 main(float4 position:SV_Position,float2 uv:TEXCOORD0):SV_Target {
+    // 3FCompare patch (0007): zoom in UV space. The viewport stays at the
+    // window-fitted size; zoom is applied by adjusting the texture coordinates.
+    // This keeps GPU load constant (swap-chain resolution) regardless of zoom
+    // factor — the old approach scaled the destination rect to zoomedWidth ×
+    // zoomedHeight (e.g. 4× zoom = 7680px viewport), causing massive GPU
+    // rasterization cost per frame ("one-frame-at-a-time stutter").
+    // Pan is also applied in UV space, layered on top of the zoom offset.
+    float2 zoomedUv = (uv - 0.5f) / max(ViewZoom, 1.0f) + 0.5f;
+    float2 pannedUv = zoomedUv + ViewPan * (Reserved==1 ? float2(0,0) : float2(1,1));
     float3 rgb=Reserved==1?ReadCoverBackdrop(uv):
-        (Projection360!=0?ReadSourcePanorama(EquirectangularUv(uv)):ReadSource(uv));
+        (Projection360!=0?ReadSourcePanorama(EquirectangularUv(uv)):ReadSource(pannedUv));
     if(ColorMode==1)return float4(rgb,1);
     if(ColorMode==0&&Transfer==0){
         if(Source2020!=0)rgb=ToBt709(To709(ToLinear709(rgb)));
@@ -757,10 +768,10 @@ struct ShaderSettings {
     std::uint32_t inputLayout;
     float sampleScale, yOffset, yScale;
     float cOffset, cScale, kr, kb;
-    float chromaOffsetX, chromaOffsetY, padding1, padding2;
+    float chromaOffsetX, chromaOffsetY, viewPanX, viewPanY;
     std::uint32_t projection360;
     float viewYaw, viewPitch, viewFovY;
-    float viewAspect, padding3, padding4, padding5;
+    float viewAspect, viewZoom, padding4, padding5;
 };
 
 struct ScaleShaderSettings {
@@ -1842,7 +1853,9 @@ FFFResult PlayerVideoRenderer::SetViewTransform(const float zoom,
     const float panX, const float panY) noexcept {
     if (!std::isfinite(zoom) || zoom <= 0.0f || !std::isfinite(panX) || !std::isfinite(panY))
         return FFFResult::InvalidArgument;
-    std::lock_guard deviceLock(deviceMutex_);
+    // 3FCompare patch (0006 rev5): no deviceMutex_ here. The three targets are
+    // relaxed atomics; taking the decode-thread lock just to store them made
+    // every UI pan sample wait behind an in-flight 4K/HDR frame upload.
     const auto zoomClamped = std::clamp(zoom, 0.05f, 64.0f);
     const auto panXClamped = std::clamp(panX, -1.0f, 1.0f);
     const auto panYClamped = std::clamp(panY, -1.0f, 1.0f);
@@ -1898,6 +1911,22 @@ FFFResult PlayerVideoRenderer::SetColorMode(const FFF3FPColorMode mode, const fl
 
 void PlayerVideoRenderer::ConfigureHdrStream(const AVCodecParameters* parameters) noexcept {
     hdrProcessor_.ConfigureStream(parameters);
+}
+
+FFFResult PlayerVideoRenderer::SetPresentConfig(const bool enableTearing) noexcept {
+    // Pacing preference only: no chain work here. The capability flag was set at
+    // chain creation, so the toggle takes effect on the very next Present.
+    tearingRequested_.store(enableTearing, std::memory_order_relaxed);
+    return !enableTearing || tearingSupported_.load(std::memory_order_relaxed)
+        ? FFFResult::Success
+        : FFFResult::NotSupported;
+}
+
+FFFResult PlayerVideoRenderer::SetPacingConfig(const bool enablePacing) noexcept {
+    // Media-rate presentation pacing for VRR (A9): the timed-text thread
+    // suppresses periodic keepalive presents; no chain work required.
+    pacingEnabled_.store(enablePacing, std::memory_order_relaxed);
+    return FFFResult::Success;
 }
 
 FFFResult PlayerVideoRenderer::ForceSdrOutputForSdrSource() noexcept {
@@ -2064,7 +2093,7 @@ FFFResult PlayerVideoRenderer::CreateD3D11HardwareDeviceContext(AVBufferRef** ou
 }
 
 FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_t height,
-    const std::uint32_t sourceBitDepth) noexcept {
+    const std::uint32_t sourceBitDepth, const bool fromPresenter) noexcept {
     if (window_ == nullptr) return FFFResult::Success;
     if (requestedMode_ == FFF3FPColorMode::MapToHdr) {
         const auto sourceHdr = hdrProcessor_.IsHdrSource();
@@ -2088,8 +2117,20 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
     if (deviceResult != FFFResult::Success) return deviceResult;
     RECT client{};
     if (!GetClientRect(window_, &client)) return FFFResult::DeviceFailure;
-    width = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(client.right - client.left));
-    height = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(client.bottom - client.top));
+    const auto clientW = static_cast<std::uint32_t>(client.right - client.left);
+    const auto clientH = static_cast<std::uint32_t>(client.bottom - client.top);
+    // 3FCompare patch (0008): a hidden/minimized window reports a 0×0 client
+    // rect. Resizing a FLIP-model chain to 1×1 during that state fails with
+    // E_INVALIDARG (0x80070057) and tears the session down ("first-frame-present"
+    // FAIL after maximise/restore). When the window is hidden we keep the
+    // existing chain — the next valid resize will catch up when it reappears.
+    if (clientW == 0 || clientH == 0) {
+        pendingSwapWidth_.store(0, std::memory_order_release);
+        pendingSwapHeight_.store(0, std::memory_order_release);
+        if (swapChain_ != nullptr) return FFFResult::Success; // keep old chain
+    }
+    width = std::max<std::uint32_t>(1, clientW);
+    height = std::max<std::uint32_t>(1, clientH);
     const bool hdr = actualMode_ == FFF3FPColorMode::MapToHdr;
     const auto outputBits = PreferredOutputBitDepth(sourceBitDepth, hdr);
     if (swapChain_ != nullptr && (hdr != swapHdr_ || outputBits != swapOutputBits_)) {
@@ -2097,7 +2138,25 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
         if (modeResult != FFFResult::Success) return modeResult;
     }
     if (swapChain_ != nullptr && width == swapWidth_ && height == swapHeight_ &&
-        hdr == swapHdr_ && outputBits == swapOutputBits_) return FFFResult::Success;
+        hdr == swapHdr_ && outputBits == swapOutputBits_) {
+        pendingSwapWidth_.store(0, std::memory_order_release);
+        pendingSwapHeight_.store(0, std::memory_order_release);
+        return FFFResult::Success;
+    }
+    // 3FCompare patch (0003): single-owner resize. Resizing an actively
+    // presented flip-model chain from the decode thread races with the
+    // presenter's in-flight Present (DXGI_ERROR_INVALID_CALL on a stale buffer
+    // reference), which surfaced as the maximize/restore -> Failed rebuild
+    // race. The decode path therefore only publishes the target size; the
+    // timed-text presenter performs the actual ResizeBuffers under presentMutex_
+    // before its next flip. This frame keeps rendering at the old chain size —
+    // the destination rect absorbs the temporary aspect difference.
+    if (swapChain_ != nullptr && hdr == swapHdr_ && outputBits == swapOutputBits_ &&
+        !fromPresenter) {
+        pendingSwapWidth_.store(width, std::memory_order_release);
+        pendingSwapHeight_.store(height, std::memory_order_release);
+        return FFFResult::Success;
+    }
     if (swapChain_ != nullptr && hdr == swapHdr_ && outputBits == swapOutputBits_) {
         context_->ClearState();
         std::lock_guard presentLock(presentMutex_);
@@ -2135,6 +2194,22 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
     description.SampleDesc.Count = 1; description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     description.BufferCount = 2; description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     description.AlphaMode = DXGI_ALPHA_MODE_IGNORE; description.Scaling = DXGI_SCALING_NONE;
+    // VRR capability (3FCompare extension): when the OS supports tearing, carry
+    // the creation flag unconditionally so the pacing mode can toggle at runtime
+    // without recreating the chain; the default remains vsync-locked Present(1,0).
+    {
+        ComPtr<IDXGIFactory5> factory5;
+        BOOL allowTearing = FALSE;
+        if (SUCCEEDED(factory.As(&factory5)) &&
+            SUCCEEDED(factory5->CheckFeatureSupport(
+                DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allowTearing, sizeof(allowTearing))) &&
+            allowTearing) {
+            tearingSupported_.store(true, std::memory_order_relaxed);
+            description.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+        } else {
+            tearingSupported_.store(false, std::memory_order_relaxed);
+        }
+    }
     ComPtr<IDXGISwapChain1> chain1;
     const auto result = factory->CreateSwapChainForHwnd(device_, window_, &description, nullptr, nullptr, &chain1);
     if (FAILED(result) || FAILED(chain1->QueryInterface(IID_PPV_ARGS(&swapChain_)))) {
@@ -2145,6 +2220,8 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
         SetError(message.str()); return FFFResult::DeviceFailure;
     }
     swapWidth_ = width; swapHeight_ = height; swapHdr_ = hdr; swapOutputBits_ = outputBits;
+    // 3FCompare perf (P1): a fresh chain must always receive metadata once.
+    hdrMetadataPushed_ = false;
     ReleaseTimedTextResources();
     if (hdr) {
         UINT support = 0;
@@ -2174,9 +2251,14 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
         // call opts the window into an explicit Advanced Color presentation
         // contract instead of the ordinary SDR desktop path.
     }
-    // Keep at most one complete composite queued. Decode and managed overlay
-    // production retain only their latest state while Present is waiting.
-    swapChain_->SetMaximumFrameLatency(1);
+    // Keep at most two complete composites queued (3FCompare perf P1, was 1).
+    // Latency=1 makes every Present block the presenter thread until DWM
+    // consumes the previous flip; combined with the deviceMutex_ shared with
+    // the decode thread this back-propagates present stalls into decode on
+    // high-bitrate HDR (observed as "frozen while Playing"). Latency=2 lets a
+    // second composite absorb scheduling jitter at the cost of one extra frame
+    // (~8-16 ms) of latency — negligible for A/B comparison use.
+    swapChain_->SetMaximumFrameLatency(2);
     {
         std::lock_guard lock(timedTextMutex_);
         presentationFrameRate_ = DetectDisplayRefreshRate(window_);
@@ -2583,6 +2665,9 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
     cachedVideoSettings_.viewFovY = std::bit_cast<float>(
         view360FovYBits_.load(std::memory_order_acquire));
     cachedVideoSettings_.viewAspect = width / height;
+    // 3FCompare patch (0007): ensure zoom/pan constants reach the shader.
+    cachedVideoSettings_.viewZoom = std::max(
+        std::bit_cast<float>(viewZoomBits_.load(std::memory_order_acquire)), 1.0f);
     context_->UpdateSubresource(constants_, 0, nullptr, &cachedVideoSettings_, 0, 0);
     context_->OMSetRenderTargets(1, &target, nullptr);
     const D3D11_VIEWPORT viewport{x, y, width, height, 0.0f, 1.0f};
@@ -2739,9 +2824,24 @@ FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidt
     const std::uint32_t outputHeight, ID3D11ShaderResourceView** views) noexcept {
     if (views == nullptr || outputWidth == 0 || outputHeight == 0)
         return FFFResult::InvalidArgument;
+    // 3FCompare patch (P2 rev2): quantize the scale-chain cache key. Zoom changes
+    // the destination size by a few pixels per wheel tick; without quantization
+    // every tick rebuilt the whole halving chain (multiple FP16 render targets
+    // for 4K/8K sources), which stalled the decode thread under deviceMutex_.
+    // Quantizing to a source-relative bucket (8% of the frame height, equal to
+    // ~2 wheel ticks at 1.10 zoom factor) keeps visual quality (the final draw
+    // still samples to the exact destination rect) while consecutive zoom steps
+    // almost always hit the cached chain. Fixed 64px was too fine: one wheel
+    // tick moved 4K output ~288px, crossing buckets on every tick.
+    const auto bucket = std::max<std::uint32_t>(64u, sourceHeight_ * 8u / 100u);
+    const auto quantize = [bucket](std::uint32_t value) noexcept {
+        return std::max<std::uint32_t>(1u, (value + bucket - 1u) / bucket * bucket);
+    };
+    const auto cacheWidth = quantize(outputWidth);
+    const auto cacheHeight = quantize(outputHeight);
     const auto generation = videoGeneration_.load(std::memory_order_acquire);
-    if (scaledVideoGeneration_ == generation && scaledOutputWidth_ == outputWidth &&
-        scaledOutputHeight_ == outputHeight) {
+    if (scaledVideoGeneration_ == generation && scaledOutputWidth_ == cacheWidth &&
+        scaledOutputHeight_ == cacheHeight) {
         std::copy(std::begin(scaledSourceViews_), std::end(scaledSourceViews_), views);
         return FFFResult::Success;
     }
@@ -2757,8 +2857,8 @@ FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidt
             (sourceWidth_ + (1u << sourceChromaWidthShift_) - 1) >> sourceChromaWidthShift_;
         const auto planeHeight = plane == 0 ? sourceHeight_ :
             (sourceHeight_ + (1u << sourceChromaHeightShift_) - 1) >> sourceChromaHeightShift_;
-        const auto targetWidth = std::min(planeWidth, outputWidth);
-        const auto targetHeight = std::min(planeHeight, outputHeight);
+        const auto targetWidth = std::min(planeWidth, cacheWidth);
+        const auto targetHeight = std::min(planeHeight, cacheHeight);
         const auto format = sourceInputLayout_ == 0 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
             (sourceInputLayout_ == 2 && plane == 1 ? DXGI_FORMAT_R16G16_FLOAT :
                 DXGI_FORMAT_R16_FLOAT);
@@ -2792,8 +2892,8 @@ FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidt
         scaledSourceViews_[plane] = currentView;
     }
     scaledVideoGeneration_ = generation;
-    scaledOutputWidth_ = outputWidth;
-    scaledOutputHeight_ = outputHeight;
+    scaledOutputWidth_ = cacheWidth;
+    scaledOutputHeight_ = cacheHeight;
     std::copy(std::begin(scaledSourceViews_), std::end(scaledSourceViews_), views);
     return FFFResult::Success;
 }
@@ -2959,6 +3059,11 @@ void PlayerVideoRenderer::TimedTextThread() noexcept {
         float frameRate = 60.0f;
         bool videoChanged = false;
         bool devicePollOnly = false;
+        // 3FCompare patch (0006): scoped outside so the A9 pacing check below
+        // can see it — the old code updated observedPresentationGeneration at
+        // the bottom of the wait block, making the pacing check always false
+        // and silently swallowing every pan/zoom redraw.
+        bool presentationGenerationChanged = false;
         {
             std::unique_lock lock(timedTextMutex_);
             const auto signaled = timedTextCondition_.wait_for(lock,
@@ -2981,19 +3086,26 @@ void PlayerVideoRenderer::TimedTextThread() noexcept {
             if (!devicePollOnly) {
                 videoChanged = videoGeneration_.load() != observedVideoGeneration;
                 const auto cameraLive = projection360Enabled_.load(std::memory_order_acquire) != 0;
+                // 3FCompare patch (0006): capture the generation delta BEFORE
+                // updating the observed snapshot, and hoist it out of this block
+                // so the A9 pacing check below can honor it.
+                const bool viewChanged =
+                    presentationGeneration_ != observedPresentationGeneration;
+                if (viewChanged) presentationGenerationChanged = true;
                 // A new decoded frame is never held behind the overlay cadence. Static
                 // subtitle/danmaku updates are still coalesced to their requested rate.
                 // A live 360 camera follows the same rule as decoded video: submit
                 // the newest view immediately and let the swap-chain frame-latency
                 // contract pace it to the physical display (including 120 Hz).
                 if (const auto now = std::chrono::steady_clock::now();
-                    !videoChanged && !cameraLive &&
+                    !videoChanged && !cameraLive && !viewChanged &&
                     nextPresentation != std::chrono::steady_clock::time_point::min() &&
                     now < nextPresentation) {
                     timedTextCondition_.wait_until(lock, nextPresentation,
-                        [this, &observedVideoGeneration] {
+                        [this, &observedVideoGeneration, &observedPresentationGeneration] {
                             return timedTextThreadStop_ ||
-                                videoGeneration_.load() != observedVideoGeneration;
+                                videoGeneration_.load() != observedVideoGeneration ||
+                                presentationGeneration_ != observedPresentationGeneration;
                         });
                     if (timedTextThreadStop_) return;
                 }
@@ -3004,6 +3116,14 @@ void PlayerVideoRenderer::TimedTextThread() noexcept {
         }
         if (devicePollOnly) {
             RequestRecoveryIfDeviceLost();
+            continue;
+        }
+        // 3FCompare VRR pacing (A9): when pacing is enabled and neither the video,
+        // the overlay, nor the view transform has changed, skip the present. The VRR
+        // display holds the last scanned-out frame; the next signal will wake us.
+        if (pacingEnabled_ && !videoChanged && !presentationGenerationChanged) {
+            observedPresentationGeneration = presentationGeneration_;
+            observedVideoGeneration = videoGeneration_.load();
             continue;
         }
         const auto presentationStart = std::chrono::steady_clock::now();
@@ -3790,6 +3910,15 @@ void PlayerVideoRenderer::SetHdrMetadata() noexcept {
     if (swapChain_ == nullptr || !swapHdr_) return;
     DXGI_HDR_METADATA_HDR10 metadata{};
     hdrProcessor_.BuildDxgiHdr10Metadata(metadata);
+    // 3FCompare perf (P1): Render() calls SetHdrMetadata on every decoded frame
+    // (line ~1976). SetHDRMetaData is a synchronous DWM round-trip; per-frame
+    // invocation adds measurable present-path latency on 4K HDR content. Only
+    // push metadata when it actually changed (memcmp of the POD struct) or when
+    // the chain was just created/reconfigured.
+    if (hdrMetadataPushed_ &&
+        memcmp(&metadata, &lastHdrMetadata_, sizeof(metadata)) == 0) return;
+    lastHdrMetadata_ = metadata;
+    hdrMetadataPushed_ = true;
     swapChain_->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof(metadata), &metadata);
 }
 
@@ -3927,7 +4056,26 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
     sourceFullRange_ = IsFullRange(frame);
     sourceInterlaced_ = (frame->flags & AV_FRAME_FLAG_INTERLACED) != 0;
     static_assert(sizeof(CachedVideoSettings) == sizeof(ShaderSettings));
+    // uploads. The incoming local `settings` has viewPan zero-initialized, and
+    // a plain memcpy wiped any pan set by DrawCachedVideo on the previous
+    // present — during playback Render() runs per decoded frame and always
+    // overwrote the pan before the presenter could draw it (the "horizontal
+    // pan dead" bug). Re-apply the current view transform after the upload.
     std::memcpy(&cachedVideoSettings_, &settings, sizeof(settings));
+    // 3FCompare patch (0007): UV-space zoom/pan — no viewport scaling.
+    const auto renderZoom = std::bit_cast<float>(viewZoomBits_.load(std::memory_order_acquire));
+    if (renderZoom > 1.0001f) {
+        const float maxPan = (renderZoom - 1.0f) / (2.0f * renderZoom);
+        cachedVideoSettings_.viewPanX =
+            -std::bit_cast<float>(viewPanXBits_.load(std::memory_order_acquire)) * maxPan;
+        cachedVideoSettings_.viewPanY =
+            -std::bit_cast<float>(viewPanYBits_.load(std::memory_order_acquire)) * maxPan;
+        cachedVideoSettings_.viewZoom = renderZoom;
+    } else {
+        cachedVideoSettings_.viewPanX = 0.0f;
+        cachedVideoSettings_.viewPanY = 0.0f;
+        cachedVideoSettings_.viewZoom = 1.0f;
+    }
     sourceLimitedToNativeSize_ = limitToNativeSize;
     sourceCoverArt_ = coverArt;
     hasCachedVideo_ = true;
@@ -3951,6 +4099,31 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
 }
 
 FFFResult PlayerVideoRenderer::Redraw() noexcept {
+    // 3FCompare patch (0006): fast redraw path. During playback the swap chain
+    // is already created and hasCachedVideo_ is true; in that case Redraw only
+    // needs to wake the presenter (it already reads the latest zoom/pan atomics
+    // every frame) — skip the deviceMutex_ + EnsureSwapChain dance entirely.
+    // The decode thread (Worker) calls Redraw from the Enqueue path; the old
+    // version blocked it behind deviceMutex_ which on HD/HDR content could
+    // stall the whole pipeline for tens of ms per Redraw call (the "pan lag /
+    // freeze" user report). The slow path below runs only when no video is
+    // cached (subtitle overlay background) or the chain has not yet been
+    // created (first frame).
+    if (hasCachedVideo_ && swapChain_ != nullptr && window_ != nullptr) {
+        {
+            std::lock_guard lock(timedTextMutex_);
+            if (!timedTextThreadRunning_) {
+                // Thread not started yet (non-playback); fall through to slow path.
+            } else {
+                ++presentationGeneration_;
+            }
+        }
+        if (timedTextThreadRunning_) {
+            timedTextCondition_.notify_one();
+            return FFFResult::Success;
+        }
+    }
+    // Slow path: not playing yet or chain absent.
     {
         std::lock_guard deviceLock(deviceMutex_);
         if (!hasCachedVideo_ || window_ == nullptr) return FFFResult::Success;
@@ -4326,21 +4499,21 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
     const auto zoom = std::bit_cast<float>(viewZoomBits_.load(std::memory_order_acquire));
     const auto panX = std::bit_cast<float>(viewPanXBits_.load(std::memory_order_acquire));
     const auto panY = std::bit_cast<float>(viewPanYBits_.load(std::memory_order_acquire));
+    // 3FCompare patch (0007): zoom/pan in UV space only.
+    // The viewport stays at the window-fitted destination rect; the shader
+    // applies zoom (uv center-scaled) and pan via ViewZoom/ViewPan constants.
+    // GPU load is now constant per frame — the old zoomedWidth×zoomedHeight
+    // viewport (e.g. 4× = 7680px) caused one-frame-per-second stutter on HD+.
     if (!projection360 && zoom > 1.0001f) {
-        const float zoomedWidth = destination.width * zoom;
-        const float zoomedHeight = destination.height * zoom;
-        const float maxPanX = (zoomedWidth - destination.width) / (2.0f * destination.width);
-        const float maxPanY = (zoomedHeight - destination.height) / (2.0f * destination.height);
-        const float offsetX = panX * std::max(maxPanX, 0.0f) * destination.width;
-        const float offsetY = panY * std::max(maxPanY, 0.0f) * destination.height;
-        destination.x = static_cast<std::uint32_t>(
-            std::max(0.0f, static_cast<float>(destination.x) +
-                (destination.width - zoomedWidth) / 2.0f - offsetX));
-        destination.y = static_cast<std::uint32_t>(
-            std::max(0.0f, static_cast<float>(destination.y) +
-                (destination.height - zoomedHeight) / 2.0f - offsetY));
-        destination.width = static_cast<std::uint32_t>(zoomedWidth);
-        destination.height = static_cast<std::uint32_t>(zoomedHeight);
+        const float maxPanX = (zoom - 1.0f) / (2.0f * zoom);
+        const float maxPanY = (zoom - 1.0f) / (2.0f * zoom);
+        cachedVideoSettings_.viewPanX = -panX * maxPanX;
+        cachedVideoSettings_.viewPanY = -panY * maxPanY;
+        cachedVideoSettings_.viewZoom = std::max(zoom, 1.0f);
+    } else {
+        cachedVideoSettings_.viewPanX = 0.0f;
+        cachedVideoSettings_.viewPanY = 0.0f;
+        cachedVideoSettings_.viewZoom = 1.0f;
     }
     ID3D11ShaderResourceView* presentationViews[3]{};
     if (projection360) {
@@ -4439,15 +4612,105 @@ FFFResult PlayerVideoRenderer::ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept 
     return FFFResult::Success;
 }
 
+// 3FCompare patch (0004): batch pixel readback. One staging copy + one Map
+// replaces the per-pixel GPU round trip used by CapturePixelSampled (~14,400
+// serialized flushes for a 320px thumbnail). Returns normalized RGBA floats
+// (range [0,1], scRGB linear for 16-bit output) in row-major order.
+FFFResult PlayerVideoRenderer::ReadPixelRegion(const std::uint32_t x, const std::uint32_t y,
+    const std::uint32_t width, const std::uint32_t height, float* dst,
+    const std::uint32_t dstFloatCount, std::uint32_t* outputBitDepth) noexcept {
+    if (dst == nullptr || width == 0 || height == 0 ||
+        dstFloatCount < width * height * 4u)
+        return FFFResult::InvalidArgument;
+    std::lock_guard deviceLock(deviceMutex_);
+    if (!hasCachedVideo_ || swapChain_ == nullptr || device_ == nullptr || context_ == nullptr ||
+        x >= swapWidth_ || y >= swapHeight_)
+        return FFFResult::InvalidState;
+    std::lock_guard presentLock(presentMutex_);
+    ComPtr<ID3D11Texture2D> backBuffer;
+    ComPtr<ID3D11RenderTargetView> target;
+    const auto targetResult = AcquireBackBufferTarget(
+        backBuffer.GetAddressOf(), target.GetAddressOf());
+    if (targetResult != FFFResult::Success) return targetResult;
+    const auto drawResult = DrawCachedVideo(target.Get());
+    if (drawResult != FFFResult::Success) return drawResult;
+
+    D3D11_TEXTURE2D_DESC description{};
+    backBuffer->GetDesc(&description);
+    const auto sourceFormat = description.Format;
+    if (sourceFormat != DXGI_FORMAT_B8G8R8A8_UNORM &&
+        sourceFormat != DXGI_FORMAT_R10G10B10A2_UNORM &&
+        sourceFormat != DXGI_FORMAT_R16G16B16A16_FLOAT)
+        return FFFResult::NotSupported;
+    // Reuse a single staging texture sized to the request instead of creating
+    // one per call (throttled by C# side to one thumbnail at a time).
+    const auto copyWidth = std::min(width, swapWidth_ - x);
+    const auto copyHeight = std::min(height, swapHeight_ - y);
+    D3D11_TEXTURE2D_DESC stagingDesc{};
+    stagingDesc.Width = copyWidth;
+    stagingDesc.Height = copyHeight;
+    stagingDesc.MipLevels = stagingDesc.ArraySize = 1;
+    stagingDesc.Format = sourceFormat;
+    stagingDesc.SampleDesc.Count = 1;
+    stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> staging;
+    if (FAILED(device_->CreateTexture2D(&stagingDesc, nullptr, &staging)))
+        return FFFResult::DeviceFailure;
+    const D3D11_BOX source{x, y, 0, x + copyWidth, y + copyHeight, 1};
+    context_->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, backBuffer.Get(), 0, &source);
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(context_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
+        return FFFResult::DeviceFailure;
+    const auto rowStride = mapped.RowPitch / sizeof(std::uint32_t);
+    const auto* srcBytes = static_cast<const std::uint8_t*>(mapped.pData);
+    auto* out = dst;
+    for (std::uint32_t row = 0; row < copyHeight; ++row) {
+        const auto* rowPtr = srcBytes + static_cast<std::size_t>(row) * mapped.RowPitch;
+        if (sourceFormat == DXGI_FORMAT_B8G8R8A8_UNORM) {
+            const auto* bgra = rowPtr;
+            for (std::uint32_t col = 0; col < copyWidth; ++col) {
+                constexpr float scale = 1.0f / 255.0f;
+                out[0] = bgra[2] * scale;
+                out[1] = bgra[1] * scale;
+                out[2] = bgra[0] * scale;
+                out[3] = bgra[3] * scale;
+                bgra += 4; out += 4;
+            }
+        } else if (sourceFormat == DXGI_FORMAT_R10G10B10A2_UNORM) {
+            const auto* packed = reinterpret_cast<const std::uint32_t*>(rowPtr);
+            constexpr float rgbScale = 1.0f / 1023.0f;
+            for (std::uint32_t col = 0; col < copyWidth; ++col) {
+                const auto p = packed[col];
+                out[0] = static_cast<float>(p & 0x3ffu) * rgbScale;
+                out[1] = static_cast<float>((p >> 10) & 0x3ffu) * rgbScale;
+                out[2] = static_cast<float>((p >> 20) & 0x3ffu) * rgbScale;
+                out[3] = static_cast<float>((p >> 30) & 0x3u) / 3.0f;
+                out += 4;
+            }
+        } else { // R16G16B16A16_FLOAT
+            const auto* rgba = reinterpret_cast<const float*>(rowPtr);
+            std::memcpy(out, rgba, static_cast<std::size_t>(copyWidth) * 4u * sizeof(float));
+            out += static_cast<std::size_t>(copyWidth) * 4u;
+        }
+    }
+    context_->Unmap(staging.Get(), 0);
+    if (outputBitDepth != nullptr) *outputBitDepth = swapOutputBits_;
+    return FFFResult::Success;
+}
+
 FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
     const std::uint64_t renderedVideoGeneration) noexcept {
     if (chain == nullptr) return FFFResult::InvalidState;
     const auto start = std::chrono::steady_clock::now();
-    // Camera redraws are submitted immediately, but the final flip must land
-    // on a display refresh boundary. Present(0) permits scan-out tearing that
-    // looks like a trailing duplicate during a fast yaw; SyncInterval=1 keeps
-    // the latest complete projection intact at both 60 and 120 Hz.
-    const auto present = chain->Present(1, 0);
+    // VRR pacing (3FCompare extension): tearing mode presents immediately and
+    // lets a G-SYNC/FreeSync display scan out on its own schedule; the default
+    // stays vsync-locked. DXGI_PRESENT_ALLOW_TEARING requires SyncInterval 0.
+    const bool tornPresent = tearingRequested_.load(std::memory_order_relaxed) &&
+        tearingSupported_.load(std::memory_order_relaxed);
+    const auto present = tornPresent
+        ? chain->Present(0, DXGI_PRESENT_ALLOW_TEARING)
+        : chain->Present(1, 0);
     presentWait100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
         std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count() / 100));
     if (present == DXGI_ERROR_DEVICE_REMOVED || present == DXGI_ERROR_DEVICE_RESET ||
@@ -4473,27 +4736,94 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
 }
 
 FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
-    std::unique_lock deviceLock(deviceMutex_);
+    // 3FCompare patch (P1): fast-path swap-chain check before taking
+    // deviceMutex_. EnsureSwapChain must run under deviceMutex_ (it touches
+    // device state), but on the steady-state path (chain exists, size matches,
+    // mode stable) it is a no-op that still costs a client-rect probe and an
+    // HDR-support cache check while blocking the decode thread. Probe the
+    // cheap invariants lock-free first; only fall back to the full call when
+    // something may actually have changed.
     const auto lyricsLayout = lyricsLayoutEnabled_.load(std::memory_order_acquire);
     if (window_ == nullptr || (!hasCachedVideo_ && swapChain_ == nullptr && !lyricsLayout))
         return FFFResult::Success;
-    const auto chainResult = EnsureSwapChain(hasCachedVideo_ ? sourceWidth_ : 1,
-        hasCachedVideo_ ? sourceHeight_ : 1, hasCachedVideo_ ? sourceBitDepth_ : 8);
-    if (chainResult != FFFResult::Success || swapChain_ == nullptr) return chainResult;
-    // Clear before drawing so an input arriving during this frame can publish a
-    // fresh generation instead of being hidden by the current presentation.
-    view360RedrawPending_.store(false, std::memory_order_release);
-    if (!hasCachedVideo_) {
-        const auto pipelineResult = EnsurePipeline(1, 1, 0, 8, 0, 0, false);
-        if (pipelineResult != FFFResult::Success) return pipelineResult;
-        cachedVideoSettings_ = {};
-        cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
-        cachedVideoSettings_.sdrPeak = sdrPeakNits_;
-        cachedVideoSettings_.hdrPeak = sdrPeakNits_;
-        cachedVideoSettings_.paperWhite = paperWhiteNits_;
-        cachedVideoSettings_.targetPeak = hdrProcessor_.State().targetPeakNits;
+    RECT client{};
+    const bool hdr = actualMode_ == FFF3FPColorMode::MapToHdr;
+    // 3FCompare patch (P1 fix, review item 7): also validate the chain format
+    // contract (swapHdr_/swapOutputBits_) so an HDR<->SDR switch or a bit-depth
+    // change with unchanged window size still falls through to EnsureSwapChain,
+    // which owns ReconfigureSwapChain. These are plain non-atomic fields but are
+    // written only under deviceMutex_; reading them here without the lock is
+    // acceptable because a torn/stale read merely routes us to the slow path.
+    const bool chainUpToDate = hasCachedVideo_ && swapChain_ != nullptr &&
+        GetClientRect(window_, &client) &&
+        static_cast<std::uint32_t>(std::max<LONG>(1, client.right - client.left)) == swapWidth_ &&
+        static_cast<std::uint32_t>(std::max<LONG>(1, client.bottom - client.top)) == swapHeight_ &&
+        hdr == swapHdr_;
+    if (!chainUpToDate) {
+        std::lock_guard deviceLock(deviceMutex_);
+        // Presenter is the single owner of swap-chain resize (3FCompare patch
+        // 0003): it must pass fromPresenter=true so the size-change branch below
+        // performs the real ResizeBuffers instead of re-publishing a pending.
+        const auto chainResult = EnsureSwapChain(hasCachedVideo_ ? sourceWidth_ : 1,
+            hasCachedVideo_ ? sourceHeight_ : 1, hasCachedVideo_ ? sourceBitDepth_ : 8,
+            /*fromPresenter=*/true);
+        if (chainResult != FFFResult::Success || swapChain_ == nullptr) return chainResult;
+        if (!hasCachedVideo_) {
+            const auto pipelineResult = EnsurePipeline(1, 1, 0, 8, 0, 0, false);
+            if (pipelineResult != FFFResult::Success) return pipelineResult;
+            cachedVideoSettings_ = {};
+            cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
+            cachedVideoSettings_.sdrPeak = sdrPeakNits_;
+            cachedVideoSettings_.hdrPeak = sdrPeakNits_;
+            cachedVideoSettings_.paperWhite = paperWhiteNits_;
+            cachedVideoSettings_.targetPeak = hdrProcessor_.State().targetPeakNits;
+        }
     }
+    std::unique_lock deviceLock(deviceMutex_);
     std::unique_lock presentLock(presentMutex_);
+    // 3FCompare patch (0003): execute a deferred resize now that the
+    // presentation lock is held — this is the only place allowed to resize an
+    // actively presented flip-model chain. The decode thread only publishes the
+    // target size (pendingSwapWidth_/Height_) and kept presenting at the old
+    // chain size meanwhile. Draining the pending flag under both locks makes
+    // sure decode and presenter never both ResizeBuffers the same chain.
+    if (const auto pendingW = pendingSwapWidth_.exchange(0, std::memory_order_acq_rel);
+        pendingW != 0) {
+        const auto pendingH = pendingSwapHeight_.exchange(0, std::memory_order_acq_rel);
+        if (!chainUpToDate || swapChain_ == nullptr) {
+            // Pending obsolete / chain recreated in the meantime — fall through
+            // to the normal (locked) EnsureSwapChain below.
+        } else if (pendingH != 0) {
+            context_->ClearState();
+            const auto resize = swapChain_->ResizeBuffers(0, pendingW,
+                std::max(1u, pendingH), DXGI_FORMAT_UNKNOWN, 0);
+            if (FAILED(resize)) {
+                if (RequestRecoveryIfDeviceLostLocked()) {
+                    presentLock.unlock();
+                    deviceLock.unlock();
+                    return FFFResult::DeviceFailure;
+                }
+                std::ostringstream message;
+                message << "Could not resize the playback swap chain (HRESULT 0x"
+                        << std::hex << static_cast<std::uint32_t>(resize) << ").";
+                SetError(message.str());
+                presentLock.unlock();
+                deviceLock.unlock();
+                return FFFResult::DeviceFailure;
+            }
+            swapWidth_ = pendingW;
+            swapHeight_ = pendingH;
+            ReleaseTimedTextResources();
+            // 3FCompare patch (0011): after a swap-chain resize, the first
+            // vsync-locked Present(1,0) can wait indefinitely inside DWM while
+            // the compositor picks up the new buffers — the presenter thread
+            // wedges there and the app shows a frozen frame with state Playing
+            // (user report: "maximise → frozen / unusable"). A single
+            // non-blocking Present(0,0) right after resize hands the chain to
+            // DWM and unblocks the next real Present.
+            swapChain_->Present(0, 0);
+        }
+    }
     ComPtr<ID3D11Texture2D> backBuffer;
     ComPtr<ID3D11RenderTargetView> backBufferTarget;
     const auto targetResult = AcquireBackBufferTarget(
@@ -4524,6 +4854,12 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     deviceLock.unlock();
     const auto result = PresentCurrentFrame(retainedChain.Get(), generation);
     if (result != FFFResult::Success) return result;
+    // 3FCompare patch (P1 fix, review item 3): restore the upstream semantics —
+    // the pending-360-redraw flag is cleared after every *successful* present,
+    // not only inside the EnsureSwapChain branch. Under the P1 fast path that
+    // branch rarely runs, so clearing there let the flag accumulate across many
+    // frames and could delay a 360 camera update by a full chain rebuild.
+    view360RedrawPending_.store(false, std::memory_order_release);
     // A format/color-space switch destroys and recreates the flip-model chain.
     // Drop every reference to the old chain and its back buffer before handing
     // presentMutex_ to the reconfiguration path. Otherwise CreateSwapChainForHwnd
