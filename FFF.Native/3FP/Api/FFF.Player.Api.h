@@ -86,6 +86,9 @@ enum class FFF3FPEvent : std::uint32_t {
     Error = 5,
     ColorModeChanged = 6,
     DeviceChanged = 7,
+    // 3FCompare P3: native speed control + position streaming
+    SpeedChanged = 8,
+    PositionChanged = 9,
 };
 
 using FFF3FPEventCallback = void(__cdecl*)(void* context, FFF3FPEvent eventType,
@@ -470,6 +473,12 @@ FFF3FP_API FFFResult FFF3FP_SetColorMode(FFF3FPHandle player, FFF3FPColorMode mo
 // the renderer keeps the vsync path (returns NotSupported).
 FFF3FP_API FFFResult FFF3FP_SetPresentConfig(FFF3FPHandle player,
     std::uint32_t enableTearing) noexcept;
+// Playback speed control (3FCompare P3): rate is applied as a clock slope
+// multiplier (0.25..4.0) — the media clock advances rate× faster than wall
+// time, audio is resampled to match, and video frames are presented at the
+// scaled cadence. No seek/flush spikes (unlike the old App-side fake speed
+// which re-Seeked N slots every second). Safe in any state.
+FFF3FP_API FFFResult FFF3FP_SetSpeed(FFF3FPHandle player, float rate) noexcept;
 // Media-rate presentation pacing for VRR (3FCompare extension, A9):
 // enablePacing = 1 suppresses the timed-text thread's periodic keepalive
 // presents that would otherwise add extra flips beyond the source video frame

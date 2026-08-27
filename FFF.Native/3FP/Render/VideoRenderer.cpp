@@ -1929,6 +1929,14 @@ FFFResult PlayerVideoRenderer::SetPacingConfig(const bool enablePacing) noexcept
     return FFFResult::Success;
 }
 
+// 3FCompare P3: native speed control — store atomic, renderer reads it.
+// Presenter thread reads speedBits_ each iteration; clock slope changes
+// in PlayerSession via ResetClock rate adjustment.
+FFFResult PlayerVideoRenderer::SetSpeed(const float rate) noexcept {
+    speedBits_.store(std::bit_cast<std::uint32_t>(rate), std::memory_order_relaxed);
+    return FFFResult::Success;
+}
+
 FFFResult PlayerVideoRenderer::ForceSdrOutputForSdrSource() noexcept {
     std::lock_guard deviceLock(deviceMutex_);
     requestedMode_ = FFF3FPColorMode::MapToSdr;

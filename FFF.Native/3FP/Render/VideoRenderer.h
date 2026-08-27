@@ -128,6 +128,8 @@ public:
     // the source video frame rate. Overlay-only updates still present (at their
     // own rate); the silent-keepalive path is eliminated.
     FFFResult SetPacingConfig(bool enablePacing) noexcept;
+    // 3FCompare P3: native speed control — adjust media clock slope & shader params.
+    FFFResult SetSpeed(float rate) noexcept;
     FFFResult ForceSdrOutputForSdrSource() noexcept;
     void ConfigureHdrStream(const AVCodecParameters* parameters) noexcept;
     FFFResult Render(const AVFrame* frame, bool limitToNativeSize = false,
@@ -474,6 +476,8 @@ private:
     // arrives, suppressing the periodic keepalive presents that would otherwise
     // break the source frame rate cadence on a VRR display.
     std::atomic<bool> pacingEnabled_{ false };
+    // 3FCompare P3: native speed control — atomic float bit-cast for lock-free reads.
+    std::atomic<std::uint32_t> speedBits_{ std::bit_cast<std::uint32_t>(1.0f) };
     HMONITOR hdrMonitor_;
     bool hdrSupportValid_;
     bool hdrSupported_;

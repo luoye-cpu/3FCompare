@@ -306,6 +306,12 @@ void PlayerWasapiRenderer::SetPaused(const bool paused) noexcept {
     if (paused && runtimeState_ != nullptr) runtimeState_->ClearValues();
     if (controlEvent_ != nullptr) SetEvent(controlEvent_);
 }
+// 3FCompare P3: native speed control — adjust atomic for clock slope & resampler.
+void PlayerWasapiRenderer::SetSpeed(float rate) noexcept {
+    const auto clamped = std::clamp(rate, 0.25f, 4.0f);
+    speed_.store(clamped);
+    if (controlEvent_ != nullptr) SetEvent(controlEvent_);
+}
 void PlayerWasapiRenderer::Reset(const std::int64_t position100ns) noexcept {
     {
         std::lock_guard lock(mutex_);
@@ -348,7 +354,10 @@ std::int64_t PlayerWasapiRenderer::Position100ns() const noexcept {
     if (!running_.load() || paused_.load() || sampleQpc <= 0) return position;
     const auto now = QpcNow100ns();
     if (now <= sampleQpc) return position;
-    return position + std::min(now - sampleQpc, std::max<std::int64_t>(0, limit - position));
+    // 3FCompare P3: scale wall-clock elapsed by speed rate for media clock.
+    const auto speed = speed_.load();
+    const auto elapsed = static_cast<std::int64_t>((now - sampleQpc) * speed);
+    return position + std::min(elapsed, std::max<std::int64_t>(0, limit - position));
 }
 std::int64_t PlayerWasapiRenderer::TimelineLimit100ns() const noexcept {
     if (outputSampleRate_ == 0) return resetPosition100ns_.load();
