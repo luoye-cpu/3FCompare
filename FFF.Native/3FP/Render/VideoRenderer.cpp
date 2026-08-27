@@ -3944,6 +3944,85 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
         input = DescribeInput(frames->sw_format);
     }
     const auto directYuv = input.layout != 0;
+    // P2: shader-settings application moved into a shared lambda so the
+    // lock-free fast path and the slow path converge on one implementation.
+    ShaderSettings settings{};
+    const auto applyShaderSettingsAndUpload =
+        [this, &frame, &settings, &input, &hdrState, source2020, coverArt, limitToNativeSize](
+            const bool d3d11Frame, const bool directYuv,
+            const std::uint32_t width, const std::uint32_t height) noexcept {
+        settings.colorMode = static_cast<std::uint32_t>(actualMode_);
+        settings.reserved = 0;
+        const auto hlgCompatibility = static_cast<std::uint32_t>(FFF3FPHdrCompatibility::Hlg);
+        settings.transfer = hdrState.format == FFF3FPHdrFormat::Hlg ||
+            (hdrState.format == FFF3FPHdrFormat::DolbyVision &&
+             (hdrState.compatibility & hlgCompatibility) != 0) ? 2u :
+            (hdrState.format != FFF3FPHdrFormat::Sdr ? 1u : 0u);
+        settings.source2020 = source2020 ? 1u : 0u;
+        settings.sdrPeak = sdrPeakNits_;
+        settings.hdrPeak = settings.transfer == 0 ? 100.0f : hdrState.sourcePeakNits;
+        sourcePeakNits_ = settings.hdrPeak;
+        settings.paperWhite = paperWhiteNits_;
+        settings.targetPeak = hdrState.targetPeakNits;
+        settings.sourceWidth = static_cast<float>(width); settings.sourceHeight = static_cast<float>(height);
+        settings.outputWidth = static_cast<float>(swapWidth_); settings.outputHeight = static_cast<float>(swapHeight_);
+        settings.inputLayout = input.layout; settings.sampleScale = input.sampleScale;
+        const auto maximum = static_cast<float>((1u << input.bitDepth) - 1u);
+        const auto shift = input.bitDepth > 8 ? input.bitDepth - 8 : 0;
+        if (directYuv && !IsFullRange(frame)) {
+            settings.yOffset = static_cast<float>(16u << shift) / maximum;
+            settings.yScale = maximum / static_cast<float>(219u << shift);
+            settings.cOffset = static_cast<float>(128u << shift) / maximum;
+            settings.cScale = maximum / static_cast<float>(224u << shift);
+        } else {
+            settings.yOffset = 0.0f; settings.yScale = 1.0f;
+            settings.cOffset = FullRangeChromaOffset(input.bitDepth);
+            settings.cScale = 1.0f;
+        }
+        YuvCoefficients(frame, source2020, settings.kr, settings.kb);
+        const auto chromaLocation = d3d11Frame && frame->chroma_location == AVCHROMA_LOC_UNSPECIFIED
+            ? AVCHROMA_LOC_LEFT : frame->chroma_location;
+        ResolveChromaOffset(frame, input, chromaLocation,
+            settings.chromaOffsetX, settings.chromaOffsetY);
+        sourceColorSpace_ = frame->colorspace;
+        sourceChromaLocation_ = chromaLocation;
+        sourceFullRange_ = IsFullRange(frame);
+        sourceInterlaced_ = (frame->flags & AV_FRAME_FLAG_INTERLACED) != 0;
+        static_assert(sizeof(CachedVideoSettings) == sizeof(ShaderSettings));
+        // Re-apply the current view transform after the upload (the "horizontal
+        // pan dead" bug). During playback Render() runs per decoded frame and a
+        // plain memcpy would otherwise wipe any pan set by DrawCachedVideo.
+        std::memcpy(&cachedVideoSettings_, &settings, sizeof(settings));
+        const auto renderZoom = std::bit_cast<float>(viewZoomBits_.load(std::memory_order_acquire));
+        if (renderZoom > 1.0001f) {
+            const float maxPan = (renderZoom - 1.0f) / (2.0f * renderZoom);
+            cachedVideoSettings_.viewPanX =
+                -std::bit_cast<float>(viewPanXBits_.load(std::memory_order_acquire)) * maxPan;
+            cachedVideoSettings_.viewPanY =
+                -std::bit_cast<float>(viewPanYBits_.load(std::memory_order_acquire)) * maxPan;
+            cachedVideoSettings_.viewZoom = renderZoom;
+        } else {
+            cachedVideoSettings_.viewPanX = 0.0f;
+            cachedVideoSettings_.viewPanY = 0.0f;
+            cachedVideoSettings_.viewZoom = 1.0f;
+        }
+        sourceLimitedToNativeSize_ = limitToNativeSize;
+        sourceCoverArt_ = coverArt;
+        hasCachedVideo_ = true;
+        videoGeneration_.fetch_add(1);
+        if (coverArt) RequestCoverBackdropRender();
+        {
+            std::lock_guard lock(timedTextMutex_);
+            if (!timedTextThread_.joinable()) {
+                timedTextThreadStop_ = false;
+                timedTextThreadRunning_ = true;
+                timedTextThread_ = std::thread(&PlayerVideoRenderer::TimedTextThread, this);
+            } else {
+                timedTextThreadRunning_ = true;
+            }
+            ++presentationGeneration_;
+        }
+    };
     if (!directYuv) {
         const auto* sourceDescriptor = av_pix_fmt_desc_get(
             static_cast<AVPixelFormat>(frame->format));
@@ -3978,6 +4057,56 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
             std::chrono::nanoseconds>(std::chrono::steady_clock::now() - conversionStart).count() / 100));
     }
     const auto deviceWaitStart = std::chrono::steady_clock::now();
+    // 3FCompare perf (P2): lock-free steady-state fast path. During normal
+    // playback the decode thread calls Render() per frame; the old code
+    // unconditionally took deviceMutex_ (shared with the presenter's
+    // PresentTimedText) just to discover that EnsureSwapChain and EnsurePipeline
+    // are both no-ops. Probe the cheap invariants lock-free first: if the
+    // window size, HDR mode, and pipeline configuration are all unchanged,
+    // skip straight to the GPU upload (the only D3D work that actually
+    // requires the lock). The presenter reads these same fields under the same
+    // deviceMutex_ guarantee; a torn stale read merely falls to the slow path
+    // below (which re-validates under the lock).
+    const bool steadyState = swapChain_ != nullptr && hasCachedVideo_ &&
+        (pendingSwapWidth_.load(std::memory_order_acquire) == 0);
+    if (steadyState) {
+        RECT clientProbe{};
+        const auto hdrProbe = actualMode_ == FFF3FPColorMode::MapToHdr;
+        if (GetClientRect(window_, &clientProbe) &&
+            static_cast<std::uint32_t>(std::max<LONG>(1, clientProbe.right - clientProbe.left)) == swapWidth_ &&
+            static_cast<std::uint32_t>(std::max<LONG>(1, clientProbe.bottom - clientProbe.top)) == swapHeight_ &&
+            hdrProbe == swapHdr_ &&
+            sourceWidth_ == width && sourceHeight_ == height &&
+            sourceInputLayout_ == input.layout && sourceBitDepth_ == input.bitDepth &&
+            sourceChromaWidthShift_ == input.chromaWidthShift &&
+            sourceChromaHeightShift_ == input.chromaHeightShift &&
+            sourceExternal_ == d3d11Frame) {
+            // Fast path: only the GPU texture upload needs deviceMutex_.
+            std::unique_lock deviceLock(deviceMutex_);
+            deviceLockWait100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
+                std::chrono::nanoseconds>(std::chrono::steady_clock::now() - deviceWaitStart).count() / 100));
+            if (d3d11Frame) {
+                auto* texture = reinterpret_cast<ID3D11Texture2D*>(frame->data[0]);
+                const auto slice = static_cast<UINT>(reinterpret_cast<std::uintptr_t>(frame->data[1]));
+                context_->CopySubresourceRegion(sourceTextures_[0], 0, 0, 0, 0, texture, slice, nullptr);
+            } else if (directYuv) {
+                context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, frame->data[0], frame->linesize[0], 0);
+                context_->UpdateSubresource(sourceTextures_[1], 0, nullptr, frame->data[1], frame->linesize[1], 0);
+                if (input.layout == 1)
+                    context_->UpdateSubresource(sourceTextures_[2], 0, nullptr, frame->data[2], frame->linesize[2], 0);
+            } else {
+                const auto bytesPerPixel = input.bitDepth <= 8 ? 4u : 8u;
+                context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, convertedRgb_.data(),
+                    width * bytesPerPixel, 0);
+            }
+            // Fast path: shader update and constant buffer upload.
+            deviceLock.unlock(); // release before slow shader work
+            applyShaderSettingsAndUpload(d3d11Frame, directYuv, width, height);
+            ++presentedVideoFrames_;
+            timedTextCondition_.notify_one();
+            return FFFResult::Success;
+        }
+    }
     std::unique_lock deviceLock(deviceMutex_);
     deviceLockWait100ns_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<
         std::chrono::nanoseconds>(std::chrono::steady_clock::now() - deviceWaitStart).count() / 100));
@@ -3987,6 +4116,7 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
         ++presentedVideoFrames_;
         return FFFResult::Success;
     }
+
     const auto chainResult = EnsureSwapChain(frame->width, frame->height, input.bitDepth);
     if (chainResult != FFFResult::Success) return chainResult;
     if (swapHdr_) SetHdrMetadata();
@@ -4014,85 +4144,9 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
         context_->UpdateSubresource(sourceTextures_[0], 0, nullptr, convertedRgb_.data(),
             width * bytesPerPixel, 0);
     }
-    ShaderSettings settings{};
-    settings.colorMode = static_cast<std::uint32_t>(actualMode_);
-    settings.reserved = 0;
-    const auto hlgCompatibility = static_cast<std::uint32_t>(FFF3FPHdrCompatibility::Hlg);
-    settings.transfer = hdrState.format == FFF3FPHdrFormat::Hlg ||
-        (hdrState.format == FFF3FPHdrFormat::DolbyVision &&
-         (hdrState.compatibility & hlgCompatibility) != 0) ? 2u :
-        (hdrState.format != FFF3FPHdrFormat::Sdr ? 1u : 0u);
-    settings.source2020 = source2020 ? 1u : 0u;
-    settings.sdrPeak = sdrPeakNits_;
-    settings.hdrPeak = settings.transfer == 0 ? 100.0f : hdrState.sourcePeakNits;
-    sourcePeakNits_ = settings.hdrPeak;
-    settings.paperWhite = paperWhiteNits_;
-    settings.targetPeak = hdrState.targetPeakNits;
-    settings.sourceWidth = static_cast<float>(width); settings.sourceHeight = static_cast<float>(height);
-    settings.outputWidth = static_cast<float>(swapWidth_); settings.outputHeight = static_cast<float>(swapHeight_);
-    settings.inputLayout = input.layout; settings.sampleScale = input.sampleScale;
-    const auto maximum = static_cast<float>((1u << input.bitDepth) - 1u);
-    const auto shift = input.bitDepth > 8 ? input.bitDepth - 8 : 0;
-    if (directYuv && !IsFullRange(frame)) {
-        settings.yOffset = static_cast<float>(16u << shift) / maximum;
-        settings.yScale = maximum / static_cast<float>(219u << shift);
-        settings.cOffset = static_cast<float>(128u << shift) / maximum;
-        settings.cScale = maximum / static_cast<float>(224u << shift);
-    } else {
-        settings.yOffset = 0.0f; settings.yScale = 1.0f;
-        settings.cOffset = FullRangeChromaOffset(input.bitDepth);
-        settings.cScale = 1.0f;
-    }
-    YuvCoefficients(frame, source2020, settings.kr, settings.kb);
-    // DXGI exposes NV12/P010 processor color spaces with left chroma siting.
-    // Hardware-decoded surfaces without bitstream siting metadata follow that
-    // API convention so VP and shader A/B paths sample the same phase.
-    const auto chromaLocation = d3d11Frame && frame->chroma_location == AVCHROMA_LOC_UNSPECIFIED
-        ? AVCHROMA_LOC_LEFT : frame->chroma_location;
-    ResolveChromaOffset(frame, input, chromaLocation,
-        settings.chromaOffsetX, settings.chromaOffsetY);
-    sourceColorSpace_ = frame->colorspace;
-    sourceChromaLocation_ = chromaLocation;
-    sourceFullRange_ = IsFullRange(frame);
-    sourceInterlaced_ = (frame->flags & AV_FRAME_FLAG_INTERLACED) != 0;
-    static_assert(sizeof(CachedVideoSettings) == sizeof(ShaderSettings));
-    // uploads. The incoming local `settings` has viewPan zero-initialized, and
-    // a plain memcpy wiped any pan set by DrawCachedVideo on the previous
-    // present — during playback Render() runs per decoded frame and always
-    // overwrote the pan before the presenter could draw it (the "horizontal
-    // pan dead" bug). Re-apply the current view transform after the upload.
-    std::memcpy(&cachedVideoSettings_, &settings, sizeof(settings));
-    // 3FCompare patch (0007): UV-space zoom/pan — no viewport scaling.
-    const auto renderZoom = std::bit_cast<float>(viewZoomBits_.load(std::memory_order_acquire));
-    if (renderZoom > 1.0001f) {
-        const float maxPan = (renderZoom - 1.0f) / (2.0f * renderZoom);
-        cachedVideoSettings_.viewPanX =
-            -std::bit_cast<float>(viewPanXBits_.load(std::memory_order_acquire)) * maxPan;
-        cachedVideoSettings_.viewPanY =
-            -std::bit_cast<float>(viewPanYBits_.load(std::memory_order_acquire)) * maxPan;
-        cachedVideoSettings_.viewZoom = renderZoom;
-    } else {
-        cachedVideoSettings_.viewPanX = 0.0f;
-        cachedVideoSettings_.viewPanY = 0.0f;
-        cachedVideoSettings_.viewZoom = 1.0f;
-    }
-    sourceLimitedToNativeSize_ = limitToNativeSize;
-    sourceCoverArt_ = coverArt;
-    hasCachedVideo_ = true;
-    videoGeneration_.fetch_add(1);
-    if (coverArt) RequestCoverBackdropRender();
-    {
-        std::lock_guard lock(timedTextMutex_);
-        if (!timedTextThread_.joinable()) {
-            timedTextThreadStop_ = false;
-            timedTextThreadRunning_ = true;
-            timedTextThread_ = std::thread(&PlayerVideoRenderer::TimedTextThread, this);
-        } else {
-            timedTextThreadRunning_ = true;
-        }
-        ++presentationGeneration_;
-    }
+    // Slow path: release lock before shader work, then apply settings.
     deviceLock.unlock();
+    applyShaderSettingsAndUpload(d3d11Frame, directYuv, width, height);
     ++presentedVideoFrames_;
     timedTextCondition_.notify_one();
     return FFFResult::Success;
