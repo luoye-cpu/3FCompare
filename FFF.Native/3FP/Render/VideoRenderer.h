@@ -135,6 +135,20 @@ public:
     FFFResult Render(const AVFrame* frame, bool limitToNativeSize = false,
         bool coverArt = false) noexcept;
     FFFResult Redraw() noexcept;
+    // 3FCompare extension: render target diagnostics (swap/client/destination sizes).
+    struct RenderTargetInfo {
+        std::uint32_t swapWidth = 0;
+        std::uint32_t swapHeight = 0;
+        std::uint32_t clientWidth = 0;
+        std::uint32_t clientHeight = 0;
+        std::uint32_t destX = 0;
+        std::uint32_t destY = 0;
+        std::uint32_t destWidth = 0;
+        std::uint32_t destHeight = 0;
+        std::uint32_t outputBitDepth = 8;
+        bool hdr = false;
+    };
+    FFFResult GetRenderTargetInfo(RenderTargetInfo& info) noexcept;
     FFFResult CreateD3D11HardwareDeviceContext(AVBufferRef** context) noexcept;
     FFFResult PresentTimedText() noexcept;
     FFFResult ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept;
@@ -212,6 +226,9 @@ private:
 
     FFFResult EnsureDevice() noexcept;
     std::uint32_t PreferredOutputBitDepth(std::uint32_t sourceBitDepth, bool hdr) noexcept;
+    // 3FCompare K1: unified chain-vs-window check (used by both presenter and Redraw).
+    // Also validates swapOutputBits_/swapDxgiFormat and the 0×0 guard.
+    bool ChainMatchesWindow() noexcept;
     FFFResult EnsureSwapChain(std::uint32_t width, std::uint32_t height,
         std::uint32_t sourceBitDepth, bool fromPresenter = false) noexcept;
     FFFResult CreateSwapChain(std::uint32_t width, std::uint32_t height,
@@ -452,6 +469,11 @@ private:
     std::atomic<std::uint64_t> deviceLockWait100ns_;
     std::atomic<std::uint64_t> softwareConvert100ns_;
     std::atomic<std::uint32_t> playbackWorkPending_;
+    // 3FCompare K1: record the last destination rect for diagnostics / probe mapping.
+    std::uint32_t lastDestX_ = 0;
+    std::uint32_t lastDestY_ = 0;
+    std::uint32_t lastDestWidth_ = 0;
+    std::uint32_t lastDestHeight_ = 0;
     std::atomic<bool> lyricsLayoutEnabled_;
     std::atomic<std::uint32_t> coverBackdropBlurRadiusBits_;
     std::atomic<std::uint32_t> coverBackdropBlurPasses_;

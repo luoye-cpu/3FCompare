@@ -146,6 +146,16 @@ FFFResult FFF3FP_GetTimedTextStatus(const FFF3FPHandle player,
     return player && status ? static_cast<PlayerSession*>(player)->GetTimedTextStatus(*status)
         : FFFResult::InvalidArgument;
 }
+// 3FCompare K1/K5
+FFFResult FFF3FP_GetRenderTargetInfo(const FFF3FPHandle player,
+    FFF3FPRenderTargetInfo* info) noexcept {
+    return player && info ? static_cast<PlayerSession*>(player)->GetRenderTargetInfo(*info)
+        : FFFResult::InvalidArgument;
+}
+FFFResult FFF3FP_Redraw(const FFF3FPHandle player) noexcept {
+    return player ? static_cast<PlayerSession*>(player)->Redraw()
+        : FFFResult::InvalidArgument;
+}
 FFFResult FFF3FP_GetDanmakuStatus(const FFF3FPHandle player,
     FFF3FPTimedTextStatus* status) noexcept {
     return player && status ? static_cast<PlayerSession*>(player)->GetDanmakuStatus(*status)

@@ -69,6 +69,9 @@ public:
     FFFResult GetTimedTextStatus(FFF3FPTimedTextStatus& status) noexcept;
     FFFResult GetDanmakuStatus(FFF3FPTimedTextStatus& status) noexcept;
     FFFResult GetLyricsStatus(FFF3FPTimedTextStatus& status) noexcept;
+    // 3FCompare K1/K5
+    FFFResult GetRenderTargetInfo(FFF3FPRenderTargetInfo& info) noexcept;
+    FFFResult Redraw() noexcept;
     std::string MediaInfo() const;
     std::string LastError() const;
 

@@ -1579,6 +1579,33 @@ FFFResult PlayerSession::GetLyricsStatus(FFF3FPTimedTextStatus& status) noexcept
     return videoRenderer_.GetTimedTextStatus(status, TimedTextLayerSlot::Lyrics);
 }
 
+// 3FCompare K1/K5: forward to the renderer (RTInfo under deviceMutex_, Redraw wake fast path).
+FFFResult PlayerSession::GetRenderTargetInfo(FFF3FPRenderTargetInfo& info) noexcept {
+    info.size = sizeof(info);
+    info.version = 1;
+    PlayerVideoRenderer::RenderTargetInfo rtInfo{};
+    const auto result = videoRenderer_.GetRenderTargetInfo(rtInfo);
+    if (result != FFFResult::Success) return result;
+    info.swapWidth = rtInfo.swapWidth;
+    info.swapHeight = rtInfo.swapHeight;
+    info.clientWidth = rtInfo.clientWidth;
+    info.clientHeight = rtInfo.clientHeight;
+    info.destX = rtInfo.destX;
+    info.destY = rtInfo.destY;
+    info.destWidth = rtInfo.destWidth;
+    info.destHeight = rtInfo.destHeight;
+    info.outputBitDepth = rtInfo.outputBitDepth;
+    info.hdr = rtInfo.hdr ? 1 : 0;
+    return FFFResult::Success;
+}
+
+FFFResult PlayerSession::Redraw() noexcept {
+    const auto result = videoRenderer_.Redraw();
+    if (result == FFFResult::DeviceFailure)
+        videoRenderer_.RequestRecoveryIfDeviceLost();
+    return result;
+}
+
 FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
     if (output.size < sizeof(FFF3FPSnapshot) || output.version != 8) return FFFResult::InvalidArgument;
     { std::lock_guard lock(snapshotMutex_); output = publishedSnapshot_; }

@@ -543,6 +543,28 @@ FFF3FP_API FFFResult FFF3FP_GetMediaInfo(FFF3FPHandle player, char* outputUtf8,
     std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept;
 FFF3FP_API FFFResult FFF3FP_GetLastError(FFF3FPHandle player, char* outputUtf8,
     std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept;
+// 3FCompare K1/K5: render-target diagnostics + present hint. RenderTargetInfo
+// reports the current swapchain/client/destination sizes (for App-side overlay
+// positioning and pixel-probe coordinate mapping). Redraw() re-presents the
+// last cached frame on the presenter thread — the App calls it after a child
+// HWND resize so flips continue issuing (ResizeBuffers stays on the presenter).
+struct FFF3FPRenderTargetInfo {
+    std::uint32_t size;
+    std::uint32_t version; // == 1
+    std::uint32_t swapWidth;
+    std::uint32_t swapHeight;
+    std::uint32_t clientWidth;
+    std::uint32_t clientHeight;
+    std::uint32_t destX;
+    std::uint32_t destY;
+    std::uint32_t destWidth;
+    std::uint32_t destHeight;
+    std::uint32_t outputBitDepth;
+    std::uint32_t hdr;
+};
+FFF3FP_API FFFResult FFF3FP_GetRenderTargetInfo(FFF3FPHandle player,
+    FFF3FPRenderTargetInfo* info) noexcept;
+FFF3FP_API FFFResult FFF3FP_Redraw(FFF3FPHandle player) noexcept;
 FFF3FP_API void FFF3FP_Destroy(FFF3FPHandle player) noexcept;
 
 FFF3FP_API FFFResult FFF3FP_OpenBitmapSubtitle(const char* localPathUtf8,
