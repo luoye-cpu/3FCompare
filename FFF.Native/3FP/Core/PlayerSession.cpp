@@ -35,7 +35,9 @@ constexpr std::int64_t TargetVideoLookAhead100ns = 1'500'000;
 // Buffered100ns includes both application PCM and samples already submitted to
 // WASAPI.  Keep the complete audible queue short so seek, stream/volume changes
 // and the information overlay reflect a low-latency local playback pipeline.
-constexpr std::int64_t TargetAudioBuffer100ns = 1'200'000;
+// 3FCompare: increase from 120ms to 250ms for high-bitrate multi-channel audio
+// (FLAC 6ch + AV1 soft decode) to prevent audio underruns during decode spikes.
+constexpr std::int64_t TargetAudioBuffer100ns = 2'500'000;
 constexpr std::size_t MaximumIndexedVideoFrames = 32'768;
 constexpr std::size_t MaximumPendingVideoPackets = 64;
 constexpr std::size_t MaximumPendingVideoPacketBytes = 16 * 1024 * 1024;
@@ -1790,6 +1792,11 @@ FFFResult PlayerSession::OpenDecoder(AVFormatContext* owner, const std::int32_t 
     }
     auto result = avcodec_parameters_to_context(context, stream->codecpar);
     context->pkt_timebase = stream->time_base;
+    // Note: the bundled FFmpeg (libavcodec 63) exposes AVCodecContext.ch_layout
+    // but no request-channel-layout field (request_channel_layout/request_ch_layout
+    // were removed upstream).  Downmix of multi-channel audio is handled in
+    // PlayerWasapiRenderer::EnsureResampler via swr_alloc_set_opts2 with an
+    // endpoint-stereo output layout; see the audio renderer for that path.
     if (result >= 0 && video && !hardwareRequested) {
         const auto hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
         context->thread_count = static_cast<int>(std::min(
