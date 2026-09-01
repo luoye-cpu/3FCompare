@@ -59,7 +59,7 @@ public static class LanguageManager
         // FFmpeg
         ["FFmpeg_Path"] = "FFmpeg DLL 目录：",
         ["FFmpeg_Browse"] = "浏览…",
-        ["FFmpeg_Hint"] = "手动设置（优先）> 自动检测（应用目录 / PATH）",
+        ["FFmpeg_Hint"] = "优先级：手动设置 > 同目录 DLL > ffmpeg-full/ 子目录",
         ["FFmpeg_Test"] = "测试探测",
 
         // 设置
@@ -68,7 +68,7 @@ public static class LanguageManager
 
         // 系统提示
         ["Msg_FolderTitle"] = "选择包含 FFmpeg DLL 的目录",
-        ["Msg_AutoDetect"] = "留空 = 自动检测（FFMPEG_DIR / PATH / 应用目录）",
+        ["Msg_AutoDetect"] = "留空 = 自动探测（手动设置 > 同目录 > ffmpeg-full/ > PATH）",
         ["Msg_ValidateSuccess"] = "✓ 目录有效",
         ["Msg_ValidateFailed"] = "✗ 目录无效",
         ["Msg_AutoDetectSuccess"] = "✓ 自动检测到：",
@@ -237,14 +237,14 @@ public static class LanguageManager
 
         ["FFmpeg_Path"] = "FFmpeg DLL Directory:",
         ["FFmpeg_Browse"] = "Browse…",
-        ["FFmpeg_Hint"] = "Manual (Preferred) > Auto Detect (App Dir / PATH)",
+        ["FFmpeg_Hint"] = "Priority: Manual > App Dir DLL > ffmpeg-full/ subdir",
         ["FFmpeg_Test"] = "Test Detection",
 
         ["Settings_Ok"] = "OK",
         ["Settings_Cancel"] = "Cancel",
 
         ["Msg_FolderTitle"] = "Select Directory Containing FFmpeg DLL",
-        ["Msg_AutoDetect"] = "Leave Empty = Auto Detect (FFMPEG_DIR / PATH / App Dir)",
+        ["Msg_AutoDetect"] = "Leave Empty = Auto Detect (Manual > App Dir > ffmpeg-full/ > PATH)",
         ["Msg_ValidateSuccess"] = "✓ Directory Valid",
         ["Msg_ValidateFailed"] = "✗ Invalid Directory",
         ["Msg_AutoDetectSuccess"] = "✓ Auto Detect: ",

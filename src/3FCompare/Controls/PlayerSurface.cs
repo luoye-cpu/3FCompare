@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Platform;
+using Avalonia.Threading;
 using _3FCompare.Core.Backend;
 
 namespace _3FCompare.Controls;
@@ -82,6 +83,10 @@ public sealed class PlayerSurface : NativeControlHost
     public event Action<double, double>? SurfaceMoved;
     /// <summary>左键释放（表面相对坐标）。</summary>
     public event Action<double, double>? SurfaceReleased;
+    /// <summary>滚轮滚动（WndProc 转发）：delta > 0 向前/放大，< 0 向后/缩小。</summary>
+    public event Action<short>? SurfaceWheel;
+    /// <summary>文件拖入（WM_DROPFILES 转发）：MainWindow 订阅以打开视频。</summary>
+    public event Action<IReadOnlyList<string>>? SurfaceFilesDropped;
 
     private const uint WM_PAINT = 0x000F;
     private const uint WM_ERASEBKGND = 0x0014;
@@ -91,6 +96,8 @@ public sealed class PlayerSurface : NativeControlHost
     private const uint WM_LBUTTONUP = 0x0202;
     private const uint WM_LBUTTONDBLCLK = 0x0203;
     private const uint WM_MOUSEWHEEL = 0x020A;
+    private const uint WM_SIZE = 0x0005;
+    private const uint WM_DROPFILES = 0x0233;
 
     // ---- Win32 常量 ----
     private const int GWLP_WNDPROC = -4;
@@ -105,6 +112,12 @@ public sealed class PlayerSurface : NativeControlHost
     public static float SharedPanY { get; set; }
     /// <summary>缩放小地图开关（由设置窗口控制）。</summary>
     public static bool SharedMinimapEnabled { get; set; } = true;
+
+    // 3FCompare M1：当前 client 尺寸（DIP 到物理由获取时换算），用于 WM_SIZE 变化检测。
+    private int _clientW;
+    private int _clientH;
+    // 防抖：resize 高频触发时合并同尺寸请求。
+    private const int RedrawDebounceMs = 16;
 
     public int Index => _index;
     public bool RealMode => _realMode;
@@ -143,8 +156,6 @@ public sealed class PlayerSurface : NativeControlHost
     }
 
     // ---------- 子窗口生命周期 ----------
-
-    // 基类签名返回非空 IPlatformHandle（Avalonia 12 NativeControlHost），此处不会返回 null
     protected override IPlatformHandle CreateNativeControlCore(IPlatformHandle parent)
     {
         EnsureWndClassRegistered();
@@ -158,6 +169,11 @@ public sealed class PlayerSurface : NativeControlHost
             throw new InvalidOperationException($"CreateWindowEx 失败: {Marshal.GetLastWin32Error()}");
 
         _origWndProc = SetWindowLongPtr(_hwnd, GWLP_WNDPROC, Marshal.GetFunctionPointerForDelegate(_subclassProc));
+
+        // 3FCompare 修复：启用子 HWND 文件拖放（WM_DROPFILES），否则 NativeControlHost
+        // 子窗口不是 OLE 拖放目标，无法直接把视频拖进画面。
+        EnableFileDrop(_hwnd);
+
         return new PlatformHandle(_hwnd, "HWND");
     }
 
@@ -200,6 +216,37 @@ public sealed class PlayerSurface : NativeControlHost
     }
 
     // ---------- WndProc：鼠标消息直接处理 + GDI 绘制 ----------
+
+    /// <summary>启用子 HWND 的文件拖放（WM_DROPFILES）。在 CreateNativeControlCore 后调用。</summary>
+    private void EnableFileDrop(nint hwnd)
+        => DragAcceptFiles(hwnd, true);
+
+    /// <summary>解析 WM_DROPFILES 的文件列表并触发事件。</summary>
+    private void HandleDropFiles(nint hDrop)
+    {
+        var count = DragQueryFileW(hDrop, 0xFFFFFFFF, nint.Zero, 0);
+        if (count > 0)
+        {
+            var files = new List<string>((int)count);
+            for (uint i = 0; i < count; i++)
+            {
+                var len = DragQueryFileW(hDrop, i, nint.Zero, 0);
+                var buffer = Marshal.AllocHGlobal((int)((len + 1) * 2));
+                try
+                {
+                    var got = DragQueryFileW(hDrop, i, buffer, len + 1);
+                    if (got > 0)
+                        files.Add(Marshal.PtrToStringUni(buffer)!);
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(buffer);
+                }
+            }
+            SurfaceFilesDropped?.Invoke(files);
+        }
+        DragFinish(hDrop);
+    }
 
     private nint SubclassedWndProc(nint hwnd, uint msg, nint wParam, nint lParam)
     {
@@ -252,6 +299,34 @@ public sealed class PlayerSurface : NativeControlHost
                 var y = (short)((lParam >> 16) & 0xFFFF);
                 SurfaceMoved?.Invoke(x, y);
                 return 0;
+            }
+            case WM_MOUSEWHEEL:
+            {
+                // 传递滚轮 delta（正=向前/放大，负=向后/缩小）
+                var delta = (short)(wParam >> 16);
+                SurfaceWheel?.Invoke(delta);
+                return 0;
+            }
+            case WM_DROPFILES:
+            {
+                HandleDropFiles(wParam);
+                return 0;
+            }
+            case WM_SIZE:
+            {
+                if (isRealModeActive && _session is not null)
+                {
+                    var w = (short)(lParam & 0xFFFF);
+                    var h = (short)((lParam >> 16) & 0xFFFF);
+                    if (w > 0 && h > 0 && (w != _clientW || h != _clientH))
+                    {
+                        _clientW = w;
+                        _clientH = h;
+                        // 3FCompare M1: debounce resize → Redraw
+                        Dispatcher.UIThread.Post(() => _session.Redraw(), DispatcherPriority.Background);
+                    }
+                }
+                return CallWindowProcW(_origWndProc, hwnd, msg, wParam, lParam);
             }
         }
         return CallWindowProcW(_origWndProc, hwnd, msg, wParam, lParam);
@@ -471,4 +546,12 @@ public sealed class PlayerSurface : NativeControlHost
     [DllImport("user32.dll")] private static extern nint SetCapture(nint hwnd);
     [DllImport("user32.dll")] private static extern nint GetCapture();
     [DllImport("user32.dll")] private static extern bool ReleaseCapture();
+    // M-修复: 文件拖放
+    [DllImport("shell32.dll", SetLastError = true)]
+    private static extern void DragAcceptFiles(nint hwnd, bool fAccept);
+    // 用 nint 缓冲区避免 NativeAOT 下 char[] 封送风险；返回填充的字符数。
+    [DllImport("shell32.dll", EntryPoint = "DragQueryFileW", SetLastError = true)]
+    private static extern uint DragQueryFileW(nint hDrop, uint iFile, nint lpszFile, uint cch);
+    [DllImport("shell32.dll")]
+    private static extern void DragFinish(nint hDrop);
 }

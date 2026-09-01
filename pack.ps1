@@ -1,8 +1,8 @@
 # 3FCompare 打包脚本 — 2 版本发布（全部 NativeAOT 编译）
 # 3FCompare Build & Pack Script — 2 variants (all NativeAOT)
 # 用法 / Usage:
-#   精简版 (不含 PLAN) / Lite (no PLAN):        .\pack.ps1 -Version "0.2.0" -Mode app
-#   完整版 (含 PLAN/ffmpeg-full) / Full (with PLAN): .\pack.ps1 -Version "0.2.0" -Mode full
+#   精简版 (无 FFmpeg) / Lite (no FFmpeg):        .\pack.ps1 -Version "0.2.0" -Mode app
+#   完整版 (含 ffmpeg-full) / Full (with ffmpeg-full): .\pack.ps1 -Version "0.2.0" -Mode full
 #   一键全部 2 个版本 / Both variants:         .\pack.ps1 -Version "0.2.0" -Mode all (default)
 param(
     [string]$Version = "0.2.0",
@@ -38,8 +38,8 @@ function Invoke-Pack([string]$mode) {
     $ArchivePath = "$PublishDir\$PackageName.7z"
 
     $modeLabel = switch ($mode) {
-        "app"  { "精简版 (NativeAOT, 不含 PLAN) / Lite (NativeAOT, no PLAN)" }
-        "full" { "完整版 (NativeAOT + PLAN/ffmpeg-full) / Full (NativeAOT + PLAN)" }
+        "app"  { "精简版 (NativeAOT, 无 FFmpeg) / Lite (NativeAOT, no FFmpeg)" }
+        "full" { "完整版 (NativeAOT + ffmpeg-full) / Full (NativeAOT + ffmpeg-full)" }
     }
     Write-Host "`n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
     Write-Host "  $modeLabel" -ForegroundColor Cyan
@@ -69,40 +69,26 @@ function Invoke-Pack([string]$mode) {
         Write-Host "   ✅ 已删除调试符号，节省 ${savedMB}MB / Debug symbols removed, saved ${savedMB}MB" -ForegroundColor Green
     }
 
-    # Step 2/3: 复制 PLAN + FFmpeg 运行时 + 生成使用说明 (仅完整版)
+    # Step 2/3: 复制 FFmpeg 运行时 + 生成使用说明 (仅完整版)
     if ($mode -eq "full") {
-        Write-Host "`n[2/4] 复制 PLAN 组件包 / Copy PLAN bundle..." -ForegroundColor Yellow
-        # 1) 将 FFmpeg DLL 复制到 ffmpeg/ 子目录（启动时 Program.SetDllDirectory 加入搜索路径）
-        $FfmpegDest = "$OutputDir\ffmpeg"
+        Write-Host "`n[2/4] 复制 FFmpeg 组件包 / Copy FFmpeg bundle..." -ForegroundColor Yellow
+        # 单份 FFmpeg DLL 复制到 ffmpeg-full/ 子目录（运行时 NativeRuntime 自动探测并注册此目录）
+        $FfmpegDest = "$OutputDir\ffmpeg-full"
         New-Item -ItemType Directory -Force -Path $FfmpegDest | Out-Null
         $FfmpegSrc = "$PublishDir\PLAN\ffmpeg-full"
         if (Test-Path $FfmpegSrc) {
             $ffDlls = @(Get-ChildItem "$FfmpegSrc\*.dll" -ErrorAction SilentlyContinue)
             if ($ffDlls.Count -gt 0) {
                 $ffDlls | ForEach-Object { Copy-Item $_.FullName "$FfmpegDest" -Force }
-                Write-Host "   ✅ FFmpeg DLL 已复制到 ffmpeg/ 子目录（$($ffDlls.Count) 个）" -ForegroundColor Green
+                Write-Host "   ✅ FFmpeg DLL 已复制到 ffmpeg-full/ 子目录（$($ffDlls.Count) 个）" -ForegroundColor Green
             }
         } else {
             Write-Host "   ⚠️ FFmpeg 源目录不存在: $FfmpegSrc / FFmpeg source not found" -ForegroundColor Yellow
-        }
-
-        # 2) 复制 PLAN 组件（FFmpeg-full 与使用说明）到 PLAN 子目录
-        $PlanDest = "$OutputDir\PLAN"
-        if (Test-Path $PlanSource) {
-            if (Test-Path $PlanDest) {
-                Remove-Item -Recurse -Force $PlanDest -ErrorAction SilentlyContinue
-                Start-Sleep -Milliseconds 500
-            }
-            robocopy $PlanSource $PlanDest /E /NFL /NDL /NJH /NJS /NC /NS
-            if ($LASTEXITCODE -ge 8) { throw "复制 PLAN 失败 (robocopy exit code: $LASTEXITCODE) / PLAN copy failed" }
-            Write-Host "   ✅ PLAN 组件已复制" -ForegroundColor Green
-        } else {
-        Write-Host "   ⚠️ PLAN 源目录不存在: $PlanSource / PLAN source not found" -ForegroundColor Yellow
-        Write-Host "   请先将 FFmpeg DLL 放入 publish\PLAN\ffmpeg-full\ 目录 / Place FFmpeg DLLs in publish\PLAN\ffmpeg-full\" -ForegroundColor Yellow
+            Write-Host "   请先将 FFmpeg DLL 放入 publish\PLAN\ffmpeg-full\ 目录 / Place FFmpeg DLLs in publish\PLAN\ffmpeg-full\" -ForegroundColor Yellow
         }
 
         Write-Host "`n[3/4] 生成使用说明 / Generate usage guide..." -ForegroundColor Yellow
-        $ReadmePath = "$PlanDest\使用说明.txt"
+        $ReadmePath = "$OutputDir\使用说明.txt"
         $content = @"
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   3FCompare v${Version} — 使用说明 / Usage Guide
@@ -120,9 +106,8 @@ function Invoke-Pack([string]$mode) {
 📁 文件结构 / File Structure
   3FCompare.exe    — 主程序（NativeAOT 单文件，内嵌播放器内核）
                          Main executable (NativeAOT, embedded player kernel)
-  av*.dll / sw*.dll    — FFmpeg 编解码引擎（在 ffmpeg/ 子目录）/ FFmpeg decoding engine (in ffmpeg/ subdirectory)
+  av*.dll / sw*.dll    — FFmpeg 编解码引擎（在 ffmpeg-full/ 子目录）/ FFmpeg decoding engine (in ffmpeg-full/ subdirectory)
   ass-9.dll            — 字幕渲染引擎 / Subtitle rendering engine
-  PLAN/ffmpeg-full/    — FFmpeg 归档副本（备份，通常无需使用）/ FFmpeg archive copy (backup, usually not needed)
 
 ⌨️ 快捷键 / Shortcuts
   Space            播放/暂停 Play/Pause
@@ -137,18 +122,18 @@ function Invoke-Pack([string]$mode) {
 
 ❓ 常见问题 / FAQ
   Q: 提示"FFmpeg 不可用"？/ "FFmpeg unavailable"?
-  A: 完整版已内置 FFmpeg（DLL 在 ffmpeg/ 子目录），通常不会出现此提示。
-     Full version includes FFmpeg DLLs in the ffmpeg/ subdirectory.
-     若出现，请打开设置（F25）→ FFmpeg 路径 → 选择程序目录或 PLAN/ffmpeg-full/，
+  A: 完整版已内置 FFmpeg（DLL 在 ffmpeg-full/ 子目录），程序会自动探测，通常不会出现此提示。
+     Full version includes FFmpeg DLLs in the ffmpeg-full/ subdirectory, auto-detected at startup.
+     若出现，请打开设置（F25）→ FFmpeg 路径 → 指向 ffmpeg-full/ 或程序目录，
      点击"测试探测"验证后保存。
-     Otherwise, open Settings (F25) → FFmpeg Path → select program dir or PLAN/ffmpeg-full/,
+     Otherwise, open Settings (F25) → FFmpeg Path → point to ffmpeg-full/ or the program dir,
      click "Test" to verify, then save.
 
-  Q: 精简版（不含 PLAN/ffmpeg-full）如何播放视频？/ How to play video in the lite version?
-  A: 精简版不含 FFmpeg，需要自行获取 FFmpeg DLL 放到程序目录，
-     或在设置中指定包含 avcodec-*.dll 的目录。
+  Q: 精简版如何播放视频？/ How to play video in the lite version?
+  A: 精简版不含 FFmpeg，需要自行获取 FFmpeg DLL，放到程序目录下 ffmpeg-full/ 子目录
+     （程序自动探测），或在设置中指定包含 avcodec-*.dll 的目录。
      The lite version does not include FFmpeg; obtain FFmpeg DLLs yourself and place them
-     in the program directory, or configure the path in Settings.
+     in an ffmpeg-full/ subdirectory next to the exe (auto-detected), or set the path in Settings.
 
   Q: 迁移到其他电脑？/ Migrate to another PC?
   A: 将整个程序文件夹复制到目标电脑即可（绿色免安装）。

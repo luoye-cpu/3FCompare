@@ -49,10 +49,10 @@ internal static class Program
         }
         catch { /* 忽略失败 */ }
 
-        // --selftest <video>：打开→等就绪→步进断言→自动播放断言（WinForms 版语义一致）
+        // --selftest <video> [video2]：video2 用于嵌入式 UI 消息注入拖入测试（可选）
         if (args.Length >= 2 && args[0] == "--selftest")
         {
-            RunSelftest(args[1]);
+            RunSelftest(args[1], args.Length >= 3 ? args[2] : null);
             return;
         }
         // --screentest <input> <png>：打开→就绪+500ms→抓表面0→存 PNG（>1000B 判过）
@@ -82,12 +82,15 @@ internal static class Program
         BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }
 
-    private static void RunSelftest(string videoPath)
+    private static void RunSelftest(string videoPath, string? dropVideoPath = null)
     {
         var exitCode = 1;
         try
         {
-            BuildAvaloniaApp().StartWithClassicDesktopLifetime(new[] { "--selftest-internal", videoPath });
+            var args = new List<string> { "--selftest-internal", videoPath };
+            if (dropVideoPath is not null)
+                args.Add(dropVideoPath);
+            BuildAvaloniaApp().StartWithClassicDesktopLifetime(args.ToArray());
             exitCode = SelftestResult.Code;
         }
         catch (Exception ex)

@@ -70,9 +70,23 @@ public interface IPlayerSession : IDisposable
     bool TryReadPixelRegion(int x, int y, int width, int height,
         float[] buffer, out uint outputBitDepth);
 
+    /// <summary>请求重绘当前帧（3FCompare K5）：子 HWND resize 后调用，
+    /// 让 presenter 线程感知尺寸变化并执行换成链 resize + 一帧重绘。</summary>
+    void Redraw();
+
+    /// <summary>读取渲染目标诊断信息（swap/client/dest 尺寸）。返回 false 表示不可用。</summary>
+    bool ReadRenderTargetInfo(out RenderTargetInfo info);
+
     /// <summary>引擎事件（原生工作线程回调；消费者须自行调度到 UI 线程）。</summary>
     event EventHandler<EngineEvent>? EngineEvent;
 }
+
+/// <summary>渲染目标尺寸诊断（3FCompare K4）。</summary>
+public readonly record struct RenderTargetInfo(
+    uint SwapWidth, uint SwapHeight,
+    uint ClientWidth, uint ClientHeight,
+    uint DestX, uint DestY, uint DestWidth, uint DestHeight,
+    uint OutputBitDepth, bool Hdr);
 
 /// <summary>会话创建选项。</summary>
 public sealed record EngineSessionOptions

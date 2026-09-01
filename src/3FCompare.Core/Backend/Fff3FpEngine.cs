@@ -524,6 +524,36 @@ private EngineMediaInfo? _cachedMediaInfo;
             return true;
         }
 
+        /// <summary>3FCompare K5：请求 presenter 线程重绘/执行挂起的 resize。</summary>
+        public void Redraw()
+        {
+            ThrowIfDisposed();
+            Fff3FpNative.FFF3FP_Redraw(_handle);
+        }
+
+        /// <summary>3FCompare K4：读取 swap/client/dest 尺寸诊断信息。</summary>
+        public bool ReadRenderTargetInfo(out RenderTargetInfo info)
+        {
+            ThrowIfDisposed();
+            var rtInfo = new Fff3FpRenderTargetInfo
+            {
+                Size = (uint)Marshal.SizeOf<Fff3FpRenderTargetInfo>(),
+                Version = 1,
+            };
+            var result = Fff3FpNative.FFF3FP_GetRenderTargetInfo(_handle, ref rtInfo);
+            if (result != FffResult.Success)
+            {
+                info = default;
+                return false;
+            }
+            info = new RenderTargetInfo(
+                rtInfo.SwapWidth, rtInfo.SwapHeight,
+                rtInfo.ClientWidth, rtInfo.ClientHeight,
+                rtInfo.DestX, rtInfo.DestY, rtInfo.DestWidth, rtInfo.DestHeight,
+                rtInfo.OutputBitDepth, rtInfo.Hdr != 0);
+            return true;
+        }
+
 /// <summary>应用智能色调映射参数（调用3FP SetColorMode）。</summary>
 	        public void ApplyToneMappingParameters(ColorMode colorMode, nint outputWindow, bool forceHdrOutput = false)
 	        {

@@ -193,6 +193,14 @@ public sealed class SimulatedEngine : IPlayerEngine
             return true;
         }
 
+        public void Redraw() { /* 演示模式无渲染链 */ }
+
+        public bool ReadRenderTargetInfo(out RenderTargetInfo info)
+        {
+            info = default;
+            return false;
+        }
+
         public void Dispose()
         {
             if (_disposed) return;

@@ -69,10 +69,9 @@ public static partial class NativeRuntime
             SetDllDirectoryW(FfmpegDirectory);
     }
 
-    /// <summary>自动探测 FFmpeg 目录：FFMPEG_DIR 环境变量 → PATH 逐项（含 bin/bin64）→ 应用目录。
-    /// 返回含 avcodec 核心 DLL 的绝对路径；未找到返回 null。
-    /// 与 DLL 解析顺序（应用目录 → 已加载模块 → PATH）互补：此探测用于「用户把 FFmpeg
-    /// 装到 PATH/环境变量后，程序自动找到并复制到应用目录」，使内核 Delay-Load 命中。</summary>
+    /// <summary>自动探测 FFmpeg 目录：FFMPEG_DIR 环境变量 → PATH 逐项（含 bin/bin64）→
+    /// 运行时来源目录（手动指定 > 同目录 > ffmpeg-full/ > ffmpeg/）。
+    /// 返回含 avcodec 核心 DLL 的绝对路径；未找到返回 null。</summary>
     public static string? AutoDetectFfmpegDirectory()
     {
         try
@@ -93,9 +92,9 @@ public static partial class NativeRuntime
                 }
             }
 
-            // 3) 应用目录（发布完整版自带 FFmpeg）
-            if (IsFfmpegAvailable())
-                return AppContext.BaseDirectory;
+            // 3) 运行时来源目录（手动指定 > 同目录 > ffmpeg-full/ > ffmpeg/）
+            if (ResolveFfmpegSourceDirectory() is { } source)
+                return source;
         }
         catch
         {
@@ -125,57 +124,76 @@ public static partial class NativeRuntime
         return null;
     }
 
-    /// <summary>检测应用目录、ffmpeg 子目录或手动指定的 FfmpegDirectory 是否已具备 FFmpeg 核心 DLL（avcodec-*.dll）。
+    /// <summary>检测运行时来源目录是否已具备 FFmpeg 核心 DLL（avcodec-*.dll）。
     /// 3FP 内核通过 Delay-Load 从 DLL 搜索路径（应用目录 + SetDllDirectory 目录 + 系统路径）解析 FFmpeg。
     /// 用于引擎可用性探测：仅有 FFF.Native 而没有 FFmpeg 时不能使用真实模式
     /// （否则打开视频时 FFmpeg Delay-Load 失败会导致原生崩溃）。
+    /// 优先级：手动指定 > 同目录 DLL > ffmpeg-full/ 子目录 > ffmpeg/ 子目录（旧版）。
     /// </summary>
     public static bool IsFfmpegAvailable()
+        => ResolveFfmpegSourceDirectory() is not null;
+
+    /// <summary>按优先级解析 FFmpeg 来源目录：
+    /// ① 手动指定的 FfmpegDirectory（仅当其含 avcodec）→ ② exe 同目录 → ③ ffmpeg-full/ 子目录
+    /// → ④ ffmpeg/ 子目录（旧完整版运行目录）。
+    /// 命中子目录时同时 SetDllDirectoryW 注册搜索路径（否则 FFF.Native 的 Delay-Load
+    /// 解析不到 avcodec → 打开媒体时原生崩溃 0xC0005FFE）。返回实际目录绝对路径或 null。</summary>
+    private static string? ResolveFfmpegSourceDirectory()
     {
         try
         {
             var appDir = AppContext.BaseDirectory;
-            if (!Directory.Exists(appDir)) return false;
-            // 检查 exe 同级目录
-            if (Directory.GetFiles(appDir, "avcodec-*.dll").Length > 0
-                || Directory.GetFiles(appDir, "avcodec*.dll").Length > 0)
+            if (!Directory.Exists(appDir)) return null;
+
+            // ① 手动指定（优先级最高）
+            if (FfmpegDirectory is not null && HasAvcodec(FfmpegDirectory))
+            {
+                Console.Error.WriteLine($"[NativeRuntime] IsFfmpegAvailable: found in FfmpegDirectory='{FfmpegDirectory}'");
+                return FfmpegDirectory;
+            }
+            // ② exe 同目录
+            if (HasAvcodec(appDir))
             {
                 Console.Error.WriteLine($"[NativeRuntime] IsFfmpegAvailable: found in appDir");
-                return true;
+                return appDir;
             }
-            // 检查 ffmpeg/ 子目录
-            var ffmpegSubDir = Path.Combine(appDir, "ffmpeg");
-            if (Directory.Exists(ffmpegSubDir))
+            // ③ ffmpeg-full/ 子目录（发布完整版运行时目录）
+            if (TryRegisterSubDir(appDir, "ffmpeg-full", out var ffmpegFullDir))
             {
-                if (Directory.GetFiles(ffmpegSubDir, "avcodec-*.dll").Length > 0
-                    || Directory.GetFiles(ffmpegSubDir, "avcodec*.dll").Length > 0)
-                {
-                    // 关键：找到后必须把该目录加入 DLL 搜索路径，否则 FFF.Native 的
-                    // Delay-Load 解析不到 avcodec → 打开媒体时原生崩溃 0xC0005FFE。
-                    // （此前只返回 true 未注册路径，MainWindow 仅在 false 分支才注册。）
-                    SetDllDirectoryW(ffmpegSubDir);
-                    Console.Error.WriteLine($"[NativeRuntime] IsFfmpegAvailable: found in ffmpeg/ subdir, registered search path");
-                    return true;
-                }
+                Console.Error.WriteLine($"[NativeRuntime] IsFfmpegAvailable: found in ffmpeg-full/ subdir, registered search path = {ffmpegFullDir}");
+                return ffmpegFullDir;
             }
-            // 检查手动指定的 FfmpegDirectory
-            if (FfmpegDirectory is not null && Directory.Exists(FfmpegDirectory))
+            // ④ ffmpeg/ 子目录（旧完整版运行目录，兼容）
+            if (TryRegisterSubDir(appDir, "ffmpeg", out var ffmpegSubDir))
             {
-                if (Directory.GetFiles(FfmpegDirectory, "avcodec-*.dll").Length > 0
-                    || Directory.GetFiles(FfmpegDirectory, "avcodec*.dll").Length > 0)
-                {
-                    Console.Error.WriteLine($"[NativeRuntime] IsFfmpegAvailable: found in FfmpegDirectory='{FfmpegDirectory}'");
-                    return true;
-                }
+                Console.Error.WriteLine($"[NativeRuntime] IsFfmpegAvailable: found in ffmpeg/ subdir, registered search path = {ffmpegSubDir}");
+                return ffmpegSubDir;
             }
             Console.Error.WriteLine($"[NativeRuntime] IsFfmpegAvailable: NOT found (FfmpegDirectory='{FfmpegDirectory}')");
-            return false;
+            return null;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[NativeRuntime] IsFfmpegAvailable exception: {ex.Message}");
-            return false;
+            return null;
         }
+    }
+
+    /// <summary>目录中是否含 avcodec 核心 DLL。</summary>
+    private static bool HasAvcodec(string dir)
+        => Directory.Exists(dir) &&
+           (Directory.GetFiles(dir, "avcodec-*.dll").Length > 0
+            || Directory.GetFiles(dir, "avcodec*.dll").Length > 0);
+
+    /// <summary>子目录存在且含 avcodec 时，把该子目录加入 DLL 搜索路径（SetDllDirectory），
+    /// 返回 true 并输出子目录绝对路径；否则返回 false。</summary>
+    private static bool TryRegisterSubDir(string appDir, string subDir, out string fullDir)
+    {
+        fullDir = Path.Combine(appDir, subDir);
+        if (!Directory.Exists(fullDir)) return false;
+        if (!HasAvcodec(fullDir)) return false;
+        SetDllDirectoryW(fullDir);
+        return true;
     }
 
     /// <summary>验证目录是否包含 FFmpeg 核心 DLL（avcodec-*.dll）。</summary>

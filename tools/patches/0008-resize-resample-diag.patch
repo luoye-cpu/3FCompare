@@ -1,0 +1,399 @@
+commit 9978be446fe494826d654eea4696def11c968f69
+Author: luoye-cpu <3412829159@qq.com>
+Date:   Sat Aug 29 14:48:56 2026 +0800
+
+    3FCompare K1-K5: presenter resize提权/末级重采样修正/Diag API+Redraw导出
+    
+    K1 修复暂停/pacing/最小化时交换链尺寸不同步:
+    - 新增 ChainMatchesWindow() 统一判据(含位深+0x0保护)
+    - TimedTextThread 的 pacing 跳过与 devicePollOnly 早退在链失配时
+      必须落到 PresentTimedText 执行 resize，不再无限等下一个出帧信号
+    - PresentTimedText 改用 ChainMatchesWindow()
+    
+    K2 末级重采样量化桶:
+    - PrepareScaledVideo 宽高各自算 bucket(X=源宽8%,Y=源高8%)
+    - 就近取整替代向上取整，保证 cache≈destination
+    
+    K3 末级 lanczos support 动态展宽:
+    - SampleLanczos3/Panorama 增加 outputSize 参数
+    - support=3/max(downscale,0.05) clamp[3,12],消除2×下采样欠采样
+    
+    K4+K5 新增 API(不改 ABI/ConfigVersion/Snapshot version):
+    - FFF3FP_GetRenderTargetInfo: swap/client/dest 尺寸+位深
+    - FFF3FP_Redraw: 导出 renderer Redraw() 快路径
+
+diff --git a/.3fc_patches_applied b/.3fc_patches_applied
+new file mode 100644
+index 0000000..e69de29
+diff --git a/FFF.Native/3FP/Api/FFF.Player.Api.h b/FFF.Native/3FP/Api/FFF.Player.Api.h
+index ea3520e..cc5d186 100644
+--- a/FFF.Native/3FP/Api/FFF.Player.Api.h
++++ b/FFF.Native/3FP/Api/FFF.Player.Api.h
+@@ -543,6 +543,28 @@ FFF3FP_API FFFResult FFF3FP_GetMediaInfo(FFF3FPHandle player, char* outputUtf8,
+     std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept;
+ FFF3FP_API FFFResult FFF3FP_GetLastError(FFF3FPHandle player, char* outputUtf8,
+     std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept;
++// 3FCompare K1/K5: render-target diagnostics + present hint. RenderTargetInfo
++// reports the current swapchain/client/destination sizes (for App-side overlay
++// positioning and pixel-probe coordinate mapping). Redraw() re-presents the
++// last cached frame on the presenter thread — the App calls it after a child
++// HWND resize so flips continue issuing (ResizeBuffers stays on the presenter).
++struct FFF3FPRenderTargetInfo {
++    std::uint32_t size;
++    std::uint32_t version; // == 1
++    std::uint32_t swapWidth;
++    std::uint32_t swapHeight;
++    std::uint32_t clientWidth;
++    std::uint32_t clientHeight;
++    std::uint32_t destX;
++    std::uint32_t destY;
++    std::uint32_t destWidth;
++    std::uint32_t destHeight;
++    std::uint32_t outputBitDepth;
++    std::uint32_t hdr;
++};
++FFF3FP_API FFFResult FFF3FP_GetRenderTargetInfo(FFF3FPHandle player,
++    FFF3FPRenderTargetInfo* info) noexcept;
++FFF3FP_API FFFResult FFF3FP_Redraw(FFF3FPHandle player) noexcept;
+ FFF3FP_API void FFF3FP_Destroy(FFF3FPHandle player) noexcept;
+ 
+ FFF3FP_API FFFResult FFF3FP_OpenBitmapSubtitle(const char* localPathUtf8,
+diff --git a/FFF.Native/3FP/Api/PlayerApi.cpp b/FFF.Native/3FP/Api/PlayerApi.cpp
+index 872e6cc..7e13d2b 100644
+--- a/FFF.Native/3FP/Api/PlayerApi.cpp
++++ b/FFF.Native/3FP/Api/PlayerApi.cpp
+@@ -146,6 +146,16 @@ FFFResult FFF3FP_GetTimedTextStatus(const FFF3FPHandle player,
+     return player && status ? static_cast<PlayerSession*>(player)->GetTimedTextStatus(*status)
+         : FFFResult::InvalidArgument;
+ }
++// 3FCompare K1/K5
++FFFResult FFF3FP_GetRenderTargetInfo(const FFF3FPHandle player,
++    FFF3FPRenderTargetInfo* info) noexcept {
++    return player && info ? static_cast<PlayerSession*>(player)->GetRenderTargetInfo(*info)
++        : FFFResult::InvalidArgument;
++}
++FFFResult FFF3FP_Redraw(const FFF3FPHandle player) noexcept {
++    return player ? static_cast<PlayerSession*>(player)->Redraw()
++        : FFFResult::InvalidArgument;
++}
+ FFFResult FFF3FP_GetDanmakuStatus(const FFF3FPHandle player,
+     FFF3FPTimedTextStatus* status) noexcept {
+     return player && status ? static_cast<PlayerSession*>(player)->GetDanmakuStatus(*status)
+diff --git a/FFF.Native/3FP/Core/PlayerSession.cpp b/FFF.Native/3FP/Core/PlayerSession.cpp
+index 028f845..b44bcbe 100644
+--- a/FFF.Native/3FP/Core/PlayerSession.cpp
++++ b/FFF.Native/3FP/Core/PlayerSession.cpp
+@@ -1579,6 +1579,33 @@ FFFResult PlayerSession::GetLyricsStatus(FFF3FPTimedTextStatus& status) noexcept
+     return videoRenderer_.GetTimedTextStatus(status, TimedTextLayerSlot::Lyrics);
+ }
+ 
++// 3FCompare K1/K5: forward to the renderer (RTInfo under deviceMutex_, Redraw wake fast path).
++FFFResult PlayerSession::GetRenderTargetInfo(FFF3FPRenderTargetInfo& info) noexcept {
++    info.size = sizeof(info);
++    info.version = 1;
++    PlayerVideoRenderer::RenderTargetInfo rtInfo{};
++    const auto result = videoRenderer_.GetRenderTargetInfo(rtInfo);
++    if (result != FFFResult::Success) return result;
++    info.swapWidth = rtInfo.swapWidth;
++    info.swapHeight = rtInfo.swapHeight;
++    info.clientWidth = rtInfo.clientWidth;
++    info.clientHeight = rtInfo.clientHeight;
++    info.destX = rtInfo.destX;
++    info.destY = rtInfo.destY;
++    info.destWidth = rtInfo.destWidth;
++    info.destHeight = rtInfo.destHeight;
++    info.outputBitDepth = rtInfo.outputBitDepth;
++    info.hdr = rtInfo.hdr ? 1 : 0;
++    return FFFResult::Success;
++}
++
++FFFResult PlayerSession::Redraw() noexcept {
++    const auto result = videoRenderer_.Redraw();
++    if (result == FFFResult::DeviceFailure)
++        videoRenderer_.RequestRecoveryIfDeviceLost();
++    return result;
++}
++
+ FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
+     if (output.size < sizeof(FFF3FPSnapshot) || output.version != 8) return FFFResult::InvalidArgument;
+     { std::lock_guard lock(snapshotMutex_); output = publishedSnapshot_; }
+diff --git a/FFF.Native/3FP/Core/PlayerSession.h b/FFF.Native/3FP/Core/PlayerSession.h
+index 588ba33..3499423 100644
+--- a/FFF.Native/3FP/Core/PlayerSession.h
++++ b/FFF.Native/3FP/Core/PlayerSession.h
+@@ -69,6 +69,9 @@ public:
+     FFFResult GetTimedTextStatus(FFF3FPTimedTextStatus& status) noexcept;
+     FFFResult GetDanmakuStatus(FFF3FPTimedTextStatus& status) noexcept;
+     FFFResult GetLyricsStatus(FFF3FPTimedTextStatus& status) noexcept;
++    // 3FCompare K1/K5
++    FFFResult GetRenderTargetInfo(FFF3FPRenderTargetInfo& info) noexcept;
++    FFFResult Redraw() noexcept;
+     std::string MediaInfo() const;
+     std::string LastError() const;
+ 
+diff --git a/FFF.Native/3FP/Render/VideoRenderer.cpp b/FFF.Native/3FP/Render/VideoRenderer.cpp
+index 788b3d9..6a1bf96 100644
+--- a/FFF.Native/3FP/Render/VideoRenderer.cpp
++++ b/FFF.Native/3FP/Render/VideoRenderer.cpp
+@@ -429,15 +429,23 @@ float Lanczos3Weight(float value) {
+ float4 LoadClamped(Texture2D<float4> sourceTexture,int2 coordinate,uint2 dimensions) {
+     return sourceTexture.Load(int3(clamp(coordinate,int2(0,0),int2(dimensions)-1),0));
+ }
+-float4 SampleLanczos3(Texture2D<float4> sourceTexture,float2 uv,uint2 dimensions) {
++float4 SampleLanczos3(Texture2D<float4> sourceTexture,float2 uv,uint2 dimensions, float2 outputSize) {
+     float2 position=uv*float2(dimensions)-0.5;
+     int2 origin=int2(floor(position));
+     float2 fraction=position-float2(origin);
++    // Dynamic support: Lanczos-3 has fixed support=3 for 1:1, but for downscale
++    // we need support = 3/scale. Wider support = wider kernel = more taps.
++    const float scaleX = float(dimensions.x) / max(outputSize.x, 1.0);
++    const float scaleY = float(dimensions.y) / max(outputSize.y, 1.0);
++    const float downscale = min(scaleX, scaleY);
++    const float support = 3.0 / max(downscale, 0.05);  // clamp at 20x downscale
++    int supportInt = int(ceil(support));
++    supportInt = clamp(supportInt, 3, 12);  // practical bounds: 3..12
+     float4 total=0.0;
+     float weightTotal=0.0;
+-    [unroll] for(int y=-2;y<=3;++y) {
++    [loop] for(int y=-supportInt; y<=supportInt; ++y) {
+         const float wy=Lanczos3Weight(float(y)-fraction.y);
+-        [unroll] for(int x=-2;x<=3;++x) {
++        [loop] for(int x=-supportInt; x<=supportInt; ++x) {
+             const float weight=wy*Lanczos3Weight(float(x)-fraction.x);
+             total+=LoadClamped(sourceTexture,origin+int2(x,y),dimensions)*weight;
+             weightTotal+=weight;
+@@ -461,15 +469,20 @@ float4 LoadPanorama(Texture2D<float4> sourceTexture,int2 coordinate,uint2 dimens
+         clamp(coordinate.y,0,int(dimensions.y)-1));
+     return sourceTexture.Load(int3(wrapped,0));
+ }
+-float4 SampleLanczos3Panorama(Texture2D<float4> sourceTexture,float2 uv,uint2 dimensions) {
++float4 SampleLanczos3Panorama(Texture2D<float4> sourceTexture,float2 uv,uint2 dimensions,float2 outputSize) {
+     float2 position=float2(frac(uv.x),saturate(uv.y))*float2(dimensions)-0.5;
+     int2 origin=int2(floor(position));
+     float2 fraction=position-float2(origin);
++    const float scaleX = float(dimensions.x) / max(outputSize.x, 1.0);
++    const float scaleY = float(dimensions.y) / max(outputSize.y, 1.0);
++    const float downscale = min(scaleX, scaleY);
++    const float support = 3.0 / max(downscale, 0.05);
++    int supportInt = clamp(int(ceil(support)), 3, 12);
+     float4 total=0.0;
+     float weightTotal=0.0;
+-    [unroll] for(int y=-2;y<=3;++y) {
++    [loop] for(int y=-supportInt; y<=supportInt; ++y) {
+         const float wy=Lanczos3Weight(float(y)-fraction.y);
+-        [unroll] for(int x=-2;x<=3;++x) {
++        [loop] for(int x=-supportInt; x<=supportInt; ++x) {
+             const float weight=wy*Lanczos3Weight(float(x)-fraction.x);
+             total+=LoadPanorama(sourceTexture,origin+int2(x,y),dimensions)*weight;
+             weightTotal+=weight;
+@@ -485,7 +498,7 @@ float4 SampleLanczos3Panorama(Texture2D<float4> sourceTexture,float2 uv,uint2 di
+ float4 SamplePanorama(Texture2D<float4> sourceTexture,float2 uv) {
+     uint width,height;
+     sourceTexture.GetDimensions(width,height);
+-    return SampleLanczos3Panorama(sourceTexture,uv,uint2(width,height));
++    return SampleLanczos3Panorama(sourceTexture,uv,uint2(width,height),float2(OutputWidth,OutputHeight));
+ }
+ float4 SampleVideo(Texture2D<float4> sourceTexture,float2 uv) {
+     uint width,height;
+@@ -493,7 +506,7 @@ float4 SampleVideo(Texture2D<float4> sourceTexture,float2 uv) {
+     const uint2 dimensions=uint2(width,height);
+     if(abs(OutputWidth-float(width))<0.01&&abs(OutputHeight-float(height))<0.01)
+         return sourceTexture.SampleLevel(PointSampler,uv,0);
+-    return SampleLanczos3(sourceTexture,uv,dimensions);
++    return SampleLanczos3(sourceTexture,uv,dimensions,float2(OutputWidth,OutputHeight));
+ }
+ float3 ReadSource(float2 uv) {
+     if(InputLayout==0)return SampleVideo(Source,uv).rgb;
+@@ -2100,6 +2113,23 @@ FFFResult PlayerVideoRenderer::CreateD3D11HardwareDeviceContext(AVBufferRef** ou
+     return FFFResult::Success;
+ }
+ 
++// 3FCompare K1: unified chain-vs-window check (used by both presenter and Redraw).
++// - Validates client rect non-zero, swapchain exists, size matches, HDR mode matches, output bit depth matches.
++// - Called WITHOUT deviceMutex_ (lock-free fast path; stale read merely falls to slow path).
++bool PlayerVideoRenderer::ChainMatchesWindow() noexcept {
++    RECT client{};
++    if (!GetClientRect(window_, &client)) return false;
++    const auto clientW = static_cast<std::uint32_t>(client.right - client.left);
++    const auto clientH = static_cast<std::uint32_t>(client.bottom - client.top);
++    if (clientW == 0 || clientH == 0) return false;
++    const bool hdr = actualMode_ == FFF3FPColorMode::MapToHdr;
++    const auto outputBits = PreferredOutputBitDepth(sourceBitDepth_, hdr);
++    return hasCachedVideo_ && swapChain_ != nullptr &&
++        static_cast<std::uint32_t>(std::max<LONG>(1, clientW)) == swapWidth_ &&
++        static_cast<std::uint32_t>(std::max<LONG>(1, clientH)) == swapHeight_ &&
++        hdr == swapHdr_ && outputBits == swapOutputBits_;
++}
++
+ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_t height,
+     const std::uint32_t sourceBitDepth, const bool fromPresenter) noexcept {
+     if (window_ == nullptr) return FFFResult::Success;
+@@ -2841,12 +2871,20 @@ FFFResult PlayerVideoRenderer::PrepareScaledVideo(const std::uint32_t outputWidt
+     // still samples to the exact destination rect) while consecutive zoom steps
+     // almost always hit the cached chain. Fixed 64px was too fine: one wheel
+     // tick moved 4K output ~288px, crossing buckets on every tick.
+-    const auto bucket = std::max<std::uint32_t>(64u, sourceHeight_ * 8u / 100u);
+-    const auto quantize = [bucket](std::uint32_t value) noexcept {
+-        return std::max<std::uint32_t>(1u, (value + bucket - 1u) / bucket * bucket);
++    // 3FCompare K2: per-axis buckets (source height for Y, source width for X)
++    // and round-to-nearest instead of round-up. The final shader samples the
++    // cache to the exact destination rect; making the cache the same size (or
++    // slightly above) the destination keeps the final resample ratio >= ~0.75,
++    // so a single Lanczos-3 with a widened support stays well within Nyquist.
++    const auto bucketX = std::max<std::uint32_t>(64u, sourceWidth_ * 8u / 100u);
++    const auto bucketY = std::max<std::uint32_t>(64u, sourceHeight_ * 8u / 100u);
++    const auto quantize = [](std::uint32_t value, std::uint32_t bucket) noexcept {
++        if (bucket == 0) return std::max<std::uint32_t>(1u, value);
++        const auto rounded = (value + bucket / 2u) / bucket * bucket;
++        return std::max<std::uint32_t>(1u, rounded);
+     };
+-    const auto cacheWidth = quantize(outputWidth);
+-    const auto cacheHeight = quantize(outputHeight);
++    const auto cacheWidth = quantize(outputWidth, bucketX);
++    const auto cacheHeight = quantize(outputHeight, bucketY);
+     const auto generation = videoGeneration_.load(std::memory_order_acquire);
+     if (scaledVideoGeneration_ == generation && scaledOutputWidth_ == cacheWidth &&
+         scaledOutputHeight_ == cacheHeight) {
+@@ -3122,14 +3160,23 @@ void PlayerVideoRenderer::TimedTextThread() noexcept {
+                 frameRate = presentationFrameRate_;
+             }
+         }
++        // 3FCompare K1: resize must not wait for a presentable event. The wait
++        // predicate only wakes on video/presentation-generation changes — a
++        // pending chain resize while paused (never signaled) would otherwise
++        // stay stale forever. The idle poll therefore services a chain
++        // mismatch too; presenting on a 0x0 client rect (minimized) is safe
++        // because EnsureSwapChain keeps the old chain in that state.
+         if (devicePollOnly) {
+             RequestRecoveryIfDeviceLost();
+-            continue;
++            if (ChainMatchesWindow()) continue;
++            // else fall through to PresentTimedText → performs the resize.
+         }
+         // 3FCompare VRR pacing (A9): when pacing is enabled and neither the video,
+-        // the overlay, nor the view transform has changed, skip the present. The VRR
+-        // display holds the last scanned-out frame; the next signal will wake us.
+-        if (pacingEnabled_ && !videoChanged && !presentationGenerationChanged) {
++        // the overlay, nor the view transform has changed — and the chain is in
++        // sync — skip the present. The VRR display holds the last scanned-out
++        // frame; the next signal will wake us. A chain mismatch always presents.
++        if (ChainMatchesWindow() && pacingEnabled_ &&
++            !videoChanged && !presentationGenerationChanged) {
+             observedPresentationGeneration = presentationGeneration_;
+             observedVideoGeneration = videoGeneration_.load();
+             continue;
+@@ -4602,8 +4649,13 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
+     const auto result = DrawWithShader(target, static_cast<float>(destination.x),
+         static_cast<float>(destination.y), static_cast<float>(destination.width),
+         static_cast<float>(destination.height), 0, presentationViews);
+-    if (result == FFFResult::Success)
++    if (result == FFFResult::Success) {
++        lastDestX_ = destination.x;
++        lastDestY_ = destination.y;
++        lastDestWidth_ = destination.width;
++        lastDestHeight_ = destination.height;
+         actualVideoScalingMode_.store(FFF3FPVideoScalingMode::Shader);
++    }
+     return result;
+ }
+ 
+@@ -4805,22 +4857,13 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
+     // HDR-support cache check while blocking the decode thread. Probe the
+     // cheap invariants lock-free first; only fall back to the full call when
+     // something may actually have changed.
++    // 3FCompare K1: unified check now includes swapOutputBits_ validation,
++    // and the 0×0 guard (hidden/minimized window) is handled here so the
++    // caller (TimedTextThread) can skip present entirely in that state.
+     const auto lyricsLayout = lyricsLayoutEnabled_.load(std::memory_order_acquire);
+     if (window_ == nullptr || (!hasCachedVideo_ && swapChain_ == nullptr && !lyricsLayout))
+         return FFFResult::Success;
+-    RECT client{};
+-    const bool hdr = actualMode_ == FFF3FPColorMode::MapToHdr;
+-    // 3FCompare patch (P1 fix, review item 7): also validate the chain format
+-    // contract (swapHdr_/swapOutputBits_) so an HDR<->SDR switch or a bit-depth
+-    // change with unchanged window size still falls through to EnsureSwapChain,
+-    // which owns ReconfigureSwapChain. These are plain non-atomic fields but are
+-    // written only under deviceMutex_; reading them here without the lock is
+-    // acceptable because a torn/stale read merely routes us to the slow path.
+-    const bool chainUpToDate = hasCachedVideo_ && swapChain_ != nullptr &&
+-        GetClientRect(window_, &client) &&
+-        static_cast<std::uint32_t>(std::max<LONG>(1, client.right - client.left)) == swapWidth_ &&
+-        static_cast<std::uint32_t>(std::max<LONG>(1, client.bottom - client.top)) == swapHeight_ &&
+-        hdr == swapHdr_;
++    const bool chainUpToDate = ChainMatchesWindow();
+     if (!chainUpToDate) {
+         std::lock_guard deviceLock(deviceMutex_);
+         // Presenter is the single owner of swap-chain resize (3FCompare patch
+@@ -5162,3 +5205,25 @@ std::string PlayerVideoRenderer::LastError() const { std::lock_guard lock(errorM
+ void PlayerVideoRenderer::SetError(std::string message) noexcept {
+     try { std::lock_guard lock(errorMutex_); lastError_ = std::move(message); } catch (...) {}
+ }
++
++// 3FCompare K1: expose swapchain/client/destination sizes for App diagnostics & probe mapping.
++FFFResult PlayerVideoRenderer::GetRenderTargetInfo(RenderTargetInfo& info) noexcept {
++    std::lock_guard lock(deviceMutex_);
++    info = {};
++    info.swapWidth = swapWidth_;
++    info.swapHeight = swapHeight_;
++    info.outputBitDepth = swapOutputBits_;
++    info.hdr = swapHdr_;
++    if (window_ != nullptr && IsWindow(window_)) {
++        RECT client{};
++        if (GetClientRect(window_, &client)) {
++            info.clientWidth = static_cast<std::uint32_t>(client.right - client.left);
++            info.clientHeight = static_cast<std::uint32_t>(client.bottom - client.top);
++        }
++    }
++    info.destX = lastDestX_;
++    info.destY = lastDestY_;
++    info.destWidth = lastDestWidth_;
++    info.destHeight = lastDestHeight_;
++    return FFFResult::Success;
++}
+diff --git a/FFF.Native/3FP/Render/VideoRenderer.h b/FFF.Native/3FP/Render/VideoRenderer.h
+index b4f70cd..55e6f73 100644
+--- a/FFF.Native/3FP/Render/VideoRenderer.h
++++ b/FFF.Native/3FP/Render/VideoRenderer.h
+@@ -135,6 +135,20 @@ public:
+     FFFResult Render(const AVFrame* frame, bool limitToNativeSize = false,
+         bool coverArt = false) noexcept;
+     FFFResult Redraw() noexcept;
++    // 3FCompare extension: render target diagnostics (swap/client/destination sizes).
++    struct RenderTargetInfo {
++        std::uint32_t swapWidth = 0;
++        std::uint32_t swapHeight = 0;
++        std::uint32_t clientWidth = 0;
++        std::uint32_t clientHeight = 0;
++        std::uint32_t destX = 0;
++        std::uint32_t destY = 0;
++        std::uint32_t destWidth = 0;
++        std::uint32_t destHeight = 0;
++        std::uint32_t outputBitDepth = 8;
++        bool hdr = false;
++    };
++    FFFResult GetRenderTargetInfo(RenderTargetInfo& info) noexcept;
+     FFFResult CreateD3D11HardwareDeviceContext(AVBufferRef** context) noexcept;
+     FFFResult PresentTimedText() noexcept;
+     FFFResult ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept;
+@@ -212,6 +226,9 @@ private:
+ 
+     FFFResult EnsureDevice() noexcept;
+     std::uint32_t PreferredOutputBitDepth(std::uint32_t sourceBitDepth, bool hdr) noexcept;
++    // 3FCompare K1: unified chain-vs-window check (used by both presenter and Redraw).
++    // Also validates swapOutputBits_/swapDxgiFormat and the 0×0 guard.
++    bool ChainMatchesWindow() noexcept;
+     FFFResult EnsureSwapChain(std::uint32_t width, std::uint32_t height,
+         std::uint32_t sourceBitDepth, bool fromPresenter = false) noexcept;
+     FFFResult CreateSwapChain(std::uint32_t width, std::uint32_t height,
+@@ -452,6 +469,11 @@ private:
+     std::atomic<std::uint64_t> deviceLockWait100ns_;
+     std::atomic<std::uint64_t> softwareConvert100ns_;
+     std::atomic<std::uint32_t> playbackWorkPending_;
++    // 3FCompare K1: record the last destination rect for diagnostics / probe mapping.
++    std::uint32_t lastDestX_ = 0;
++    std::uint32_t lastDestY_ = 0;
++    std::uint32_t lastDestWidth_ = 0;
++    std::uint32_t lastDestHeight_ = 0;
+     std::atomic<bool> lyricsLayoutEnabled_;
+     std::atomic<std::uint32_t> coverBackdropBlurRadiusBits_;
+     std::atomic<std::uint32_t> coverBackdropBlurPasses_;

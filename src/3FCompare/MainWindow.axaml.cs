@@ -88,6 +88,12 @@ public partial class MainWindow : Window
             s.SurfacePressed += OnSurfacePress;
             s.SurfaceMoved += OnSurfaceMove;
             s.SurfaceReleased += OnSurfaceRelease;
+            // 3FCompare 修复：滚轮缩放走 WndProc（子 HWND 截获鼠标，Avalonia
+            // PointerWheel 路由收不到）→ SurfaceWheel 事件直接驱动
+            s.SurfaceWheel += OnSurfaceWheel;
+            // 3FCompare 修复：文件拖入走子 HWND 的 WM_DROPFILES（NativeControlHost
+            // 子窗口不是 OLE 拖放目标，Avalonia Drop 事件收不到）
+            s.SurfaceFilesDropped += OnSurfaceFilesDropped;
         };
 
         // 默认 2 路空网格（WinForms 初始形态）
@@ -142,8 +148,9 @@ public partial class MainWindow : Window
 
         // 自动化 selftest / screentest 模式（GetCommandLineArgs 返回进程原始参数）
         var args = Environment.GetCommandLineArgs();
+        // --selftest <video> [video2]：video2 用于嵌入式拖入测试（可选）
         if (args.Length >= 3 && args[1] == "--selftest")
-            _ = RunSelftestAsync(args[2]);
+            _ = RunSelftestAsync(args[2], args.Length >= 4 ? args[3] : null);
         else if (args.Length >= 4 && args[1] == "--screentest")
             _ = RunScreentestAsync(args[2], args[3]);
     }
@@ -237,7 +244,23 @@ public partial class MainWindow : Window
     private void OpenPaths(System.Collections.Generic.IReadOnlyList<string> paths)
     {
         if (paths.Count == 0) return;
-        _coordinator.OpenFiles(paths, autoPlay: true);
+        // 3FCompare 修复：先把网格扩到能容纳"现有路数 + 新拖入文件"的数量。
+        // PlaybackCoordinator.OpenFiles 用 _surfaceAt(_sync.Count) 取 surface，
+        // 若网格没预建足够 surface（拖入第 3 路/多个文件）会静默跳过打开。
+        var needed = Math.Min(9, _sync.Count + paths.Count);
+        if (Grid.Count < needed)
+        {
+            Console.Error.WriteLine($"[MainWindow] OpenPaths: 扩展网格 {Grid.Count}→{needed}");
+            Grid.SetCount(needed, _realMode);
+        }
+        try
+        {
+            _coordinator.OpenFiles(paths, autoPlay: true);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[MainWindow] OpenPaths exception: {ex}");
+        }
         UpdateStatus();
     }
 
@@ -630,6 +653,9 @@ public partial class MainWindow : Window
         return Math.Clamp((int)Math.Floor(frac * frameRate), 0, (int)Math.Round(frameRate) - 1);
     }
 
+    // 选中路 RTInfo 用于状态栏诊断
+    private RenderTargetInfo? _lastRtInfo;
+
     private void UpdateStatus()
     {
         if (_sync.Count == 0)
@@ -640,10 +666,27 @@ public partial class MainWindow : Window
         var mode = Grid.SingleView ? LanguageManager.T("Status_SingleMode") : LanguageManager.T("Status_GridMode");
         var failed = _sync.Slots.Count(s => s.Failed);
         var runtimeError = _sync.LastRuntimeError;
-        StatusInfo.Text =
-            $"{mode}模式 | 路数 {_sync.Count}/9 | {LanguageManager.T("Status_Steps")}: {_sync.StepProfile.FrameStep}帧/{_sync.StepProfile.SecondsStep:0.#}秒" +
-            (failed > 0 ? $" | {failed} 路失败" : string.Empty) +
-            (runtimeError is not null ? $" | ⚠ {runtimeError}" : string.Empty);
+
+        // 3FCompare M6: 选中路渲染目标诊断
+        var sb = new System.Text.StringBuilder();
+        sb.Append($"{mode}模式 | 路数 {_sync.Count}/9 | {LanguageManager.T("Status_Steps")}: {_sync.StepProfile.FrameStep}帧/{_sync.StepProfile.SecondsStep:0.#}秒");
+        if (failed > 0) sb.Append($" | {failed} 路失败");
+        if (runtimeError is not null) sb.Append($" | ⚠ {runtimeError}");
+
+        // Try read RTInfo from selected session
+        var slot = _sync.Slots.ElementAtOrDefault(Grid.SelectedIndex);
+        if (slot?.Session is { } session && session.ReadRenderTargetInfo(out var rt))
+        {
+            _lastRtInfo = rt;
+            if (rt.SwapWidth > 0 && rt.SwapHeight > 0)
+            {
+                sb.Append($" | SW:{rt.ClientWidth}x{rt.ClientHeight}->{rt.SwapWidth}x{rt.SwapHeight}");
+                if (rt.DestWidth > 0)
+                    sb.Append($" | V:{rt.DestX},{rt.DestY} {rt.DestWidth}x{rt.DestHeight}");
+                sb.Append($" | bpp:{rt.OutputBitDepth} {(rt.Hdr ? "HDR" : "SDR")}");
+            }
+        }
+        StatusInfo.Text = sb.ToString();
     }
 
 // ══════════ 视图变换：缩放/平移 ══════════
@@ -681,6 +724,25 @@ public partial class MainWindow : Window
     private int _panLastX, _panLastY;
     private int _recovering; // 0=空闲, 1=恢复中（防止并发重建导致崩溃）
     private int _recoveryAttempts; // 重建风暴抑制：连续失败计数，≥3 放弃避免死循环
+
+    /// <summary>滚轮缩放（PlayerSurface WndProc 转发）。delta&gt;0 放大，&lt;0 缩小。
+/// NativeControlHost 子 HWND 截获鼠标消息，Avalonia 顶层窗口的 OnPointerWheelChanged
+/// 收不到；改为子类化 WndProc 处理 WM_MOUSEWHEEL 后通过 SurfaceWheel 事件回传。</summary>
+    private void OnSurfaceWheel(short delta)
+    {
+        var factor = delta > 0 ? 1.15f : 1f / 1.15f;
+        _viewZoom = Math.Clamp(_viewZoom * factor, 1f, 32f);
+        ApplyViewTransform();
+    }
+
+    /// <summary>文件拖入（PlayerSurface 子 HWND/覆盖层 WM_DROPFILES 转发）。
+    /// NativeControlHost 子 HWND 不是 OLE 拖放目标，Avalonia 顶层 Drop 事件收不到；
+    /// 通过 DragAcceptFiles + WM_DROPFILES 让子 HWND 直接接收文件拖入。</summary>
+    private void OnSurfaceFilesDropped(System.Collections.Generic.IReadOnlyList<string> paths)
+    {
+        if (paths is { Count: > 0 })
+            OpenPaths(paths);
+    }
 
     /// <summary>左键按下（WndProc 转发）：放大中→开始平移。
     /// 降低轮询频率（不停止，保持 Failed 检测和位置同步）。</summary>
@@ -754,20 +816,19 @@ public partial class MainWindow : Window
         PlayerSurface.SharedPanX = _viewPanX;
         PlayerSurface.SharedPanY = _viewPanY;
 
-        // 节流：150ms (~7Hz)，平衡响应速度与 Redraw() 开销
+        // 3FCompare M7: 16ms (~60Hz) 节流，内核 0006 后 SetViewTransform 仅写 3 个 atomic（毫秒级）。
+        // 删除高频 stderr WriteLine（管道满时反压 UI 线程）。
         var now = Environment.TickCount64;
-        if (now - _lastPanApplyTicks < 150) return;
+        if (now - _lastPanApplyTicks < 16) return;
         _lastPanApplyTicks = now;
 
-        // UI 线程同步调用：原生 SetViewTransform 仅写 3 个 atomic（毫秒级）。
-        // 不要用 Task.Run——线程池并发 P/Invoke 在会话重建/关闭时访问已释放句柄
+        // UI 线程同步调用。不要用 Task.Run——线程池并发 P/Invoke 在会话重建/关闭时访问已释放句柄
         // 会触发 0xC0000005 闪退，且跨线程读取 _viewZoom/_viewPanX/Y 无序导致"拖不动"。
         try
         {
-            Console.Error.WriteLine($"[Transform] zoom={_viewZoom:F2} pan=({_viewPanX:F3},{_viewPanY:F3})");
             _sync.SetViewTransform(_viewZoom, _viewPanX, _viewPanY);
         }
-        catch (Exception ex) { Console.Error.WriteLine($"[Transform] FAIL: {ex.Message}"); }
+        catch { /* 忽略避免 stderr 反压 */ }
     }
 
 
@@ -953,8 +1014,10 @@ public partial class MainWindow : Window
     }
 
 /// <summary>批量采样重建帧（WgcFrameCapture 不可用时的退路，~320px 宽）。
-    /// 3FCompare patch (0004)：优先走内核单次 staging 拷贝 API；不支持时回退逐像素。</summary>
-    private static System.Drawing.Bitmap? CapturePixelSampled(IPlayerSession? session)
+    /// 3FCompare K4/M3：内核像素读回的坐标域是**后台缓冲**，且视频内容只占据
+    /// destination 矩形（letterbox 之外是背景）。因此先用 RTInfo 取目标矩形，
+    /// 在矩形内一次批量读回，再降采样到目标缩略图。</summary>
+    private System.Drawing.Bitmap? CapturePixelSampled(IPlayerSession? session)
     {
         if (session is null) return null;
         try
@@ -963,45 +1026,61 @@ public partial class MainWindow : Window
             var srcW = media?.VideoWidth ?? 0;
             var srcH = media?.VideoHeight ?? 0;
             if (srcW <= 0 || srcH <= 0) return null;
-            var w = Math.Min(320, srcW);
-            var h = (int)Math.Round((double)srcH * w / srcW);
-            var bmp = new System.Drawing.Bitmap(w, h);
-            // 批量路径：一次 P/Invoke 取整块区域（内核 staging 拷贝 + Map）
-            var stride = 2;
-            var sw = (w + stride - 1) / stride;
-            var sh = (h + stride - 1) / stride;
-            var buffer = new float[sw * sh * 4];
-            if (session.TryReadPixelRegion(0, 0, sw, sh, buffer, out _))
+
+            var targetW = Math.Min(320, srcW);
+            var targetH = Math.Max(1, (int)Math.Round((double)srcH * targetW / srcW));
+
+            // 无 RTInfo（演示模式/旧内核）时退回全屏假定。
+            if (!session.ReadRenderTargetInfo(out var rt) || rt.DestWidth == 0 || rt.DestHeight == 0)
             {
-                for (var sy = 0; sy < sh; sy++)
+                rt = new RenderTargetInfo((uint)srcW, (uint)srcH, (uint)srcW, (uint)srcH,
+                    0, 0, (uint)srcW, (uint)srcH, 8, false);
+            }
+
+            var bmp = new System.Drawing.Bitmap(targetW, targetH);
+            // 目标矩形面积可承受时一次批量读回；过大则按步长逐点采样（退路，保持可用性）。
+            const uint PixelBudget = 4_000_000;
+            if (rt.DestWidth * rt.DestHeight <= PixelBudget)
+            {
+                var rw = (int)rt.DestWidth;
+                var rh = (int)rt.DestHeight;
+                var buffer = new float[rw * rh * 4];
+                if (!session.TryReadPixelRegion((int)rt.DestX, (int)rt.DestY, rw, rh, buffer, out _))
+                    return null;
+                for (var y = 0; y < targetH; y++)
                 {
-                    for (var sx = 0; sx < sw; sx++)
+                    var sy = Math.Min(rh - 1, (int)((y + 0.5) * rh / (double)targetH));
+                    for (var x = 0; x < targetW; x++)
                     {
-                        var i = (sy * sw + sx) * 4;
-                        var x = sx * stride;
-                        var y = sy * stride;
-                        var c = System.Drawing.Color.FromArgb(
-                            To8(buffer[i + 3]), To8(buffer[i]), To8(buffer[i + 1]), To8(buffer[i + 2]));
-                        bmp.SetPixel(x, y, c);
-                        if (x + 1 < w) bmp.SetPixel(x + 1, y, c);
-                        if (y + 1 < h) bmp.SetPixel(x, y + 1, c);
-                        if (x + 1 < w && y + 1 < h) bmp.SetPixel(x + 1, y + 1, c);
+                        var sx = Math.Min(rw - 1, (int)((x + 0.5) * rw / (double)targetW));
+                        var i = (sy * rw + sx) * 4;
+                        bmp.SetPixel(x, y, System.Drawing.Color.FromArgb(
+                            To8(buffer[i + 3]), To8(buffer[i]), To8(buffer[i + 1]), To8(buffer[i + 2])));
                     }
                 }
                 return bmp;
             }
-            // 回退路径：逐像素（旧行为）
-            for (var y = 0; y < h; y += stride)
+
+            var stride = Math.Max(2, (int)(rt.DestWidth / targetW));
+            var sw = (targetW + stride - 1) / stride;
+            var sh = (targetH + stride - 1) / stride;
+            var small = new float[sw * sh * 4];
+            if (!session.TryReadPixelRegion((int)rt.DestX, (int)rt.DestY,
+                    (int)Math.Min(rt.DestWidth, (uint)(sw * stride)),
+                    (int)Math.Min(rt.DestHeight, (uint)(sh * stride)), small, out _))
+                return null;
+            for (var sy = 0; sy < sh; sy++)
             {
-                for (var x = 0; x < w; x += stride)
+                for (var sx = 0; sx < sw; sx++)
                 {
-                    if (!session.TryReadPixel((int)((x + 0.5) / w * srcW), (int)((y + 0.5) / h * srcH), out var s))
-                        return null;
-                    var c = System.Drawing.Color.FromArgb(To8(s.A), To8(s.R), To8(s.G), To8(s.B));
-                    bmp.SetPixel(x, y, c);
-                    if (x + 1 < w) bmp.SetPixel(x + 1, y, c);
-                    if (y + 1 < h) bmp.SetPixel(x, y + 1, c);
-                    if (x + 1 < w && y + 1 < h) bmp.SetPixel(x + 1, y + 1, c);
+                    var i = (sy * sw + sx) * 4;
+                    var x = sx * stride;
+                    var y = sy * stride;
+                    var c = System.Drawing.Color.FromArgb(
+                        To8(small[i + 3]), To8(small[i]), To8(small[i + 1]), To8(small[i + 2]));
+                    for (var dy = 0; dy < stride && y + dy < targetH; dy++)
+                        for (var dx = 0; dx < stride && x + dx < targetW; dx++)
+                            bmp.SetPixel(x + dx, y + dy, c);
                 }
             }
             return bmp;
@@ -1010,6 +1089,39 @@ public partial class MainWindow : Window
         {
             return null;
         }
+    }
+
+    /// <summary>探针坐标：表面 DIP → 物理后台缓冲像素 → destination 矩形内 → 源视频像素。
+    /// 3FCompare M3：旧实现直接用源分辨率等比映射，既漏了 RenderScaling 也漏了 letterbox。</summary>
+    private (int X, int Y)? MapPointerToVideoPixel(PlayerSurface surface, IPlayerSession session, Point local)
+    {
+        var media = session.ReadMediaInfo();
+        if (media is null || media.VideoWidth <= 0 || media.VideoHeight <= 0 ||
+            surface.Bounds.Width <= 0 || surface.Bounds.Height <= 0) return null;
+
+        // 1) DIP → 物理像素（子 HWND client 尺寸 == Bounds × RenderScaling）
+        var scale = TopLevel.GetTopLevel(this)?.RenderScaling ?? 1.0;
+        var physX = local.X * scale;
+        var physY = local.Y * scale;
+        if (!session.ReadRenderTargetInfo(out var rt) || rt.SwapWidth == 0 || rt.SwapHeight == 0)
+        {
+            // 无诊断信息：退回旧的整面等比映射
+            return ((int)(physX / Math.Max(1, rt.SwapWidth == 0 ? physX : rt.SwapWidth) * media.VideoWidth),
+                    (int)(physY / Math.Max(1, rt.SwapHeight == 0 ? physY : rt.SwapHeight) * media.VideoHeight));
+        }
+
+        // 2) 表面 → 后台缓冲（ShowInBounds 使 chain 尺寸 == client 尺寸，直接可用）
+        var bbX = (int)physX;
+        var bbY = (int)physY;
+
+        // 3) 超出视频内容区（letterbox 黑边）→ 无有效像素
+        if (bbX < (int)rt.DestX || bbX >= (int)(rt.DestX + rt.DestWidth) ||
+            bbY < (int)rt.DestY || bbY >= (int)(rt.DestY + rt.DestHeight)) return null;
+
+        // 4) destination 内 → 源视频像素
+        var nx = (int)((bbX - (int)rt.DestX) / (double)rt.DestWidth * media.VideoWidth);
+        var ny = (int)((bbY - (int)rt.DestY) / (double)rt.DestHeight * media.VideoHeight);
+        return (Math.Clamp(nx, 0, media.VideoWidth - 1), Math.Clamp(ny, 0, media.VideoHeight - 1));
     }
 
     private static int To8(float v) => Math.Clamp((int)Math.Round(v * 255f), 0, 255);
@@ -1178,6 +1290,8 @@ public partial class MainWindow : Window
         _probe.AttachSession(session);
         _audioPanel.AttachSession(session, session?.ReadMediaInfo());
         _mediaPanel.ShowMediaInfo(session?.ReadMediaInfo());
+        // M5: bind magnifier to selected session so it can sample pixels
+        Magnifier.AttachSession(session);
 
         if (slot is null)
         {
@@ -1208,14 +1322,14 @@ public partial class MainWindow : Window
             Magnifier.UpdateAt(e.GetPosition(CenterPanel));
         if (ReferenceEquals(_sidebar.Active, _probe) && surface.Selected)
         {
-            // 坐标从表面客户区像素逆缩放到视频原生分辨率（TryReadPixel 需要原生坐标）
             var slot = _sync.Slots.ElementAtOrDefault(surface.Index);
-            var media = slot?.Session?.ReadMediaInfo();
-            if (media is not null && surface.Bounds.Width > 0 && surface.Bounds.Height > 0)
+            if (slot?.Session is { } session)
             {
-                var nx = (int)(local.X / surface.Bounds.Width * media.VideoWidth);
-                var ny = (int)(local.Y / surface.Bounds.Height * media.VideoHeight);
-                _probe.UpdatePoint(nx, ny);
+                var mapped = MapPointerToVideoPixel(surface, session, local);
+                if (mapped is { } p)
+                    _probe.UpdatePoint(p.X, p.Y);
+                else
+                    _probe.UpdatePoint(-1, -1); // outside video content
             }
             else
             {
@@ -1323,6 +1437,54 @@ public partial class MainWindow : Window
     private const int SW_MAXIMIZE = 3;
     private const int SW_RESTORE = 9;
 
+    // 3FCompare 修复：嵌入式 UI 消息注入测试 P/Invoke
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool PostMessageW(nint hWnd, uint Msg, nint wParam, nint lParam);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern nint GlobalAlloc(uint uFlags, nuint dwBytes);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern nint GlobalLock(nint hMem);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool GlobalUnlock(nint hMem);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GlobalFree(nint hMem);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern void DragAcceptFiles(nint hwnd, bool fAccept);
+
+    [DllImport("shell32.dll", EntryPoint = "DragQueryFileW", SetLastError = true)]
+    private static extern uint DragQueryFileW(nint hDrop, uint iFile, nint lpszFile, uint cch);
+
+    [DllImport("shell32.dll")]
+    private static extern void DragFinish(nint hDrop);
+
+    // 3FCompare 修复：HDROP 结构（用于构造 WM_DROPFILES 所需的结构）
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    private struct DROPFILES
+    {
+        public uint pFiles;
+        public POINT pt;
+        public bool fNC;
+        public bool fWide;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT
+    {
+        public int x;
+        public int y;
+    }
+
+    private const uint WM_DROPFILES = 0x0233;
+    private const uint GHND = 0x0042; // GMEM_MOVEABLE | GMEM_ZEROINIT
+    private const uint GMEM_ZEROINIT = 0x0040;
+    private const uint GMEM_MOVEABLE = 0x0002;
+    private const uint CF_HDROP = 15;
+
     /// <summary>给 Avalonia 顶层窗口添加 WS_CLIPCHILDREN 样式，
     /// 防止 Avalonia 的 WGL 渲染覆盖 NativeControlHost 子窗口。</summary>
     private unsafe void TryEnableClipChildren()
@@ -1355,50 +1517,13 @@ public partial class MainWindow : Window
         {
             var oldState = (WindowState)(change.OldValue ?? WindowState.Normal);
             var newState = (WindowState)(change.NewValue ?? WindowState.Normal);
-            // 窗口最大化/还原时，D3D11 SwapChain ResizeBuffers 在渲染中调用会失败。
-            // 先暂停播放，让引擎在空闲状态下完成尺寸转换，避免进入 Failed 状态。
-            if ((newState == WindowState.Maximized || oldState == WindowState.Maximized) && _sync.Count > 0)
-            {
-                var wasPlaying = false;
-                try
-                {
-                    var snap = _sync.ReadMasterSnapshot();
-                    wasPlaying = snap is { State: PlayerState.Playing };
-                    if (wasPlaying)
-                    {
-                        Console.Error.WriteLine($"[MainWindow] 窗口状态变化，暂停播放中...");
-                        _sync.Pause();
-                    }
-                }
-                catch { /* 忽略 */ }
-
-                // 延迟恢复播放（等待窗口尺寸转换完成）
-                if (wasPlaying)
-                {
-                    _ = ResumeAfterResizeAsync();
-                }
-            }
-
+            // 3FCompare M2: 移除最大化/还原的 Pause→500ms→Play hack。
+            // 内核(0003 单所有者 resize + 0008 0×0 保护 + 0011 Present(0,0) 解楔 + K1
+            // presenter 尺寸同步)已结构性支持渲染中尺寸转换，暂停反而制造
+            // "暂停/pacing 时不 resize" 死区。
+            // 子 HWND 尺寸由 PlayerSurface.WM_SIZE → Redraw 自然驱动，无需手动触发。
             if (newState == WindowState.Normal)
                 _lastNormal = (Position, Bounds.Size);
-        }
-    }
-
-    private async System.Threading.Tasks.Task ResumeAfterResizeAsync()
-    {
-        try
-        {
-            // 等待 500ms 确保窗口尺寸转换完成
-            await System.Threading.Tasks.Task.Delay(500);
-            if (_sync.Count > 0)
-            {
-                _sync.Play();
-                Console.Error.WriteLine($"[MainWindow] 窗口尺寸转换完成，恢复播放");
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"[MainWindow] 恢复播放失败: {ex.Message}");
         }
     }
 
@@ -1541,7 +1666,33 @@ public partial class MainWindow : Window
         Console.Out.Flush();
     }
 
-    private async System.Threading.Tasks.Task RunSelftestAsync(string videoPath)
+    /// <summary>构造 HDROP 内存结构（GMEM_MOVEABLE + ZEROINIT），供 WM_DROPFILES 注入测试用。
+    /// 布局：DROPFILES 头（pFiles=偏移, fWide=TRUE）+ UTF-16 文件路径 + 双 \\0 结尾。
+    /// 调用方用完后必须 GlobalFree(hDrop)（或由 DragFinish 释放——测试里显式 GlobalFree）。</summary>
+    private static nint BuildHDrop(string filePath)
+    {
+        var structSize = Marshal.SizeOf<DROPFILES>();
+        var pathBytes = System.Text.Encoding.Unicode.GetBytes(filePath + "\0\0");
+        var total = (nuint)(structSize + pathBytes.Length);
+        var hMem = GlobalAlloc(GHND, total);
+        if (hMem == nint.Zero) return nint.Zero;
+        var ptr = GlobalLock(hMem);
+        if (ptr == nint.Zero) { GlobalFree(hMem); return nint.Zero; }
+        try
+        {
+            Marshal.WriteInt32(ptr, Marshal.OffsetOf<DROPFILES>("pFiles").ToInt32(), structSize);
+            Marshal.WriteByte(ptr, Marshal.OffsetOf<DROPFILES>("fWide").ToInt32(), 1);
+            var dst = nint.Add(ptr, structSize);
+            Marshal.Copy(pathBytes, 0, dst, pathBytes.Length);
+        }
+        finally
+        {
+            GlobalUnlock(hMem);
+        }
+        return hMem;
+    }
+
+    private async System.Threading.Tasks.Task RunSelftestAsync(string videoPath, string? dropVideoPath = null)
     {
         _ = System.Threading.Tasks.Task.Run(async () =>
         {
@@ -1650,9 +1801,14 @@ public partial class MainWindow : Window
                     var beforeSnap = _sync.ReadMasterSnapshot();
                     Log($"最大化前: pos={TimeSpan.FromTicks(before):g} presented={beforeSnap?.PresentedVideoFrames} state={beforeSnap?.State}");
 
-                    // 最大化
-                    ShowWindow(hwnd, SW_MAXIMIZE);
+                    // 最大化（使用 Avalonia WindowState 以触发布局更新）
+                    WindowState = WindowState.Maximized;
                     await System.Threading.Tasks.Task.Delay(3000);
+
+                    // 强制重新测量/布局，确保子 HWND 尺寸同步
+                    Grid.InvalidateMeasure();
+                    Grid.InvalidateArrange();
+                    UpdateLayout();
 
                     var midSnap = _sync.ReadMasterSnapshot();
                     Log($"最大化后: pos={TimeSpan.FromTicks(midSnap?.Position100ns ?? 0):g} presented={midSnap?.PresentedVideoFrames} state={midSnap?.State}");
@@ -1675,9 +1831,14 @@ public partial class MainWindow : Window
                         }
                     }
 
-                    // 还原
-                    ShowWindow(hwnd, SW_RESTORE);
+                    // 还原（使用 Avalonia WindowState 以触发布局更新）
+                    WindowState = WindowState.Normal;
                     await System.Threading.Tasks.Task.Delay(3000);
+
+                    // 强制重新测量/布局
+                    Grid.InvalidateMeasure();
+                    Grid.InvalidateArrange();
+                    UpdateLayout();
 
                     var afterSnap = _sync.ReadMasterSnapshot();
                     var after = _sync.GetMasterPosition100ns();
@@ -1790,6 +1951,88 @@ public partial class MainWindow : Window
                 // 恢复正常视图并继续播放
                 _sync.SetViewTransform(1.0f, 0f, 0f);
                 _sync.Play();
+            }
+
+            // ══════════ 嵌入式 UI 消息注入测试（真实走 WndProc → SurfaceWheel/SurfaceFilesDropped 分支） ══════════
+            _step = "UI消息注入-滚轮缩放";
+            {
+                // 取得第 0 路真实子 HWND（NativeControlHost 的 D3D 输出窗口）
+                var surface = Grid.GetSurface(0);
+                var targetHwnd = surface?.Hwnd ?? nint.Zero;
+                if (targetHwnd == nint.Zero)
+                    throw new InvalidOperationException("无法取得 PlayerSurface 子 HWND");
+
+                // 基线：初始 zoom 应为 1（上一压力测试已复位）
+                var zoomBefore = _viewZoom;
+                Log($"基线 zoom={zoomBefore:F3} hwnd=0x{targetHwnd:X}");
+
+                // 注入 3 次 WM_MOUSEWHEEL（向前，delta=+120），走 PlayerSurface.SubclassedWndProc
+                // 的 WM_MOUSEWHEEL → SurfaceWheel → OnSurfaceWheel → _viewZoom *= 1.15^3
+                const int WM_MOUSEWHEEL = 0x020A;
+                short delta = 120;
+                for (var i = 0; i < 3; i++)
+                {
+                    var wParam = (nint)((long)(ushort)delta << 16);
+                    PostMessageW(targetHwnd, WM_MOUSEWHEEL, wParam, nint.Zero);
+                    await System.Threading.Tasks.Task.Delay(80);
+                }
+                // 等 UI 线程处理完 PostMessage
+                await Dispatcher.UIThread.InvokeAsync(() => { });
+                await System.Threading.Tasks.Task.Delay(300);
+
+                var zoomAfter = _viewZoom;
+                var expected = zoomBefore * 1.15f * 1.15f * 1.15f;
+                Log($"注入后 zoom={zoomAfter:F3} (期望≈{expected:F3})");
+                if (Math.Abs(zoomAfter - expected) > 0.01f)
+                    throw new InvalidOperationException(
+                        $"滚轮缩放未生效：zoom {zoomBefore:F3} → {zoomAfter:F3}，期望 {expected:F3}");
+
+                // 再注入向后滚动（缩小），确认双向都走通
+                for (var i = 0; i < 3; i++)
+                {
+                    var wParam = unchecked((nint)((long)(ushort)(-120) << 16));
+                    PostMessageW(targetHwnd, WM_MOUSEWHEEL, wParam, nint.Zero);
+                    await System.Threading.Tasks.Task.Delay(80);
+                }
+                await Dispatcher.UIThread.InvokeAsync(() => { });
+                await System.Threading.Tasks.Task.Delay(300);
+                Log($"缩小后 zoom={_viewZoom:F3} (期望≈{zoomBefore:F3})");
+                if (Math.Abs(_viewZoom - zoomBefore) > 0.01f)
+                    throw new InvalidOperationException(
+                        $"滚轮缩小未复位：zoom={_viewZoom:F3}，期望 {zoomBefore:F3}");
+            }
+
+            _step = "UI消息注入-文件拖入";
+            if (dropVideoPath is not null && File.Exists(dropVideoPath))
+            {
+                var surface = Grid.GetSurface(0);
+                var targetHwnd = surface?.Hwnd ?? nint.Zero;
+                if (targetHwnd == nint.Zero)
+                    throw new InvalidOperationException("无法取得 PlayerSurface 子 HWND");
+
+                var countBefore = _sync.Count;
+                Log($"拖入前路数={countBefore}");
+
+                // 构造真实 HDROP 并 PostMessage WM_DROPFILES 到子 HWND（走 HandleDropFiles → SurfaceFilesDropped → OpenPaths）
+                var hDrop = BuildHDrop(dropVideoPath);
+                if (hDrop == nint.Zero)
+                    throw new InvalidOperationException("HDROP 构造失败");
+                PostMessageW(targetHwnd, WM_DROPFILES, hDrop, nint.Zero);
+
+                // 等待拖入文件被解析、打开并加入 _sync
+                var dropDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
+                while (DateTime.UtcNow < dropDeadline && _sync.Count <= countBefore)
+                    await System.Threading.Tasks.Task.Delay(200);
+
+                if (_sync.Count <= countBefore)
+                    throw new InvalidOperationException(
+                        $"文件拖入未生效：路数仍为 {_sync.Count}（期望 > {countBefore}）");
+                Log($"拖入后路数={_sync.Count} ✓ 拖入文件已打开");
+                // 注意：HandleDropFiles 内部已 DragFinish(hDrop) 释放内存，这里不再重复释放
+            }
+            else
+            {
+                Log("未提供第二个视频，跳过文件拖入测试");
             }
 
             Log("全部通过 ✓");
