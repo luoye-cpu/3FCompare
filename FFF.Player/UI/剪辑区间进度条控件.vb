@@ -6,7 +6,8 @@ Imports Vortice.DirectWrite
 ''' </summary>
 Friend NotInheritable Class 剪辑区间进度条控件
     Inherits Control
-    Implements LakeUI.V3_IGpuRenderable, LakeUI.V3_IGpuInvalidationSource
+    Implements LakeUI.D3D_IGpuRenderable, LakeUI.D3D_IGpuInvalidationSource,
+               LakeUI.V5_IGpuPresentationSource
 
     Private 当前播放位置 As TimeSpan
     Private 媒体总时长 As TimeSpan
@@ -17,7 +18,7 @@ Friend NotInheritable Class 剪辑区间进度条控件
 
     Friend Sub New()
         SetStyle(ControlStyles.UserPaint Or ControlStyles.AllPaintingInWmPaint Or
-                 ControlStyles.OptimizedDoubleBuffer Or ControlStyles.ResizeRedraw Or
+                 ControlStyles.ResizeRedraw Or
                  ControlStyles.SupportsTransparentBackColor, True)
         Font = New Font("Microsoft YaHei UI", 9.0F)
         ForeColor = Color.Silver
@@ -78,7 +79,7 @@ Friend NotInheritable Class 剪辑区间进度条控件
         If Not LakeUI.D3D_PaintBridge.PaintRenderable(e, Me, Me) Then MyBase.OnPaint(e)
     End Sub
 
-    Public Sub RenderGpu(context As LakeUI.D3D_PaintContext) Implements LakeUI.V3_IGpuRenderable.RenderGpu
+    Public Sub RenderGpu(context As LakeUI.D3D_PaintContext) Implements LakeUI.D3D_IGpuRenderable.RenderGpu
         If context Is Nothing OrElse ClientSize.Width <= 0 OrElse ClientSize.Height <= 0 Then Return
 
         Dim 宽度 = CSng(ClientSize.Width)
@@ -96,15 +97,7 @@ Friend NotInheritable Class 剪辑区间进度条控件
         Dim 进度宽度 = 时间到X(显示位置, 宽度)
         If 进度宽度 > 0.0F Then
             Dim 进度区域 As New RectangleF(0.0F, 0.0F, 进度宽度, 高度)
-            Dim 渐变画刷 = context.GetLinearGradientBrush(进度区域,
-                Color.FromArgb(100, 100, 100), Color.FromArgb(80, 80, 80), Orientation.Horizontal)
-            If 渐变画刷 IsNot Nothing Then
-                context.DeviceContext.FillRectangle(
-                    New Vortice.RawRectF(进度区域.Left, 进度区域.Top, 进度区域.Right, 进度区域.Bottom),
-                    渐变画刷)
-            Else
-                context.FillRectangle(进度区域, Color.FromArgb(90, 90, 90))
-            End If
+            context.FillRectangle(进度区域, Color.FromArgb(120, 220, 220, 220))
             context.DrawRectangle(New RectangleF(0.5F, 0.5F,
                 Math.Max(0.0F, 进度宽度 - 1.0F), Math.Max(0.0F, 高度 - 1.0F)),
                 Color.FromArgb(120, 120, 120))
@@ -124,7 +117,7 @@ Friend NotInheritable Class 剪辑区间进度条控件
             Color.FromArgb(200, 200, 200))
     End Sub
 
-    Public Function GetRenderBounds() As Rectangle Implements LakeUI.V3_IGpuInvalidationSource.GetRenderBounds
+    Public Function GetRenderBounds() As Rectangle Implements LakeUI.D3D_IGpuInvalidationSource.GetRenderBounds
         Return New Rectangle(Point.Empty, Size)
     End Function
 

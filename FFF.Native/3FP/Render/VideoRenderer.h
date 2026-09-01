@@ -364,7 +364,7 @@ private:
     std::uint32_t swapWidth_;
     std::uint32_t swapHeight_;
     bool swapHdr_;
-    std::uint32_t swapOutputBits_;
+    std::atomic<std::uint32_t> swapOutputBits_{8};
     // 3FCompare patch (0003): single-owner swap-chain resize. The decode thread
     // may not ResizeBuffers an actively presented chain (DXGI_ERROR_INVALID_CALL
     // when a stale buffer reference is still outstanding), which surfaced as the
@@ -455,7 +455,7 @@ private:
     // Counts successful final swap-chain presents that included each visible
     // layer. A texture redraw is not a presentation and must not advance this.
     std::uint32_t timedTextPresentCounts_[4];
-    std::uint64_t backBufferAcquisitionCount_;
+    std::atomic<std::uint64_t> backBufferAcquisitionCount_;
     bool timedTextPipelineQueryInFlight_[4];
     std::uint64_t timedTextCompositePixelInvocations_[4];
     CachedVideoSettings cachedVideoSettings_;
