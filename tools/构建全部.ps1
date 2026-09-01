@@ -106,7 +106,7 @@ function Deploy-To($targetDir) {
     Write-Host "  已部署 -> $targetDir"
 }
 
-Deploy-To (Join-Path $ProjectRoot "src\3FCompare.App\bin\$Configuration\net11.0-windows")
+Deploy-To (Join-Path $ProjectRoot "src\3FCompare\bin\$Configuration\net11.0-windows")
 Deploy-To (Join-Path $ProjectRoot "tests\3FCompare.SmokeTests\bin\$Configuration\net11.0")
 
 if (-not $SkipTests) {
@@ -117,4 +117,4 @@ if (-not $SkipTests) {
 }
 
 Write-Host "✔ 全部完成。运行冒烟: dotnet run --project tests/3FCompare.SmokeTests -- <视频>"
-Write-Host "✔ 运行应用: dotnet run --project src/3FCompare.App"
+Write-Host "✔ 运行应用: dotnet run --project src/3FCompare"

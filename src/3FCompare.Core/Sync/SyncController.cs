@@ -87,7 +87,10 @@ public sealed class SyncController
 
     private EngineSnapshot?[] _snapshotCache = Array.Empty<EngineSnapshot?>();
 
-    /// <summary>读取全部会话快照（UI 轮询用）。复用内部数组避免每 16ms 分配。</summary>
+    /// <summary>读取全部会话快照（UI 轮询用）。
+    /// ⚠ 契约：返回的是内部复用数组，仅在**下一次调用前、且只在 UI 线程上**有效；
+    /// 调用方不得缓存引用或跨线程读取。需要长期持有时应自行复制。
+    /// （当前唯一消费方 PollSnapshots 满足该契约；若将来有多消费者需改为拷贝语义。）</summary>
     public IReadOnlyList<EngineSnapshot?> ReadAllSnapshots()
     {
         if (_snapshotCache.Length != _slots.Count)
@@ -180,7 +183,12 @@ public sealed class SyncController
 
             var newSnap = master.Session.ReadSnapshot();
             var newPos = newSnap.Position100ns;
-            if (newPos == oldPos && oldFrame == newSnap.FrameIndex && fps > 0)
+            // 用 timelineGeneration 判定 StepFrame 是否真正生效（seek 成功才递增）。
+            // 旧判据 newPos==oldPos 在异步解码下不可靠：StepFrame 入队后快照大概率
+            // 仍返回旧位置，会被误判"不支持"而降级为时间 Seek。
+            var stepApplied = newSnap.TimelineGeneration != snap.TimelineGeneration ||
+                              newSnap.FrameIndex != snap.FrameIndex;
+            if (!stepApplied && fps > 0)
             {
                 // StepFrame 无效（可能不支持），按时间换算
                 newPos = FrameTimeline.StepByFrames(oldPos, duration, frames, fps);
@@ -251,11 +259,20 @@ public sealed class SyncController
         return snap?.Duration100ns ?? 0;
     }
 
-    /// <summary>从快照估算帧率（fps）。优先用时间基，否则回退 24。</summary>
+    /// <summary>从快照估算帧率（fps）。
+    /// 优先用快照携带的媒体帧率（来自媒体信息 nominalFrameRate，准确）。
+    /// 回退：帧 PTS 增量换算（fps = timeBaseDen / (timeBaseNum × pts增量)），
+    /// 注意 frameTimeBase 是流时间基（如 1/15360）而非帧率——直接 Den/Num 是错的
+    /// （曾导致 4K H.264 显示 15360fps 的 bug）。无数据时回退 24。</summary>
     public static double EstimateFps(EngineSnapshot snap)
     {
-        if (snap.FrameTimeBaseDen > 0 && snap.FrameTimeBaseNum > 0)
-            return (double)snap.FrameTimeBaseDen / snap.FrameTimeBaseNum;
+        if (snap.FrameRate > 0) return snap.FrameRate;
+        if (snap.FrameTimeBaseDen > 0 && snap.FrameTimeBaseNum > 0 && snap.RawFramePts > 1)
+        {
+            // 单帧增量未知时无法从时间基推 fps；仅在能拿到帧号差时才可靠。
+            // 这里保守回退默认值，避免把时间基当帧率。
+            return 24.0;
+        }
         return 24.0;
     }
 

@@ -42,6 +42,9 @@ public sealed class AppSettings
     /// 低配设备可关闭，关闭后仅更新时间码和播放头，不触发 BitBlt 屏幕抓取。</summary>
     public bool ScrubPreviewEnabled { get; set; } = true;
 
+    /// <summary>缩放小地图（默认开启）：缩放 > 1 时在表面右下角显示缩略视口指示器。</summary>
+    public bool MinimapEnabled { get; set; } = true;
+
     /// <summary>窗口记忆：上次位置/尺寸/最大化状态（F27 窗口模式管理）。</summary>
     public int WindowX { get; set; } = -1;
 

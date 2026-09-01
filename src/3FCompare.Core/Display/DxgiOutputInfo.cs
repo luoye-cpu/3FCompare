@@ -29,8 +29,9 @@ internal static partial class DxgiOutputInfo
     /// <summary>DXGI_ERROR_NOT_FOUND（枚举正常终止码）。</summary>
     private const int DXGI_ERROR_NOT_FOUND = unchecked((int)0x887A0002);
 
-    /// <summary>DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020（HDR10 输出色彩空间）。</summary>
-    private const int DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 = 3;
+    /// <summary>DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020（HDR10 输出色彩空间）。
+    /// dxgicommon.h: DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 = 12。</summary>
+    private const int DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 = 12;
 
     // vtable 槽位（IUnknown=0..2；各基类方法按 dxgi.h 顺序占位）：
     //   IUnknown QI/AddRef/Release = 0/1/2

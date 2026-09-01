@@ -103,7 +103,7 @@ External tool components are placed in the `PLAN/` subdirectory; the app points 
 
 ```powershell
 # Windows x64 精简版（NativeAOT，内嵌 FFF.Native）/ Lite (NativeAOT, embedded FFF.Native)
-dotnet publish src/3FCompare.Avalonia/3FCompare.Avalonia.csproj `
+dotnet publish src/3FCompare/3FCompare.csproj `
     -c Release -r win-x64 `
     -p:PublishAot=true `
     -p:SelfContained=true `
@@ -111,7 +111,7 @@ dotnet publish src/3FCompare.Avalonia/3FCompare.Avalonia.csproj `
     -o publish/build/3FCompare-v0.1.0-x64/
 
 # Windows x64 完整版（NativeAOT，另需复制 PLAN/ 目录）/ Full (NativeAOT, plus PLAN/ copy)
-dotnet publish src/3FCompare.Avalonia/3FCompare.Avalonia.csproj `
+dotnet publish src/3FCompare/3FCompare.csproj `
     -c Release -r win-x64 `
     -p:PublishAot=true `
     -p:SelfContained=true `
@@ -248,9 +248,9 @@ Invoke-7zMax 'a -t7z -mx9 -md=3840m -mfb=273 -ms=on -mmt=1 "out.7z" *'
 
 ### 5.1 版本号位置 / Version Location
 
-`src/3FCompare.Avalonia/3FCompare.Avalonia.csproj`:
+`src/3FCompare/3FCompare.csproj`:
 ```xml
-<Version>0.1.4</Version>
+<Version>0.2.0</Version>
 <VersionSuffix>BETA</VersionSuffix>
 ```
 

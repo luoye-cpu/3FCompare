@@ -7,21 +7,15 @@ namespace _3FCompare;
 
 internal static class Program
 {
-    // 将子目录加入 DLL 搜索路径，使 ffmpeg 等 DLL 可从 exe 同级子目录加载
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern bool SetDllDirectory(string? lpPathName);
-
     [STAThread]
     public static void Main(string[] args)
     {
-        // 添加 ffmpeg 子目录到 DLL 搜索路径（发布包结构：ffmpeg/*.dll 与 exe 分开放置）
-        try
-        {
-            var ffmpegDir = Path.Combine(AppContext.BaseDirectory, "ffmpeg");
-            if (Directory.Exists(ffmpegDir))
-                SetDllDirectory(ffmpegDir);
-        }
-        catch { /* 忽略失败（非核心功能）*/ }
+        // F-LOG：落盘日志最先初始化（捕获从第一行起的全部内容）
+        _3FCompare.Core.Diagnostics.AppLog.Initialize();
+        // 双写器：全代码库 Console.Error.WriteLine 自动同步落盘（55 处调用点零改动）
+        _3FCompare.Core.Diagnostics.ConsoleErrorRerouter.Install();
+        _3FCompare.Core.Diagnostics.AppLog.Info("App",
+            $"启动 args=[{string.Join(' ', args)}]");
 
         // 内嵌 FFF.Native.dll 自解压（3FP 播放器内核）
         try
@@ -30,8 +24,22 @@ internal static class Program
                 name => System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream(name) is { } s
                     ? ReadAll(s)
                     : null);
+            _3FCompare.Core.Diagnostics.AppLog.Debug("Native", "FFF.Native.dll 自解压完成");
         }
-        catch { /* 非内嵌形态（精简版/开发运行）：忽略 */ }
+        catch (Exception ex)
+        {
+            _3FCompare.Core.Diagnostics.AppLog.Warn("Native", $"自解压跳过: {ex.Message}");
+        }
+
+        // F-LOG：安装内核日志 sink（内核线程的日志汇入同一落盘通道）
+        try
+        {
+            _3FCompare.Core.Diagnostics.KernelLogBridge.Install();
+        }
+        catch (Exception ex)
+        {
+            _3FCompare.Core.Diagnostics.AppLog.Warn("Kernel", $"sink 安装失败: {ex.Message}");
+        }
 
         // 内嵌 Avalonia 原生 DLL 自解压（libSkiaSharp.dll / libHarfBuzzSharp.dll）
         try
@@ -41,10 +49,10 @@ internal static class Program
         }
         catch { /* 忽略失败 */ }
 
-        // --selftest <video>：打开→等就绪→步进断言→自动播放断言（WinForms 版语义一致）
+        // --selftest <video> [video2]：video2 用于嵌入式 UI 消息注入拖入测试（可选）
         if (args.Length >= 2 && args[0] == "--selftest")
         {
-            RunSelftest(args[1]);
+            RunSelftest(args[1], args.Length >= 3 ? args[2] : null);
             return;
         }
         // --screentest <input> <png>：打开→就绪+500ms→抓表面0→存 PNG（>1000B 判过）
@@ -74,12 +82,15 @@ internal static class Program
         BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }
 
-    private static void RunSelftest(string videoPath)
+    private static void RunSelftest(string videoPath, string? dropVideoPath = null)
     {
         var exitCode = 1;
         try
         {
-            BuildAvaloniaApp().StartWithClassicDesktopLifetime(new[] { "--selftest-internal", videoPath });
+            var args = new List<string> { "--selftest-internal", videoPath };
+            if (dropVideoPath is not null)
+                args.Add(dropVideoPath);
+            BuildAvaloniaApp().StartWithClassicDesktopLifetime(args.ToArray());
             exitCode = SelftestResult.Code;
         }
         catch (Exception ex)
@@ -112,8 +123,9 @@ internal static class Program
         Environment.Exit(exitCode);
     }
 
-    /// <summary>selftest 结果（由 MainWindow 自动化流程写入）。</summary>
-    public static (int Code, string Message) SelftestResult;
+    /// <summary>selftest 结果（由 MainWindow 自动化流程写入）。默认 = 失败，
+    /// 防止 MainWindow 未写入时（启动即崩）误报成功。</summary>
+    public static (int Code, string Message) SelftestResult = (1, "selftest 未完成");
 
     /// <summary>autodemo 待打开文件（App 创建主窗时消费）。</summary>
     public static string[]? AutodemoFiles;
@@ -126,10 +138,10 @@ internal static class Program
             .UseWin32()
             .With(new Win32PlatformOptions
             {
-                // 使用 WGL（OpenGL）替代 ANGLE（OpenGL ES→D3D），避免依赖 av_libglesv2.dll
                 RenderingMode = new[] { Win32RenderingMode.Wgl, Win32RenderingMode.Software },
             })
             .UseSkia()
+            .UseHarfBuzz()
             .LogToTrace();
 
     private static byte[] ReadAll(System.IO.Stream s)

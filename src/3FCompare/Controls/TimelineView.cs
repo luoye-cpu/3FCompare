@@ -17,7 +17,7 @@ public sealed class TimelineView : Control
     private bool _loopEnabled;
     private bool _scrubbing;
     private DateTime _lastScrubEmit = DateTime.MinValue;
-    private bool _dragged;
+    private bool _dragged; // 预留：拖动状态标记（当前由 _scrubbing 承担，保留供后续扩展）
 
     public event Action<long>? SeekRequested;
     public event Action<long, bool>? AbPointSet;   // (position100ns, isA)
@@ -61,9 +61,30 @@ public sealed class TimelineView : Control
 
     // ---------- 状态注入 ----------
 
-    public void SetDuration(long duration100ns) { _duration100ns = Math.Max(0, duration100ns); InvalidateVisual(); }
-    public void SetPosition(long position100ns) { _position100ns = position100ns; InvalidateVisual(); }
-    public void SetPreviewPosition(long position100ns) { _preview100ns = position100ns; InvalidateVisual(); }
+    public void SetDuration(long duration100ns)
+    {
+        duration100ns = Math.Max(0, duration100ns);
+        // 同值短路：播放中 duration 恒定，避免每 tick 无效重绘（PollSnapshots 4Hz × 9 路）
+        if (_duration100ns == duration100ns) return;
+        _duration100ns = duration100ns;
+        InvalidateVisual();
+    }
+
+    public void SetPosition(long position100ns)
+    {
+        // 同值短路：仅在位置真正变化时重绘
+        if (_position100ns == position100ns) return;
+        _position100ns = position100ns;
+        InvalidateVisual();
+    }
+
+    public void SetPreviewPosition(long position100ns)
+    {
+        // 相同预览位置（如拖动停止后复点）不触发重绘
+        if (_preview100ns == position100ns) return;
+        _preview100ns = position100ns;
+        InvalidateVisual();
+    }
     public void SetLoopRange(long start100ns, long end100ns, bool enabled)
     {
         _loopStart = start100ns; _loopEnd = end100ns; _loopEnabled = enabled;
@@ -87,7 +108,7 @@ public sealed class TimelineView : Control
         if (!point.Properties.IsLeftButtonPressed) return;
         Focus();
         _scrubbing = true;
-        _dragged = false;
+        _dragged = false; // 纯点击未拖动：松手时跳过 Seek（位置未变，无需解码跳转）
         e.Pointer.Capture(this);
         ScrubThrottled(PositionFromX(e.GetPosition(this).X));
         e.Handled = true;
@@ -107,10 +128,24 @@ public sealed class TimelineView : Control
         base.OnPointerReleased(e);
         if (!_scrubbing) return;
         _scrubbing = false;
+        var dragged = _dragged;
         e.Pointer.Capture(null);
-        // 松手才真正 Seek（拖动期间只做预览，不触发解码跳转）
-        SeekRequested?.Invoke(PositionFromX(e.GetPosition(this).X));
+        // 松手才真正 Seek（拖动期间只做预览，不触发解码跳转）。
+        // 纯点击（未拖动）位置未变，跳过 Seek 避免一次无谓的解码器 flush。
+        if (dragged)
+            SeekRequested?.Invoke(PositionFromX(e.GetPosition(this).X));
         e.Handled = true;
+    }
+
+    protected override void OnPointerCaptureLost(PointerCaptureLostEventArgs e)
+    {
+        base.OnPointerCaptureLost(e);
+        // ALT+TAB 等导致捕获丢失时复位 scrubbing，否则轮询不再更新播放头位置
+        if (_scrubbing)
+        {
+            _scrubbing = false;
+            InvalidateVisual();
+        }
     }
 
     protected override void OnKeyDown(KeyEventArgs e)
@@ -136,6 +171,19 @@ public sealed class TimelineView : Control
 
     private static string Ts(long ticks) => TimeSpan.FromTicks(ticks).ToString(@"hh\:mm\:ss");
 
+    // ---- 缓存渲染资源（避免每次 Render 分配新对象导致 GC 压力和卡顿）----
+    private static readonly SolidColorBrush BrushTrackBg = new(Color.FromRgb(40, 40, 46));
+    private static readonly SolidColorBrush BrushLoopFill = new(Color.FromArgb(70, 100, 200, 100));
+    private static readonly SolidColorBrush BrushLoopLine = new(Color.FromRgb(100, 200, 100));
+    private static readonly Pen PenLoopLine = new(BrushLoopLine, 1.5);
+    private static readonly SolidColorBrush BrushTickColor = new(Color.FromRgb(80, 80, 90));
+    private static readonly Pen PenTick = new(BrushTickColor, 1);
+    private static readonly SolidColorBrush BrushTickLabel = new(Color.FromRgb(140, 140, 150));
+    private static readonly Typeface TypeConsolas = new("Consolas");
+    private static readonly SolidColorBrush BrushPlayhead = new(Color.FromRgb(255, 200, 64));
+    private static readonly Pen PenPlayhead = new(BrushPlayhead, 2);
+    private static readonly SolidColorBrush BrushTimestamp = new(Color.FromRgb(200, 200, 210));
+
     public override void Render(DrawingContext dc)
     {
         base.Render(dc);
@@ -143,36 +191,31 @@ public sealed class TimelineView : Control
         var h = Bounds.Height;
         if (w <= 0 || h <= 0) return;
 
-        // 轨道底
+        // 轨道底（缓存画刷）
         var trackRect = new Rect(0, h * 0.30, w, h * 0.40);
-        dc.DrawFill(new SolidColorBrush(Color.FromRgb(40, 40, 46)), trackRect);
+        dc.DrawFill(BrushTrackBg, trackRect);
 
         // A-B 循环区间（半透明绿 + 两端竖线）
         if (_loopEnabled && _duration100ns > 0 && _loopEnd > _loopStart)
         {
             var ax = (double)_loopStart / _duration100ns * w;
             var bx = (double)_loopEnd / _duration100ns * w;
-            dc.DrawFill(new SolidColorBrush(Color.FromArgb(70, 100, 200, 100)),
-                new Rect(ax, 0, bx - ax, h));
-            dc.DrawLine(new Pen(new SolidColorBrush(Color.FromRgb(100, 200, 100)), 1.5),
-                new Point(ax, 0), new Point(ax, h));
-            dc.DrawLine(new Pen(new SolidColorBrush(Color.FromRgb(100, 200, 100)), 1.5),
-                new Point(bx, 0), new Point(bx, h));
+            dc.DrawFill(BrushLoopFill, new Rect(ax, 0, bx - ax, h));
+            dc.DrawLine(PenLoopLine, new Point(ax, 0), new Point(ax, h));
+            dc.DrawLine(PenLoopLine, new Point(bx, 0), new Point(bx, h));
         }
 
         // 11 个刻度 + hh:mm:ss 标签
-        var tickPen = new Pen(new SolidColorBrush(Color.FromRgb(80, 80, 90)), 1);
-        var labelBrush = new SolidColorBrush(Color.FromRgb(140, 140, 150));
         for (var i = 0; i <= 10; i++)
         {
             var x = w * i / 10.0;
             var tickTop = i % 5 == 0 ? h * 0.12 : h * 0.2;
-            dc.DrawLine(tickPen, new Point(x, tickTop), new Point(x, h * 0.3));
+            dc.DrawLine(PenTick, new Point(x, tickTop), new Point(x, h * 0.3));
             if (i % 5 == 0 && _duration100ns > 0)
             {
                 var label = Ts((long)(_duration100ns * i / 10.0));
                 var ft = new FormattedText(label, System.Globalization.CultureInfo.CurrentCulture,
-                    FlowDirection.LeftToRight, new Typeface("Consolas"), 10, labelBrush);
+                    FlowDirection.LeftToRight, TypeConsolas, 10, BrushTickLabel);
                 dc.DrawText(ft, new Point(Math.Min(x + 2, w - ft.Width), h - ft.Height - 1));
             }
         }
@@ -182,16 +225,14 @@ public sealed class TimelineView : Control
         if (_duration100ns > 0)
         {
             var px = (double)pos / _duration100ns * w;
-            var accent = new SolidColorBrush(Color.FromRgb(255, 200, 64));
-            dc.DrawLine(new Pen(accent, 2), new Point(px, 0), new Point(px, h));
-            dc.DrawGeometry(accent, null, Triangle(px));
+            dc.DrawLine(PenPlayhead, new Point(px, 0), new Point(px, h));
+            dc.DrawGeometry(BrushPlayhead, null, Triangle(px));
         }
 
         // 当前时间戳（左上）
         var stamp = TimeSpan.FromTicks(_scrubbing ? _preview100ns : _position100ns).ToString(@"hh\:mm\:ss\.fff");
         var stampText = new FormattedText(stamp, System.Globalization.CultureInfo.CurrentCulture,
-            FlowDirection.LeftToRight, new Typeface("Consolas"), 11,
-            new SolidColorBrush(Color.FromRgb(200, 200, 210)));
+            FlowDirection.LeftToRight, TypeConsolas, 11, BrushTimestamp);
         dc.DrawText(stampText, new Point(4, 2));
     }
 

@@ -99,7 +99,7 @@ public partial class TransportBar : UserControl
     public Func<double>? StepProfileSecondsProvider { get; set; }
 
     private void OnLoop(object? sender, RoutedEventArgs e) =>
-        LoopToggled?.Invoke(this, BtnLoop.Background is not null);
+        LoopToggled?.Invoke(this, BtnLoop.Background is null); // 传目标状态（当前关→开，当前开→关）
 
     private void OnAdd(object? sender, RoutedEventArgs e) => AddClicked?.Invoke(this, EventArgs.Empty);
     private void OnRemove(object? sender, RoutedEventArgs e) => RemoveClicked?.Invoke(this, EventArgs.Empty);

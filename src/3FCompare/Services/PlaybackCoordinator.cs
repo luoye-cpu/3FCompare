@@ -42,6 +42,9 @@ public sealed class PlaybackCoordinator
     public bool RealMode => _realMode;
     public SyncController Sync => _sync;
 
+    /// <summary>窗口已关闭（自动化流程终止标志）。</summary>
+    public bool IsClosed => _closed;
+
     /// <summary>状态变化通知（失败路变化/事件到达等，UI 据此刷新状态栏）。</summary>
     public event EventHandler? StateChanged;
 
@@ -202,8 +205,30 @@ public sealed class PlaybackCoordinator
         switch (evt.Type)
         {
             case EngineEventType.Error:
-                if (evt.DetailJson.Contains("\"state\":6", StringComparison.OrdinalIgnoreCase)
-                    || evt.DetailJson.Contains("fail", StringComparison.OrdinalIgnoreCase))
+                // 用 System.Text.Json 解析 state 字段，避免字符串包含匹配的脆弱性
+                var isFailure = false;
+                if (!string.IsNullOrEmpty(evt.DetailJson))
+                {
+                    try
+                    {
+                        using var doc = System.Text.Json.JsonDocument.Parse(evt.DetailJson);
+                        if (doc.RootElement.TryGetProperty("state", out var stateEl) &&
+                            stateEl.ValueKind == System.Text.Json.JsonValueKind.Number &&
+                            stateEl.GetInt32() == 6)
+                            isFailure = true;
+                        else if (doc.RootElement.TryGetProperty("reason", out var reasonEl) &&
+                                 reasonEl.ValueKind == System.Text.Json.JsonValueKind.String &&
+                                 (reasonEl.GetString()?.Contains("fail", StringComparison.OrdinalIgnoreCase) == true))
+                            isFailure = true;
+                    }
+                    catch
+                    {
+                        // JSON 解析失败时回退到字符串匹配
+                        isFailure = evt.DetailJson.Contains("\"state\":6", StringComparison.OrdinalIgnoreCase) ||
+                                    evt.DetailJson.Contains("fail", StringComparison.OrdinalIgnoreCase);
+                    }
+                }
+                if (isFailure)
                 {
                     slot.Failed = true;
                     slot.Error = $"内核错误: {evt.DetailJson}";

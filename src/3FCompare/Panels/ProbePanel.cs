@@ -98,10 +98,14 @@ public sealed class ProbePanel : StackPanel
     public void CopyToClipboard()
     {
         if (!_hasSample) return;
-        // 手工拼接（NativeAOT：匿名类型反射序列化不可用）
+        // Avalonia 12：IClipboard.SetTextAsync 移除，改用 DataTransfer+SetDataAsync
         var json = string.Create(System.Globalization.CultureInfo.InvariantCulture,
             $"{{\n  \"x\": {_lastX},\n  \"y\": {_lastY},\n  \"r\": {_last.R:0.######},\n  \"g\": {_last.G:0.######}," +
             $"\n  \"b\": {_last.B:0.######},\n  \"a\": {_last.A:0.######},\n  \"bitDepth\": {_last.BitDepth}\n}}");
-        TopLevel.GetTopLevel(this)?.Clipboard?.SetTextAsync(json);
+        var item = new global::Avalonia.Input.DataTransferItem();
+        item.SetText(json);
+        var transfer = new global::Avalonia.Input.DataTransfer();
+        transfer.Add(item);
+        _ = TopLevel.GetTopLevel(this)?.Clipboard?.SetDataAsync(transfer);
     }
 }

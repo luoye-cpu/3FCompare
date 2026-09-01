@@ -118,9 +118,18 @@ public sealed class CompareGridView : Control
 
     protected override Size MeasureOverride(Size availableSize)
     {
+        // 计算每格尺寸（而不是用整体 availableSize），避免 DesiredSize 膨胀导致布局异常
+        var (cols, rows) = GridLayout.ResolveGrid(_surfaces.Count, _singleView,
+            _presetCols ?? 0, _presetRows ?? 0);
+        if (_singleView) (cols, rows) = (1, 1);
+        var cellW = cols > 0 ? availableSize.Width / cols : availableSize.Width;
+        var cellH = rows > 0 ? availableSize.Height / rows : availableSize.Height;
+        var cellSize = new Size(Math.Max(0, cellW), Math.Max(0, cellH));
+
         foreach (var s in _surfaces)
-            s.Measure(availableSize);
+            s.Measure(cellSize);
         _hint.Measure(availableSize);
+
         return availableSize;
     }
 
@@ -145,7 +154,8 @@ public sealed class CompareGridView : Control
             var col = visibleIndex % cols;
             var row = visibleIndex / cols;
             // 每格留 1px 缝隙（选中边框不互相覆盖）
-            s.Arrange(new Rect(col * cw + 1, row * ch + 1, cw - 2, ch - 2));
+            var r = new Rect(col * cw + 1, row * ch + 1, cw - 2, ch - 2);
+            s.Arrange(r);
         }
         return finalSize;
     }

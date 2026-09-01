@@ -25,9 +25,6 @@ public sealed class ToolsSidebar : UserControl
     /// <summary>当前展开宽度（只读，供宿主在折叠展开时恢复）。</summary>
     public double ExpandedWidth => _expandedWidth;
 
-    /// <summary>激活页签变化（MainWindow 据此刷新面板会话绑定）。</summary>
-    public event EventHandler? ActiveToolChanged;
-
     public ProbePanel Probe { get; }
     public BookmarkPanel Bookmarks { get; }
     public OffsetPanel Offset { get; }
@@ -101,21 +98,20 @@ public sealed class ToolsSidebar : UserControl
     /// <summary>设置展开宽度（由宿主在首次布局或拖动分隔条后更新）。</summary>
     public void UpdateExpandedWidth(double width)
     {
-        if (width >= MinWidth) _expandedWidth = width;
+        if (width >= PanelMinWidth) _expandedWidth = width;
     }
 
-    private const double MinWidth = 100;
+    private const double PanelMinWidth = 100; // 侧栏最小宽度（避免与 Layoutable.MinWidth 属性同名隐藏 CS0108）
 
     public void Activate(Control panel)
     {
         _active = panel;
         _content.Content = panel;
-        foreach (var (tab, p) in _tabs)
-            tab.Background = ReferenceEquals(p, panel)
-                ? new SolidColorBrush(Color.FromRgb(255, 200, 64))
-                : null;
-        ActiveToolChanged?.Invoke(this, EventArgs.Empty);
-    }
+foreach (var (tab, p) in _tabs)
+	            tab.Background = ReferenceEquals(p, panel)
+	                ? new SolidColorBrush(Color.FromRgb(255, 200, 64))
+	                : null;
+	    }
 
     public void ActivateProbe() => Activate(Probe);
     public void ActivateBookmarks() => Activate(Bookmarks);

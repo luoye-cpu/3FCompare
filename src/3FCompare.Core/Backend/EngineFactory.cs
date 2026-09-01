@@ -14,22 +14,19 @@ public static class EngineFactory
     {
         // 先低成本检查 FFmpeg（避免加载 FFF.Native 后才发现不可用）
         if (!NativeRuntime.IsFfmpegAvailable())
+        {
+            Console.Error.WriteLine("[EngineFactory] IsNativeAvailable: IsFfmpegAvailable=false");
             return false;
+        }
         try
         {
-            // 再尝试加载 FFF.Native 并调用无副作用函数，最可靠。
-            return Fff3FpNativeProbe.FFF3FP_GetApiVersion() >= 1;
+            var ver = Fff3FpNativeProbe.FFF3FP_GetApiVersion();
+            Console.Error.WriteLine($"[EngineFactory] IsNativeAvailable: GetApiVersion={ver}");
+            return ver >= 1;
         }
-        catch (DllNotFoundException)
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
         {
-            return false;
-        }
-        catch (EntryPointNotFoundException)
-        {
-            return false;
-        }
-        catch (BadImageFormatException)
-        {
+            Console.Error.WriteLine($"[EngineFactory] IsNativeAvailable: {ex.GetType().Name}: {ex.Message}");
             return false;
         }
     }

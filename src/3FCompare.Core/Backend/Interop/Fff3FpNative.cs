@@ -19,16 +19,6 @@ internal enum FffResult : int
     NotSupported = -7,
 }
 
-/// <summary>显示器HDR能力（对应3FP的HdrDisplayCapabilities）。</summary>
-[StructLayout(LayoutKind.Sequential)]
-internal struct HdrDisplayCapabilities
-{
-    public bool supported;              // 是否支持HDR
-    public float minimumNits;           // 最小亮度（nits）
-    public float maximumNits;           // 峰值亮度（nits）
-    public float maximumFullFrameNits;  // 全帧最大亮度（nits）
-}
-
 /// <summary>解码模式（FFF3FPDecodeMode）。</summary>
 internal enum FffDecodeMode : uint
 {
@@ -159,6 +149,24 @@ internal struct Fff3FpVideoPixelProbe
     public uint Reserved;
 }
 
+/// <summary>FFF3FPRenderTargetInfo（3FCompare K4，API 独立新结构）。</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct Fff3FpRenderTargetInfo
+{
+    public uint Size;
+    public uint Version;  // == 1
+    public uint SwapWidth;
+    public uint SwapHeight;
+    public uint ClientWidth;
+    public uint ClientHeight;
+    public uint DestX;
+    public uint DestY;
+    public uint DestWidth;
+    public uint DestHeight;
+    public uint OutputBitDepth;
+    public uint Hdr;
+}
+
 /// <summary>对 FFF.Native.dll（3FP）的 P/Invoke 互操作层。
 /// 全部使用 <see cref="LibraryImportAttribute"/> 以兼容 NativeAOT 静态解析（06-R15）。</summary>
 internal static partial class Fff3FpNative
@@ -246,4 +254,18 @@ internal static partial class Fff3FpNative
     [LibraryImport(DllName)]
     internal static partial FffResult FFF3FP_ReadVideoPixel(nint player,
         ref Fff3FpVideoPixelProbe probe);
+
+    // 3FCompare patch (0004): batch pixel readback (single GPU staging copy).
+    [LibraryImport(DllName)]
+    internal static partial FffResult FFF3FP_ReadVideoPixelRegion(nint player,
+        uint x, uint y, uint width, uint height,
+        float[] dst, uint dstFloatCount, out uint outputBitDepth);
+
+    // 3FCompare K4/K5: render-target diagnostics + Redraw
+    [LibraryImport(DllName)]
+    internal static partial FffResult FFF3FP_GetRenderTargetInfo(nint player,
+        ref Fff3FpRenderTargetInfo info);
+
+    [LibraryImport(DllName)]
+    internal static partial FffResult FFF3FP_Redraw(nint player);
 }
