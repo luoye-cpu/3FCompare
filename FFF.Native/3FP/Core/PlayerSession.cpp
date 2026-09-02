@@ -1803,6 +1803,14 @@ FFFResult PlayerSession::OpenDecoder(AVFormatContext* owner, const std::int32_t 
             hardwareThreads, MaximumSoftwareDecoderThreads));
         context->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
     }
+    // 3FCompare: enable multi-threaded audio decoding (FLAC supports frame-level
+    // parallelism). Reduces CPU contention between AV1 video and FLAC audio decode.
+    if (result >= 0 && !video && !hardwareRequested) {
+        const auto hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
+        context->thread_count = static_cast<int>(std::min(
+            hardwareThreads, MaximumSoftwareDecoderThreads));
+        context->thread_type = FF_THREAD_FRAME;
+    }
     if (result >= 0 && hardwareRequested) {
         // The decoder already allocates its codec-specific DPB. Extra surfaces
         // only cover the bounded presentation queue plus in-flight copies.
