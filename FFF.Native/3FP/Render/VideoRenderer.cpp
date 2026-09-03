@@ -2200,6 +2200,12 @@ FFFResult PlayerVideoRenderer::EnsureSwapChain(std::uint32_t width, std::uint32_
         if (SUCCEEDED(resize)) {
             swapWidth_ = width; swapHeight_ = height;
             ReleaseTimedTextResources();
+            // 3FCompare patch (0011 follow-up): mirror the deferred-resize path in
+            // PresentTimedText — after a real ResizeBuffers, one non-blocking
+            // Present(0,0) hands the new backbuffers to DWM and prevents the next
+            // VSync-locked Present(1,0) from waiting 100+ ms inside the compositor
+            // (user report: "click maximize/restore → screen freezes briefly").
+            swapChain_->Present(0, 0);
             return FFFResult::Success;
         }
         if (RequestRecoveryIfDeviceLostLocked()) return FFFResult::DeviceFailure;
@@ -2228,7 +2234,9 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
         (outputBits >= 10 ? DXGI_FORMAT_R10G10B10A2_UNORM :
             DXGI_FORMAT_B8G8R8A8_UNORM);
     description.SampleDesc.Count = 1; description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    description.BufferCount = 2; description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    // 3FCompare: 3 back buffers to absorb resize/present jitter and avoid starving
+    // the audio pipeline during swap chain resize (DWM needs >2 frames at 4K).
+    description.BufferCount = 3; description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     description.AlphaMode = DXGI_ALPHA_MODE_IGNORE; description.Scaling = DXGI_SCALING_NONE;
     // VRR capability (3FCompare extension): when the OS supports tearing, carry
     // the creation flag unconditionally so the pacing mode can toggle at runtime
