@@ -123,7 +123,7 @@ public partial class MainWindow : Window
         _sidebar.CollapsedChanged += collapsed =>
         {
             MainArea.ColumnDefinitions[0].Width = new GridLength(
-                collapsed ? 24 : _sidebar.ExpandedWidth, GridUnitType.Pixel);
+                collapsed ? 44 : _sidebar.ExpandedWidth, GridUnitType.Pixel);
             SidebarSplitter.IsVisible = !collapsed;
         };
         SidebarHost.Content = _sidebar;
@@ -255,7 +255,11 @@ public partial class MainWindow : Window
         }
         try
         {
-            _coordinator.OpenFiles(paths, autoPlay: true);
+            // Keep every route on a common paused timeline while files finish opening.
+            // Auto-playing the first route lets its clock advance before later routes are ready.
+            _sync.Pause();
+            SetPlaying(false);
+            _coordinator.OpenFiles(paths, autoPlay: false);
         }
         catch (Exception ex)
         {
@@ -2051,4 +2055,3 @@ public partial class MainWindow : Window
         }
     }
 }
-

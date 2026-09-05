@@ -2,31 +2,35 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-             mc:Ignorable="d" d:DesignWidth="900" d:DesignHeight="44"
+             mc:Ignorable="d" d:DesignWidth="1200" d:DesignHeight="54"
              x:Class="_3FCompare.Controls.TransportBar">
 
-  <Grid ColumnDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,*,Auto,Auto" Margin="8,4">
+  <Grid ColumnDefinitions="*,Auto,*" Margin="12,7">
+    <StackPanel Grid.Column="0" Orientation="Horizontal" HorizontalAlignment="Left" Spacing="6">
+      <Button x:Name="BtnAdd" Width="36" Height="36" Click="OnAdd" Content="+" FontSize="16" />
+      <Button x:Name="BtnRemove" Width="36" Height="36" Click="OnRemove" Content="−" FontSize="16" />
+    </StackPanel>
 
-    <Button Grid.Column="0" x:Name="BtnPlayPause" Width="36" Height="28" Click="OnPlayPause" Content="▶" />
-    <Button Grid.Column="1" x:Name="BtnStop" Width="36" Height="28" Click="OnStop" Content="■" Margin="4,0,0,0" />
-    <Button Grid.Column="2" x:Name="BtnFramePrev" Width="32" Height="28" Click="OnFramePrev" Content="◀" Margin="4,0,0,0" />
-    <Button Grid.Column="3" x:Name="BtnFrameNext" Width="32" Height="28" Click="OnFrameNext" Content="▶" Margin="4,0,0,0" />
-    <Button Grid.Column="4" x:Name="BtnSecPrev" Width="32" Height="28" Click="OnSecPrev" Content="◀◀" Margin="8,0,0,0" />
-    <Button Grid.Column="5" x:Name="BtnSecNext" Width="32" Height="28" Click="OnSecNext" Content="▶▶" Margin="4,0,0,0" />
-    <Button Grid.Column="6" x:Name="BtnLoop" Width="36" Height="28" Click="OnLoop" Content="🔁" Margin="8,0,0,0" />
-    <Button Grid.Column="7" x:Name="BtnAdd" Width="32" Height="28" Click="OnAdd" Content="+" Margin="8,0,0,0" />
-    <Button Grid.Column="8" x:Name="BtnRemove" Width="32" Height="28" Click="OnRemove" Content="−" Margin="4,0,0,0" />
+    <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" Spacing="6">
+      <Button x:Name="BtnSecPrev" Width="40" Height="36" Click="OnSecPrev" Content="◀◀" />
+      <Button x:Name="BtnFramePrev" Width="38" Height="36" Click="OnFramePrev" Content="◀" />
+      <Button x:Name="BtnPlayPause" Width="46" Height="36" Click="OnPlayPause" Content="▶" FontSize="16" />
+      <Button x:Name="BtnStop" Width="38" Height="36" Click="OnStop" Content="■" />
+      <Button x:Name="BtnFrameNext" Width="38" Height="36" Click="OnFrameNext" Content="▶" />
+      <Button x:Name="BtnSecNext" Width="40" Height="36" Click="OnSecNext" Content="▶▶" />
+      <Button x:Name="BtnLoop" Width="40" Height="36" Click="OnLoop" Content="🔁" />
+    </StackPanel>
 
-    <ComboBox Grid.Column="9" x:Name="ComboSpeed" Width="72" Height="28" Margin="8,0,0,0"
-              SelectionChanged="OnSpeedChanged" />
-    <ComboBox Grid.Column="10" x:Name="ComboColorMode" Width="88" Height="28" Margin="4,0,0,0"
-              SelectionChanged="OnColorModeChanged" />
-
-    <TextBlock Grid.Column="11" x:Name="TextTime" Margin="12,0,0,0" VerticalAlignment="Center"
-               FontFamily="Consolas" FontSize="13"
-               Foreground="#FFC8C8D2" Text="00:00:00:00 / 00:00:00" />
-
-    <TextBlock Grid.Column="13" x:Name="TextInfo" Margin="8,0,0,0" VerticalAlignment="Center"
-               FontSize="12" Foreground="#8C8C96" Text="" />
+    <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+      <ComboBox x:Name="ComboSpeed" Width="82" Height="36" FontSize="13"
+                SelectionChanged="OnSpeedChanged" />
+      <ComboBox x:Name="ComboColorMode" Width="172" Height="36" FontSize="13"
+                SelectionChanged="OnColorModeChanged" />
+      <TextBlock x:Name="TextTime" Width="208" Margin="10,0,0,0" VerticalAlignment="Center"
+                 HorizontalAlignment="Right" TextAlignment="Right" FontFamily="Consolas" FontSize="13"
+                 Foreground="#FFC8C8D2" Text="00:00:00:00 / 00:00:00" />
+      <TextBlock x:Name="TextInfo" MaxWidth="120" VerticalAlignment="Center"
+                 TextTrimming="CharacterEllipsis" FontSize="12" Foreground="#8C8C96" Text="" />
+    </StackPanel>
   </Grid>
 </UserControl>
