@@ -67,12 +67,12 @@
             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" />
 
     <!-- 底部：传输栏 -->
-    <Border DockPanel.Dock="Bottom" x:Name="TransportHost" Height="44"
+    <Border DockPanel.Dock="Bottom" x:Name="TransportHost" Height="54"
             Background="{DynamicResource PanelBrush}"
             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" />
 
     <!-- 主区：侧栏 | 分隔条 | 中央网格/AB滑块/放大镜 -->
-    <Grid ColumnDefinitions="240,Auto,*" x:Name="MainArea">
+    <Grid ColumnDefinitions="264,Auto,*" x:Name="MainArea">
       <ContentControl x:Name="SidebarHost" Grid.Column="0" />
       <GridSplitter x:Name="SidebarSplitter" Grid.Column="1" Width="4"
                     ResizeDirection="Columns" Background="#50505A" MinWidth="4" />
