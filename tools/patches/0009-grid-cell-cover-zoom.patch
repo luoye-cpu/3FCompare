@@ -1,0 +1,147 @@
+diff --git a/FFF.Native/3FP/Render/VideoRenderer.cpp b/FFF.Native/3FP/Render/VideoRenderer.cpp
+index 99ff55b..9911433 100644
+--- a/FFF.Native/3FP/Render/VideoRenderer.cpp
++++ b/FFF.Native/3FP/Render/VideoRenderer.cpp
+@@ -821,6 +821,20 @@ constexpr VideoDestination CalculateVideoDestination(const std::uint32_t sourceW
+     return {(outputWidth - width) / 2, (outputHeight - height) / 2, width, height};
+ }
+ 
++// Grow a fitted video viewport only until it covers its complete grid cell.
++// Any remaining user zoom is applied in UV space, keeping GPU work bounded.
++constexpr float CalculateZoomViewportScale(const VideoDestination destination,
++    const std::uint32_t outputWidth, const std::uint32_t outputHeight,
++    const float zoom) noexcept {
++    if (destination.width == 0 || destination.height == 0 ||
++        outputWidth == 0 || outputHeight == 0)
++        return 1.0f;
++    const auto coverScale = std::max(
++        static_cast<float>(outputWidth) / static_cast<float>(destination.width),
++        static_cast<float>(outputHeight) / static_cast<float>(destination.height));
++    return std::clamp(zoom, 1.0f, std::max(coverScale, 1.0f));
++}
++
+ constexpr VideoDestination CalculateLyricsCoverDestination(const std::uint32_t sourceWidth,
+     const std::uint32_t sourceHeight, const std::uint32_t outputWidth,
+     const std::uint32_t outputHeight, const float coverWidthPercentage,
+@@ -901,6 +915,12 @@ static_assert(CalculateVideoDestination(640, 360, 1920, 1080, true).width == 640
+     CalculateVideoDestination(640, 360, 1920, 1080, true).y == 360);
+ static_assert(CalculateVideoDestination(2560, 1440, 1920, 1080, true).width == 1920 &&
+     CalculateVideoDestination(2560, 1440, 1920, 1080, true).height == 1080);
++static_assert(CalculateZoomViewportScale(
++    CalculateVideoDestination(1920, 1080, 640, 800), 640, 800, 1.0f) == 1.0f);
++static_assert(CalculateZoomViewportScale(
++    CalculateVideoDestination(1920, 1080, 640, 800), 640, 800, 4.0f) > 2.22f &&
++    CalculateZoomViewportScale(
++        CalculateVideoDestination(1920, 1080, 640, 800), 640, 800, 4.0f) < 2.23f);
+ static_assert(CalculateLyricsCoverDestination(512, 512, 800, 400,
+     50.0f, 50.0f, 7.5f, 0.0f, 7.5f).x == 60 &&
+     CalculateLyricsCoverDestination(512, 512, 800, 400,
+@@ -2655,7 +2675,8 @@ FFFResult PlayerVideoRenderer::EnsureVideoProcessorInputSurface(
+ 
+ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
+     const float x, const float y, const float width, const float height,
+-    const std::uint32_t effect, ID3D11ShaderResourceView* const* sourceViews) noexcept {
++    const std::uint32_t effect, ID3D11ShaderResourceView* const* sourceViews,
++    const bool useCachedViewTransform) noexcept {
+     if (target == nullptr || context_ == nullptr || width <= 0.0f || height <= 0.0f)
+         return FFFResult::InvalidArgument;
+     cachedVideoSettings_.colorMode = static_cast<std::uint32_t>(actualMode_);
+@@ -2672,9 +2693,11 @@ FFFResult PlayerVideoRenderer::DrawWithShader(ID3D11RenderTargetView* target,
+     cachedVideoSettings_.viewFovY = std::bit_cast<float>(
+         view360FovYBits_.load(std::memory_order_acquire));
+     cachedVideoSettings_.viewAspect = width / height;
+-    // 3FCompare patch (0007): ensure zoom/pan constants reach the shader.
+-    cachedVideoSettings_.viewZoom = std::max(
+-        std::bit_cast<float>(viewZoomBits_.load(std::memory_order_acquire)), 1.0f);
++    if (!useCachedViewTransform) {
++        cachedVideoSettings_.viewPanX = 0.0f;
++        cachedVideoSettings_.viewPanY = 0.0f;
++        cachedVideoSettings_.viewZoom = 1.0f;
++    }
+     context_->UpdateSubresource(constants_, 0, nullptr, &cachedVideoSettings_, 0, 0);
+     context_->OMSetRenderTargets(1, &target, nullptr);
+     const D3D11_VIEWPORT viewport{x, y, width, height, 0.0f, 1.0f};
+@@ -4508,23 +4531,33 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
+         destination = CalculateVideoDestination(sourceWidth_, sourceHeight_, swapWidth_,
+             swapHeight_, sourceLimitedToNativeSize_);
+     }
+-    // Apply the view transform (zoom + pan) around the destination center.
+-    // Zoom scales the fitted video box; pan offsets are normalized to the
+-    // unzoomed box and clamped so the zoomed view always covers the fitted box.
++    // First grow the fitted viewport toward a cover layout so letterbox space
++    // disappears progressively. Further zoom stays in UV space for stable cost.
+     const auto zoom = std::bit_cast<float>(viewZoomBits_.load(std::memory_order_acquire));
+     const auto panX = std::bit_cast<float>(viewPanXBits_.load(std::memory_order_acquire));
+     const auto panY = std::bit_cast<float>(viewPanYBits_.load(std::memory_order_acquire));
+-    // 3FCompare patch (0007): zoom/pan in UV space only.
+-    // The viewport stays at the window-fitted destination rect; the shader
+-    // applies zoom (uv center-scaled) and pan via ViewZoom/ViewPan constants.
+-    // GPU load is now constant per frame — the old zoomedWidth×zoomedHeight
+-    // viewport (e.g. 4× = 7680px) caused one-frame-per-second stutter on HD+.
++    float drawX = static_cast<float>(destination.x);
++    float drawY = static_cast<float>(destination.y);
++    float drawWidth = static_cast<float>(destination.width);
++    float drawHeight = static_cast<float>(destination.height);
+     if (!projection360 && zoom > 1.0001f) {
+-        const float maxPanX = (zoom - 1.0f) / (2.0f * zoom);
+-        const float maxPanY = (zoom - 1.0f) / (2.0f * zoom);
++        const auto viewportScale = CalculateZoomViewportScale(
++            destination, swapWidth_, swapHeight_, zoom);
++        drawWidth *= viewportScale;
++        drawHeight *= viewportScale;
++        const auto overflowX = std::max(0.0f, drawWidth - static_cast<float>(swapWidth_));
++        const auto overflowY = std::max(0.0f, drawHeight - static_cast<float>(swapHeight_));
++        drawX = static_cast<float>(destination.x) +
++            (static_cast<float>(destination.width) - drawWidth) * 0.5f + panX * overflowX * 0.5f;
++        drawY = static_cast<float>(destination.y) +
++            (static_cast<float>(destination.height) - drawHeight) * 0.5f + panY * overflowY * 0.5f;
++
++        const auto shaderZoom = std::max(zoom / viewportScale, 1.0f);
++        const float maxPanX = (shaderZoom - 1.0f) / (2.0f * shaderZoom);
++        const float maxPanY = (shaderZoom - 1.0f) / (2.0f * shaderZoom);
+         cachedVideoSettings_.viewPanX = -panX * maxPanX;
+         cachedVideoSettings_.viewPanY = -panY * maxPanY;
+-        cachedVideoSettings_.viewZoom = std::max(zoom, 1.0f);
++        cachedVideoSettings_.viewZoom = shaderZoom;
+     } else {
+         cachedVideoSettings_.viewPanX = 0.0f;
+         cachedVideoSettings_.viewPanY = 0.0f;
+@@ -4552,14 +4585,17 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
+     // scaler discrepancy.  SDR still writes ordinary Rec.709 code values to
+     // the implicit SDR swap-chain contract, so DWM remains the sole owner of
+     // the Windows HDR SDR-white adjustment.
+-    const auto result = DrawWithShader(target, static_cast<float>(destination.x),
+-        static_cast<float>(destination.y), static_cast<float>(destination.width),
+-        static_cast<float>(destination.height), 0, presentationViews);
++    const auto result = DrawWithShader(target, drawX, drawY, drawWidth,
++        drawHeight, 0, presentationViews, true);
+     if (result == FFFResult::Success) {
+-        lastDestX_ = destination.x;
+-        lastDestY_ = destination.y;
+-        lastDestWidth_ = destination.width;
+-        lastDestHeight_ = destination.height;
++        const auto clippedLeft = std::max(0.0f, drawX);
++        const auto clippedTop = std::max(0.0f, drawY);
++        const auto clippedRight = std::min(static_cast<float>(swapWidth_), drawX + drawWidth);
++        const auto clippedBottom = std::min(static_cast<float>(swapHeight_), drawY + drawHeight);
++        lastDestX_ = static_cast<std::uint32_t>(clippedLeft);
++        lastDestY_ = static_cast<std::uint32_t>(clippedTop);
++        lastDestWidth_ = static_cast<std::uint32_t>(std::max(0.0f, clippedRight - clippedLeft));
++        lastDestHeight_ = static_cast<std::uint32_t>(std::max(0.0f, clippedBottom - clippedTop));
+         actualVideoScalingMode_.store(FFF3FPVideoScalingMode::Shader);
+     }
+     return result;
+diff --git a/FFF.Native/3FP/Render/VideoRenderer.h b/FFF.Native/3FP/Render/VideoRenderer.h
+index 2591ac3..bec0f9e 100644
+--- a/FFF.Native/3FP/Render/VideoRenderer.h
++++ b/FFF.Native/3FP/Render/VideoRenderer.h
+@@ -244,7 +244,8 @@ private:
+     FFFResult RenderVideoProcessorInput() noexcept;
+     FFFResult DrawWithShader(ID3D11RenderTargetView* target, float x, float y,
+         float width, float height, std::uint32_t effect = 0,
+-        ID3D11ShaderResourceView* const* sourceViews = nullptr) noexcept;
++        ID3D11ShaderResourceView* const* sourceViews = nullptr,
++        bool useCachedViewTransform = false) noexcept;
+     FFFResult PrepareScaledVideo(std::uint32_t outputWidth, std::uint32_t outputHeight,
+         ID3D11ShaderResourceView** views) noexcept;
+     FFFResult EnsurePlaneScaleChain(std::size_t plane, std::uint32_t sourceWidth,

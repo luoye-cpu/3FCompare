@@ -9,20 +9,34 @@ using _3FCompare.Panels;
 
 namespace _3FCompare.Controls;
 
-/// <summary>右侧工具侧栏（WinForms VerticalDockHost 对应）：
-/// 顶部折叠按钮 + 5 页签（探针/书签/偏移/媒体/音频）+ 放大镜常驻开关 + 内容区。
-/// 折叠/展开时通过 CollapsedChanged 事件告知宿主（MainWindow）调整 Grid 列宽，
-/// 自身记录展开宽度（默认 240px），避免用 Bounds.Width（折叠后为 24px）导致展开回不去。</summary>
+/// <summary>Fluent 风格工具侧栏：纵向导航、常驻放大镜开关与可折叠内容区。</summary>
 public sealed class ToolsSidebar : UserControl
 {
-    private readonly CheckBox _magnifierCheck = new() { FontSize = 11 };
+    private static readonly IBrush PanelBackground = new SolidColorBrush(Color.FromRgb(30, 30, 36));
+    private static readonly IBrush CardBackground = new SolidColorBrush(Color.FromRgb(38, 38, 45));
+    private static readonly IBrush ActiveBackground = new SolidColorBrush(Color.FromArgb(36, 255, 200, 64));
+    private static readonly IBrush Accent = new SolidColorBrush(Color.FromRgb(255, 200, 64));
+    private static readonly IBrush SecondaryText = new SolidColorBrush(Color.FromRgb(200, 200, 210));
+    private static readonly IBrush Divider = new SolidColorBrush(Color.FromRgb(62, 62, 70));
+
+    private readonly TextBlock _title = new() { FontSize = 16, FontWeight = FontWeight.SemiBold };
+    private readonly Button _collapseButton = new()
+    {
+        Width = 36,
+        Height = 32,
+        FontSize = 12,
+        Content = "◀",
+        HorizontalAlignment = HorizontalAlignment.Right,
+    };
+    private readonly StackPanel _navigation = new() { Spacing = 4 };
+    private readonly CheckBox _magnifierCheck = new() { FontSize = 13, VerticalAlignment = VerticalAlignment.Center };
+    private readonly Border _magnifierHost;
     private readonly ContentControl _content = new();
-    private readonly List<(Button Tab, Control Panel)> _tabs = new();
+    private readonly List<(string Key, Button Tab, Control Panel)> _tabs = new();
     private Control? _active;
-    /// <summary>展开时的宽度（像素），折叠后记录此值供恢复。</summary>
-    public const double DefaultExpandedWidth = 240;
+
+    public const double DefaultExpandedWidth = 264;
     private double _expandedWidth = DefaultExpandedWidth;
-    /// <summary>当前展开宽度（只读，供宿主在折叠展开时恢复）。</summary>
     public double ExpandedWidth => _expandedWidth;
 
     public ProbePanel Probe { get; }
@@ -35,83 +49,148 @@ public sealed class ToolsSidebar : UserControl
     public event EventHandler? MagnifierToggled;
 
     public bool Collapsed { get; private set; }
-    /// <summary>折叠/展开状态变化时触发，宿主应据此调整 Grid 列宽。</summary>
     public event Action<bool>? CollapsedChanged;
 
     public ToolsSidebar(ProbePanel probe, BookmarkPanel bookmarks, OffsetPanel offset, MediaInfoPanel media, AudioPanel audio)
     {
-        Probe = probe; Bookmarks = bookmarks; Offset = offset; Media = media; Audio = audio;
+        Probe = probe;
+        Bookmarks = bookmarks;
+        Offset = offset;
+        Media = media;
+        Audio = audio;
 
-        var collapse = new Button { Height = 20, FontSize = 10, Content = "◀", HorizontalAlignment = HorizontalAlignment.Right };
-        ToolTip.SetTip(collapse, "折叠/展开");
-        collapse.Click += (_, _) => ToggleCollapse();
+        ToolTip.SetTip(_collapseButton, "折叠/展开");
+        _collapseButton.Click += (_, _) => ToggleCollapse();
 
-        var tabsRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2, Margin = new Thickness(4, 2) };
         foreach (var (key, panel) in new[]
                  {
                      ("Tab_Probe", (Control)probe), ("Tab_Bookmarks", bookmarks),
                      ("Tab_Offset", offset), ("Tab_Media", media), ("Tab_Audio", audio),
                  })
         {
-            var tab = new Button { Height = 24, FontSize = 11, Padding = new Thickness(8, 0), Content = LanguageManager.T(key) };
+            var tab = new Button
+            {
+                Height = 38,
+                FontSize = 13,
+                Padding = new Thickness(12, 0),
+                HorizontalContentAlignment = HorizontalAlignment.Left,
+                CornerRadius = new CornerRadius(6),
+                Content = LanguageManager.T(key),
+            };
             tab.Click += (_, _) => Activate(panel);
-            _tabs.Add((tab, panel));
-            tabsRow.Children.Add(tab);
+            _tabs.Add((key, tab, panel));
+            _navigation.Children.Add(tab);
         }
 
         _magnifierCheck.Content = LanguageManager.T("Mag_Magnifier");
-        _magnifierCheck.Margin = new Thickness(6, 4);
         _magnifierCheck.IsCheckedChanged += (_, _) => MagnifierToggled?.Invoke(this, EventArgs.Empty);
+        _magnifierHost = new Border
+        {
+            Background = CardBackground,
+            CornerRadius = new CornerRadius(7),
+            Padding = new Thickness(12, 8),
+            Margin = new Thickness(0, 8, 0, 0),
+            Child = _magnifierCheck,
+        };
 
-        var top = new StackPanel { Orientation = Orientation.Vertical };
-        top.Children.Add(collapse);
-        top.Children.Add(tabsRow);
-        top.Children.Add(_magnifierCheck);
+        var header = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            Margin = new Thickness(4, 2, 4, 10),
+        };
+        _title.VerticalAlignment = VerticalAlignment.Center;
+        _title.Margin = new Thickness(8, 0, 0, 0);
+        Grid.SetColumn(_collapseButton, 1);
+        header.Children.Add(_title);
+        header.Children.Add(_collapseButton);
 
-        var root = new DockPanel();
-        DockPanel.SetDock(top, Dock.Top);
-        root.Children.Add(top);
-        root.Children.Add(_content);
-        Content = root;
+        var contentHost = new Border
+        {
+            BorderBrush = Divider,
+            BorderThickness = new Thickness(0, 1, 0, 0),
+            Margin = new Thickness(0, 10, 0, 0),
+            Padding = new Thickness(0, 10, 0, 0),
+            Child = _content,
+        };
+
+        var layout = new Grid
+        {
+            RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto"),
+            Margin = new Thickness(8),
+        };
+        Grid.SetRow(_navigation, 1);
+        Grid.SetRow(contentHost, 2);
+        Grid.SetRow(_magnifierHost, 3);
+        layout.Children.Add(header);
+        layout.Children.Add(_navigation);
+        layout.Children.Add(contentHost);
+        layout.Children.Add(_magnifierHost);
+
+        Content = new Border
+        {
+            Background = PanelBackground,
+            BorderBrush = Divider,
+            BorderThickness = new Thickness(0, 0, 1, 0),
+            Child = layout,
+        };
 
         Activate(probe);
+        ApplyLanguage();
         LanguageManager.LanguageChanged += (_, _) =>
-            global::Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-                _magnifierCheck.Content = LanguageManager.T("Mag_Magnifier"));
+            global::Avalonia.Threading.Dispatcher.UIThread.Post(ApplyLanguage);
     }
 
-    /// <summary>切换折叠/展开状态。宿主应监听 CollapsedChanged 事件调整列宽。</summary>
     public void ToggleCollapse()
     {
         Collapsed = !Collapsed;
+        ApplyCollapsedState();
         CollapsedChanged?.Invoke(Collapsed);
     }
 
-    /// <summary>展开侧栏（恢复展开宽度）。</summary>
     public void Expand()
     {
         if (!Collapsed) return;
         Collapsed = false;
+        ApplyCollapsedState();
         CollapsedChanged?.Invoke(false);
     }
 
-    /// <summary>设置展开宽度（由宿主在首次布局或拖动分隔条后更新）。</summary>
     public void UpdateExpandedWidth(double width)
     {
         if (width >= PanelMinWidth) _expandedWidth = width;
     }
 
-    private const double PanelMinWidth = 100; // 侧栏最小宽度（避免与 Layoutable.MinWidth 属性同名隐藏 CS0108）
+    private const double PanelMinWidth = 160;
 
     public void Activate(Control panel)
     {
         _active = panel;
         _content.Content = panel;
-foreach (var (tab, p) in _tabs)
-	            tab.Background = ReferenceEquals(p, panel)
-	                ? new SolidColorBrush(Color.FromRgb(255, 200, 64))
-	                : null;
-	    }
+        foreach (var (_, tab, item) in _tabs)
+        {
+            var active = ReferenceEquals(item, panel);
+            tab.Background = active ? ActiveBackground : null;
+            tab.Foreground = active ? Accent : SecondaryText;
+            tab.FontWeight = active ? FontWeight.SemiBold : FontWeight.Normal;
+        }
+    }
+
+    private void ApplyCollapsedState()
+    {
+        _title.IsVisible = !Collapsed;
+        _navigation.IsVisible = !Collapsed;
+        _content.IsVisible = !Collapsed;
+        _magnifierHost.IsVisible = !Collapsed;
+        _collapseButton.Content = Collapsed ? "▶" : "◀";
+    }
+
+    private void ApplyLanguage()
+    {
+        _title.Text = LanguageManager.T("Sidebar_Title");
+        _magnifierCheck.Content = LanguageManager.T("Mag_Magnifier");
+        foreach (var (key, tab, _) in _tabs)
+            tab.Content = LanguageManager.T(key);
+    }
 
     public void ActivateProbe() => Activate(Probe);
     public void ActivateBookmarks() => Activate(Bookmarks);
