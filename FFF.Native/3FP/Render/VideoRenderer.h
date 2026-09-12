@@ -245,7 +245,8 @@ private:
     FFFResult RenderVideoProcessorInput() noexcept;
     FFFResult DrawWithShader(ID3D11RenderTargetView* target, float x, float y,
         float width, float height, std::uint32_t effect = 0,
-        ID3D11ShaderResourceView* const* sourceViews = nullptr) noexcept;
+        ID3D11ShaderResourceView* const* sourceViews = nullptr,
+        bool useCachedViewTransform = false) noexcept;
     FFFResult PrepareScaledVideo(std::uint32_t outputWidth, std::uint32_t outputHeight,
         ID3D11ShaderResourceView** views) noexcept;
     FFFResult EnsurePlaneScaleChain(std::size_t plane, std::uint32_t sourceWidth,
