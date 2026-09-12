@@ -4,6 +4,9 @@ Imports System.Threading
 Imports System.Threading.Tasks
 
 Public Class Form1
+    Private 光盘控制器 As 播放器光盘控制器
+    Private Const WM_ENTERSIZEMOVE As Integer = &H231
+    Private Const WM_EXITSIZEMOVE As Integer = &H232
     Public Shared Property 当前主窗体 As Form1
     Private Const 跳转秒数 As Integer = 5
     Private Const HDR操作提示键 As String = "HDR模式"
@@ -30,6 +33,7 @@ Public Class Form1
     Private 流选择器 As 播放器流选择器
     Private 画面菜单控制器 As 播放器画面菜单控制器
     Private 视角360控制器 As 播放器360视角控制器
+    Private 显示器唤醒 As 显示器唤醒请求
     Private 按钮图标 As 播放器按钮图标资源
     Private 设置窗口 As Form设置
     Private ReadOnly 播放列表数据 As New 播放列表 With {.播放模式 = 列表播放模式.顺序播放}
@@ -44,6 +48,12 @@ Public Class Form1
     Private 已跳过HDR强制确认 As Boolean
 
     Private Event 方向键快捷键已请求 As KeyEventHandler
+
+    Protected Overrides Sub WndProc(ByRef m As Message)
+        If m.Msg = WM_ENTERSIZEMOVE Then 播放控制器?.设置窗口移动状态(True)
+        MyBase.WndProc(m)
+        If m.Msg = WM_EXITSIZEMOVE Then 播放控制器?.设置窗口移动状态(False)
+    End Sub
 
     Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
         当前主窗体 = Me
@@ -85,6 +95,7 @@ Public Class Form1
         播放控制器 = New 播放器控制器(
             Function() 画面控件.输出窗口句柄, SynchronizationContext.Current,
             CType(设置.实例对象.解码方式, 解码模式))
+        显示器唤醒 = New 显示器唤醒请求()
         播放控制器.设置SDR峰值亮度(设置.实例对象.HDR映射SDR参考亮度)
         播放控制器.设置HDR峰值亮度(设置.实例对象.HDR峰值亮度)
         剪辑区间控制器 = New 播放器剪辑区间控制器(播放控制器, 画面控件,
@@ -132,6 +143,7 @@ Public Class Form1
             End Sub,
             Sub(文本) 信息图层呈现器?.显示操作信息(文本, &HFF69DF8BUI, "360°视频"))
         画面菜单控制器.应用全局字体(设置.实例对象.字体)
+        光盘控制器 = New 播放器光盘控制器(Me, 画面控件, 播放控制器, MCM_标题栏菜单)
         全屏交互控制器 = New 播放器全屏交互控制器(Me, 画面控件,
             ModernPanel1, MP_剪辑区间操作容器, Function() 剪辑区间控制器.模式已启用)
 
@@ -304,6 +316,7 @@ Public Class Form1
         RemoveHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
         全屏交互控制器?.Dispose()
         视角360控制器?.Dispose()
+        光盘控制器?.Dispose()
         画面菜单控制器?.Dispose()
         窗口布局控制器?.释放()
         界面呈现器?.释放()
@@ -313,6 +326,7 @@ Public Class Form1
         字幕图层呈现器?.释放()
         流选择器?.Dispose()
         播放列表窗口?.Dispose()
+        显示器唤醒?.释放()
         播放控制器?.释放()
         播放器按钮图标资源.清除(MB_播放和暂停, MB_停止, MB_倒退或上一个, MB_快进或下一个,
             MB_打开文件, MB_软件设置, MB_播放列表, MB_剪辑区间模式, MB_查看当前媒体信息, MB_选择流)
@@ -344,7 +358,7 @@ Public Class Form1
     End Sub
 
     Private Sub 画面控件_文件拖入(sender As Object, e As 播放器文件拖入事件参数)
-        Dim 存在的文件 = e.文件路径.Where(Function(x) File.Exists(x)).ToArray()
+        Dim 存在的文件 = e.文件路径.Where(AddressOf 光盘路径.媒体存在).ToArray()
         If 存在的文件.Length = 0 Then Return
         Dim 路径 As String
         If 播放控制器.是否有媒体 Then
@@ -377,7 +391,7 @@ Public Class Form1
 
     Friend Shared Function 取得命令行文件(参数 As IEnumerable(Of String)) As String
         If 参数 Is Nothing Then Return String.Empty
-        Dim 文件路径 = 参数.FirstOrDefault(Function(x) Not String.IsNullOrWhiteSpace(x) AndAlso File.Exists(x))
+        Dim 文件路径 = 参数.FirstOrDefault(AddressOf 光盘路径.媒体存在)
         Return If(String.IsNullOrEmpty(文件路径), String.Empty, Path.GetFullPath(文件路径))
     End Function
 
@@ -402,13 +416,14 @@ Public Class Form1
         ElseIf 弹幕自动加载器.是支持的弹幕文件(路径) Then
             播放控制器.替换弹幕(路径)
         Else
-            启动后台任务(播放列表数据.从媒体创建并扫描相似文件Async(路径))
+            If Not 光盘路径.是光盘路径(路径) Then 启动后台任务(播放列表数据.从媒体创建并扫描相似文件Async(路径))
             播放控制器.打开媒体(路径)
         End If
     End Sub
 
     Private Sub 播放控制器_状态已变化(sender As Object, e As EventArgs)
         If Not 正在关闭 Then
+            显示器唤醒?.更新(播放控制器.安全读取快照())
             界面呈现器.刷新()
             更新WASAPI按钮()
         End If
@@ -416,6 +431,7 @@ Public Class Form1
 
     Private Sub 播放控制器_媒体已打开(sender As Object, e As 播放器媒体事件参数)
         If 正在关闭 Then Return
+        显示器唤醒?.更新(e.快照)
         If Not 播放列表数据.选择路径(e.文件路径) Then
             待选中播放列表路径 = e.文件路径
         Else
@@ -428,7 +444,8 @@ Public Class Form1
         弹幕图层呈现器?.使图层失效()
         歌词图层呈现器?.使图层失效()
         信息图层呈现器?.使内容失效()
-        Text = Path.GetFileName(e.文件路径)
+        Dim 光盘标题 = If(光盘路径.是光盘路径(e.文件路径) AndAlso Directory.Exists(e.文件路径), e.文件路径.TrimEnd("\"c, "/"c), Path.GetFileName(e.文件路径))
+        Text = 光盘标题
         界面呈现器.媒体已打开(e.保留剪辑区间)
         界面呈现器.更新媒体信息(e.媒体信息, e.快照)
         视角360控制器?.媒体已打开(e.文件路径, e.媒体信息, e.快照)
@@ -436,6 +453,7 @@ Public Class Form1
     End Sub
 
     Private Sub 播放控制器_播放结束(sender As Object, e As EventArgs)
+        If 光盘路径.是光盘路径(播放控制器.当前媒体路径) Then Return
         If 正在关闭 Then Return
         Dim 下一项 = 播放列表数据.移动到播放结束后的项目()
         If 下一项 IsNot Nothing Then 播放控制器.打开媒体(下一项.路径)
@@ -695,6 +713,7 @@ Public Class Form1
     End Sub
 
     Protected Overrides Function ProcessDialogKey(keyData As Keys) As Boolean
+        If 光盘控制器 IsNot Nothing AndAlso 光盘控制器.处理按键(keyData) Then Return True
         If keyData = Keys.Tab AndAlso Not 正在关闭 Then
             切换媒体信息层()
             Return True
@@ -705,6 +724,7 @@ Public Class Form1
 
     Protected Overrides Function ProcessCmdKey(ByRef msg As Message, keyData As Keys) As Boolean
         If 正在关闭 Then Return MyBase.ProcessCmdKey(msg, keyData)
+        If 光盘控制器 IsNot Nothing AndAlso 光盘控制器.处理按键(keyData) Then Return True
         If 处理方向键快捷键(keyData) Then Return True
         Select Case keyData
             Case Keys.Control Or Keys.O
@@ -796,6 +816,7 @@ Public Class Form1
     End Sub
 
     Private Sub MB_标题栏菜单按钮_Click(sender As Object, e As EventArgs) Handles MB_标题栏菜单按钮.Click
+        光盘控制器?.请求扫描光驱()
         MCM_标题栏菜单.Show(MP_DX视频容器, New Point(0, 0))
     End Sub
 End Class

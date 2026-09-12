@@ -78,6 +78,7 @@ public:
     FFFResult Start() noexcept;
     void Stop() noexcept;
     FFFResult Enqueue(const AVFrame* frame, std::int64_t position100ns) noexcept;
+    FFFResult Finish() noexcept;
     void SetPaused(bool paused) noexcept;
     // 3FCompare P3: native speed control — adjust resampler output timing.
     void SetSpeed(float rate) noexcept;
@@ -106,6 +107,7 @@ private:
         std::size_t silenceBytes = 0;
     };
     void RenderThread() noexcept;
+    void ApplyGain(std::vector<std::uint8_t>& converted) noexcept;
     FFFResult EnsureResampler(const AVFrame* frame) noexcept;
     void UpdatePeakLevels(const std::uint8_t* samples, std::uint32_t frames) noexcept;
     void PublishRuntimeDiagnostics() noexcept;
@@ -146,6 +148,7 @@ private:
     std::atomic<bool> muted_;
     std::atomic<float> speed_{ 1.0f };  // 3FCompare P3: native speed control
     std::atomic<bool> running_;
+    std::atomic<bool> clockRunning_;
     std::atomic<bool> paused_;
     std::atomic<bool> resetRequested_;
     std::atomic<bool> restartRequested_;
@@ -163,12 +166,17 @@ private:
     // startup, pause and reset are deliberately excluded.
     std::atomic<std::uint64_t> underrunCount_;
     std::atomic<bool> hasSubmittedAudio_;
+    std::atomic<bool> endOfStream_;
     // Decoded PCM is the authoritative continuous timeline. Container PTS is
     // used once to anchor it after open/seek and later only to identify a real
     // discontinuity. Chasing ordinary packet timestamp quantization here would
     // splice silence into valid AAC/VBR audio and audibly click.
     bool timelineAnchored_;
     std::uint64_t producedTimelineFrames_;
+    // Number of output frames still covered by the startup/seek de-click ramp.
+    // This is deliberately renderer-local so every device restart and seek has
+    // the same zero-to-signal boundary regardless of codec/container PTS.
+    std::uint32_t fadeInFramesRemaining_;
     std::atomic<std::uint64_t> timestampJitterCount_;
     std::atomic<std::uint64_t> discontinuityCount_;
     std::atomic<std::uint64_t> insertedSilenceFrames_;

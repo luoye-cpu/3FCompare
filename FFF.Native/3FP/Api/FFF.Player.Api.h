@@ -440,6 +440,10 @@ FFF3FP_API void FFF3FP_SetLogCallback(FFF3FPLogCallback callback, void* context)
 FFF3FP_API FFFResult FFF3FP_Create(const FFF3FPConfiguration* configuration,
     FFF3FPHandle* player) noexcept;
 FFF3FP_API FFFResult FFF3FP_Open(FFF3FPHandle player, const char* localPathUtf8) noexcept;
+FFF3FP_API FFFResult FFF3FP_DiscNavigate(FFF3FPHandle player, int command, int value, int y) noexcept;
+FFF3FP_API FFFResult FFF3FP_CopySdrFrame(FFF3FPHandle player, void* pixels, std::uint32_t capacity,
+    std::uint32_t* width, std::uint32_t* height, std::uint32_t discOnly) noexcept;
+FFF3FP_API FFFResult FFF3FP_GetDiscStatus(FFF3FPHandle player, char* output, std::uint32_t outputSize, std::uint32_t* requiredSize) noexcept;
 FFF3FP_API FFFResult FFF3FP_Play(FFF3FPHandle player) noexcept;
 FFF3FP_API FFFResult FFF3FP_Pause(FFF3FPHandle player) noexcept;
 // Synchronously stops the current audio renderer and discards already-submitted
@@ -488,6 +492,7 @@ FFF3FP_API FFFResult FFF3FP_SetSpeed(FFF3FPHandle player, float rate) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetPacingConfig(FFF3FPHandle player,
     std::uint32_t enablePacing) noexcept;
 FFF3FP_API FFFResult FFF3FP_SetOutputWindow(FFF3FPHandle player, void* outputWindow) noexcept;
+FFF3FP_API FFFResult FFF3FP_SetInteractiveMove(FFF3FPHandle player, std::uint32_t enabled) noexcept;
 // View transform for frame inspection: zoom scales the fitted video box
 // (1.0 = fit, >1 = magnify), panX/panY are normalized offsets in [-1,1]
 // relative to the unzoomed box.

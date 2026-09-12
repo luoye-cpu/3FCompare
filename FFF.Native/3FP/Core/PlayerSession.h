@@ -4,6 +4,7 @@
 #include "3FP/Audio/WasapiRenderer.h"
 #include "3FP/Render/VideoRenderer.h"
 #include "Shared/Ffmpeg/SharedFileInput.h"
+#include "3FP/Disc/DiscInput.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -30,6 +31,10 @@ public:
     ~PlayerSession();
 
     FFFResult Open(const char* localPathUtf8) noexcept;
+    FFFResult DiscNavigate(int command, int value, int y) noexcept;
+    std::string DiscStatus() const;
+    FFFResult CopySdrFrame(void* pixels, std::uint32_t capacity, std::uint32_t& width,
+        std::uint32_t& height, bool discOnly) noexcept { return videoRenderer_.CopySdrFrame(pixels, capacity, width, height, discOnly); }
     FFFResult Play() noexcept;
     FFFResult Pause() noexcept;
     FFFResult DiscardAudioOutput() noexcept;
@@ -53,6 +58,7 @@ public:
     // 3FCompare P3: native speed control — changes the media clock slope (rate multiplier).
     FFFResult SetSpeed(float rate) noexcept;
     FFFResult SetOutputWindow(void* outputWindow) noexcept;
+    FFFResult SetInteractiveMove(bool enabled) noexcept;
     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
     FFFResult Set360View(bool enabled, float yaw, float pitch, float fovY) noexcept;
     FFFResult SetAudioEndpoint(const char* endpointIdUtf8) noexcept;
@@ -90,6 +96,10 @@ private:
     void DoStepKeyframe(std::int32_t direction);
     void Worker() noexcept;
     void PumpPlayback() noexcept;
+    bool VideoQueueSaturated() const noexcept;
+    void TryCompletePlaybackPreroll() noexcept;
+    void UpdateDrainedAudioClock() noexcept;
+    void DrainInternalAudio() noexcept;
     void PumpExternalAudio() noexcept;
     bool ShouldDelayAudioUntilVideoFrame() const noexcept;
     void ArmAudioUntilVideoFrame() noexcept;
@@ -98,6 +108,9 @@ private:
     void ApplyAudioPlaybackPause(bool playing) noexcept;
     bool PresentAudioBoundary() noexcept;
     void DoOpen(std::string pathUtf8) noexcept;
+    bool ReopenDiscDemux();
+    void PublishDisc();
+    bool HoldDisc();
     void DoClose(FFF3FPState finalState = FFF3FPState::Closed,
         bool preserveVideoOutput = false) noexcept;
     void DoSeek(std::int64_t position100ns, std::int64_t targetFrame = -1,
@@ -175,6 +188,14 @@ private:
     std::thread worker_;
     std::atomic<bool> terminate_;
     AVFormatContext* format_;
+    std::unique_ptr<DiscInput> disc_;
+    std::atomic<bool> discCancel_{false};
+    std::string discStatus_ = "{}";
+    std::uint64_t discGraphicsSequence_ = 0;
+    std::int64_t discPositionOffset_ = 0;
+    bool discDrained_ = false;
+    unsigned discInvalidPackets_ = 0;
+    std::int64_t lastQueuedVideoPts_ = AV_NOPTS_VALUE;
     std::unique_ptr<SharedFileInput> formatIo_;
     // These objects belong exclusively to the session worker.  FFmpeg permits
     // reuse after av_packet_unref/av_frame_unref, avoiding per-packet heap churn
@@ -226,6 +247,7 @@ private:
     std::int64_t framePtsIndexBase_;
     bool rebuildingFrameIndex_;
     bool audioBlockedUntilVideoFrame_;
+    bool playbackPreroll_;
     std::uint64_t audioUnblockVideoGeneration_;
     bool audioResumePendingAfterVideoFrame_;
     std::deque<AVFrame*> videoFrameQueue_;
@@ -242,6 +264,10 @@ private:
     std::deque<BitRateBucket> audioBitRateBuckets_;
     std::int64_t publishedBitRateSecond_;
     bool draining_;
+    bool demuxEnded_;
+    bool audioDecoderDrained_;
+    bool externalAudioDrained_;
+    bool audioClockFinished_;
     bool staticImage_;
     bool hardwareFallbackPending_;
     std::string pendingHardwareFallbackReason_;

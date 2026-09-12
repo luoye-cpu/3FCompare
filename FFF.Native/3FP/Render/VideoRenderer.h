@@ -97,6 +97,7 @@ enum class TimedTextLayerSlot : std::uint32_t {
     Danmaku = 1,
     PlayerInformation = 2,
     Lyrics = 3,
+    Disc = 4,
 };
 
 FFFResult EvaluateVideoColorTransform(FFF3FPColorTransform& transform) noexcept;
@@ -114,48 +115,23 @@ public:
     ~PlayerVideoRenderer();
 
     FFFResult SetWindow(HWND window) noexcept;
+    void SetDiscAspect(double aspect) noexcept { discAspect_.store(static_cast<float>(aspect)); }
+    void SetInteractiveMove(bool enabled) noexcept;
     FFFResult SetScalingQuality(FFF3FPVideoScalingQuality quality) noexcept;
     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
     FFFResult Set360View(bool enabled, float yaw, float pitch, float fovY) noexcept;
     FFFResult SetColorMode(FFF3FPColorMode mode, float sdrPeakNits,
         float hdrPeakNits, float paperWhiteNits, bool forceHdrOutput = false) noexcept;
-    // VRR pacing preference (3FCompare extension). Returns NotSupported when
-    // tearing is requested but the display chain cannot do it; the renderer
-    // keeps the vsync path either way and retries on the next chain creation.
-    FFFResult SetPresentConfig(bool enableTearing) noexcept;
-    // Media-rate presentation pacing for VRR (A9): when enabled, the timed-text
-    // thread suppresses the periodic presents that would add extra flips beyond
-    // the source video frame rate. Overlay-only updates still present (at their
-    // own rate); the silent-keepalive path is eliminated.
-    FFFResult SetPacingConfig(bool enablePacing) noexcept;
-    // 3FCompare P3: native speed control — adjust media clock slope & shader params.
-    FFFResult SetSpeed(float rate) noexcept;
     FFFResult ForceSdrOutputForSdrSource() noexcept;
     void ConfigureHdrStream(const AVCodecParameters* parameters) noexcept;
     FFFResult Render(const AVFrame* frame, bool limitToNativeSize = false,
-        bool coverArt = false) noexcept;
+        bool coverArt = false, bool prepareOnly = false) noexcept;
     FFFResult Redraw() noexcept;
-    // 3FCompare extension: render target diagnostics (swap/client/destination sizes).
-    struct RenderTargetInfo {
-        std::uint32_t swapWidth = 0;
-        std::uint32_t swapHeight = 0;
-        std::uint32_t clientWidth = 0;
-        std::uint32_t clientHeight = 0;
-        std::uint32_t destX = 0;
-        std::uint32_t destY = 0;
-        std::uint32_t destWidth = 0;
-        std::uint32_t destHeight = 0;
-        std::uint32_t outputBitDepth = 8;
-        bool hdr = false;
-    };
-    FFFResult GetRenderTargetInfo(RenderTargetInfo& info) noexcept;
     FFFResult CreateD3D11HardwareDeviceContext(AVBufferRef** context) noexcept;
     FFFResult PresentTimedText() noexcept;
     FFFResult ReadPixel(FFF3FPVideoPixelProbe& probe) noexcept;
-    // 3FCompare patch (0004): batch pixel readback for thumbnail capture.
-    FFFResult ReadPixelRegion(std::uint32_t x, std::uint32_t y,
-        std::uint32_t width, std::uint32_t height, float* dst,
-        std::uint32_t dstFloatCount, std::uint32_t* outputBitDepth) noexcept;
+    FFFResult CopySdrFrame(void* pixels, std::uint32_t capacity, std::uint32_t& width,
+        std::uint32_t& height, bool discOnly) noexcept;
     FFFResult SetTimedTextLayer(TimedTextRenderLayer layer, TimedTextLayerSlot slot) noexcept;
     FFFResult GetTimedTextStatus(FFF3FPTimedTextStatus& status, TimedTextLayerSlot slot) noexcept;
     bool DeviceRecoveryRequested() const noexcept;
@@ -172,6 +148,7 @@ public:
     std::uint64_t SwapChainPresents() const noexcept;
     std::uint64_t SubmittedVideoGeneration() const noexcept;
     std::uint64_t PresentedVideoGeneration() const noexcept;
+    bool HasPendingVideoPresentation() const noexcept;
     bool HasOutputWindow() const noexcept;
     std::uint64_t PresentWait100ns() const noexcept;
     std::uint64_t DeviceLockWait100ns() const noexcept;
@@ -182,6 +159,7 @@ public:
     std::string LastError() const;
 
 private:
+    friend struct TimedTextAtlasRegression;
     enum class CoverBackdropRenderResult {
         Complete,
         Deferred,
@@ -190,7 +168,8 @@ private:
     struct TimedTextSprite {
         float atlasX = 0;
         float atlasY = 0;
-        float padding = 0;
+        float offsetX = 0;
+        float offsetY = 0;
         float width = 0;
         float height = 0;
     };
@@ -200,7 +179,7 @@ private:
     };
     struct PendingTimedTextSprite {
         std::size_t commandIndex = 0;
-        IDWriteTextLayout* layout = nullptr;
+        std::shared_ptr<IDWriteTextLayout> layout;
         std::uint64_t key = 0;
         TimedTextSprite sprite{};
         float outline = 0;
@@ -226,11 +205,8 @@ private:
 
     FFFResult EnsureDevice() noexcept;
     std::uint32_t PreferredOutputBitDepth(std::uint32_t sourceBitDepth, bool hdr) noexcept;
-    // 3FCompare K1: unified chain-vs-window check (used by both presenter and Redraw).
-    // Also validates swapOutputBits_/swapDxgiFormat and the 0×0 guard.
-    bool ChainMatchesWindow() noexcept;
     FFFResult EnsureSwapChain(std::uint32_t width, std::uint32_t height,
-        std::uint32_t sourceBitDepth, bool fromPresenter = false) noexcept;
+        std::uint32_t sourceBitDepth) noexcept;
     FFFResult CreateSwapChain(std::uint32_t width, std::uint32_t height,
         bool hdr, std::uint32_t outputBits) noexcept;
     FFFResult ReconfigureSwapChain(bool hdr, std::uint32_t outputBits) noexcept;
@@ -245,8 +221,7 @@ private:
     FFFResult RenderVideoProcessorInput() noexcept;
     FFFResult DrawWithShader(ID3D11RenderTargetView* target, float x, float y,
         float width, float height, std::uint32_t effect = 0,
-        ID3D11ShaderResourceView* const* sourceViews = nullptr,
-        bool useCachedViewTransform = false) noexcept;
+        ID3D11ShaderResourceView* const* sourceViews = nullptr) noexcept;
     FFFResult PrepareScaledVideo(std::uint32_t outputWidth, std::uint32_t outputHeight,
         ID3D11ShaderResourceView** views) noexcept;
     FFFResult EnsurePlaneScaleChain(std::size_t plane, std::uint32_t sourceWidth,
@@ -271,10 +246,10 @@ private:
         std::uint32_t inputLayout = 0;
         float sampleScale = 1, yOffset = 0, yScale = 1;
         float cOffset = 0.5f, cScale = 1, kr = 0.2126f, kb = 0.0722f;
-        float chromaOffsetX = 0, chromaOffsetY = 0, viewPanX = 0, viewPanY = 0;
+        float chromaOffsetX = 0, chromaOffsetY = 0, padding1 = 0, padding2 = 0;
         std::uint32_t projection360 = 0;
         float viewYaw = 0, viewPitch = 0, viewFovY = 90;
-        float viewAspect = 1, viewZoom = 1, padding4 = 0, padding5 = 0;
+        float viewAspect = 1, padding3 = 0, padding4 = 0, padding5 = 0;
     };
     FFFResult EnsureTimedTextResources(TimedTextLayerSlot slot) noexcept;
     FFFResult EnsureD2DContext() noexcept;
@@ -336,10 +311,10 @@ private:
     ID3D11ShaderResourceView* coverBackdropView_;
     ID3D11Texture2D* coverBackdropSourceTexture_;
     ID3D11RenderTargetView* coverBackdropSourceTarget_;
-    ID3D11Texture2D* timedTextTextures_[4];
-    ID3D11RenderTargetView* timedTextTargets_[4];
-    ID3D11ShaderResourceView* timedTextViews_[4];
-    ID3D11Query* timedTextPipelineQueries_[4];
+    ID3D11Texture2D* timedTextTextures_[5];
+    ID3D11RenderTargetView* timedTextTargets_[5];
+    ID3D11ShaderResourceView* timedTextViews_[5];
+    ID3D11Query* timedTextPipelineQueries_[5];
     ID3D11BlendState* timedTextBlend_;
     ID3D11Texture2D* timedTextAtlasTexture_;
     ID3D11ShaderResourceView* timedTextAtlasView_;
@@ -355,7 +330,7 @@ private:
     ID2D1Bitmap1* d2dCoverBackdropSource_;
     ID2D1Bitmap1* d2dCoverBackdropTarget_;
     ID2D1Effect* coverBackdropBlurEffect_;
-    ID2D1Bitmap1* d2dTargets_[4];
+    ID2D1Bitmap1* d2dTargets_[5];
     ID2D1Bitmap1* d2dAtlasTarget_;
     ID2D1Bitmap1* d2dTimedTextShadowTarget_;
     ID2D1Effect* timedTextShadowBlurEffect_;
@@ -365,16 +340,8 @@ private:
     std::uint32_t swapWidth_;
     std::uint32_t swapHeight_;
     bool swapHdr_;
-    std::atomic<std::uint32_t> swapOutputBits_{8};
-    // 3FCompare patch (0003): single-owner swap-chain resize. The decode thread
-    // may not ResizeBuffers an actively presented chain (DXGI_ERROR_INVALID_CALL
-    // when a stale buffer reference is still outstanding), which surfaced as the
-    // maximize/restore -> Failed rebuild race. When a size change is detected on
-    // an existing chain, the decoding path only records the target size here;
-    // the timed-text presenter performs the real resize under presentMutex_
-    // (EnsureSwapChain(..., fromPresenter=true)). 0,0 means no resize pending.
-    std::atomic<std::uint32_t> pendingSwapWidth_{0};
-    std::atomic<std::uint32_t> pendingSwapHeight_{0};
+    bool swapAllowTearing_;
+    std::atomic<std::uint32_t> swapOutputBits_;
     std::uint32_t sourceWidth_;
     std::uint32_t sourceHeight_;
     std::uint32_t sourceInputLayout_;
@@ -420,11 +387,6 @@ private:
     std::atomic<float> view360FovYBits_;
     float sourcePeakNits_;
     HdrProcessor hdrProcessor_;
-    // 3FCompare perf (P1): dedupe per-frame SetHDRMetaData DWM round-trips.
-    // Reset when the swap chain is (re)created so a fresh chain always receives
-    // the current metadata at least once.
-    DXGI_HDR_METADATA_HDR10 lastHdrMetadata_{};
-    bool hdrMetadataPushed_{ false };
     std::vector<std::uint8_t> convertedRgb_;
     mutable std::mutex deviceMutex_;
     mutable std::mutex presentMutex_;
@@ -446,23 +408,25 @@ private:
     // command and string again on the video/present thread.
     // Subtitle, danmaku, lyrics and player information have independent producers and
     // render surfaces. Player information is always the topmost GPU layer.
-    // Composite order is fixed to video -> danmaku -> subtitle -> lyrics -> information.
-    std::shared_ptr<const TimedTextRenderLayer> timedTextLayers_[4];
-    std::uint64_t timedTextRenderedSequences_[4];
-    std::uint32_t timedTextRenderedCommandCounts_[4];
-    bool timedTextRenderedHdrHighlights_[4];
-    std::uint32_t timedTextWidths_[4];
-    std::uint32_t timedTextHeights_[4];
+    // Composite order is video -> danmaku -> subtitle -> lyrics -> disc -> information.
+    std::shared_ptr<const TimedTextRenderLayer> timedTextLayers_[5];
+    std::uint64_t timedTextRenderedSequences_[5];
+    std::uint32_t timedTextRenderedCommandCounts_[5];
+    bool timedTextRenderedHdrHighlights_[5];
+    std::uint32_t timedTextWidths_[5];
+    std::uint32_t timedTextHeights_[5];
     // Counts successful final swap-chain presents that included each visible
     // layer. A texture redraw is not a presentation and must not advance this.
-    std::uint32_t timedTextPresentCounts_[4];
+    std::uint32_t timedTextPresentCounts_[5];
     std::atomic<std::uint64_t> backBufferAcquisitionCount_;
-    bool timedTextPipelineQueryInFlight_[4];
-    std::uint64_t timedTextCompositePixelInvocations_[4];
+    bool timedTextPipelineQueryInFlight_[5];
+    std::uint64_t timedTextCompositePixelInvocations_[5];
+    std::atomic<float> discAspect_{0};
     CachedVideoSettings cachedVideoSettings_;
     bool hasCachedVideo_;
     std::atomic<std::uint64_t> videoGeneration_;
     std::atomic<std::uint64_t> presentedVideoGeneration_;
+    std::atomic<std::uint64_t> countedVideoGeneration_;
     std::atomic<std::uint64_t> presentedVideoFrames_;
     std::atomic<std::uint64_t> coalescedVideoFrames_;
     std::atomic<std::uint64_t> swapChainPresents_;
@@ -470,11 +434,7 @@ private:
     std::atomic<std::uint64_t> deviceLockWait100ns_;
     std::atomic<std::uint64_t> softwareConvert100ns_;
     std::atomic<std::uint32_t> playbackWorkPending_;
-    // 3FCompare K1: record the last destination rect for diagnostics / probe mapping.
-    std::uint32_t lastDestX_ = 0;
-    std::uint32_t lastDestY_ = 0;
-    std::uint32_t lastDestWidth_ = 0;
-    std::uint32_t lastDestHeight_ = 0;
+    std::atomic<bool> interactiveMove_;
     std::atomic<bool> lyricsLayoutEnabled_;
     std::atomic<std::uint32_t> coverBackdropBlurRadiusBits_;
     std::atomic<std::uint32_t> coverBackdropBlurPasses_;
@@ -488,19 +448,6 @@ private:
     std::atomic<std::uint64_t> coverBackdropBlurSettingsGeneration_;
     std::atomic<bool> deviceRecoveryRequested_;
     std::function<void()> recoveryCallback_;
-    // VRR state (3FCompare extension). tearingRequested_/Supported_ control the
-    // Present(0, ALLOW_TEARING) path; pacingEnabled_ controls the media-rate
-    // presentation cadence (A9): when set, the timed-text thread skips presents
-    // that would add extra flips beyond the source video frame rate on VRR displays.
-    std::atomic<bool> tearingRequested_{ false };
-    std::atomic<bool> tearingSupported_{ false };
-    // Media-rate presentation pacing for VRR (A9): when enabled, the timed-text
-    // thread only presents when a new video frame or overlay change actually
-    // arrives, suppressing the periodic keepalive presents that would otherwise
-    // break the source frame rate cadence on a VRR display.
-    std::atomic<bool> pacingEnabled_{ false };
-    // 3FCompare P3: native speed control — atomic float bit-cast for lock-free reads.
-    std::atomic<std::uint32_t> speedBits_{ std::bit_cast<std::uint32_t>(1.0f) };
     HMONITOR hdrMonitor_;
     bool hdrSupportValid_;
     bool hdrSupported_;
