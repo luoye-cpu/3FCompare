@@ -1190,7 +1190,7 @@ FFFResult PlayerSession::SetViewTransform(const float zoom, const float panX,
     // from any thread is safe. Redraw only wakes the presenter via its fast
     // path, which also does not contend with decode.
     // Upstream 2026.9: guard disc playback (disc renderer has its own view path).
-    if (disc_) return;
+    if (disc_) return FFFResult::Success;
     const auto result = videoRenderer_.SetViewTransform(zoom, panX, panY);
     if (result != FFFResult::Success) return result;
     const auto redrawResult = videoRenderer_.Redraw();
