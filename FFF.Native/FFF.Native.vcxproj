@@ -212,6 +212,9 @@
     </ClCompile>
     <ClCompile Include="3FR\Timeline\QpcTimeline.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="FFF.Native.rc" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
