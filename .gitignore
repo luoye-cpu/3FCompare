@@ -381,3 +381,6 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# 3FCompare: vendored vcpkg install tree (rebuild via tools/准备光盘库.ps1)
+vcpkg_installed/
