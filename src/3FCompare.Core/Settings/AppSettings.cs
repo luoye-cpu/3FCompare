@@ -10,7 +10,9 @@ public sealed class AppSettings
     public int? WindowY { get; set; }
     public int? WindowWidth { get; set; }
     public int? WindowHeight { get; set; }
-    /// <summary>Avalonia WindowState 枚举值（1=Normal 2=Maximized 3=FullScreen，0=Minimized 不恢复）。</summary>
+    /// <summary>Avalonia WindowState 枚举 int 值。**注意枚举顺序不是直觉的数字**：
+    /// 0=Normal, 1=Minimized, 2=Maximized, 3=FullScreen。只在 Normal/Maximized 时恢复
+    /// （Minimized 无意义，FullScreen 会让用户莫名全屏）。</summary>
     public int? WindowState { get; set; }
 
     public bool HardwareDecode { get; set; } = true;

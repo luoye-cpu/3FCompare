@@ -1407,20 +1407,30 @@ public partial class MainWindow : Window
             Width = _settings.WindowWidth.Value;
             Height = _settings.WindowHeight.Value;
 
+            var pos = new PixelPoint((int)Width, (int)Height); // 占位，下方按需覆盖
+            var havePos = false;
             if (_settings.WindowX is { } x && _settings.WindowY is { } y)
             {
-                var pos = new PixelPoint(x, y);
-                var screen = Screens.ScreenFromPoint(pos) ?? Screens.Primary;
-                if (Screens.All.Any(s => s.Bounds.Contains(pos)) && screen is not null)
+                var target = new PixelPoint(x, y);
+                var screen = Screens.ScreenFromPoint(target) ?? Screens.Primary;
+                if (Screens.All.Any(s => s.Bounds.Contains(target)) && screen is not null)
                 {
                     // 轻微越界（标题栏跑出屏幕）时夹回工作区内，保证可拖动
                     var wa = screen.WorkingArea;
                     Position = new PixelPoint(
-                        Math.Clamp(pos.X, wa.X, Math.Max(wa.X, wa.Right - 200)),
-                        Math.Clamp(pos.Y, wa.Y, Math.Max(wa.Y, wa.Bottom - 100)));
+                        Math.Clamp(target.X, wa.X, Math.Max(wa.X, wa.Right - 200)),
+                        Math.Clamp(target.Y, wa.Y, Math.Max(wa.Y, wa.Bottom - 100)));
+                    pos = Position;
+                    havePos = true;
                 }
                 // 完全越界 → 跳过坐标恢复，仅用默认居中位置
             }
+
+            // 预置 _lastNormal：若本次以 Maximized 启动，OnOpened 不会记录 Normal 几何
+            // （那时 WindowState 已是 Maximized），而 OnClosing 又优先取 _lastNormal——
+            // 不预置会导致"最大化关闭"把屏幕尺寸当成用户偏好的窗口尺寸存下来。
+            if (havePos)
+                _lastNormal = (pos, new Size(Width, Height));
         }
 
         if (_settings.WindowState == (int)WindowState.Maximized)
