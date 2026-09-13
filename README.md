@@ -153,7 +153,7 @@ _Key keys: `Space` play/pause · `←/→` frame step · `Shift+←/→` second 
 | 启动提示「未找到 FFmpeg 核心库」 | 按上面第 2 步放置 DLL，或在弹窗里点「打开设置」指定目录后**重启** / Place the DLLs (step 2) or point to the folder in Settings, then **restart** |
 | 一直是演示模式（画面是彩条/测试图） | 状态栏看引擎名与原因；确认 DLL 位数是 **x64**、文件名匹配 `avcodec-*.dll` / Check the engine name and reason in the status bar; make sure the DLLs are **x64** and named `avcodec-*.dll` |
 | HDR 画面偏灰/过曝 | 设置 → 色彩：自动即可；也可手动切 SDR/HDR，详见「显示链路」一节 / Settings → Color: leave on Auto, or switch SDR/HDR manually |
-| 窗口跑到看不见的地方了 | 窗口几何会自动记忆；若显示器变化导致越界，程序会自动回落到默认居中位置 / Geometry is remembered; on monitor changes the app resets to a centered default |
+| 窗口跑到看不见的地方了 | 窗口几何自动记忆；若上次坐标已不在任何屏幕内（显示器拔掉/分辨率变化），程序会跳过坐标恢复、改用系统默认位置，并在下次关闭时重新记录当前坐标自愈 / Geometry is remembered; if the last position is off every screen, position restore is skipped in favour of the system default and the next close re-records a valid one |
 
 ### 构建与运行 / Build & Run
 

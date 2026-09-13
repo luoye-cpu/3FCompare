@@ -1402,35 +1402,33 @@ public partial class MainWindow : Window
     /// 会让用户莫名全屏，Minimized 无意义，二者都按默认 Normal 处理。</summary>
     private void RestoreWindowGeometry()
     {
-        if (_settings.WindowWidth is > 0 && _settings.WindowHeight is > 0)
+        if (_settings.WindowWidth is not > 0 || _settings.WindowHeight is not > 0) return;
+
+        var restoredSize = new Size(_settings.WindowWidth.Value, _settings.WindowHeight.Value);
+        Width = restoredSize.Width;
+        Height = restoredSize.Height;
+
+        // 预置 _lastNormal：本次若以 Maximized 启动，OnOpened 只在 Normal 时记录几何，
+        // Maximized 时不会记录；而 SaveWindowGeometry 又优先取 _lastNormal——
+        // 不预置就会在"最大化关闭"时把屏幕尺寸当成用户偏好的窗口尺寸存下来。
+        // 关键：这里只依赖"有可恢复的尺寸"，**不能**依赖坐标是否恢复成功，否则
+        // 首次运行（无坐标、有尺寸）后再最大化关闭同样会写坏尺寸。
+        _lastNormal = (Position, restoredSize);
+
+        if (_settings.WindowX is { } x && _settings.WindowY is { } y)
         {
-            Width = _settings.WindowWidth.Value;
-            Height = _settings.WindowHeight.Value;
-
-            var pos = new PixelPoint((int)Width, (int)Height); // 占位，下方按需覆盖
-            var havePos = false;
-            if (_settings.WindowX is { } x && _settings.WindowY is { } y)
+            var target = new PixelPoint(x, y);
+            // 完全越界（显示器拔掉/分辨率变化）→ 跳过坐标恢复，保留默认位置
+            if (Screens.All.Any(s => s.Bounds.Contains(target))
+                && (Screens.ScreenFromPoint(target) ?? Screens.Primary) is { } screen)
             {
-                var target = new PixelPoint(x, y);
-                var screen = Screens.ScreenFromPoint(target) ?? Screens.Primary;
-                if (Screens.All.Any(s => s.Bounds.Contains(target)) && screen is not null)
-                {
-                    // 轻微越界（标题栏跑出屏幕）时夹回工作区内，保证可拖动
-                    var wa = screen.WorkingArea;
-                    Position = new PixelPoint(
-                        Math.Clamp(target.X, wa.X, Math.Max(wa.X, wa.Right - 200)),
-                        Math.Clamp(target.Y, wa.Y, Math.Max(wa.Y, wa.Bottom - 100)));
-                    pos = Position;
-                    havePos = true;
-                }
-                // 完全越界 → 跳过坐标恢复，仅用默认居中位置
+                // 轻微越界（标题栏跑出屏幕）时夹回工作区内，保证可拖动
+                var wa = screen.WorkingArea;
+                Position = new PixelPoint(
+                    Math.Clamp(target.X, wa.X, Math.Max(wa.X, wa.Right - 200)),
+                    Math.Clamp(target.Y, wa.Y, Math.Max(wa.Y, wa.Bottom - 100)));
+                _lastNormal = (Position, restoredSize);
             }
-
-            // 预置 _lastNormal：若本次以 Maximized 启动，OnOpened 不会记录 Normal 几何
-            // （那时 WindowState 已是 Maximized），而 OnClosing 又优先取 _lastNormal——
-            // 不预置会导致"最大化关闭"把屏幕尺寸当成用户偏好的窗口尺寸存下来。
-            if (havePos)
-                _lastNormal = (pos, new Size(Width, Height));
         }
 
         if (_settings.WindowState == (int)WindowState.Maximized)
