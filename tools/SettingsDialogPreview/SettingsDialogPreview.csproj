@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net11.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <EnableDefaultEmbeddedResourceItems>false</EnableDefaultEmbeddedResourceItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Reference Include="3FCompare.App">
+      <HintPath>C:\PLAN\3FCompare\src\3FCompare.App\bin\Debug\net11.0-windows\3FCompare.App.dll</HintPath>
+    </Reference>
+    <Reference Include="3FCompare.Core">
+      <HintPath>C:\PLAN\3FCompare\src\3FCompare.App\bin\Debug\net11.0-windows\3FCompare.Core.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+</Project>
