@@ -68,3 +68,6 @@ third_party/LakeUI/
 
 # 本机 git 对象库损坏恢复时的临时备份（勿提交）
 _corrupt_pack_backup/
+
+# WorkBuddy 工作记忆（本机 agent 日志与项目约定，不入库；文件保留在磁盘）
+.workbuddy-ai/
