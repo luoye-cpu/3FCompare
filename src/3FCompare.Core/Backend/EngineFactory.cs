@@ -68,6 +68,9 @@ public static class EngineFactory
         {
             return new Fff3FpEngine();
         }
+        // 降级时把模式名（含原因）写日志：状态栏只显示一次、且用户可能不看，
+        // 日志是排查"为什么是演示模式"的唯一留痕（可用性 P1-3 的配套）。
+        AppLog.Warn("EngineFactory", $"Create: {CurrentModeName}");
         return new SimulatedEngine();
     }
 
