@@ -10,6 +10,16 @@ internal static class Program
     [STAThread]
     public static void Main(string[] args)
     {
+        // 进程退出钩子：卸载内核日志 sink + 冲刷日志。
+        // 内核解码/播放线程可能活过托管侧——不注销回调，CLR 停机后它们反向 P/Invoke
+        // 会触发 coreclr ceemain.cpp:1750 断言（"Attempt to execute managed code after the
+        // .NET runtime thread state has been destroyed."）并让进程以 127 退出。
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        {
+            try { _3FCompare.Core.Diagnostics.KernelLogBridge.Uninstall(); } catch { }
+            try { _3FCompare.Core.Diagnostics.AppLog.Shutdown(); } catch { }
+        };
+
         // F-LOG：落盘日志最先初始化（捕获从第一行起的全部内容）
         _3FCompare.Core.Diagnostics.AppLog.Initialize();
         // 双写器：全代码库 Console.Error.WriteLine 自动同步落盘（55 处调用点零改动）
@@ -32,9 +42,11 @@ internal static class Program
         }
 
         // F-LOG：安装内核日志 sink（内核线程的日志汇入同一落盘通道）
+        // FFF_NO_KERNEL_LOG=1 可禁用，用于定位退出期 CLR 反向 P/Invoke 断言的来源
         try
         {
-            _3FCompare.Core.Diagnostics.KernelLogBridge.Install();
+            if (Environment.GetEnvironmentVariable("FFF_NO_KERNEL_LOG") != "1")
+                _3FCompare.Core.Diagnostics.KernelLogBridge.Install();
         }
         catch (Exception ex)
         {

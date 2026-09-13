@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -24,6 +24,60 @@ namespace _3FCompare;
 /// 打开/播放/步进/循环/缩放平移/网格布局/时间轴/状态栏全量；面板与对话框 M3 实装。</summary>
 public partial class MainWindow : Window
 {
+    /// <summary>自测/压力测试模式（由命令行 --selftest/--screentest/--multitest 置位）。
+    /// 置位时跳过窗口几何持久化，避免测试窗口的位置/尺寸覆盖用户配置。</summary>
+    private bool _selfTestMode;
+
+    /// <summary>强制终止当前进程（kernel32!TerminateProcess）。
+    /// 不用 ExitProcess：后者会依次执行所有 DLL 的 DLL_PROCESS_DETACH，
+    /// 实测在 FFF.Native / D3D11 上会死锁挂住。TerminateProcess 不跑 detach，且能指定退出码。</summary>
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern bool TerminateProcess(nint hProcess, int exitCode);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern nint GetCurrentProcess();
+
+    /// <summary>
+    /// 自测/压力测试统一退出口：复刻 OnClosing 的清理链后再退出。
+    /// 直接 Environment.Exit 会绕过 OnClosing，播放器会话不 Destroy；且 CLR 的托管停机
+    /// 期间仍有原生线程反向回调托管委托，触发 ceemain.cpp:1750 断言并以 127 退出
+    /// （测试明明全部通过却报崩溃）。这里改用 TerminateProcess：日志/控制台已显式冲刷，
+    /// 无需走托管停机，退出码也能如实传递。
+    /// </summary>
+    private void ExitSelfTest(int code)
+    {
+        // ① 先销毁全部播放器会话（与 OnClosing 同一条清理链）
+        DestroyAllSessions();
+        // ② 再卸载内核日志 sink（同样是托管委托）
+        try { _3FCompare.Core.Diagnostics.KernelLogBridge.Uninstall(); } catch { }
+        Console.Error.WriteLine($"[ExitSelfTest] 清理完毕 slots={_sync.Slots.Count} {DateTime.Now:HH:mm:ss.fff}");
+        // ③ 关闭窗口并让 Avalonia 真正销毁 HWND。
+        //    停机时若 HWND 仍在，系统投递的窗口消息会经 Avalonia 的托管 WndProc
+        //    反向进入已销毁的 CLR —— 这正是 ceemain.cpp:1750 断言的触发点。
+        try
+        {
+            Close();
+            for (var i = 0; i < 20; i++)
+            {
+                Avalonia.Threading.Dispatcher.UIThread.RunJobs();
+                System.Threading.Thread.Sleep(50);
+            }
+        }
+        catch { }
+        // ④ 静默期：等内核工作线程收尾，避免飞行中的回调撞上 CLR 停机
+        try { System.Threading.Thread.Sleep(600); } catch { }
+        Console.Error.WriteLine($"[ExitSelfTest] 准备退出 code={code} {DateTime.Now:HH:mm:ss.fff}");
+        // ⑤ 冲刷日志与控制台（TerminateProcess 不走托管停机，必须在这里显式冲刷）
+        try { _3FCompare.Core.Diagnostics.AppLog.Shutdown(); } catch { }
+        Console.Out.Flush();
+        Console.Error.Flush();
+        // ⑥ 强制终止进程：跳过 CLR 托管停机与 DLL detach，
+        //    原生线程没有机会回调已销毁的运行时，退出码也能如实传递
+        TerminateProcess(GetCurrentProcess(), code);
+        System.Threading.Thread.Sleep(3000); // 兜底：理论上不会走到
+        Environment.Exit(code);
+    }
+
     private async System.Threading.Tasks.Task RunScreentestAsync(string input, string outputPng)
     {
         var code = 1;
@@ -72,7 +126,7 @@ public partial class MainWindow : Window
         finally
         {
             Console.Out.Flush();
-            Environment.Exit(code);
+            ExitSelfTest(code);
         }
     }
 
@@ -93,7 +147,7 @@ public partial class MainWindow : Window
                 {
                     Console.Error.WriteLine($"selftest: 看门狗触发 ✗ 卡在步骤 [{_step}] 超过 40s");
                     Console.Error.Flush();
-                    Environment.Exit(3);
+                    ExitSelfTest(3);
                 }
             }
         });
@@ -103,7 +157,7 @@ public partial class MainWindow : Window
             if (!File.Exists(videoPath))
             {
                 Console.Error.WriteLine($"selftest: 文件不存在 {videoPath}");
-                Environment.Exit(2);
+                ExitSelfTest(2);
             }
 
             _step = "打开";
@@ -434,7 +488,7 @@ public partial class MainWindow : Window
         finally
         {
             Console.Out.Flush();
-            Environment.Exit(code);
+            ExitSelfTest(code);
         }
     }
 
@@ -456,7 +510,7 @@ public partial class MainWindow : Window
             if (!File.Exists(videoPath))
             {
                 Console.Error.WriteLine($"multitest: 文件不存在 {videoPath}");
-                Environment.Exit(2);
+                ExitSelfTest(2);
             }
 
             // 打开 N 路：统一暂停对齐（与 OpenPaths 语义一致），全部就绪后手动 Play
@@ -553,7 +607,7 @@ public partial class MainWindow : Window
         finally
         {
             Console.Out.Flush();
-            Environment.Exit(code);
+            ExitSelfTest(code);
         }
     }
 

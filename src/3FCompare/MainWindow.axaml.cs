@@ -171,6 +171,11 @@ public partial class MainWindow : Window
 
         // 自动化 selftest / screentest / multitest 模式（GetCommandLineArgs 返回进程原始参数）
         var args = Environment.GetCommandLineArgs();
+        // 自测/压力测试模式：退出前会 Close() 窗口以销毁子 HWND，
+        // 必须跳过窗口几何持久化，否则会用测试窗口的位置/尺寸覆盖用户配置。
+        if (args.Length >= 3 && args[1] is "--selftest" or "--screentest" or "--multitest")
+            _selfTestMode = true;
+
         // --selftest <video> [video2]：video2 用于嵌入式拖入测试（可选）
         if (args.Length >= 3 && args[1] == "--selftest")
             _ = RunSelftestAsync(args[2], args.Length >= 4 ? args[3] : null);
@@ -1668,10 +1673,28 @@ public partial class MainWindow : Window
         SaveWindowGeometry();
 
         _pollTimer.Stop();
-        _coordinator.Close();
-        _sync.Clear();
+        DestroyAllSessions();
         _3FCompare.Core.Diagnostics.AppLog.Shutdown();
         base.OnClosing(e);
+    }
+
+    /// <summary>销毁全部播放器会话（含 _coordinator.Close() 与 _sync.Clear()）。
+    /// 内核工作线程持有托管事件回调的函数指针：会话不 Destroy 就退出进程，这些线程会在
+    /// CLR 停机后继续反向 P/Invoke，触发 coreclr/vm/ceemain.cpp:1750 断言
+    /// （"Attempt to execute managed code after the .NET runtime thread state has been
+    /// destroyed."）并使进程以 127 退出。此前全代码库无任何 Dispose 会话的调用点。</summary>
+    private void DestroyAllSessions()
+    {
+        try
+        {
+            foreach (var slot in _sync.Slots)
+            {
+                try { (slot.Session as IDisposable)?.Dispose(); } catch { }
+            }
+        }
+        catch { }
+        try { _coordinator.Close(); } catch { }
+        try { _sync.Clear(); } catch { }
     }
 
     /// <summary>保存窗口几何（可用性 P0-2）。
@@ -1680,6 +1703,7 @@ public partial class MainWindow : Window
     /// 记录坐标完全落在所有屏幕之外（显示器拔掉/分辨率变化）时只存状态不存坐标。</summary>
     private void SaveWindowGeometry()
     {
+        if (_selfTestMode) return; // 自测模式：不把测试窗口的几何写进用户配置
         var state = WindowState;
         if (state == WindowState.Minimized)
         {
