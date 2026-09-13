@@ -65,3 +65,6 @@ publish/
 .zcode/
 testmedia/media/
 third_party/LakeUI/
+
+# 本机 git 对象库损坏恢复时的临时备份（勿提交）
+_corrupt_pack_backup/

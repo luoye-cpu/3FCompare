@@ -9,7 +9,9 @@ namespace _3FCompare.Controls;
 /// <summary>传输栏（WinForms TransportBar 对应）：播放/停止/双步进/循环/加减路/倍速/色彩模式/时间码。</summary>
 public partial class TransportBar : UserControl
 {
-    private static readonly double[] Speeds = { 0.5, 1.0, 2.0, 4.0 };
+    // 慢速档（<1.0）已移除：内核原生变速未接线前，伪变速实现只对 >1.0 生效，
+    // 更慢的档位会被静默忽略（见 PlaybackCoordinator 的每秒 Seek 逻辑）
+    private static readonly double[] Speeds = { 1.0, 2.0, 4.0 };
     private bool _suppressComboEvents;
 
     public event EventHandler? PlayPauseClicked;
@@ -30,7 +32,7 @@ public partial class TransportBar : UserControl
         InitializeComponent();
         foreach (var s in Speeds)
             ComboSpeed.Items.Add($"{s:0.#}x");
-        ComboSpeed.SelectedIndex = 1;
+        ComboSpeed.SelectedIndex = 0; // 1.0x
         ComboColorMode.Items.Clear();
         ComboColorMode.Items.Add(LanguageManager.T("Color_Auto"));
         ComboColorMode.Items.Add("SDR");

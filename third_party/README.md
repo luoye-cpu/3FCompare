@@ -8,4 +8,4 @@
 | Shared FFmpeg DLL | BtbN FFmpeg-Builds `...-win64-gpl-shared.zip` | `third_party/ffmpeg/` |
 | libass 构建 | 上游 `tools/准备FFmpeg.ps1`（vcpkg） | `third_party/vcpkg_installed/` |
 
-> 详见 [docs/06-风险与依赖.md](../docs/06-风险与依赖.md)。
+> 详见 [docs/06-风险与依赖.zh.md](../docs/06-风险与依赖.zh.md)。

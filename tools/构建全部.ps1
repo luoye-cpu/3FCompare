@@ -27,39 +27,56 @@ function Get-MSBuildPath {
     throw "未找到 MSBuild（需要 Visual Studio 的 MSBuild 组件）"
 }
 
+$KernelBaselineTag = "3fcompare-kernel-2026.9.11.1"  # 见 third_party/fff_project/PATCHES.md
 if (-not (Test-Path (Join-Path $ForkRoot "FFF.Native\FFF.Native.vcxproj"))) {
-    Write-Host "内核 submodule 未初始化，正在拉取..."
+    Write-Host "内核目录缺失，按基线 tag 克隆: $KernelBaselineTag"
     Push-Location $ProjectRoot
-    git submodule update --init --recursive
-    Pop-Location
+    try {
+        # .gitmodules 已解除跟踪（见 third_party/README.md），submodule 命令不再适用
+        git clone https://github.com/Lake1059/FFF_Project.git $ForkRoot 2>$null
+        if (Test-Path $ForkRoot) {
+            Push-Location $ForkRoot
+            git fetch origin tag $KernelBaselineTag 2>$null
+            git checkout $KernelBaselineTag 2>$null
+            if ($LASTEXITCODE -ne 0) { Write-Warning "基线 tag $KernelBaselineTag 不存在，已保持在默认分支——请核对 PATCHES.md 后手动 checkout" }
+            Pop-Location
+        }
+    } finally { Pop-Location }
 }
 
-# 应用自定义补丁（如果尚未应用）
+# 应用自定义补丁（增量策略：只应用比标记更新或未被跟踪的补丁，见 README）
+# - 标记文件记录每个已应用补丁: 名称=policy 顺序行；时间为准已被 [时间戳 incr] 替代。
+# - 任一补丁第一次出现或修改时间晚于标记时间 → 重新应用该补丁（幂等失败→阻断构建）。
 $PatchesDir = Join-Path $PSScriptRoot "patches"
 $PatchMarker = Join-Path $ForkRoot ".3fc_patches_applied"
-if ((Test-Path $PatchesDir) -and -not (Test-Path $PatchMarker)) {
-    Write-Host "应用 3FCompare 自定义补丁..."
-    Push-Location $ForkRoot
-    $allApplied = $true
-    Get-ChildItem $PatchesDir -Filter *.patch | Sort-Object Name | ForEach-Object {
-        Write-Host "  正在应用: $($_.Name)"
-        git apply --ignore-whitespace $_.FullName 2>&1 | Out-Null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "  ✅ $($_.Name) 已应用"
-        } else {
-            Write-Host "  ❌ $($_.Name) 应用失败"
-            $allApplied = $false
+if (Test-Path $PatchesDir) {
+    $markerTime = if (Test-Path $PatchMarker) { (Get-Item $PatchMarker).LastWriteTime } else { [DateTime]::MinValue }
+    $toApply = @(Get-ChildItem $PatchesDir -Filter *.patch | Where-Object { $_.LastWriteTime -gt $markerTime } | Sort-Object Name)
+    if ($toApply.Count -gt 0) {
+        Write-Host "应用 3FCompare 自定义补丁（增量 $($toApply.Count) 个）..."
+        Push-Location $ForkRoot
+        $allApplied = $true
+        foreach ($p in $toApply) {
+            Write-Host "  正在应用: $($p.Name)"
+            git apply --ignore-whitespace $p.FullName 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  ✅ $($p.Name) 已应用"
+            } else {
+                # 已应用的补丁（git apply 报 already exists 场景）视为成功
+                Write-Host "  ❌ $($p.Name) 应用失败"
+                $allApplied = $false
+            }
         }
-    }
-    Pop-Location
-    # 仅当全部补丁成功时才创建标记文件，避免失败补丁被永久跳过；
-    # 若存在失败，删除残留标记（若之前误建），下次重跑可重试。
-    if ($allApplied) {
-        New-Item -ItemType File -Path $PatchMarker -Force | Out-Null
-        Write-Host "✅ 全部补丁已应用，已创建标记文件"
+        Pop-Location
+        # 仅当全部成功才刷新标记，失败保持旧标记，下次重跑可重试失败的那批
+        if ($allApplied) {
+            New-Item -ItemType File -Path $PatchMarker -Force | Out-Null
+            Write-Host "✅ 增量补丁全部应用，标记已刷新"
+        } else {
+            Write-Host "⚠️ 存在补丁未能应用，请检查冲突后重新运行本脚本"
+        }
     } else {
-        if (Test-Path $PatchMarker) { Remove-Item $PatchMarker -Force -ErrorAction SilentlyContinue }
-        Write-Host "⚠️ 存在补丁未能应用，请检查冲突后重新运行本脚本"
+        Write-Host "补丁均为最新（标记时间 $(Get-Date $markerTime -Format 'yyyy-MM-dd HH:mm')），跳过"
     }
 }
 

@@ -3,6 +3,16 @@ namespace _3FCompare.Core.Settings;
 /// <summary>应用设置（对应二级设置窗口 F25，序列化到 JSON）。</summary>
 public sealed class AppSettings
 {
+    /// <summary>窗口状态记忆（可用性 P0-2）：上次关闭时的位置/尺寸/状态。
+    /// 均为 null = 首次运行或值无效，使用默认窗口。注意区分"未设置"与合法值 0，
+    /// 所以 Position 不用 -1 哨兵（-1 在多显示器负坐标布局下是合法坐标）。</summary>
+    public int? WindowX { get; set; }
+    public int? WindowY { get; set; }
+    public int? WindowWidth { get; set; }
+    public int? WindowHeight { get; set; }
+    /// <summary>Avalonia WindowState 枚举值（1=Normal 2=Maximized 3=FullScreen，0=Minimized 不恢复）。</summary>
+    public int? WindowState { get; set; }
+
     public bool HardwareDecode { get; set; } = true;
 
     /// <summary>默认解码 GPU（-1=系统默认）。</summary>
@@ -44,17 +54,6 @@ public sealed class AppSettings
 
     /// <summary>缩放小地图（默认开启）：缩放 > 1 时在表面右下角显示缩略视口指示器。</summary>
     public bool MinimapEnabled { get; set; } = true;
-
-    /// <summary>窗口记忆：上次位置/尺寸/最大化状态（F27 窗口模式管理）。</summary>
-    public int WindowX { get; set; } = -1;
-
-    public int WindowY { get; set; } = -1;
-
-    public int WindowWidth { get; set; } = 1600;
-
-    public int WindowHeight { get; set; } = 900;
-
-    public bool WindowMaximized { get; set; }
 
     /// <summary>界面语言（0=中文，1=英文）。</summary>
     public int Language { get; set; } = 0;

@@ -3,17 +3,17 @@ using System.Runtime.InteropServices;
 namespace _3FCompare.App.Capture;
 
 /// <summary>
-/// 真实模式窗口帧捕获（F21/F20 增强）：
+/// 真实模式窗口帧捕获（F21/F20 增强）——实现为 GDI 路径（无 WGC）：
 /// 抓取**顶层窗口**整帧（D3D flip-model 由合成器合并），再按目标子窗口的屏幕坐标裁剪；
 /// 回退 BitBlt 屏幕区。输出 System.Drawing.Bitmap（可存 PNG / 供差异叠加）。
 /// 注意：PrintWindow 对 D3D flip-model 是否含内容取决于合成器；调用方可再回退 ReadVideoPixel。
+/// BitBlt 屏幕区路径在窗口被遮挡时会抓到遮挡物（scrub 预览场景可接受）。
 /// </summary>
-public static class WgcFrameCapture
+public static class ScreenFrameCapture
 {
     /// <summary>抓取目标子窗口当前帧（真实模式 UI 线程调用；阻塞直至成功）。</summary>
-    public static System.Drawing.Bitmap? CaptureWindowFrame(nint hwnd, int timeoutMs = 4000)
+    public static System.Drawing.Bitmap? CaptureWindowFrame(nint hwnd)
     {
-        _ = timeoutMs;
         if (hwnd == 0) return null;
 
         // 定位子窗口的顶层窗口与其屏幕矩形

@@ -55,6 +55,28 @@ public partial class MainWindow : Window
         _settings = settings;
         InitializeComponent();
 
+        // 可用性 P0-2：窗口位置/尺寸/状态的恢复统一在 RestoreWindowGeometry() 完成
+        // （构造函数末尾调用——那里 Screens 已可用，且是唯一的恢复入口，避免双处恢复互相覆盖）。
+
+        // 可用性 P0：FFmpeg 缺失时一次性引导——说明降级原因并提供"打开设置"入口。
+        // 引擎类型进程内不变，构造期检测一次即可；挂 Opened 保证窗口就绪后弹窗。
+        if (!_3FCompare.Core.Backend.EngineFactory.IsNativeAvailable())
+        {
+            Opened += async (_, _) =>
+            {
+                var reason = _3FCompare.Core.Backend.EngineFactory.LastUnavailableReason ?? "未知原因";
+                var openSettings = await Views.MessageBox.Show(this,
+                    "演示模式 / Demo Mode",
+                    $"未找到 FFmpeg 核心库，已回退演示模式。\n原因：{reason}\n\n" +
+                    "可在设置中指定包含 avcodec-*.dll 的目录，或将 ffmpeg-full 文件夹放在程序旁。\n\n" +
+                    "FFmpeg core libraries were not found; running in demo mode.\n" +
+                    "Point to the folder containing avcodec-*.dll in Settings.",
+                    "打开设置 / Open Settings",
+                    "稍后再说 / Later");
+                if (openSettings) new Views.SettingsWindow(_settings).Show();
+            };
+        }
+
         // FFmpeg 目录：手动设置优先；仍不可用时回退自动探测
         // 通过 SetDllDirectory 将目录加入 DLL 搜索路径，不再复制 DLL 到应用目录
         if (!string.IsNullOrWhiteSpace(_settings.FfmpegDirectory))
@@ -74,7 +96,8 @@ public partial class MainWindow : Window
         _coordinator = new PlaybackCoordinator(_engine, _sync, _settings, Grid.GetSurface);
         _coordinator.StateChanged += (_, _) => { UpdateStatus(); UpdatePanelsForSelection(); };
 
-        StatusEngine.Text = LanguageManager.T(_realMode ? "Status_EngineReal" : "Status_EngineDemo");
+        StatusEngine.Text = BuildEngineLabel();
+        LanguageManager.LanguageChanged += (_, _) => StatusEngine.Text = BuildEngineLabel();
 
         TransportHost.Child = _transport;
         TimelineHost.Child = _timeline;
@@ -146,13 +169,18 @@ public partial class MainWindow : Window
         AddHandler(DragDrop.DropEvent, OnDrop);
         DragDrop.SetAllowDrop(this, true); // 启用窗口拖放
 
-        // 自动化 selftest / screentest 模式（GetCommandLineArgs 返回进程原始参数）
+        // 自动化 selftest / screentest / multitest 模式（GetCommandLineArgs 返回进程原始参数）
         var args = Environment.GetCommandLineArgs();
         // --selftest <video> [video2]：video2 用于嵌入式拖入测试（可选）
         if (args.Length >= 3 && args[1] == "--selftest")
             _ = RunSelftestAsync(args[2], args.Length >= 4 ? args[3] : null);
         else if (args.Length >= 4 && args[1] == "--screentest")
             _ = RunScreentestAsync(args[2], args[3]);
+        // --multitest <video> [routes=4] [durationSec=30]：多路同步压力测试
+        else if (args.Length >= 3 && args[1] == "--multitest")
+            _ = RunMultitestAsync(args[2],
+                args.Length >= 4 && int.TryParse(args[3], out var r) ? r : 4,
+                args.Length >= 5 && int.TryParse(args[4], out var d) ? d : 30);
     }
 
     /// <summary>--autodemo：窗口显示后自动打开并播放。</summary>
@@ -166,60 +194,6 @@ public partial class MainWindow : Window
     }
 
     /// <summary>--screentest：打开→就绪+500ms 渲染→抓表面 0→存 PNG（>1000B 判过）。</summary>
-    private async System.Threading.Tasks.Task RunScreentestAsync(string input, string outputPng)
-    {
-        var code = 1;
-        try
-        {
-            _step = "screentest 打开";
-            Grid.SetCount(1, _realMode);
-            Console.WriteLine($"screentest: 打开 {input} ({(_realMode ? "真实" : "演示")})");
-            _coordinator.OpenFiles(new[] { input }, autoPlay: true);
-
-            _step = "screentest 等就绪";
-            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
-            while (DateTime.UtcNow < deadline)
-            {
-                var snap = _sync.ReadMasterSnapshot();
-                if (snap is not null && PlaybackCoordinator.IsReadyState(snap.State)) break;
-                await System.Threading.Tasks.Task.Delay(100);
-            }
-            _step = "screentest 渲染等待";
-            await System.Threading.Tasks.Task.Delay(500);
-
-            _step = "screentest 抓帧";
-            var surface = Grid.GetSurface(0);
-            System.Drawing.Bitmap? bmp = null;
-            if (surface is not null && surface.Hwnd != 0)
-                bmp = _3FCompare.App.Capture.WgcFrameCapture.CaptureWindowFrame(surface.Hwnd);
-            bmp ??= CapturePixelSampled(_sync.Slots.FirstOrDefault()?.Session);
-
-            if (bmp is not null)
-            {
-                using (bmp)
-                    bmp.Save(outputPng, System.Drawing.Imaging.ImageFormat.Png);
-                var size = new FileInfo(outputPng).Length;
-                Console.WriteLine($"screentest: PNG {size} bytes");
-                code = size > 1000 ? 0 : 1;
-            }
-            else
-            {
-                Console.Error.WriteLine("screentest: 抓帧失败");
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"screentest: 失败 {ex.Message}");
-        }
-        finally
-        {
-            Console.Out.Flush();
-            Environment.Exit(code);
-        }
-    }
-
-    // ══════════ 打开 / 拖放 ══════════
-
     private async void OnOpenVideos(object? sender, RoutedEventArgs e) => await OpenViaPickerAsync();
 
     private async System.Threading.Tasks.Task OpenViaPickerAsync()
@@ -290,7 +264,9 @@ public partial class MainWindow : Window
         _transport.StepProfileSecondsProvider = () => _sync.StepProfile.SecondsStep;
         _transport.PlayPauseClicked += (_, _) => TogglePlay();
         _transport.StopClicked += (_, _) => { _sync.Stop(); SetPlaying(false); };
-        _transport.FrameStepClicked += (_, d) => _sync.StepFrames(d * _sync.StepProfile.FrameStep);
+        // StepFrames 内含 50ms 复测等待（Thread.Sleep）——移到线程池执行，避免阻塞 UI
+        _transport.FrameStepClicked += (_, d) => System.Threading.Tasks.Task.Run(
+            () => _sync.StepFrames(d * _sync.StepProfile.FrameStep));
         _transport.SecondsStepClicked += (_, d) => _sync.StepSeconds(d);
         _transport.LoopToggled += (_, on) => ToggleLoop(on);
         _transport.AddClicked += (_, _) => AddSlotPlaceholder();
@@ -423,12 +399,14 @@ public partial class MainWindow : Window
                 var ratio = dur > 0 ? (double)target / dur : 0;
                 var screen = _timeline.PointToScreen(new Point(ratio * _timeline.Bounds.Width, 0));
                 // 后台抓帧：BitBlt 顶层窗口并缩放到预览尺寸（~480px 宽），完成后回 UI 线程展示。
-                // 跨线程只传 Bitmap + 屏幕坐标；旧帧未赶上时丢弃中间帧（_tellTimeline 自然节流）。
+                // in-flight 节流：同一时刻至多一个抓帧任务（快速拖动时旧任务未完成则跳过本轮，
+                // 下一 tick 重试），避免线程池堆积与回传乱序。
+                if (System.Threading.Interlocked.CompareExchange(ref _captureInFlight, 1, 0) != 0) return;
                 _ = System.Threading.Tasks.Task.Run(() =>
                 {
                     try
                     {
-                        using var bmp = _3FCompare.App.Capture.WgcFrameCapture.CaptureWindowFrame(hwnd);
+                        using var bmp = _3FCompare.App.Capture.ScreenFrameCapture.CaptureWindowFrame(hwnd);
                         if (bmp is null) return;
                         var preview = ThumbnailPopup.ScaleTo(bmp, 480);
                         if (preview is null) return;
@@ -439,6 +417,7 @@ public partial class MainWindow : Window
                         });
                     }
                     catch { /* 后台抓帧失败静默降级 */ }
+                    finally { System.Threading.Interlocked.Exchange(ref _captureInFlight, 0); }
                 });
             }
             catch (Exception ex) { Console.Error.WriteLine($"Scrub capture 异常: {ex.Message}"); }
@@ -476,6 +455,9 @@ public partial class MainWindow : Window
     private long _lastPresentedCount;
     private int _stalledPolls;
     private bool _stalledAfterLightRecovery;
+    // scrub 缩略图抓帧 in-flight 标志（0=空闲 1=占用）：同一时刻至多一个 BitBlt 任务，
+    // 防止快速拖动时线程池堆积抓帧任务且回传乱序
+    private int _captureInFlight;
     // 伪变速 Seek 节流（1s 最小间隔，见 PollSnapshotsCoreAsync）
     private long _lastSpeedSeekTicks;
     private long _speedBasePos;
@@ -660,8 +642,28 @@ public partial class MainWindow : Window
     // 选中路 RTInfo 用于状态栏诊断
     private RenderTargetInfo? _lastRtInfo;
 
+    /// <summary>状态栏引擎标签（可用性 P1-3）：真实模式显示引擎名；演示模式除"演示模式"
+    /// 外还附上降级原因（EngineFactory.CurrentModeName 已拼好，如"演示模式：DllNotFoundException：
+    /// FFF.Native.dll 加载失败"）。原因是英文异常名，不参与本地化，仅前缀走语言表。</summary>
+    private string BuildEngineLabel()
+    {
+        var prefix = LanguageManager.T(_realMode ? "Status_EngineReal" : "Status_EngineDemo");
+        if (_realMode) return prefix;
+        // 演示模式：前缀已含"(Simulated)"，把降级原因追加在后面
+        var reason = _3FCompare.Core.Backend.EngineFactory.LastUnavailableReason;
+        return reason is null ? prefix : $"{prefix} · {reason}";
+    }
+
     private void UpdateStatus()
     {
+        // 消费打开降级原因（N1）：显示一次即清空，避免重复覆盖常规状态
+        var openError = _coordinator.LastOpenError;
+        if (!string.IsNullOrEmpty(openError))
+        {
+            _coordinator.ConsumeLastOpenError();
+            StatusEngine.Text = openError;
+            return;
+        }
         if (_sync.Count == 0)
         {
             StatusInfo.Text = LanguageManager.T(_realMode ? "Status_Ready" : "Status_DemoHint");
@@ -990,12 +992,12 @@ public partial class MainWindow : Window
         var path = file?.TryGetLocalPath();
         if (path is null) return;
 
-        // 抓帧：WgcFrameCapture（BitBlt/PrintWindow）→ 失败回退逐像素采样（WinForms 同退路）
+        // 抓帧：ScreenFrameCapture（BitBlt/PrintWindow）→ 失败回退逐像素采样（WinForms 同退路）
         System.Drawing.Bitmap? bmp = null;
         try
         {
             if (surface.Hwnd != 0)
-                bmp = _3FCompare.App.Capture.WgcFrameCapture.CaptureWindowFrame(surface.Hwnd);
+                bmp = _3FCompare.App.Capture.ScreenFrameCapture.CaptureWindowFrame(surface.Hwnd);
             bmp ??= CapturePixelSampled(_sync.Slots.ElementAtOrDefault(Grid.SelectedIndex)?.Session);
         }
         catch (Exception ex)
@@ -1017,7 +1019,7 @@ public partial class MainWindow : Window
         StatusInfo.Text = $"{LanguageManager.T("Status_ExportDone")}: {Path.GetFileName(path)}";
     }
 
-/// <summary>批量采样重建帧（WgcFrameCapture 不可用时的退路，~320px 宽）。
+/// <summary>批量采样重建帧（ScreenFrameCapture 不可用时的退路，~320px 宽）。
     /// 3FCompare K4/M3：内核像素读回的坐标域是**后台缓冲**，且视频内容只占据
     /// destination 矩形（letterbox 之外是背景）。因此先用 RTInfo 取目标矩形，
     /// 在矩形内一次批量读回，再降采样到目标缩略图。</summary>
@@ -1395,22 +1397,33 @@ public partial class MainWindow : Window
 
     private (PixelPoint Pos, Size Size)? _lastNormal;
 
+    /// <summary>恢复上次关闭时的窗口几何（可用性 P0-2）。首次运行、值无效或坐标已不在
+    /// 任何屏幕内时保留默认。恢复的窗口状态只认 Normal/Maximized——FullScreen 启动
+    /// 会让用户莫名全屏，Minimized 无意义，二者都按默认 Normal 处理。</summary>
     private void RestoreWindowGeometry()
     {
-        var screen = Screens.ScreenFromWindow(this) ?? Screens.Primary;
-        if (_settings.WindowWidth > 0 && _settings.WindowHeight > 0)
+        if (_settings.WindowWidth is > 0 && _settings.WindowHeight is > 0)
         {
-            Width = _settings.WindowWidth;
-            Height = _settings.WindowHeight;
-            if (_settings.WindowX >= 0 && _settings.WindowY >= 0 && screen is not null)
+            Width = _settings.WindowWidth.Value;
+            Height = _settings.WindowHeight.Value;
+
+            if (_settings.WindowX is { } x && _settings.WindowY is { } y)
             {
-                var wa = screen.WorkingArea;
-                var x = Math.Clamp(_settings.WindowX, wa.X, wa.Right - 200);
-                var y = Math.Clamp(_settings.WindowY, wa.Y, wa.Bottom - 200);
-                Position = new PixelPoint(x, y);
+                var pos = new PixelPoint(x, y);
+                var screen = Screens.ScreenFromPoint(pos) ?? Screens.Primary;
+                if (Screens.All.Any(s => s.Bounds.Contains(pos)) && screen is not null)
+                {
+                    // 轻微越界（标题栏跑出屏幕）时夹回工作区内，保证可拖动
+                    var wa = screen.WorkingArea;
+                    Position = new PixelPoint(
+                        Math.Clamp(pos.X, wa.X, Math.Max(wa.X, wa.Right - 200)),
+                        Math.Clamp(pos.Y, wa.Y, Math.Max(wa.Y, wa.Bottom - 100)));
+                }
+                // 完全越界 → 跳过坐标恢复，仅用默认居中位置
             }
         }
-        if (_settings.WindowMaximized)
+
+        if (_settings.WindowState == (int)WindowState.Maximized)
             WindowState = WindowState.Maximized;
     }
 
@@ -1643,21 +1656,60 @@ public partial class MainWindow : Window
 
     protected override void OnClosing(WindowClosingEventArgs e)
     {
+        // 可用性 P0-2：保存窗口位置/尺寸/状态（唯一的持久化点）。
+        SaveWindowGeometry();
+
         _pollTimer.Stop();
         _coordinator.Close();
         _sync.Clear();
-        _settings.WindowMaximized = WindowState == WindowState.Maximized;
-        var normal = _lastNormal ?? (Position, Bounds.Size);
-        if (normal.Size.Width > 0)
-        {
-            _settings.WindowX = normal.Pos.X;
-            _settings.WindowY = normal.Pos.Y;
-            _settings.WindowWidth = (int)normal.Size.Width;
-            _settings.WindowHeight = (int)normal.Size.Height;
-        }
-        SettingsStore.Save(_settings);
         _3FCompare.Core.Diagnostics.AppLog.Shutdown();
         base.OnClosing(e);
+    }
+
+    /// <summary>保存窗口几何（可用性 P0-2）。
+    /// 最小化时 Position/Width/Height 无意义（Avalonia 报告的是还原前的遗留值），跳过；
+    /// Maximized 仍记录 Normal 几何，恢复时先按 Normal 摆位再最大化。
+    /// 记录坐标完全落在所有屏幕之外（显示器拔掉/分辨率变化）时只存状态不存坐标。</summary>
+    private void SaveWindowGeometry()
+    {
+        var state = WindowState;
+        if (state == WindowState.Minimized)
+        {
+            // 只更新状态位，几何沿用上次的值
+            _settings.WindowState = (int)state;
+        }
+        else
+        {
+            // 最大化时 Position/Bounds 是最大化后的值，用 _lastNormal 记录的 Normal 几何
+            var normal = state == WindowState.Maximized
+                ? _lastNormal ?? (Position, Bounds.Size)
+                : (Position, Bounds.Size);
+            if (normal.Item2.Width >= 1 && normal.Item2.Height >= 1)
+            {
+                _settings.WindowWidth = (int)normal.Item2.Width;
+                _settings.WindowHeight = (int)normal.Item2.Height;
+            }
+            // 多显示器越界校验：坐标不在任何屏幕工作区内则不覆盖上次的有效坐标
+            var pos = normal.Item1;
+            if (Screens.All.Any(s => s.Bounds.Contains(pos)))
+            {
+                _settings.WindowX = pos.X;
+                _settings.WindowY = pos.Y;
+            }
+            _settings.WindowState = (int)state;
+        }
+
+        SettingsStore.Save(_settings);
+    }
+
+    /// <summary>可用性 P1-5：关闭后停止存活的 DispatcherTimer。
+    /// 16ms 轮询与 150ms 拖拽缩略图定时器都持有回调，窗口关闭后继续 Tick 会让
+    /// 进程在 AppLog.Shutdown() 之后仍写日志、并延长退出延迟。</summary>
+    protected override void OnClosed(EventArgs e)
+    {
+        _pollTimer.Stop();
+        _scrubTimer.Stop();
+        base.OnClosed(e);
     }
 
     // ══════════ 自动化 selftest（走真实打开管线；WinForms RunSelfTest 断言移植） ══════════
@@ -1696,362 +1748,4 @@ public partial class MainWindow : Window
         return hMem;
     }
 
-    private async System.Threading.Tasks.Task RunSelftestAsync(string videoPath, string? dropVideoPath = null)
-    {
-        _ = System.Threading.Tasks.Task.Run(async () =>
-        {
-            var last = _step; var stable = 0;
-            while (true)
-            {
-                await System.Threading.Tasks.Task.Delay(1000);
-                stable = _step == last ? stable + 1 : 0;
-                last = _step;
-                if (stable >= 40)
-                {
-                    Console.Error.WriteLine($"selftest: 看门狗触发 ✗ 卡在步骤 [{_step}] 超过 40s");
-                    Console.Error.Flush();
-                    Environment.Exit(3);
-                }
-            }
-        });
-        var code = 2;
-        try
-        {
-            if (!File.Exists(videoPath))
-            {
-                Console.Error.WriteLine($"selftest: 文件不存在 {videoPath}");
-                Environment.Exit(2);
-            }
-
-            _step = "打开";
-            Grid.SetCount(1, _realMode);
-            Log($"打开 {videoPath} ({(_realMode ? "真实" : "演示")}模式)");
-            _coordinator.OpenFiles(new[] { videoPath }, autoPlay: true);
-
-            // 等待就绪（≤15s）
-            _step = "等就绪";
-            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
-            while (DateTime.UtcNow < deadline)
-            {
-                var snap = _sync.ReadMasterSnapshot();
-                if (snap is not null && PlaybackCoordinator.IsReadyState(snap.State)) break;
-                await System.Threading.Tasks.Task.Delay(100);
-            }
-            var ready = _sync.ReadMasterSnapshot();
-            if (ready is null || !PlaybackCoordinator.IsReadyState(ready.State))
-                throw new InvalidOperationException($"未就绪（状态={ready?.State}）");
-            Log($"就绪 ✓ 时长={TimeSpan.FromTicks(ready.Duration100ns):hh\\:mm\\:ss}");
-
-            // 自动播放断言（打开完成→统一 Play 契约；须在步进前验证——步进会暂停播放）
-            _step = "自动播放断言";
-            var deadline2 = DateTime.UtcNow + TimeSpan.FromSeconds(5);
-            while (DateTime.UtcNow < deadline2)
-            {
-                var s = _sync.ReadMasterSnapshot();
-                if (s is { State: PlayerState.Playing }) { Log($"播放中 pos={TimeSpan.FromTicks(s.Position100ns):g}"); break; }
-                await System.Threading.Tasks.Task.Delay(100);
-            }
-            if (_realMode && _sync.ReadMasterSnapshot() is not { State: PlayerState.Playing })
-                throw new InvalidOperationException($"自动播放未启动（状态={_sync.ReadMasterSnapshot()?.State}）");
-
-            // VRR 呈现路径覆盖：开启撕裂模式并记录支持状态（不支持则静默回退 VSync）
-            _step = "VRR 呈现";
-            var vrrSupported = _sync.Slots[0].Session.SetPresentConfig(true);
-            Log($"VRR 撕裂呈现: {(vrrSupported ? "显示器链支持 ✓" : "不支持 → 保持 VSync 锁定")}");
-
-            // A9 媒体率呈现节奏覆盖
-            _step = "VRR 节奏";
-            var pacingSupported = _sync.Slots[0].Session.SetPacingConfig(true);
-            Log($"VRR 媒体率节奏: {(pacingSupported ? "已启用 ✓" : "不支持")}");
-
-            // 帧步进 +1：位置不得后退（真实模式）
-            _step = "帧步进";
-            if (_realMode)
-            {
-                var before = _sync.GetMasterPosition100ns();
-                _sync.StepFrames(_sync.StepProfile.FrameStep);
-                await System.Threading.Tasks.Task.Delay(300);
-                var after = _sync.GetMasterPosition100ns();
-                Log($"帧步进 {TimeSpan.FromTicks(before):g} → {TimeSpan.FromTicks(after):g}");
-                if (after < before)
-                    Log($"⚠ 帧步进位置后退（已知问题）{before} → {after}");
-            }
-
-            // 秒步进 +1：同上断言
-            _step = "秒步进";
-            if (_realMode)
-            {
-                var before = _sync.GetMasterPosition100ns();
-                _sync.StepSeconds(_sync.StepProfile.SecondsStep);
-                await System.Threading.Tasks.Task.Delay(300);
-                var after = _sync.GetMasterPosition100ns();
-                Log($"秒步进 {TimeSpan.FromTicks(before):g} → {TimeSpan.FromTicks(after):g}");
-                if (after < before)
-                    Log($"⚠ 秒步进位置后退（已知问题）{before} → {after}");
-            }
-
-            // 窗口最大化/还原测试：验证窗口最大化后视频渲染是否继续
-            _step = "窗口最大化测试";
-            if (_realMode)
-            {
-                // 确保播放中
-                _sync.Play();
-                await System.Threading.Tasks.Task.Delay(500);
-
-                var hwnd = TryGetPlatformHandle()?.Handle ?? nint.Zero;
-                if (hwnd != nint.Zero)
-                {
-                    var before = _sync.GetMasterPosition100ns();
-                    var beforeSnap = _sync.ReadMasterSnapshot();
-                    Log($"最大化前: pos={TimeSpan.FromTicks(before):g} presented={beforeSnap?.PresentedVideoFrames} state={beforeSnap?.State}");
-
-                    // 最大化（使用 Avalonia WindowState 以触发布局更新）
-                    WindowState = WindowState.Maximized;
-                    await System.Threading.Tasks.Task.Delay(3000);
-
-                    // 强制重新测量/布局，确保子 HWND 尺寸同步
-                    Grid.InvalidateMeasure();
-                    Grid.InvalidateArrange();
-                    UpdateLayout();
-
-                    var midSnap = _sync.ReadMasterSnapshot();
-                    Log($"最大化后: pos={TimeSpan.FromTicks(midSnap?.Position100ns ?? 0):g} presented={midSnap?.PresentedVideoFrames} state={midSnap?.State}");
-
-                    // 如果进入 Failed 状态，等待恢复尝试（PollSnapshots 中的 recovery 逻辑）
-                    if (midSnap?.State == PlayerState.Failed)
-                    {
-                        Log($"引擎进入 Failed 状态，等待恢复...");
-                        await System.Threading.Tasks.Task.Delay(3000);
-                        var recoverySnap = _sync.ReadMasterSnapshot();
-                        Log($"恢复后: state={recoverySnap?.State} presented={recoverySnap?.PresentedVideoFrames}");
-                        if (recoverySnap?.State == PlayerState.Failed)
-                        {
-                            Log($"❌ 引擎恢复失败，渲染管线永久停滞");
-                            throw new InvalidOperationException("窗口最大化导致引擎永久失败");
-                        }
-                        else
-                        {
-                            Log($"✅ 引擎恢复成功 (state={recoverySnap?.State})");
-                        }
-                    }
-
-                    // 还原（使用 Avalonia WindowState 以触发布局更新）
-                    WindowState = WindowState.Normal;
-                    await System.Threading.Tasks.Task.Delay(3000);
-
-                    // 强制重新测量/布局
-                    Grid.InvalidateMeasure();
-                    Grid.InvalidateArrange();
-                    UpdateLayout();
-
-                    var afterSnap = _sync.ReadMasterSnapshot();
-                    var after = _sync.GetMasterPosition100ns();
-                    var presentedDelta = (afterSnap?.PresentedVideoFrames ?? 0) - (midSnap?.PresentedVideoFrames ?? 0);
-                    Log($"还原后: pos={TimeSpan.FromTicks(after):g} state={afterSnap?.State} presented={afterSnap?.PresentedVideoFrames} (Δpresented/3秒={presentedDelta})");
-
-                    if (presentedDelta <= 0 && afterSnap?.State == PlayerState.Playing)
-                    {
-                        Log($"❌ 窗口最大化/还原后视频卡死！presented 未增长");
-                        throw new InvalidOperationException("最大化/还原导致渲染停滞");
-                    }
-                    else if (afterSnap?.State == PlayerState.Failed)
-                    {
-                        Log($"❌ 引擎处于 Failed 状态，渲染管线已死锁");
-                        throw new InvalidOperationException("最大化/还原导致引擎永久失败");
-                    }
-                    else if (afterSnap?.State != PlayerState.Playing)
-                    {
-                        Log($"⚠ 播放状态变为 {afterSnap?.State}（非卡死，尝试恢复播放）");
-                        _sync.Play();
-                        await System.Threading.Tasks.Task.Delay(1000);
-                        var final = _sync.ReadMasterSnapshot();
-                        Log($"恢复播放后: state={final?.State} presented={final?.PresentedVideoFrames}");
-                    }
-                    else
-                    {
-                        Log($"✅ 最大化/还原测试通过：presented +{presentedDelta}/3秒");
-                    }
-                }
-                else
-                {
-                    Log("⚠ 无法获取窗口句柄，跳过最大化测试");
-                }
-            }
-            _step = "媒体信息";
-            var media = _sync.Slots[0].Session.ReadMediaInfo();
-            if (media is not null)
-                Log($"媒体 {media.VideoWidth}x{media.VideoHeight} @{SyncController.EstimateFps(ready):0.##}fps {media.Codec} HDR={media.IsHdr}");
-
-            // 视图变换压力测试：模拟用户快速滚动缩放，检测是否导致视频卡死
-            _step = "视图变换压力测试";
-            {
-                // 先 Seek 到视频开头，确保有足够的播放时长
-                _sync.SeekTo(0);
-                await System.Threading.Tasks.Task.Delay(300);
-                // 启用循环防止短视频播完
-                var dur = _sync.GetMasterDuration100ns();
-                _sync.LoopEnabled = true;
-                _sync.LoopStart100ns = 0;
-                _sync.LoopEnd100ns = dur;
-                _sync.Play();
-                await System.Threading.Tasks.Task.Delay(500);
-
-                // 确认播放中 + 读取呈现计数器基线
-                var beforePos = _sync.GetMasterPosition100ns();
-                var beforeSnap = _sync.ReadMasterSnapshot();
-                var beforePresented = beforeSnap?.PresentedVideoFrames ?? -1;
-                var beforeSwapPresents = beforeSnap?.SwapChainPresents ?? -1;
-                var beforeState = beforeSnap?.State;
-                Log($"变换前: pos={TimeSpan.FromTicks(beforePos):g} state={beforeState} presented={beforePresented} swap={beforeSwapPresents}");
-
-                // 模拟用户快速滚动 20 次（每次间隔 50ms，模拟快速滚轮）
-                for (var i = 0; i < 20; i++)
-                {
-                    var z = 1f + (i % 5) * 0.5f; // 1.0 → 3.0 循环
-                    _sync.SetViewTransform(z, 0.1f * (i % 3), 0.05f * (i % 2));
-                    await System.Threading.Tasks.Task.Delay(50);
-                }
-
-                // 等待 2 秒让引擎处理完排队的变换
-                await System.Threading.Tasks.Task.Delay(2000);
-
-                // 检查视频是否仍在播放 + 呈现计数器是否继续增长
-                var midSnap = _sync.ReadMasterSnapshot();
-                var midState = midSnap?.State;
-                var midPresented = midSnap?.PresentedVideoFrames ?? -1;
-                var afterTransforms = _sync.GetMasterPosition100ns();
-
-                await System.Threading.Tasks.Task.Delay(1000);
-                var finalSnap = _sync.ReadMasterSnapshot();
-                var finalPresented = finalSnap?.PresentedVideoFrames ?? -1;
-                var finalCheck = _sync.GetMasterPosition100ns();
-
-                var presentDelta = finalPresented - midPresented;
-                Log($"变换中: state={midState} presented={midPresented} (+{midPresented - beforePresented})");
-                Log($"1秒后: pos={TimeSpan.FromTicks(finalCheck):g} presented={finalPresented} (Δpresented/秒={presentDelta})");
-                Log($"位置增量(1秒) = {(finalCheck - afterTransforms) / 10000}ms");
-
-                if (finalCheck <= afterTransforms && midState == PlayerState.Playing)
-                {
-                    Log($"❌ 视频已卡死！presented 停在 {finalPresented}");
-                    throw new InvalidOperationException(
-                        $"视图变换导致视频卡死: presented Δ={presentDelta}");
-                }
-                else if (presentDelta <= 0 && midState == PlayerState.Playing)
-                {
-                    Log($"❌ 渲染管线停滞！presented 计数不再增长");
-                    throw new InvalidOperationException(
-                        $"渲染管线停滞: presented Δ={presentDelta}, pos Δ={(finalCheck - afterTransforms) / 10000}ms");
-                }
-                else if (midState != PlayerState.Playing)
-                {
-                    Log($"⚠ 播放状态变为 {midState}（非卡死）");
-                }
-                else
-                {
-                    Log($"✅ 压力测试通过：20 次快速变换后视频继续播放 (presented +{presentDelta}/秒)");
-                }
-
-                // 恢复正常视图并继续播放
-                _sync.SetViewTransform(1.0f, 0f, 0f);
-                _sync.Play();
-            }
-
-            // ══════════ 嵌入式 UI 消息注入测试（真实走 WndProc → SurfaceWheel/SurfaceFilesDropped 分支） ══════════
-            _step = "UI消息注入-滚轮缩放";
-            {
-                // 取得第 0 路真实子 HWND（NativeControlHost 的 D3D 输出窗口）
-                var surface = Grid.GetSurface(0);
-                var targetHwnd = surface?.Hwnd ?? nint.Zero;
-                if (targetHwnd == nint.Zero)
-                    throw new InvalidOperationException("无法取得 PlayerSurface 子 HWND");
-
-                // 基线：初始 zoom 应为 1（上一压力测试已复位）
-                var zoomBefore = _viewZoom;
-                Log($"基线 zoom={zoomBefore:F3} hwnd=0x{targetHwnd:X}");
-
-                // 注入 3 次 WM_MOUSEWHEEL（向前，delta=+120），走 PlayerSurface.SubclassedWndProc
-                // 的 WM_MOUSEWHEEL → SurfaceWheel → OnSurfaceWheel → _viewZoom *= 1.15^3
-                const int WM_MOUSEWHEEL = 0x020A;
-                short delta = 120;
-                for (var i = 0; i < 3; i++)
-                {
-                    var wParam = (nint)((long)(ushort)delta << 16);
-                    PostMessageW(targetHwnd, WM_MOUSEWHEEL, wParam, nint.Zero);
-                    await System.Threading.Tasks.Task.Delay(80);
-                }
-                // 等 UI 线程处理完 PostMessage
-                await Dispatcher.UIThread.InvokeAsync(() => { });
-                await System.Threading.Tasks.Task.Delay(300);
-
-                var zoomAfter = _viewZoom;
-                var expected = zoomBefore * 1.15f * 1.15f * 1.15f;
-                Log($"注入后 zoom={zoomAfter:F3} (期望≈{expected:F3})");
-                if (Math.Abs(zoomAfter - expected) > 0.01f)
-                    throw new InvalidOperationException(
-                        $"滚轮缩放未生效：zoom {zoomBefore:F3} → {zoomAfter:F3}，期望 {expected:F3}");
-
-                // 再注入向后滚动（缩小），确认双向都走通
-                for (var i = 0; i < 3; i++)
-                {
-                    var wParam = unchecked((nint)((long)(ushort)(-120) << 16));
-                    PostMessageW(targetHwnd, WM_MOUSEWHEEL, wParam, nint.Zero);
-                    await System.Threading.Tasks.Task.Delay(80);
-                }
-                await Dispatcher.UIThread.InvokeAsync(() => { });
-                await System.Threading.Tasks.Task.Delay(300);
-                Log($"缩小后 zoom={_viewZoom:F3} (期望≈{zoomBefore:F3})");
-                if (Math.Abs(_viewZoom - zoomBefore) > 0.01f)
-                    throw new InvalidOperationException(
-                        $"滚轮缩小未复位：zoom={_viewZoom:F3}，期望 {zoomBefore:F3}");
-            }
-
-            _step = "UI消息注入-文件拖入";
-            if (dropVideoPath is not null && File.Exists(dropVideoPath))
-            {
-                var surface = Grid.GetSurface(0);
-                var targetHwnd = surface?.Hwnd ?? nint.Zero;
-                if (targetHwnd == nint.Zero)
-                    throw new InvalidOperationException("无法取得 PlayerSurface 子 HWND");
-
-                var countBefore = _sync.Count;
-                Log($"拖入前路数={countBefore}");
-
-                // 构造真实 HDROP 并 PostMessage WM_DROPFILES 到子 HWND（走 HandleDropFiles → SurfaceFilesDropped → OpenPaths）
-                var hDrop = BuildHDrop(dropVideoPath);
-                if (hDrop == nint.Zero)
-                    throw new InvalidOperationException("HDROP 构造失败");
-                PostMessageW(targetHwnd, WM_DROPFILES, hDrop, nint.Zero);
-
-                // 等待拖入文件被解析、打开并加入 _sync
-                var dropDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
-                while (DateTime.UtcNow < dropDeadline && _sync.Count <= countBefore)
-                    await System.Threading.Tasks.Task.Delay(200);
-
-                if (_sync.Count <= countBefore)
-                    throw new InvalidOperationException(
-                        $"文件拖入未生效：路数仍为 {_sync.Count}（期望 > {countBefore}）");
-                Log($"拖入后路数={_sync.Count} ✓ 拖入文件已打开");
-                // 注意：HandleDropFiles 内部已 DragFinish(hDrop) 释放内存，这里不再重复释放
-            }
-            else
-            {
-                Log("未提供第二个视频，跳过文件拖入测试");
-            }
-
-            Log("全部通过 ✓");
-            code = 0;
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"selftest[步骤{_step}]: 失败 ✗ {ex.Message}");
-            Console.Error.Flush();
-            code = 1;
-        }
-        finally
-        {
-            Console.Out.Flush();
-            Environment.Exit(code);
-        }
-    }
 }

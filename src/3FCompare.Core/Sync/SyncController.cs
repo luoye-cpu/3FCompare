@@ -85,42 +85,39 @@ public sealed class SyncController
         catch (Exception ex) { ReportRuntimeError("读取 master 快照", ex); return null; }
     }
 
-    private EngineSnapshot?[] _snapshotCache = Array.Empty<EngineSnapshot?>();
-
     /// <summary>读取全部会话快照（UI 轮询用）。
-    /// ⚠ 契约：返回的是内部复用数组，仅在**下一次调用前、且只在 UI 线程上**有效；
-    /// 调用方不得缓存引用或跨线程读取。需要长期持有时应自行复制。
-    /// （当前唯一消费方 PollSnapshots 满足该契约；若将来有多消费者需改为拷贝语义。）</summary>
+    /// 拷贝语义：每次返回新数组，调用方可安全持有引用（9 路快照的分配成本可忽略）。</summary>
     public IReadOnlyList<EngineSnapshot?> ReadAllSnapshots()
     {
-        if (_snapshotCache.Length != _slots.Count)
-            _snapshotCache = new EngineSnapshot?[_slots.Count];
+        var snapshots = new EngineSnapshot?[_slots.Count];
         for (var i = 0; i < _slots.Count; i++)
         {
-            try { _snapshotCache[i] = _slots[i].Session.ReadSnapshot(); }
-            catch (Exception ex) { ReportRuntimeError($"读取第 {i} 路快照", ex); _snapshotCache[i] = null; }
+            try { snapshots[i] = _slots[i].Session.ReadSnapshot(); }
+            catch (Exception ex) { ReportRuntimeError($"读取第 {i} 路快照", ex); snapshots[i] = null; }
         }
-        return _snapshotCache;
+        return snapshots;
     }
 
     public void Play()
     {
-        foreach (var slot in _slots)
+        for (var i = 0; i < _slots.Count; i++)
         {
+            var slot = _slots[i];
             if (slot.Failed) continue;
             try { slot.Session.Play(); }
-            catch (Exception ex) { ReportRuntimeError($"播放第 {_slots.IndexOf(slot)} 路", ex); }
+            catch (Exception ex) { ReportRuntimeError($"播放第 {i} 路", ex); }
         }
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 
     public void Pause()
     {
-        foreach (var slot in _slots)
+        for (var i = 0; i < _slots.Count; i++)
         {
+            var slot = _slots[i];
             if (slot.Failed) continue;
             try { slot.Session.Pause(); }
-            catch (Exception ex) { ReportRuntimeError($"暂停第 {_slots.IndexOf(slot)} 路", ex); }
+            catch (Exception ex) { ReportRuntimeError($"暂停第 {i} 路", ex); }
         }
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -128,21 +125,23 @@ public sealed class SyncController
     /// <summary>向所有会话广播统一的视口变换（缩放 + 平移），保证多路看到同一区域。</summary>
     public void SetViewTransform(float zoom, float panX, float panY)
     {
-        foreach (var slot in _slots)
+        for (var i = 0; i < _slots.Count; i++)
         {
+            var slot = _slots[i];
             if (slot.Failed) continue;
             try { slot.Session.SetViewTransform(zoom, panX, panY); }
-            catch (Exception ex) { ReportRuntimeError($"视图变换第 {_slots.IndexOf(slot)} 路", ex); }
+            catch (Exception ex) { ReportRuntimeError($"视图变换第 {i} 路", ex); }
         }
     }
 
     public void Stop()
     {
-        foreach (var slot in _slots)
+        for (var i = 0; i < _slots.Count; i++)
         {
+            var slot = _slots[i];
             if (slot.Failed) continue;
             try { slot.Session.Stop(); }
-            catch (Exception ex) { ReportRuntimeError($"停止第 {_slots.IndexOf(slot)} 路", ex); }
+            catch (Exception ex) { ReportRuntimeError($"停止第 {i} 路", ex); }
         }
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -186,11 +185,23 @@ public sealed class SyncController
             // 用 timelineGeneration 判定 StepFrame 是否真正生效（seek 成功才递增）。
             // 旧判据 newPos==oldPos 在异步解码下不可靠：StepFrame 入队后快照大概率
             // 仍返回旧位置，会被误判"不支持"而降级为时间 Seek。
+            // StepFrame 在内核侧异步执行，立即读快照大概率还没落地——先给一次
+            // 短等待复测（50ms），仍无变化才降级为时间换算，避免每次帧步进都
+            // 付出 av_seek_frame + 解码器 flush 的全量成本。
             var stepApplied = newSnap.TimelineGeneration != snap.TimelineGeneration ||
                               newSnap.FrameIndex != snap.FrameIndex;
+            if (!stepApplied)
+            {
+                System.Threading.Thread.Sleep(50);
+                newSnap = master.Session.ReadSnapshot();
+                newPos = newSnap.Position100ns;
+                stepApplied = newSnap.TimelineGeneration != snap.TimelineGeneration ||
+                              newSnap.FrameIndex != snap.FrameIndex;
+            }
             if (!stepApplied && fps > 0)
             {
-                // StepFrame 无效（可能不支持），按时间换算
+                // StepFrame 复测后仍无变化（可能不支持），按时间换算
+                Diagnostics.AppLog.Debug("Sync", $"StepFrame 未生效，回退时间步进 fps={fps} oldFrame={oldFrame}");
                 newPos = FrameTimeline.StepByFrames(oldPos, duration, frames, fps);
                 master.Session.Seek(newPos);
                 newSnap = master.Session.ReadSnapshot();
@@ -267,12 +278,8 @@ public sealed class SyncController
     public static double EstimateFps(EngineSnapshot snap)
     {
         if (snap.FrameRate > 0) return snap.FrameRate;
-        if (snap.FrameTimeBaseDen > 0 && snap.FrameTimeBaseNum > 0 && snap.RawFramePts > 1)
-        {
-            // 单帧增量未知时无法从时间基推 fps；仅在能拿到帧号差时才可靠。
-            // 这里保守回退默认值，避免把时间基当帧率。
-            return 24.0;
-        }
+        // 无帧率数据时保守回退 24：frameTimeBase 是流时间基（如 1/15360）而非
+        // 帧率，无法从它推导 fps（曾导致 4K H.264 显示 15360fps 的 bug）。
         return 24.0;
     }
 

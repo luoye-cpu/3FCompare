@@ -8,8 +8,8 @@ namespace _3FCompare.Core.Backend;
 /// <summary>3FP 后端适配器（基于 fork 的 FFF.Native，MIT）。</summary>
 public sealed class Fff3FpEngine : IPlayerEngine
 {
-    // 内核 2026.8.24（8c48643）起 PlayerApiVersion=13（FFF3FP_Create 严格校验）。
-    private const uint ConfigVersion = 13;
+    // 内核 2026.9.11 合并（f25c28f）起 PlayerApiVersion=14（FFF3FP_Create 严格校验）。
+    private const uint ConfigVersion = 14;
 
     public IReadOnlyList<AdapterInfo> EnumerateAdapters()
     {

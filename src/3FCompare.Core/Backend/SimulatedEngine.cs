@@ -183,7 +183,9 @@ public sealed class SimulatedEngine : IPlayerEngine
             float[] buffer, out uint outputBitDepth)
         {
             outputBitDepth = 8;
-            for (var i = 0; i < buffer.Length; i += 4)
+            // 与真实引擎一致：缓冲区必须容纳 width*height*4 个 float，否则拒绝
+            if (buffer.Length < width * height * 4) return false;
+            for (var i = 0; i + 3 < buffer.Length; i += 4)
             {
                 buffer[i] = 0.5f;
                 buffer[i + 1] = 0.5f;

@@ -26,8 +26,8 @@
     <PackageReference Include="Avalonia.Desktop" Version="12.1.1" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.1" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
-    <!-- PoC-A GDI 绘制 + M4 WgcFrameCapture 位图路径 -->
-    <PackageReference Include="System.Drawing.Common" Version="10.0.11" />
+    <!-- PoC-A GDI 绘制 + ScreenFrameCapture 位图路径 -->
+    <PackageReference Include="System.Drawing.Common" Version="10.0.12" />
   </ItemGroup>
 
   <ItemGroup>
