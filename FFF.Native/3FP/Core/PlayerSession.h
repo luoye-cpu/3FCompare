@@ -55,8 +55,6 @@ public:
         float hdrPeakNits, float paperWhiteNits, bool forceHdrOutput) noexcept;
     FFFResult SetPresentConfig(bool enableTearing) noexcept;
     FFFResult SetPacingConfig(bool enablePacing) noexcept;
-    // 3FCompare P3: native speed control — changes the media clock slope (rate multiplier).
-    FFFResult SetSpeed(float rate) noexcept;
     FFFResult SetOutputWindow(void* outputWindow) noexcept;
     FFFResult SetInteractiveMove(bool enabled) noexcept;
     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;

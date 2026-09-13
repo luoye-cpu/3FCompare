@@ -100,12 +100,6 @@ FFFResult FFF3FP_SetPacingConfig(const FFF3FPHandle player, const std::uint32_t 
         static_cast<PlayerSession*>(player)->SetPacingConfig(enablePacing != 0) :
         FFFResult::InvalidArgument;
 }
-FFFResult FFF3FP_SetSpeed(const FFF3FPHandle player, const float rate) noexcept {
-    if (player == nullptr) return FFFResult::InvalidArgument;
-    // Clamp to supported range [0.25, 4.0]; 0 = pause handled at App layer.
-    const auto clampedRate = std::clamp(rate, 0.25f, 4.0f);
-    return static_cast<PlayerSession*>(player)->SetSpeed(clampedRate);
-}
 FFFResult FFF3FP_SetOutputWindow(const FFF3FPHandle player, void* window) noexcept { return player ? static_cast<PlayerSession*>(player)->SetOutputWindow(window) : FFFResult::InvalidArgument; }
 FFFResult FFF3FP_SetInteractiveMove(const FFF3FPHandle player, const std::uint32_t enabled) noexcept {
     return player && enabled <= 1 ? static_cast<PlayerSession*>(player)->SetInteractiveMove(enabled != 0)

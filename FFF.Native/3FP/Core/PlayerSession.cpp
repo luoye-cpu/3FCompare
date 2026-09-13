@@ -1082,19 +1082,6 @@ FFFResult PlayerSession::SetPacingConfig(const bool enablePacing) noexcept {
     Enqueue([this, enablePacing] { videoRenderer_.SetPacingConfig(enablePacing); });
     return FFFResult::Success;
 }
-// 3FCompare P3: native speed control — change media clock slope instead of fake Seek.
-FFFResult PlayerSession::SetSpeed(const float rate) noexcept {
-    Enqueue([this, rate] {
-        const float clamped = std::clamp(rate, 0.25f, 4.0f);
-        videoRenderer_.SetSpeed(clamped);
-        // Also adjust audio resampler if needed (WASAPI renderer plays at resampled clock).
-        if (audioRenderer_) audioRenderer_->SetSpeed(clamped);
-        // Emit SpeedChanged event for App sync.
-        Emit(FFF3FPEvent::SpeedChanged,
-            "{\"rate\":" + std::to_string(clamped) + "}");
-    });
-    return FFFResult::Success;
-}
 FFFResult PlayerSession::SetColorMode(const FFF3FPColorMode mode, const float sdr, const float hdr,
     const float paper, const bool forceHdrOutput) noexcept {
     if (mode > FFF3FPColorMode::MapToHdr || !std::isfinite(sdr) || sdr <= 0 ||

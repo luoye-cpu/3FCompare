@@ -4371,11 +4371,6 @@ FFFResult PlayerVideoRenderer::SetPacingConfig(const bool enablePacing) noexcept
     return FFFResult::Success;
 }
 
-FFFResult PlayerVideoRenderer::SetSpeed(const float rate) noexcept {
-    speedBits_.store(std::bit_cast<std::uint32_t>(rate), std::memory_order_relaxed);
-    return FFFResult::Success;
-}
-
 FFFResult PlayerVideoRenderer::GetRenderTargetInfo(RenderTargetInfo& info) noexcept {
     std::lock_guard lock(deviceMutex_);
     info = {};

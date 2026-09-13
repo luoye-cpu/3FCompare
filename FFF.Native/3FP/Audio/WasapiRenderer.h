@@ -80,8 +80,6 @@ public:
     FFFResult Enqueue(const AVFrame* frame, std::int64_t position100ns) noexcept;
     FFFResult Finish() noexcept;
     void SetPaused(bool paused) noexcept;
-    // 3FCompare P3: native speed control — adjust resampler output timing.
-    void SetSpeed(float rate) noexcept;
     void Reset(std::int64_t position100ns) noexcept;
     void SetVolume(float volume, bool muted) noexcept;
     std::int64_t Position100ns() const noexcept;
@@ -146,7 +144,6 @@ private:
     bool outputFloat_;
     std::atomic<float> volume_;
     std::atomic<bool> muted_;
-    std::atomic<float> speed_{ 1.0f };  // 3FCompare P3: native speed control
     std::atomic<bool> running_;
     std::atomic<bool> clockRunning_;
     std::atomic<bool> paused_;

@@ -120,11 +120,10 @@ public:
     FFFResult SetScalingQuality(FFF3FPVideoScalingQuality quality) noexcept;
     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
     // 3FCompare extensions kept for the managed API surface (PlayerApi exports
-    // FFF3FP_SetPresentConfig / SetPacingConfig / SetSpeed / GetRenderTargetInfo).
+    // FFF3FP_SetPresentConfig / SetPacingConfig / GetRenderTargetInfo).
     // Zoom itself follows the upstream viewport-scaling implementation.
     FFFResult SetPresentConfig(bool enableTearing) noexcept;
     FFFResult SetPacingConfig(bool enablePacing) noexcept;
-    FFFResult SetSpeed(float rate) noexcept;
     struct RenderTargetInfo {
         std::uint32_t swapWidth = 0;
         std::uint32_t swapHeight = 0;
@@ -365,9 +364,6 @@ private:
     bool swapHdr_;
     bool swapAllowTearing_;
     std::atomic<std::uint32_t> swapOutputBits_;
-    // 3FCompare P3: native speed control — atomic float bit-cast (shim: stored
-    // for the managed API; upstream presenter currently runs at rate 1.0).
-    std::atomic<std::uint32_t> speedBits_{ std::bit_cast<std::uint32_t>(1.0f) };
     // Last drawn video destination rect (3FCompare K4 diagnostics shim),
     // recorded by DrawCachedVideo after each successful shader draw.
     std::atomic<std::uint32_t> lastDestX_{ 0 };

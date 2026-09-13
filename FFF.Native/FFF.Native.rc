@@ -3,11 +3,11 @@
 // 更新内核 API 时须同步递增此处主版本号。
 #include <winver.h>
 
-#define VER_API 13
+#define VER_API 14
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION VER_API,0,0,0
- PRODUCTVERSION 0,2,0,0
+ PRODUCTVERSION 0,3,0,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -20,13 +20,13 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "3FCompare"
             VALUE "FileDescription", "FFF.Native - 3FP media player kernel"
-            VALUE "FileVersion", "13.0.0.0"
+            VALUE "FileVersion", "14.0.0.0"
             VALUE "InternalName", "FFF.Native"
             VALUE "LegalCopyright", "MIT License"
             VALUE "OriginalFilename", "FFF.Native.dll"
             VALUE "ProductName", "3FP Player Kernel"
-            VALUE "ProductVersion", "0.2.0 (api 13)"
-            VALUE "ApiVersion", "13"
+            VALUE "ProductVersion", "0.3.0 (api 14)"
+            VALUE "ApiVersion", "14"
         END
     END
     BLOCK "VarFileInfo"
