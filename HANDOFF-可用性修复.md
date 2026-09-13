@@ -98,7 +98,36 @@ dotnet test  tests/3FCompare.Core.Tests/3FCompare.Core.Tests.csproj --no-restore
 4. bash 多行输出截断、read_file 首行截断等旧坑依旧:输出写 `/tmp/xxx.txt` 再读最稳。
    本轮结束已清理 `_*.txt` 临时文件。
 
+## 审查后处理（第二轮）
+
+### 1. 测试素材基线更正（重要）
+
+原先用 `test_4k_60M.mp4` 等**合成测试图案**做实机验证，结论不可信。现统一改用真实拍摄的
+高规格素材（`testmedia/media/real/`，4K/8K、HEVC/AV1、10bit、HDR10）。
+来源与清单见 **`docs/09-测试素材与实机验证.zh.md`**。
+
+### 2. 退出期 CLR 反向 P/Invoke 断言（已修复）
+
+自测打印"全部通过 ✓"后进程却以 127 退出并报 `coreclr/vm/ceemain.cpp:1750`
+（"Attempt to execute managed code after the .NET runtime thread state has been destroyed."）。
+根因：托管委托（内核事件回调 + 日志回调）交给原生后，内核线程在 CLR 停机后仍反向调用；
+自测还绕过了 `OnClosing`，会话与子 HWND 都没销毁。
+
+修复：`DestroyAllSessions()`（并接入 `OnClosing`）、`KernelLogBridge.Uninstall()`、
+`ProcessExit` 兜底钩子、自测统一退出口 `ExitSelfTest()`（清理 → 关窗销毁 HWND → 静默期 →
+flush → `TerminateProcess`）。详见 docs/09 §2。
+验证：真实 4K 单路 selftest 连续 4 轮 `exit=0`、无断言。
+
+> `ExitProcess` **不能用**：会执行 DLL 的 `DLL_PROCESS_DETACH`，实测在 FFF.Native/D3D11 上死锁挂住。
+
+### 3. 多路播放崩溃结论更正（未修复）
+
+换成真实 4K 素材后，多路崩溃从"偶发"变为**近乎必现**；且 `HardwareDecode` 开与关都崩
+（软解下甚至出现 SIGILL）——**与硬件解码无关**，此前判断有误。单路 selftest 稳定通过，
+问题在多路并发的解码/呈现路径，属 FFF.Native 原生缺陷，需 dump 在原生侧继续定位。
+
 ## 相关文档
 
+- `docs/09-测试素材与实机验证.zh.md` — 素材基线、退出期断言修复、已知原生缺陷
 - `docs/08-管线修复计划.zh.md` — M1~M5 已全部完成(勿重复做)
 - `third_party/fff_project/PATCHES.md` — 内核补丁索引(内核侧勿动)
