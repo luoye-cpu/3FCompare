@@ -17,8 +17,23 @@ $ProjectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $ForkRoot    = Join-Path $ProjectRoot "third_party\fff_project"
 $PatchesDir  = Join-Path $PSScriptRoot "patches"
 
-$KernelBaselineTag = "3fcompare-kernel-2026.9.11.1"
-$KernelBaselineSha = "6bc8d61c7fd0a2053e806a627c6db1b4f112e2d9"
+# 基线 SHA / tag 的**唯一真源**是 tools/构建全部.ps1（tools/发布门禁.ps1 同样从那里提取）。
+# 这里不再复制一份常量：一旦复制，改基线时极易漏改，导致"本脚本体检说一致、
+# 构建却按旧基线拦下"的假象——这正是要防的那类静默不一致。
+$BuildScriptPath = Join-Path $PSScriptRoot "构建全部.ps1"
+if (-not (Test-Path $BuildScriptPath)) {
+    Write-Host "缺少 $BuildScriptPath，无法取得内核基线" -ForegroundColor Red
+    exit 1
+}
+$buildSrc = Get-Content $BuildScriptPath -Raw
+$mTag = [regex]::Match($buildSrc, '\$KernelBaselineTag\s*=\s*"([^"]+)"')
+$mSha = [regex]::Match($buildSrc, '\$KernelBaselineSha\s*=\s*"([0-9a-fA-F]{7,40})"')
+if (-not ($mTag.Success -and $mSha.Success)) {
+    Write-Host "无法从 $BuildScriptPath 提取 `$KernelBaselineTag / `$KernelBaselineSha" -ForegroundColor Red
+    exit 1
+}
+$KernelBaselineTag = $mTag.Groups[1].Value
+$KernelBaselineSha = $mSha.Groups[1].Value
 
 function Invoke-Git {
     param(

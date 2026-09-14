@@ -341,10 +341,43 @@ if (-not (Test-Path $assMarker)) {
 
 Write-Host "=== [3/5] 构建 FFF.Native ==="
 $msbuild = Get-MSBuildPath
+
+# ---- S5：把「实际部署的 DLL」与「内核 HEAD」绑定 ----
+# Assert-KernelExtensions 只校验**头文件文本**，证明不了 x64/<配置> 下的 DLL 就是这个 HEAD 编出来的。
+# 而 x64/ 被 .gitignore 且从不清空：一旦内核切过分支或回退过，陈旧 DLL 会被继续复用并部署出去，
+# 现象是"构建全绿，但运行行为与基线对不上"，极难归因。
+# 做法：内核构建成功后，在 DLL 旁写戳记（第 1 行=内核 HEAD，第 2 行=DLL 的 SHA256）；
+#       下次构建前比对戳记里的 HEAD —— 不一致、或压根没有戳记，就强制 /t:Rebuild。
+$kernelDll = Join-Path $ForkRoot "FFF.Native\x64\$Configuration\FFF.Native.dll"
+$stampPath = "$kernelDll.3fcbuild"
+
+function Get-FileSha256([string]$path) {
+    return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+$needRebuild = $false
+if (Test-Path $kernelDll) {
+    if (-not (Test-Path $stampPath)) {
+        $needRebuild = $true
+        Write-Host "  DLL 存在但没有构建戳记，来源不明 → 强制重建（S5）" -ForegroundColor Yellow
+    } else {
+        $stampHead = (Get-Content $stampPath -TotalCount 1).Trim()
+        if ($stampHead -ne $kernelSha) {
+            $needRebuild = $true
+            Write-Host "  DLL 由旧内核 HEAD 编出（戳记 $($stampHead.Substring(0, 12)) ≠ 当前 $($kernelSha.Substring(0, 12))）→ 强制重建（S5）" -ForegroundColor Yellow
+        }
+    }
+}
+
 Push-Location $ForkRoot
 try {
-    & $msbuild "FFF.Native\FFF.Native.vcxproj" /p:Configuration=$Configuration /p:Platform=x64 /m /v:minimal
+    $msbuildArgs = @("FFF.Native\FFF.Native.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=x64", "/m", "/v:minimal")
+    if ($needRebuild) { $msbuildArgs += "/t:Rebuild" }
+    & $msbuild @msbuildArgs
     if ($LASTEXITCODE -ne 0) { throw "FFF.Native 构建失败" }
+    if (-not (Test-Path $kernelDll)) { throw "构建后未找到产物：$kernelDll" }
+    # 构建成功 → 刷新戳记，供下次比对（源 DLL 自此与该 HEAD 绑定）
+    Set-Content -Path $stampPath -Value "$kernelSha`n$(Get-FileSha256 $kernelDll)" -Encoding ASCII
 } finally { Pop-Location }
 
 Write-Host "=== [4/5] 部署 DLL 到应用与冒烟目录 ==="
@@ -353,6 +386,15 @@ function Deploy-To($targetDir) {
     if (-not (Test-Path $src)) { throw "未找到构建产物: $src" }
     New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
     Copy-Item $src $targetDir -Force
+
+    # S5：部署后校验落地副本与源一致。源 DLL 已由 $stampPath 绑定到内核 HEAD，
+    # 这条再把"源 → 目标"这一段钉死，堵住复制被占用/跳过导致的"部署了旧 DLL"。
+    $dst = Join-Path $targetDir "FFF.Native.dll"
+    $srcHash = Get-FileSha256 $src
+    $dstHash = Get-FileSha256 $dst
+    if ($srcHash -ne $dstHash) {
+        throw "部署校验失败：$dst 与源不一致（$dstHash ≠ $srcHash）——可能复制被占用或跳过"
+    }
 
     # FFmpeg 共享库：数量为 0 必须报错。此前 Get-ChildItem 不校验数量，
     # 缺件时脚本照样打印"已部署"，应用起来后静默回退演示模式，排查成本很高。

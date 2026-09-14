@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Threading;
 using _3FCompare.Controls;
@@ -33,9 +34,24 @@ public sealed class PlaybackCoordinator
     private readonly bool _realMode;
     private readonly Func<int, PlayerSurface?> _surfaceAt;
 
+    // 所有读写一律走 Interlocked / Volatile：当前各路续体都回到 Avalonia 同步上下文、实际串行，
+    // 但那是对上下文的隐式依赖（换线程池续体就会静默出错），配额收支错了还很难定位。
     private int _pendingAutoPlay;
     private readonly Queue<Action> _onAllOpenedCallbacks = new();
     private bool _closed;
+
+    /// <summary>归还一份自动播放配额。返回 true 表示配额已归零（即"最后一路也还了"）。
+    /// <para>配额已为 0 时什么都不做并返回 false（调用方据此不触发后续动作）。
+    /// CAS 循环保证并发下不会把配额减成负数。</para></summary>
+    private bool TryConsumePendingAutoPlay()
+    {
+        while (true)
+        {
+            var cur = Volatile.Read(ref _pendingAutoPlay);
+            if (cur <= 0) return false;
+            if (Interlocked.CompareExchange(ref _pendingAutoPlay, cur - 1, cur) == cur) return cur - 1 == 0;
+        }
+    }
 
     public PlaybackCoordinator(IPlayerEngine engine, SyncController sync, AppSettings settings,
         Func<int, PlayerSurface?> surfaceAt)
@@ -70,7 +86,7 @@ public sealed class PlaybackCoordinator
         {
             AppLog.Warn("Coordinator", $"OpenFiles 兜底捕获: {ex.GetType().Name}: {ex.Message}");
             LastOpenError = $"打开失败：{ex.Message}";
-            _pendingAutoPlay = 0;
+            Interlocked.Exchange(ref _pendingAutoPlay, 0);
             _onAllOpenedCallbacks.Clear();
             StateChanged?.Invoke(this, EventArgs.Empty);
         }
@@ -86,12 +102,12 @@ public sealed class PlaybackCoordinator
             StateChanged?.Invoke(this, EventArgs.Empty);
             return;
         }
-        if (autoPlay) _pendingAutoPlay += count;
+        if (autoPlay) Interlocked.Add(ref _pendingAutoPlay, count);
         if (onAllOpened is not null) _onAllOpenedCallbacks.Enqueue(onAllOpened);
 
         for (var i = 0; i < count; i++)
         {
-            if (_closed) { _pendingAutoPlay = 0; return; }
+            if (_closed) { Interlocked.Exchange(ref _pendingAutoPlay, 0); return; }
             var path = files[i];
             var surface = _surfaceAt(_sync.Count);
             if (surface is null)
@@ -101,7 +117,7 @@ public sealed class PlaybackCoordinator
                 // 降级为状态通知（LastOpenError + StateChanged）。
                 LastOpenError = $"第 {_sync.Count + 1} 路没有可用的播放面板（surface 为空），已取消本次打开";
                 AppLog.Warn("Coordinator", LastOpenError);
-                _pendingAutoPlay = 0;
+                Interlocked.Exchange(ref _pendingAutoPlay, 0);
                 _onAllOpenedCallbacks.Clear();
                 StateChanged?.Invoke(this, EventArgs.Empty);
                 return;
@@ -145,12 +161,11 @@ public sealed class PlaybackCoordinator
                 // 也就不会调 TryAutoPlayAfterOpen 归还配额。而 _pendingAutoPlay 是在循环前一次性记账的，
                 // 漏还就会让配额永远回不到 0 → 自动播放与 onAllOpened（会话恢复 Seek / 循环区间）永不执行，
                 // 表现为"文件都打开了但就是不动"。
-                if (autoPlay && _pendingAutoPlay > 0)
+                if (autoPlay)
                 {
-                    _pendingAutoPlay--;
                     // 归零说明没有任何一路能走异步完成路径（可能全部失败）：
                     // 清掉悬挂的回调队列，避免它污染下一次打开；不在此触发 Play（无路可播）。
-                    if (_pendingAutoPlay == 0) _onAllOpenedCallbacks.Clear();
+                    if (TryConsumePendingAutoPlay()) _onAllOpenedCallbacks.Clear();
                 }
                 surface.IsFailed = true;
                 surface.ErrorText = ex.Message;
@@ -197,9 +212,9 @@ public sealed class PlaybackCoordinator
                 surface.ErrorText = ex.Message;
                 TryAutoPlayAfterOpen(); // 失败路也计入完成，避免卡住
             }
-            else if (_pendingAutoPlay > 0)
+            else if (Volatile.Read(ref _pendingAutoPlay) > 0)
             {
-                _pendingAutoPlay = 0;
+                Interlocked.Exchange(ref _pendingAutoPlay, 0);
             }
         }
         StateChanged?.Invoke(this, EventArgs.Empty);
@@ -260,8 +275,8 @@ public sealed class PlaybackCoordinator
     /// <summary>全部就绪后：先跑恢复回调，再统一 Play（跳过 Failed 槽）。</summary>
     private void TryAutoPlayAfterOpen()
     {
-        if (_pendingAutoPlay <= 0) return;
-        if (--_pendingAutoPlay > 0) return;
+        // 归还一份配额；未归零说明还有路没就绪，等最后一路来触发。
+        if (!TryConsumePendingAutoPlay()) return;
 
         while (_onAllOpenedCallbacks.Count > 0)
             _onAllOpenedCallbacks.Dequeue().Invoke();
@@ -329,7 +344,7 @@ public sealed class PlaybackCoordinator
     public void Close()
     {
         _closed = true;
-        _pendingAutoPlay = 0;
+        Interlocked.Exchange(ref _pendingAutoPlay, 0);
         _onAllOpenedCallbacks.Clear();
     }
 }

@@ -152,4 +152,68 @@ public class PipelineRegressionTests
         Assert.Equal(0, PlaybackSpeed.SeekAdvanceTicks(TimeSpan.TicksPerSecond, 1.0)); // 1× 不跳
         Assert.Equal(0, PlaybackSpeed.SeekAdvanceTicks(TimeSpan.TicksPerSecond, 0.5)); // 慢速未接线
     }
+
+    // ══════════ C9：时间码「秒内帧号」必须与显示的秒同源 ══════════
+    //
+    // 旧实现用 FrameIndex % round(fps)（标称帧网格），而时间码的 HH:MM:SS 来自
+    // Position100ns（墙上时间）。23.976 / 29.97 下两套网格每秒相对滑移，
+    // 约 1000 s 后错开整整一个周期 → "秒刚跳过去，帧号却是 29"。
+
+    private const long Sec = TimeSpan.TicksPerSecond;
+
+    [Theory]
+    [InlineData(29.97)]
+    [InlineData(23.976)]
+    [InlineData(25.0)]
+    [InlineData(60.0)]
+    [InlineData(30.0)]
+    public void FrameInSecond_整秒处一律为零_帧号与秒同源(double fps)
+    {
+        // 秒边界上（整秒）帧号必须是 0：这是"帧号属于当前这一秒"的判据。
+        // 旧实现的反例：500s @29.97 → Floor(500*29.97)=14985，14985 % 30 = 15（应为 0）。
+        for (var s = 0; s <= 2000; s += 7)
+            Assert.Equal(0, Timecode.FrameInSecond(s * Sec, fps));
+    }
+
+    [Theory]
+    [InlineData(29.97, 500, 14)]   // 半秒 → Floor(0.5*29.97)=14
+    [InlineData(23.976, 500, 11)]  // Floor(0.5*23.976)=11
+    [InlineData(25.0, 500, 12)]
+    [InlineData(60.0, 500, 30)]
+    public void FrameInSecond_半秒处取中间帧(double fps, int second, int expected)
+        => Assert.Equal(expected, Timecode.FrameInSecond(second * Sec + Sec / 2, fps));
+
+    [Theory]
+    [InlineData(29.97)]
+    [InlineData(23.976)]
+    public void FrameInSecond_秒内单调不越界(double fps)
+    {
+        var max = (int)Math.Ceiling(fps) - 1;
+        var prev = -1;
+        for (var i = 0; i < 200; i++)
+        {
+            var t = 137 * Sec + i * (Sec / 200);   // 第 137 秒内均匀取样
+            var ff = Timecode.FrameInSecond(t, fps);
+            Assert.InRange(ff, 0, max);
+            Assert.True(ff >= prev, $"帧号在秒内回退了：{prev} → {ff}");
+            prev = ff;
+        }
+    }
+
+    [Fact]
+    public void FrameInSecond_秒末取到最后一帧()
+    {
+        // 一秒的最后一个 tick：Floor(((10^7-1)/10^7) * 29.97) = 29（上限内）
+        Assert.Equal(29, Timecode.FrameInSecond(501 * Sec - 1, 29.97));
+        Assert.Equal(23, Timecode.FrameInSecond(501 * Sec - 1, 23.976));
+    }
+
+    [Theory]
+    [InlineData(0, 29.97)]
+    [InlineData(-1, 29.97)]
+    [InlineData(0, 0)]
+    [InlineData(10 * 10_000_000L, 0)]
+    [InlineData(10 * 10_000_000L, -30.0)]
+    public void FrameInSecond_无效输入返回零(long pos, double fps)
+        => Assert.Equal(0, Timecode.FrameInSecond(pos, fps));
 }

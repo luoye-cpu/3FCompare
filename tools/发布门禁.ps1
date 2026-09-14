@@ -89,6 +89,9 @@ function Invoke-Cmd {
     )
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
+    # 必须先清空：$LASTEXITCODE 是"上一次原生调用"的残留值。若本次进程压根没起来
+    # （沙箱 / PATH 缺失），它会沿用上一次成功调用的 0 → 门禁假绿。
+    $global:LASTEXITCODE = $null
     $raw = & $FilePath @Arguments 2>&1
     # 某些受限环境（如自动化沙箱）根本起不了进程：此时 $LASTEXITCODE 为 null。
     # 不显式兜底的话，门禁只会显示"exit="空值，看不出到底是测试失败还是命令没跑起来。

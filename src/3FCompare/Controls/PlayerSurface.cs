@@ -429,7 +429,7 @@ public sealed class PlayerSurface : NativeControlHost
 	            var key = (hue, rw, rh);
 	            if (!_gradCache.TryGetValue(key, out var cached) || cached is null)
 	            {
-	                if (_gradCache.Count >= MaxGradCache) _gradCache.Clear();
+	                if (_gradCache.Count >= MaxGradCache) ClearGradCache();
 	                _gradCache[key] = cached = new System.Drawing.Drawing2D.LinearGradientBrush(
 	                    rect, ColorFromHsv(hue, 0.55f, 0.35f), ColorFromHsv((hue + 60) % 360, 0.65f, 0.18f),
 	                    System.Drawing.Drawing2D.LinearGradientMode.ForwardDiagonal);
@@ -443,7 +443,7 @@ public sealed class PlayerSurface : NativeControlHost
 	        int bigSize = Math.Max(14, rect.Width / 22);
 	        if (!_bigFontCache.TryGetValue(bigSize, out var bigFont))
 	        {
-	            if (_bigFontCache.Count >= MaxFontCache) _bigFontCache.Clear();
+	            if (_bigFontCache.Count >= MaxFontCache) ClearFontCache(_bigFontCache);
 	            _bigFontCache[bigSize] = bigFont = new System.Drawing.Font("Consolas", bigSize, System.Drawing.FontStyle.Bold);
 	        }
 	        var size = g.MeasureString(frameText, bigFont);

@@ -13,12 +13,12 @@
 
 ### 内核基线
 
-`构建全部.ps1` 钉死内核完整 SHA（tag 只是可读别名，可被移动）：
+`构建全部.ps1` 钉死内核完整 SHA（tag 只是可读别名，可被移动）。
 
-```
-$KernelBaselineTag = "3fcompare-kernel-2026.9.11.1"
-$KernelBaselineSha = "6bc8d61c7fd0a2053e806a627c6db1b4f112e2d9"
-```
+> **唯一真源 = `构建全部.ps1` 里的 `$KernelBaselineTag` / `$KernelBaselineSha`。**
+> `发布门禁.ps1` 与 `更新内核.ps1` 都从该脚本正则提取，**不要在别处再复制常量**。
+> 复制的后果已经出现过一次风险：改基线时漏改一处，会变成「体检脚本说与基线一致、
+> 构建却按另一份基线拦下」。改基线只改 `构建全部.ps1` 一处。
 
 内核目录 `third_party/fff_project/` 被 `.gitignore` 整体忽略，且该归档分支与 tag
 **目前只存在于本机**——远端 `Lake1059/FFF_Project` 没有 `3fcompare-kernel-*` tag。

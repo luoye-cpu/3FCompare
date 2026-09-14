@@ -130,6 +130,10 @@ public partial class MainWindow : Window
 
             var data = bmp.LockBits(new System.Drawing.Rectangle(0, 0, w, h),
                 ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+            // 解锁与释放的职责必须收敛到 finally：此前失败分支先 UnlockBits + Dispose，
+            // finally 又对已释放的 Bitmap 再 UnlockBits 一次 → 每次回读失败都抛异常
+            // （被外层 catch 吞掉，结果"碰巧正确"，但异常路径常态化）。
+            var readOk = false;
             try
             {
                 var dst = (byte*)data.Scan0;
@@ -138,9 +142,7 @@ public partial class MainWindow : Window
                     var rows = Math.Min(tileRows, h - y);
                     if (!session.TryReadPixelRegion(x0, y0 + y, w, rows, buffer, out _))
                     {
-                        bmp.UnlockBits(data);
-                        bmp.Dispose();
-                        return null;
+                        return null;   // 解锁/释放交给 finally
                     }
                     for (var r = 0; r < rows; r++)
                     {
@@ -158,12 +160,16 @@ public partial class MainWindow : Window
                         }
                     }
                 }
+                readOk = true;
+                return bmp;
             }
             finally
             {
-                bmp.UnlockBits(data);
+                // 先解锁（此时 Bitmap 仍存活），再按成败决定是否释放；
+                // 内层 try/finally 保证即使 UnlockBits 抛异常也不会漏 Dispose。
+                try { bmp.UnlockBits(data); }
+                finally { if (!readOk) bmp.Dispose(); }
             }
-            return bmp;
         }
         catch
         {

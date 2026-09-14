@@ -258,7 +258,10 @@ function Invoke-Pack([string]$mode) {
   版本 Version: v${Version} | 架构 Arch: ${Arch} | 构建日期 Build: $((Get-Date -Format "yyyy-MM-dd"))
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 "@
-        Set-Content -Path $ReadmePath -Value $content -Encoding UTF8
+        # 不能写 -Encoding UTF8：PS 5.1 会写 BOM、pwsh 7 不写，同一份使用说明.txt
+        # 在另一版本下打开就乱码。显式指定带 BOM 的 UTF8，两个版本行为一致。
+        # （Set-Content 在 5.1 下 -Encoding UTF8 也是 BOM，但 pwsh 7 默认无 BOM，故统一走 .NET API）
+        [IO.File]::WriteAllText($ReadmePath, $content, (New-Object Text.UTF8Encoding $true))
         Write-Host "   ✅ 使用说明已生成 → $ReadmePath" -ForegroundColor Green
     } else {
         Write-Host "`n[2/4] 跳过 (精简版不含 PLAN) / Skipped (lite, no PLAN)" -ForegroundColor Yellow
