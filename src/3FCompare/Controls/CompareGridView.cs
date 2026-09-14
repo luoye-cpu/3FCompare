@@ -20,6 +20,7 @@ public sealed class CompareGridView : Control
     private readonly List<PlayerSurface> _surfaces = new();
     private readonly TextBlock _hint;
     private bool _singleView;
+    private string _preset = "auto";
     private int _selectedIndex = -1;
     private int? _presetCols, _presetRows;
 
@@ -63,7 +64,8 @@ public sealed class CompareGridView : Control
         };
         VisualChildren.Add(_hint);
         LogicalChildren.Add(_hint);
-        LanguageManager.LanguageChanged += OnLanguageChanged;
+        // P1-2：弱订阅（静态事件不得强持有控件）
+        LanguageManager.SubscribeWeak(this, g => g.OnLanguageChanged(null, EventArgs.Empty));
     }
 
     private void OnLanguageChanged(object? sender, EventArgs e) =>
@@ -102,15 +104,19 @@ public sealed class CompareGridView : Control
 
     public PlayerSurface? GetSurface(int i) => i >= 0 && i < _surfaces.Count ? _surfaces[i] : null;
 
+    /// <summary>当前网格预设名（"2x1"/"2x2"/"3x3"/"auto"）。
+    /// 供自测断言"会话还原是否真的应用了预设"——只看 SingleView 抓不到 2x2/3x3 的还原缺失。</summary>
+    internal string Preset => _preset;
+
     /// <summary>设置网格预设（"2x1"/"2x2"/"3x3"/"auto"）。</summary>
     public void SetGridLayout(string preset)
     {
         switch (preset)
         {
-            case "2x1": _presetCols = 2; _presetRows = 1; break;
-            case "2x2": _presetCols = 2; _presetRows = 2; break;
-            case "3x3": _presetCols = 3; _presetRows = 3; break;
-            default: _presetCols = null; _presetRows = null; break;
+            case "2x1": _presetCols = 2; _presetRows = 1; _preset = "2x1"; break;
+            case "2x2": _presetCols = 2; _presetRows = 2; _preset = "2x2"; break;
+            case "3x3": _presetCols = 3; _presetRows = 3; _preset = "3x3"; break;
+            default: _presetCols = null; _presetRows = null; _preset = "auto"; break;
         }
         InvalidateMeasure();
         InvalidateVisual();

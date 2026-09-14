@@ -48,8 +48,8 @@ public sealed class ProbePanel : StackPanel
         Children.Add(hint);
         Children.Add(copy);
 
-        LanguageManager.LanguageChanged += (_, _) =>
-            global::Avalonia.Threading.Dispatcher.UIThread.Post(RefreshCoord);
+        // P1-2：弱订阅（静态事件不得强持有控件）
+        LanguageManager.SubscribeWeak(this, p => global::Avalonia.Threading.Dispatcher.UIThread.Post(p.RefreshCoord));
         RefreshCoord();
     }
 

@@ -32,6 +32,17 @@ public sealed class PlayerSurface : NativeControlHost
 
     private delegate nint WndProcDelegate(nint hwnd, uint msg, nint wParam, nint lParam);
 
+    /// <summary>静态构造：校验 P/Invoke 结构与原生布局一致。
+    /// 尺寸不符说明字段声明漏了（如 PAINTSTRUCT 少 rgbReserved[32]），
+    /// 那会导致 BeginPaint 越界写栈 —— 宁可启动即失败，也不要带着内存破坏跑。</summary>
+    static PlayerSurface()
+    {
+        var size = Marshal.SizeOf<PAINTSTRUCT>();
+        if (size != NativePaintStructSize)
+            throw new InvalidOperationException(
+                $"PAINTSTRUCT 大小必须等于原生 tagPAINTSTRUCT 的 {NativePaintStructSize} 字节，当前为 {size} 字节。");
+    }
+
     // ---- 自定义窗口类（替代 STATIC，确保鼠标消息正确路由）----
     private const string CustomWndClass = "3FCompare_PlayerSurface";
     private static bool _wndClassRegistered;
@@ -323,7 +334,14 @@ public sealed class PlayerSurface : NativeControlHost
                         _clientW = w;
                         _clientH = h;
                         // 3FCompare M1: debounce resize → Redraw
-                        Dispatcher.UIThread.Post(() => _session.Redraw(), DispatcherPriority.Background);
+                        // 捕获会话引用而不是在闭包里延迟读字段：会话可能在 Post 执行前被释放。
+                        // Avalonia Dispatcher 作业里的未处理异常会击穿整个进程，必须兜住。
+                        var redrawTarget = _session;
+                        Dispatcher.UIThread.Post(() =>
+                        {
+                            try { redrawTarget?.Redraw(); }
+                            catch (ObjectDisposedException) { /* 会话已释放，无需重绘 */ }
+                        }, DispatcherPriority.Background);
                     }
                 }
                 return CallWindowProcW(_origWndProc, hwnd, msg, wParam, lParam);
@@ -349,6 +367,22 @@ public sealed class PlayerSurface : NativeControlHost
     private static readonly Dictionary<int, System.Drawing.Font> _timeFontCache = new();
     private static readonly Dictionary<(int hue, int w, int h), System.Drawing.Drawing2D.LinearGradientBrush?> _gradCache = new();
     private static readonly object _gradCacheLock = new();
+
+    /// <summary>清空字体缓存前<b>必须</b>逐个 Dispose。
+    /// GDI 句柄上限约 1 万个进程级共享，只 Clear() 字典会把 Font 的底层句柄留给 GC，
+    /// 而 GC 回收时机不确定 —— 长时间逐帧切换尺寸时足以把句柄耗尽（表现为创建画笔失败）。</summary>
+    private static void ClearFontCache(Dictionary<int, System.Drawing.Font> cache)
+    {
+        foreach (var f in cache.Values) f.Dispose();
+        cache.Clear();
+    }
+
+    /// <summary>同上：渐变刷缓存清空前逐个 Dispose（LinearGradientBrush 同样持有 GDI 句柄）。</summary>
+    private static void ClearGradCache()
+    {
+        foreach (var b in _gradCache.Values) b?.Dispose();
+        _gradCache.Clear();
+    }
 
     private void PaintSelf()
     {
@@ -418,9 +452,9 @@ public sealed class PlayerSurface : NativeControlHost
 
 	        var timeText = TimeSpan.FromTicks(pos).ToString(@"hh\:mm\:ss\.fff");
 	        int timeSize = Math.Max(10, rect.Width / 40);
-	        if (!_timeFontCache.TryGetValue(timeSize, out var timeFont))
+            if (!_timeFontCache.TryGetValue(timeSize, out var timeFont))
 	        {
-	            if (_timeFontCache.Count >= MaxFontCache) _timeFontCache.Clear();
+	            if (_timeFontCache.Count >= MaxFontCache) ClearFontCache(_timeFontCache);
 	            _timeFontCache[timeSize] = timeFont = new System.Drawing.Font("Consolas", timeSize);
 	        }
 	        g.DrawString(timeText, timeFont, BrushTextDim,
@@ -496,8 +530,20 @@ public sealed class PlayerSurface : NativeControlHost
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }
 
-    [StructLayout(LayoutKind.Sequential)]
+    /// <summary>原生 <c>tagPAINTSTRUCT</c>（x64）为 72 字节：尾部还有 <c>BYTE rgbReserved[32]</c>。
+    /// <para>本结构按字段算只有 40 字节，若少了 <c>Size = 72</c>，
+    /// <c>BeginPaint</c> 会按原生大小写入 <c>ref</c> 传入的托管栈上局部变量，
+    /// 越界写 32 字节，踩坏同栈帧的相邻局部变量 —— 每次重绘都触发，
+    /// 表现为偶发随机崩溃（与已知多路 SIGSEGV/SIGILL 现象重叠，难以归因）。</para>
+    /// <para>我们从不读 <c>rgbReserved</c>，故只需保证缓冲区足够大；
+    /// 大小由 <see cref="NativePaintStructSize"/> 处的静态校验兜底，防止将来再漏。</para>
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential, Size = 72)]
     private struct PAINTSTRUCT { public nint HDC; public bool fErase; public RECT rcPaint; public bool fRestore; public bool fIncUpdate; }
+
+    /// <summary>PAINTSTRUCT 与原生布局的一致性校验（防回归）。
+    /// 放在静态构造函数里：进程启动即校验一次，不在 WM_PAINT 热路径上。</summary>
+    private const int NativePaintStructSize = 72;
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct WNDCLASSEX

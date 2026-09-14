@@ -30,7 +30,8 @@ public sealed class TimelineView : Control
         Focusable = true;
         ClipToBounds = true;
         ContextMenu = BuildContextMenu();
-        LanguageManager.LanguageChanged += (_, _) => RefreshMenuTexts();
+        // P1-2：弱订阅（静态事件不得强持有控件）
+        LanguageManager.SubscribeWeak(this, v => v.RefreshMenuTexts());
     }
 
     private ContextMenu BuildContextMenu()

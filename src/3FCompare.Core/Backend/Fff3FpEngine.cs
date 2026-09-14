@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using System.Text;
 using _3FCompare.Core.Backend.Interop;
 using _3FCompare.Core.Display;
@@ -8,8 +8,8 @@ namespace _3FCompare.Core.Backend;
 /// <summary>3FP 后端适配器（基于 fork 的 FFF.Native，MIT）。</summary>
 public sealed class Fff3FpEngine : IPlayerEngine
 {
-    // 内核 2026.8.24（8c48643）起 PlayerApiVersion=13（FFF3FP_Create 严格校验）。
-    private const uint ConfigVersion = 13;
+    // 内核 2026.9.11 合并（f25c28f）起 PlayerApiVersion=14（FFF3FP_Create 严格校验）。
+    private const uint ConfigVersion = 14;
 
     public IReadOnlyList<AdapterInfo> EnumerateAdapters()
     {
@@ -52,7 +52,7 @@ public sealed class Fff3FpEngine : IPlayerEngine
         session.AttachHandle(handle);
 
         // 创建会话后立即设置智能参数与呈现节奏
-        session.ApplyToneMappingParameters(options.ColorMode, options.OutputWindow, options.ForceHdrOutput);
+        session.ApplyInitialColorMode(options.ColorMode, options.OutputWindow, options.ForceHdrOutput);
         if (options.TearingPresent)
             session.SetPresentConfig(true); // 不支持时静默保持 VSync（返回值忽略）
         if (options.PacingEnabled)
@@ -185,24 +185,44 @@ public sealed class Fff3FpEngine : IPlayerEngine
             Check(Fff3FpNative.FFF3FP_SetVolume(_handle, volume, muted ? 1u : 0u), nameof(SetVolume));
         }
 
-        /// <summary>设置色彩模式（运行时切换 HDR/SDR）。
-        /// 使用智能参数计算（ToneMappingParameters），避免固定的 100 nits 导致 BT.2390 曲线失效。</summary>
-public void SetColorMode(ColorMode mode)
-	        {
-	            ThrowIfDisposed();
+        /// <summary>设置色彩模式（运行时切换 HDR/SDR）。</summary>
+        /// <param name="contentIsHdr">内容是否为 HDR。为 null 时按本会话媒体信息自行判定；
+        /// <b>多路对比时调用方必须传入统一值</b>——否则同一源的两路只要有一路 HDR 元数据丢失，
+        /// 就会走不同的色调映射曲线，对比结果不再公平（P1-8）。</param>
+        public void SetColorMode(ColorMode mode, bool? contentIsHdr = null)
+        {
+            ThrowIfDisposed();
+            ApplyColorMode(mode, contentIsHdr, _options.ForceHdrOutput);
+        }
 
-	            // 获取当前媒体信息，判断是否为 HDR 内容
-	            var mediaInfo = ReadMediaInfo();
-	            var contentIsHdr = mediaInfo?.IsHdr ?? false;
+        /// <summary>创建会话后应用初始色彩模式。
+        /// 与 <see cref="SetColorMode"/> 共用同一实现（P1-7：过去这里是两份几乎重复的代码，
+        /// 且对 NotSupported 的处理不一致）。额外职责：记录输出窗口并让显示器能力缓存失效。</summary>
+        internal void ApplyInitialColorMode(ColorMode mode, nint outputWindow, bool forceHdrOutput)
+        {
+            // 更新输出窗口引用（CreateSession 时传入，运行时不变但保留以防后续扩展）
+            _outputWindow = outputWindow;
+            // 输出窗口变化时清除显示器能力缓存
+            _cachedDisplayCaps = null;
+            ApplyColorMode(mode, null, forceHdrOutput);
+        }
 
-	            // 智能计算参数（使用会话缓存的显示器能力，避免重复 DXGI 枚举）
-	            var displayCapabilities = GetDisplayCapabilities();
-	            var config = ToneMappingParameters.Calculate(mode, displayCapabilities, contentIsHdr);
+        /// <summary>色调映射的<b>唯一</b>实现：显示器能力 + 内容 HDR 状态 → 计算参数 → 下发内核。</summary>
+        private void ApplyColorMode(ColorMode mode, bool? contentIsHdr, bool forceHdrOutput)
+        {
+            // 使用会话缓存的显示器能力，避免重复 DXGI 枚举
+            var displayCapabilities = GetDisplayCapabilities();
+            var isHdr = contentIsHdr ?? (ReadMediaInfo()?.IsHdr ?? false);
+            var config = ToneMappingParameters.Calculate(mode, displayCapabilities, isHdr);
 
-            var result = Fff3FpNative.FFF3FP_SetColorMode(_handle, (uint)mode, config.SdrPeakNits, config.HdrPeakNits, config.PaperWhiteNits,
-                _options.ForceHdrOutput ? 1u : 0u);
-            if (result != FffResult.Success)
+            var result = Fff3FpNative.FFF3FP_SetColorMode(_handle, (uint)mode, config.SdrPeakNits,
+                config.HdrPeakNits, config.PaperWhiteNits, forceHdrOutput ? 1u : 0u);
+            // NotSupported 视为软失败：旧内核或某些模式不支持设置色调映射参数，
+            // 不应让整个色彩模式切换中断（两份旧实现对此处理不一致，此处统一）。
+            if (result != FffResult.Success && result != FffResult.NotSupported)
+            {
                 throw new EngineException((int)result, $"SetColorMode 失败: {result}");
+            }
         }
 
         /// <summary>设置呈现节奏（内核扩展：VRR/G-SYNC 低延迟路径）。
@@ -552,34 +572,6 @@ private EngineMediaInfo? _cachedMediaInfo;
                 rtInfo.DestX, rtInfo.DestY, rtInfo.DestWidth, rtInfo.DestHeight,
                 rtInfo.OutputBitDepth, rtInfo.Hdr != 0);
             return true;
-        }
-
-/// <summary>应用智能色调映射参数（调用3FP SetColorMode）。</summary>
-	        public void ApplyToneMappingParameters(ColorMode colorMode, nint outputWindow, bool forceHdrOutput = false)
-	        {
-	            // 更新输出窗口引用（CreateSession 时传入，运行时不变但保留以防后续扩展）
-	            _outputWindow = outputWindow;
-	            // 输出窗口变化时清除显示器能力缓存
-	            _cachedDisplayCaps = null;
-
-	            // 获取显示器能力（使用会话缓存，避免重复 DXGI 枚举）
-	            var displayCapabilities = GetDisplayCapabilities();
-
-            // 获取当前媒体信息，判断是否为 HDR 内容
-            var mediaInfo = ReadMediaInfo();
-            var contentIsHdr = mediaInfo?.IsHdr ?? false;
-
-            // 智能计算参数
-            var config = ToneMappingParameters.Calculate(colorMode, displayCapabilities, contentIsHdr);
-
-            // 调用3FP的SetColorMode API
-            var result = Fff3FpNative.FFF3FP_SetColorMode(_handle, (uint)colorMode, config.SdrPeakNits,
-                config.HdrPeakNits, config.PaperWhiteNits, forceHdrOutput ? 1u : 0u);
-            if (result != FffResult.Success && result != FffResult.NotSupported)
-            {
-                // 忽略 NotSupported（3FP可能不支持某些模式）
-                throw new EngineException((int)result, $"SetColorMode 失败: {result}");
-            }
         }
 
         public void Dispose()

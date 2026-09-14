@@ -45,7 +45,8 @@ logs/
 
 # 内核（FFF_Project，已解除 submodule 跟踪）
 # 整个目录不入库：第三方源码 + 构建产物，依赖 tools/构建全部.ps1 重新获取/构建。
-# 对内核的自研补丁单独存放于 tools/patches/*.patch（入库跟踪），由 tools/更新内核.ps1 自动重打。
+# 基线钉死在 tools/构建全部.ps1 的 $KernelBaselineSha；
+# 历史补丁留档于 tools/patches/*.patch（入库跟踪，但不自动重放，详见该目录 README）。
 third_party/fff_project/
 
 # 测试媒体目录规范（testmedia/）：
@@ -60,8 +61,29 @@ testmedia/tools/*/obj/
 
 # 发布产物（NativeAOT + 第三方 DLL，190+ MB）
 publish/
+
+# 旧 AI 工具的会话临时产物（plan / 快照），内容已被 docs/ 与各里程碑实现覆盖
 .zcode/
-publish/
-.zcode/
-testmedia/media/
+
+# 一次性 UI 自动化/调试脚本：硬编码屏幕坐标与进程号，不可复用（已移入 tools/debug/）
+tools/debug/
+tools/_*.py
+tools/_*.txt
+
+# 参考用的第三方 UI 库（GPL/付费双授权，仅作视觉参考，不参与构建）
 third_party/LakeUI/
+
+# 本机 git 对象库损坏恢复时的临时备份（勿提交）
+_corrupt_pack_backup/
+
+# WorkBuddy 工作记忆（本机 agent 日志与项目约定，不入库；文件保留在磁盘）
+.workbuddy-ai/
+
+# 内核基线追溯记录（tools/构建全部.ps1 生成，发布门禁据此校验产物内核 == 发布基线）
+# 是本机构建产物，每台机器/每次构建都可能不同，不入库。
+.3fc_kernel_sha
+
+# 注意：.3fc_kernel_baseline.bundle 是**有意入库**的（约 2MB），不要加到这里。
+# 它是内核基线归档（分支 3fcompare/zoom-viewport-cover + tag 3fcompare-kernel-2026.9.11.1），
+# 上游 Lake1059/FFF_Project 不含 3FCompare 扩展，没有它换机器就无法复现构建。
+# 重建方式：git clone .3fc_kernel_baseline.bundle third_party/fff_project

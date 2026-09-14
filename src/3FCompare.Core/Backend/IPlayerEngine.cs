@@ -39,7 +39,11 @@ public interface IPlayerSession : IDisposable
     void SetVolume(float volume, bool muted);
 
     /// <summary>设置色彩模式（MapToSdr/RawHdrAsSdr/MapToHdr）。运行时切换 HDR/SDR。</summary>
-    void SetColorMode(ColorMode mode);
+    /// <param name="mode">目标色彩模式。</param>
+    /// <param name="contentIsHdr">内容是否为 HDR。传 null 由会话按自身媒体信息判定；
+    /// <b>多路对比时必须由调用方传入全会话统一的值</b>，否则同一素材的两个编码版本
+    /// 只要有一路 HDR 元数据缺失，两路就会走不同的色调映射曲线，对比失去意义。</param>
+    void SetColorMode(ColorMode mode, bool? contentIsHdr = null);
 
     /// <summary>设置呈现节奏（内核扩展：VRR/G-SYNC 低延迟路径）。
     /// tearing=true 选择 Present(0, ALLOW_TEARING)（显示器按自身节奏扫描输出）；

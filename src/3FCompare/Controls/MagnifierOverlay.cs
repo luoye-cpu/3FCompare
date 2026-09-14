@@ -30,8 +30,21 @@ public sealed class MagnifierOverlay : Control
         IsVisible = false;
     }
 
+    /// <summary>自测钩子：采样缓冲是否已就绪（C3 回归断言用。</summary>
+    internal bool HasPixelGrid => _pixelGrid is not null;
+
+    /// <summary>自测钩子：把采样缓冲置回"读回失败"状态。
+    /// 用于复现"换路前读回失败 → 缓冲为 null → 换路后永久空框"这一路径。</summary>
+    internal void SimulatePixelReadFailureForSelfTest() => _pixelGrid = null;
+
     /// <summary>绑定当前选中会话（探针移动时用于读像素）。</summary>
-    public void AttachSession(IPlayerSession? session) => _session = session;
+    public void AttachSession(IPlayerSession? session)
+    {
+        _session = session;
+        // 恢复采样缓冲：换路 / 重开时必须重建。若沿用换路前的 null，
+        // RefreshPixels 会永久走"引擎未就绪"分支，放大镜只剩空框且再也不恢复。
+        _pixelGrid ??= new float[ZoomGrid * ZoomGrid * 4];
+    }
 
     /// <summary>定位到（相对父容器的）光标位置并显示。
     /// cursor 为"中心点"（放大镜覆盖在光标旁）。</summary>
@@ -52,8 +65,10 @@ public sealed class MagnifierOverlay : Control
 
     private void RefreshPixels(Point cursor)
     {
+        // 注意：判据里不能含 "_pixelGrid is null"。它一旦被置 null（读回失败 / 引擎未就绪），
+        // 就会永远命中同一判据提前返回，再也进不到下面重新赋值的分支 —— 永久只剩空框。
         if (_session is null || !_session.ReadRenderTargetInfo(out var rt) ||
-            rt.SwapWidth == 0 || rt.SwapHeight == 0 || _pixelGrid is null)
+            rt.SwapWidth == 0 || rt.SwapHeight == 0)
         {
             _pixelGrid = null;
             return;

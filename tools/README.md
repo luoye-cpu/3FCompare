@@ -1,27 +1,49 @@
 # 3FCompare 构建脚本
 
-本目录存放供本仓库使用的构建/冒烟/调试脚本（排除上游 FFF_Project 自带工具）。
+本目录存放供本仓库使用的构建/内核维护/发布脚本（排除上游 FFF_Project 自带工具）。
 
 ## 构建 / 内核维护
 
 | 脚本 | 用途 |
 | --- | --- |
-| `构建全部.ps1` | 一键构建 FFF.Native 内核（Release x64）+ 部署 DLL + 可跳过测试（`-SkipTests`）。前置：Visual Studio 2022+（C++ 桌面负载）、Git |
-| `更新内核.ps1` | 将 `third_party/fff_project` 子模块更新到上游最新 commit，自动重打 `patches/` 自定义补丁，重建并部署内核（`-CheckOnly` 仅检查更新） |
-| `patches/` | 3FCompare 自研扩展补丁存放目录（VRR 交换链 / 视口子区域 / 全帧回读等），构建与更新子模块时自动重打 |
+| `构建全部.ps1` | 构建 FFF.Native 内核并部署 DLL。**内核补丁的唯一入口**。参数：`-Configuration Release\|Debug`、`-SkipTests`、`-SkipPatches`、`-ForcePatches`、`-AllowKernelDrift` |
+| `更新内核.ps1` | 内核升级**体检**：核对基线 SHA、查询上游差速与归档 tag 是否可复现、列出人工重移植流程。默认会 `git fetch`；`-CheckOnly` 只查不联网 |
+| `发布门禁.ps1` | 发布前门禁：编译零告警 → 单元测试全绿 → 打包 → 产物自检（见下） |
+| `patches/` | 3FCompare 自研扩展的**历史留档**。当前基线已内置这些扩展，构建时默认跳过；重放规则见该目录 README |
 
-## 调试辅助脚本（LakeUI/窗口自动化）
+### 内核基线
 
-| 脚本 | 用途 |
+`构建全部.ps1` 钉死内核完整 SHA（tag 只是可读别名，可被移动）：
+
+```
+$KernelBaselineTag = "3fcompare-kernel-2026.9.11.1"
+$KernelBaselineSha = "6bc8d61c7fd0a2053e806a627c6db1b4f112e2d9"
+```
+
+内核目录 `third_party/fff_project/` 被 `.gitignore` 整体忽略，且该归档分支与 tag
+**目前只存在于本机**——远端 `Lake1059/FFF_Project` 没有 `3fcompare-kernel-*` tag。
+新机器裸克隆无法复现基线，此时脚本会**报错中止**，绝不会静默退回上游默认分支
+（旧版本正是这么做的，会拿没有 3FCompare 扩展的内核构建出"成功"的假象）。
+
+修复可复现性：
+
+```bash
+git -C third_party/fff_project push origin 3fcompare/zoom-viewport-cover
+git -C third_party/fff_project push origin 3fcompare-kernel-2026.9.11.1
+```
+
+升级内核是**人工重移植**流程，见 `third_party/fff_project/PATCHES.md`。
+
+## 调试/诊断工具
+
+| 工程 / 脚本 | 用途 |
 | --- | --- |
-| `枚举顶层窗口.ps1` | 枚举某进程的所有顶层窗口 |
-| `窗口操作.ps1` | 向指定窗口发送消息或键盘按键 |
-| `激活并点击.ps1` | 激活目标窗口并点击指定坐标 |
-| `点击坐标.ps1` | 点击指定屏幕坐标 |
-| `扫描按钮.ps1` | 扫描窗口标题栏区域图标像素分布，定位各按钮位置 |
-| `验证播放列表.ps1` | 3FP 播放列表左右分区验证（点击播放列表按钮 → 验证 DragSelectZoneWidth 生效） |
-| `反射验证LakeUI.ps1` | 反射验证 `LakeUI.UltraDetailListView` 的 `DragSelectZoneWidth` 属性（从 FFF.Player 输出目录加载） |
-| `LakeUIReflect/` | 反射验证小工具工程（.NET，随上述脚本使用） |
+| `DxgiInteropProbe/` | DXGI 互操作诊断工具（验证 ComImport vs 裸 vtable 调用差异，**迁移文档 §M0 关键工具**） |
+| `debug/` | 一次性 UI 自动化脚本（硬编码屏幕坐标与进程号，不可复用）。**已 gitignore，不入库** |
 
 > 说明：本仓库不包含第三方二进制；FFmpeg DLL 取自 `third_party/fff_project/runtime/`（BtbN 构建），libass 由 vcpkg 准备。
 > 单元测试与 E3 冒烟分别通过 `dotnet test tests/3FCompare.Core.Tests` 与 `dotnet run --project tests/3FCompare.SmokeTests` 执行。
+
+> ⚠️ 本机 `dotnet restore` 全域失败（`Value cannot be null. (Parameter 'path1')`）。
+> 根因是沙箱里 `APPDATA` 为空。所有 build/test 必须前置环境变量：
+> `APPDATA="C:\Users\<用户>\AppData\Roaming" dotnet build ... --no-restore`

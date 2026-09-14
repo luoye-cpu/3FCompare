@@ -65,7 +65,9 @@ public sealed class SettingsWindow : Window
             WindowY = current.WindowY,
             WindowWidth = current.WindowWidth,
             WindowHeight = current.WindowHeight,
-            WindowMaximized = current.WindowMaximized,
+            WindowState = current.WindowState,
+            SidebarWidth = current.SidebarWidth,
+            SidebarCollapsed = current.SidebarCollapsed,
             Language = current.Language,
         };
         Title = LanguageManager.T("Settings_DialogTitle");
@@ -256,7 +258,9 @@ public sealed class SettingsWindow : Window
                 MinimapEnabled = miniMap,
                 WindowX = _orig.WindowX, WindowY = _orig.WindowY,
                 WindowWidth = _orig.WindowWidth, WindowHeight = _orig.WindowHeight,
-                WindowMaximized = _orig.WindowMaximized,
+                WindowState = _orig.WindowState,
+                SidebarWidth = _orig.SidebarWidth,
+                SidebarCollapsed = _orig.SidebarCollapsed,
                 Language = lang,
             };
         }

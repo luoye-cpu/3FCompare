@@ -26,7 +26,7 @@
                 SelectionChanged="OnSpeedChanged" />
       <ComboBox x:Name="ComboColorMode" Width="172" Height="36" FontSize="13"
                 SelectionChanged="OnColorModeChanged" />
-      <TextBlock x:Name="TextTime" Width="208" Margin="10,0,0,0" VerticalAlignment="Center"
+      <TextBlock x:Name="TextTime" Width="168" Margin="10,0,0,0" VerticalAlignment="Center"
                  HorizontalAlignment="Right" TextAlignment="Right" FontFamily="Consolas" FontSize="13"
                  Foreground="#FFC8C8D2" Text="00:00:00:00 / 00:00:00" />
       <TextBlock x:Name="TextInfo" MaxWidth="120" VerticalAlignment="Center"

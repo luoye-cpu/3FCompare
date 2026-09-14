@@ -33,8 +33,9 @@ public sealed class MediaInfoPanel : ScrollViewer
             },
         };
         Clear();
-        LanguageManager.LanguageChanged += (_, _) =>
-            global::Avalonia.Threading.Dispatcher.UIThread.Post(() => { if (_text.Text == LanguageManager.T("MediaInfo_Empty")) Clear(); });
+        // P1-2：弱订阅（静态事件不得强持有控件）
+        LanguageManager.SubscribeWeak(this, p =>
+            global::Avalonia.Threading.Dispatcher.UIThread.Post(() => { if (p._text.Text == LanguageManager.T("MediaInfo_Empty")) p.Clear(); }));
     }
 
     private string L(string key) => LanguageManager.T(key);

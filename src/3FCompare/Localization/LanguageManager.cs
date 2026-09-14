@@ -25,7 +25,78 @@ public static class LanguageManager
         if ((lang is 0 or 1) && _currentLanguage != lang)
         {
             _currentLanguage = lang;
+            RaiseWeakSubscriptions();
             LanguageChanged?.Invoke(null, EventArgs.Empty);
+        }
+    }
+
+    /// <summary>以<b>弱引用</b>方式订阅语言切换事件（AOT 安全：不使用反射）。
+    /// <para><b>为什么需要</b>：<c>LanguageChanged</c> 是静态事件，若用
+    /// <c>LanguageChanged += (_, _) =&gt; this.Refresh()</c> 这类捕获 <c>this</c> 的 lambda 订阅，
+    /// 静态事件会永久持有该实例——窗口关闭、控件从视觉树移除后仍不会被回收，
+    /// 连带其持有的引擎会话 / D3D 设备 / 原生线程一起泄漏（P1-2）。</para>
+    /// <para><b>用法</b>：<c>LanguageManager.SubscribeWeak(this, c =&gt; c.OnLanguageChanged());</c>
+    /// 注意 handler 必须通过<b>参数</b>访问目标，<b>不要</b>捕获 <c>this</c>，
+    /// 否则会重新形成强引用、使弱订阅失去意义。</para></summary>
+    private static readonly List<WeakSubscription> _weakSubs = new();
+
+    public static IDisposable SubscribeWeak<T>(T target, Action<T> handler) where T : class
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        var sub = new WeakSubscription(target, o => handler((T)o));
+        lock (_weakSubs)
+        {
+            _weakSubs.Add(sub);
+            // 顺带剪除已失效条目：订阅点会随窗口/控件反复创建，而语言切换并不频繁
+            // ——只在订阅与触发两个时机清理，成本可忽略。
+            _weakSubs.RemoveAll(s => !s.IsAlive);
+        }
+        return sub;
+    }
+
+    /// <summary>触发全部弱订阅，并剪除目标已被回收的条目。
+    /// <para><b>为什么必须主动剪除</b>：弱引用只保证「不阻止目标被回收」，
+    /// 并不保证「订阅会自动从列表里消失」。目标死后委托与其闭包仍驻留在列表里，
+    /// 窗口反复开关会持续累积 —— 这与「自动失效」并不等价，长期运行是实打实的泄漏。</para></summary>
+    private static void RaiseWeakSubscriptions()
+    {
+        WeakSubscription[] snapshot;
+        lock (_weakSubs)
+        {
+            snapshot = _weakSubs.ToArray();
+            _weakSubs.RemoveAll(s => !s.IsAlive);
+        }
+        // 锁外回调：handler 可能反过来订阅/退订，避免自死锁
+        foreach (var s in snapshot) s.TryInvoke();
+    }
+
+    /// <summary>单条弱订阅：目标存活时回调，被回收后由 <see cref="RaiseWeakSubscriptions"/> 剪除。</summary>
+    private sealed class WeakSubscription : IDisposable
+    {
+        private readonly WeakReference<object> _weak;
+        private readonly Action<object> _handler;
+        private bool _disposed;
+
+        public WeakSubscription(object target, Action<object> handler)
+        {
+            _weak = new WeakReference<object>(target);
+            _handler = handler;
+        }
+
+        /// <summary>目标是否仍存活（已退订的视为不存活）。</summary>
+        public bool IsAlive => !_disposed && _weak.TryGetTarget(out _);
+
+        public void TryInvoke()
+        {
+            if (_disposed) return;
+            if (_weak.TryGetTarget(out var alive)) _handler(alive);
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            lock (_weakSubs) { _weakSubs.Remove(this); }
         }
     }
 
@@ -100,6 +171,7 @@ public static class LanguageManager
         ["Menu_Diff"] = "差异叠加",
         ["Menu_Audio"] = "音频",
         ["Menu_ShowGrid"] = "显示 对比网格",
+        ["Menu_Panels"] = "面板",
         ["Menu_GridLayout"] = "网格布局",
         ["Menu_Grid_2x1"] = "2×1（默认）",
         ["Menu_Grid_2x2"] = "2×2",
@@ -277,6 +349,7 @@ public static class LanguageManager
         ["Menu_Diff"] = "Diff Overlay",
         ["Menu_Audio"] = "Audio",
         ["Menu_ShowGrid"] = "Show Comparison Grid",
+        ["Menu_Panels"] = "Panels",
         ["Menu_GridLayout"] = "Grid Layout",
         ["Menu_Grid_2x1"] = "2×1 (Default)",
         ["Menu_Grid_2x2"] = "2×2",
@@ -293,6 +366,7 @@ public static class LanguageManager
         ["Status_GridMode"] = "Grid",
         ["Status_SingleMode"] = "Single",
         ["Status_Color"] = "Color",
+        ["Status_ColorModeUnified"] = "Color: HDR status differs across slots — tone mapping unified to HDR",
         ["Status_ExportDone"] = "Exported",
         ["Status_Steps"] = "Step",
         ["Sidebar_Title"] = "Tools",

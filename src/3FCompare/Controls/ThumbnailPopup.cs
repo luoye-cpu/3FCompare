@@ -55,7 +55,9 @@ public sealed class ThumbnailPopup : Window
     }
 
     /// <summary>在屏幕坐标 (x,y) 显示；bmp 为 null 时显示拖动提示。
-    /// 复用 WriteableBitmap（同尺寸时仅拷贝像素，不重新分配 GPU 纹理）。</summary>
+    /// 复用 WriteableBitmap（同尺寸时仅拷贝像素，不重新分配 GPU 纹理）。
+    /// <para><b>生命周期</b>：bmp 由本方法负责释放。像素一旦复制进 WriteableBitmap，
+    /// 原 GDI 位图就不再需要；调用方<b>不得</b>再 Dispose 传入的位图。</para></summary>
     public void ShowAt(PixelPoint position, System.Drawing.Bitmap? bmp)
     {
         _hint.Text = LanguageManager.T("Thumbnail_Hint");
@@ -63,7 +65,13 @@ public sealed class ThumbnailPopup : Window
         _image.IsVisible = bmp is not null;
 
         if (bmp is not null)
-            UpdateBitmap(bmp);
+        {
+            // P0-5 修复：过去这里只复制像素、从不释放 GDI 位图，而调用方在拖动（scrubbing）
+            // 分支里也不会释放，导致每 150ms（一个 scrub tick）泄漏一张 480px 宽的 GDI 位图。
+            // GDI 句柄上限约 1 万，长时间拖动时间轴会耗尽句柄，使整个进程的界面绘制失败。
+            try { UpdateBitmap(bmp); }
+            finally { bmp.Dispose(); }
+        }
 
         Position = new PixelPoint(position.X - 110, position.Y - (int)Height - 6);
         if (!IsVisible) Show();
@@ -124,6 +132,19 @@ public sealed class ThumbnailPopup : Window
     {
         _hideTimer.Stop();
         base.Hide();
+    }
+
+    /// <summary>彻底关闭并释放预览窗口持有的资源。
+    /// <para><b>注意</b>：Hide() 只是隐藏，Window 与其原生资源仍然存活。
+    /// 宿主窗口关闭时必须调用本方法，否则进程里会残留一个永不销毁的顶层窗口，
+    /// 且 Avalonia 会因仍有存活 Window 而不退出消息循环。</para></summary>
+    public void CloseAndDispose()
+    {
+        _hideTimer.Stop();
+        _image.Source = null;
+        _writeable?.Dispose();
+        _writeable = null;
+        Close();
     }
 
 }

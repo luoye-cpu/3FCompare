@@ -185,7 +185,30 @@ public static class KernelLogBridge
             }
             catch { /* 日志回调内绝不抛 */ }
         };
-        Backend.Interop.Fff3FpNativeProbe.FFF3FP_SetLogCallback(_delegate, nint.Zero);
+        Backend.Interop.Fff3FpNativeProbe.FFF3FP_SetLogCallback(
+            System.Runtime.InteropServices.Marshal.GetFunctionPointerForDelegate(_delegate), nint.Zero);
         AppLog.Debug("Kernel", "日志 sink 已安装");
+    }
+
+    /// <summary>
+    /// 卸载内核日志 sink（进程退出前必须调用）。
+    /// 内核解码/播放线程生命周期长于托管侧：若不注销，CLR 停机后内核线程仍会反向 P/Invoke
+    /// 回调本委托，触发 "Attempt to execute managed code after the .NET runtime thread state
+    /// has been destroyed."（coreclr/vm/ceemain.cpp:1750）并使进程以 127 退出——
+    /// 表现为"测试全部通过但进程崩溃"。
+    /// </summary>
+    public static void Uninstall()
+    {
+        if (_delegate is null) return;
+        try
+        {
+            Backend.Interop.Fff3FpNativeProbe.FFF3FP_SetLogCallback(nint.Zero, nint.Zero);
+            AppLog.Debug("Kernel", "日志 sink 已卸载");
+        }
+        catch { /* 卸载失败不阻塞退出 */ }
+        finally
+        {
+            _delegate = null;
+        }
     }
 }

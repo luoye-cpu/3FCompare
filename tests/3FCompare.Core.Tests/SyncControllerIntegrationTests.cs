@@ -142,7 +142,7 @@ public class AppSettingsSerializationTests
             WindowY = 200,
             WindowWidth = 1920,
             WindowHeight = 1080,
-            WindowMaximized = true,
+            WindowState = 2, // Maximized
         };
 
         // 用与生产相同的 JsonAotContext 序列化
@@ -156,6 +156,6 @@ public class AppSettingsSerializationTests
         Assert.Equal(s.FrameStep, back.FrameStep);
         Assert.Equal(s.SecondsStep, back.SecondsStep);
         Assert.Equal(s.WindowX, back.WindowX);
-        Assert.Equal(s.WindowMaximized, back.WindowMaximized);
+        Assert.Equal(s.WindowState, back.WindowState);
     }
 }

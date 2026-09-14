@@ -1,7 +1,13 @@
 # 3FCompare Avalonia 迁移规划
 
+<div align="center">
+
+[**English**](07-Avalonia迁移规划.en.md) · **简体中文**
+
+</div>
+
 > 状态：**迁移完成（M0–M5 全部通过）**｜创建：2026-08-22｜完成：2026-08-22
-> WinForms 版归档于 tag `winforms-final`；前置阅读：`docs/02-系统架构.md`、本文档第三节「硬约束」
+> WinForms 版归档于 tag `winforms-final`；前置阅读：`docs/02-系统架构.zh.md`、本文档第三节「硬约束」
 
 ## 1. 迁移动机与目标
 
@@ -95,7 +101,7 @@
 
 ### M3 — 工具面板与对话框（2 周）✅ 2026-08-22
 - [x] 侧栏 ToolsSidebar（5 页签 + 折叠按钮 + 放大镜常驻开关 + GridSplitter 拖宽）
-- [x] ProbePanel（TryReadPixel 读数 + JSON 复制）/ BookmarkPanel（增删跳转 + JSON源生成/CSV 导出）/
+- [x] ProbePanel（TryReadPixel 读数 + JSON 复制）/ BookmarkPanel（增删跳转 + JSON源生成/CSV 导出）/ 
       OffsetPanel（±帧/±100ms/对齐/归零）/ MediaInfoPanel（完整技术报告）/ AudioPanel（音轨/音量/静音）
 - [x] AbSliderView（占位渐变 + 拖动分割线，WinForms 同语义）/ DiffOverlayView（96×N 网格像素采样热力图，
       TryReadPixel 直接采样替代 WinForms 的 DrawToBitmap 采样）/ MagnifierOverlay
@@ -113,7 +119,7 @@
 - [x] WgcFrameCapture 链接编译（纯 Win32 与 UI 框架无关）；--screentest 实测抓到真实
       D3D 画面 + GDI 覆盖层共存（1.4MB PNG，视觉确认通过）
 - [x] 帧导出 Ctrl+S（WgcFrameCapture → TryReadPixel 逐像素采样退路，WinForms 同款语义）
-- [x] --selftest / --screentest（>1000B 判过）/ --autodemo 全部移植，退出码语义与 WinForms 一致
+- [x] --selftest / --screentest（>1000B 判过） / --autodemo 全部移植，退出码语义与 WinForms 一致
       （注：selftest 的自动播放断言须在步进断言**之前**——StepFrame 会暂停播放，与 WinForms 行为一致）
 - [x] 拖放打开（M2 已含）
 - 验证：selftest 两轮通过、screentest 产出 PNG 视觉确认、autodemo 双路 10s 存活冒烟
@@ -163,28 +169,3 @@
   重写为裸 vtable 委托方案（`DxgiOutputInfo`）。此为 M0 期间唯一 Core 改动，属缺陷修复。
 - 2026-08-22: 体积实测——Avalonia AOT 单文件 17.5MB > 15MB 红线，重评估挂起至 M5。
 - 2026-08-22: M5 红线判定：口径对齐（分发产物 7z，与 WinForms 基线 5.1MB 同口径）——精简版
-  35.3MB 原始 → 9.3MB ≤ 15MB ✓（原始超出为 Skia/ANGLE 原生栈，属框架固有成本）。
-- 2026-08-22: **迁移完成（M0–M5 单日全通过）**。WinForms 版删除前归档 tag `winforms-final`。
-  双轨链接的 LanguageManager/WgcFrameCapture 迁入 Avalonia 项目。AbSlider/DiffOverlay 与 WinForms
-  保持同样的「占位画面/直接采样」语义（真实 D3D 内容合成进对比视图留待内核共享纹理接口，属后续增强）。
-- 2026-08-22: **内核升级至上游 2026.8.20（2fbd242）**，API 契约 v11→v12：`FFF3FPConfiguration` 新增
-  `forceHdrOutput` 字段、`FFF3FP_SetColorMode` 新增第 4 参数；Core 互操作同步（`EngineSessionOptions.ForceHdrOutput`
-  默认 false，UI 暴露留作后续）。新内核语义：绕过显示器 HDR 能力门控（针对亮度字段缺失的电视），
-  且亮度字段缺失不再阻断 scRGB 链进入（部分电视上报 PQ 桌面但亮度全 0）。**确认最新内核仍无任何
-  VRR 路径**（Present(1,0) VSync 锁定、无 ALLOW_TEARING，A8/A9 结论不变）。
-  注意：fff_project 已非 submodule（普通 clone），`tools/更新内核.ps1` 的 submodule 分支失效需手工 pull；
-  `tools/patches/` 为空，无补丁冲突风险。
-- 2026-08-22: **VRR 补丁落地（docs/03 §6 首个自研内核补丁）**。`FFF3FP_SetPresentConfig(player, enableTearing)`：
-  交换链在系统支持时恒带 `ALLOW_TEARING` 创建标记（运行时切换无需重建链），开启后
-  `Present(0, DXGI_PRESENT_ALLOW_TEARING)` 让 G-SYNC/FreeSync 显示器按自身节奏扫描输出。
-  Core 透传：`IPlayerSession.SetPresentConfig` / `EngineSessionOptions.TearingPresent` /
-  `AppSettings.VrrTearingPresent` + 设置窗「VRR 低延迟呈现」开关（默认关，盯帧对比推荐关）。
-  补丁文件 `tools/patches/0001-vrr-tearing-present-config.patch`（151 行 / 6 文件，已应用并打标记）。
-  实测：本机显示链报告支持撕裂，selftest 全程跑撕裂路径全绿；screentest 正常。
-  未做（A9 部分）：逐媒体帧率的刷新率调谐。
-- 2026-08-22: M1 完成期间发现本机 .NET 11 预览运行时（11.0.100-preview.6）两个工程级坑：
-  ① App.axaml 内嵌 `<Application.Resources>/<Application.Styles>` 会使编译 XAML 按类型查找失败
-    （「No precompiled XAML found for App」）——规避：App.axaml 保持空，主题经 ThemeResources 代码装配；
-    MainWindow.axaml/控件 axaml 内容不受影响。
-  ② MSBuild 增量构建在源码编辑后误判 up-to-date（产物时间戳不更新、跑旧二进制造成误诊）——
-    规避：一律 `dotnet build --no-incremental`。

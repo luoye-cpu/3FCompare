@@ -129,7 +129,7 @@ public sealed class SimulatedEngine : IPlayerEngine
 
         public void SetVolume(float volume, bool muted) { /* 演示模式无音频 */ }
 
-        public void SetColorMode(ColorMode mode) { /* 演示模式略过 */ }
+        public void SetColorMode(ColorMode mode, bool? contentIsHdr = null) { /* 演示模式略过 */ }
 
         public bool SetPresentConfig(bool tearing) => !tearing; // 演示模式无呈现链，仅"关闭"语义成立
         public bool SetPacingConfig(bool pacing) => !pacing; // 演示模式无叠加层，仅"关闭"语义成立
@@ -183,7 +183,9 @@ public sealed class SimulatedEngine : IPlayerEngine
             float[] buffer, out uint outputBitDepth)
         {
             outputBitDepth = 8;
-            for (var i = 0; i < buffer.Length; i += 4)
+            // 与真实引擎一致：缓冲区必须容纳 width*height*4 个 float，否则拒绝
+            if (buffer.Length < width * height * 4) return false;
+            for (var i = 0; i + 3 < buffer.Length; i += 4)
             {
                 buffer[i] = 0.5f;
                 buffer[i + 1] = 0.5f;

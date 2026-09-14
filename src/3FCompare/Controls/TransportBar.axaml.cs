@@ -1,4 +1,5 @@
 using System;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Media;
@@ -9,7 +10,9 @@ namespace _3FCompare.Controls;
 /// <summary>传输栏（WinForms TransportBar 对应）：播放/停止/双步进/循环/加减路/倍速/色彩模式/时间码。</summary>
 public partial class TransportBar : UserControl
 {
-    private static readonly double[] Speeds = { 0.5, 1.0, 2.0, 4.0 };
+    // 慢速档（<1.0）已移除：内核原生变速未接线前，伪变速实现只对 >1.0 生效，
+    // 更慢的档位会被静默忽略（见 PlaybackCoordinator 的每秒 Seek 逻辑）
+    private static readonly double[] Speeds = { 1.0, 2.0, 4.0 };
     private bool _suppressComboEvents;
 
     public event EventHandler? PlayPauseClicked;
@@ -25,19 +28,47 @@ public partial class TransportBar : UserControl
     public double CurrentSpeed => BtnPlayPause.Tag is double d ? d : 1.0;
     public int CurrentColorMode => ComboColorMode.SelectedIndex;
 
+    /// <summary>以编程方式设置倍速：走与用户操作<b>完全相同</b>的
+    /// Combo.SelectionChanged → <see cref="SpeedChanged"/> 链路（自测 / 快捷键复用）。
+    /// 返回是否命中档位；当前已是该档位时不会触发事件（返回 false）。</summary>
+    public bool SetSpeed(double speed)
+    {
+        var i = Array.IndexOf(Speeds, speed);
+        if (i < 0 || ComboSpeed.SelectedIndex == i) return false;
+        ComboSpeed.SelectedIndex = i; // 触发 OnSpeedChanged → SpeedChanged
+        return true;
+    }
+
     public TransportBar()
     {
         InitializeComponent();
         foreach (var s in Speeds)
             ComboSpeed.Items.Add($"{s:0.#}x");
-        ComboSpeed.SelectedIndex = 1;
+        ComboSpeed.SelectedIndex = 0; // 1.0x
         ComboColorMode.Items.Clear();
         ComboColorMode.Items.Add(LanguageManager.T("Color_Auto"));
         ComboColorMode.Items.Add("SDR");
         ComboColorMode.Items.Add("HDR");
         ComboColorMode.SelectedIndex = 0;
-        LanguageManager.LanguageChanged += (_, _) => global::Avalonia.Threading.Dispatcher.UIThread.Post(ApplyLanguage);
+        // P1-2：弱订阅（静态事件不得强持有控件）
+        LanguageManager.SubscribeWeak(this, b => global::Avalonia.Threading.Dispatcher.UIThread.Post(b.ApplyLanguage));
         ApplyLanguage();
+    }
+
+    // ---- 响应式收缩 ----
+    // 三块区域撑满时约需 1000px，窗口最小 960 会把中间那排播放按钮挤变形。
+    // 按「信息量优先级」由低到高丢弃：说明文字 → 色彩模式宽度 → 倍速宽度。
+    private const double WideThreshold = 1180;
+    private const double MediumThreshold = 1020;
+
+    protected override void OnSizeChanged(SizeChangedEventArgs e)
+    {
+        base.OnSizeChanged(e);
+        var w = e.NewSize.Width;
+        if (w <= 0) return;
+        TextInfo.IsVisible = w >= WideThreshold;
+        ComboColorMode.Width = w >= WideThreshold ? 172 : w >= MediumThreshold ? 132 : 104;
+        ComboSpeed.Width = w >= MediumThreshold ? 82 : 68;
     }
 
     private void ApplyLanguage()

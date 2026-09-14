@@ -10,6 +10,16 @@ internal static class Program
     [STAThread]
     public static void Main(string[] args)
     {
+        // 进程退出钩子：卸载内核日志 sink + 冲刷日志。
+        // 内核解码/播放线程可能活过托管侧——不注销回调，CLR 停机后它们反向 P/Invoke
+        // 会触发 coreclr ceemain.cpp:1750 断言（"Attempt to execute managed code after the
+        // .NET runtime thread state has been destroyed."）并让进程以 127 退出。
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        {
+            try { _3FCompare.Core.Diagnostics.KernelLogBridge.Uninstall(); } catch { }
+            try { _3FCompare.Core.Diagnostics.AppLog.Shutdown(); } catch { }
+        };
+
         // F-LOG：落盘日志最先初始化（捕获从第一行起的全部内容）
         _3FCompare.Core.Diagnostics.AppLog.Initialize();
         // 双写器：全代码库 Console.Error.WriteLine 自动同步落盘（55 处调用点零改动）
@@ -32,9 +42,11 @@ internal static class Program
         }
 
         // F-LOG：安装内核日志 sink（内核线程的日志汇入同一落盘通道）
+        // FFF_NO_KERNEL_LOG=1 可禁用，用于定位退出期 CLR 反向 P/Invoke 断言的来源
         try
         {
-            _3FCompare.Core.Diagnostics.KernelLogBridge.Install();
+            if (Environment.GetEnvironmentVariable("FFF_NO_KERNEL_LOG") != "1")
+                _3FCompare.Core.Diagnostics.KernelLogBridge.Install();
         }
         catch (Exception ex)
         {
@@ -61,6 +73,12 @@ internal static class Program
             RunScreentest(args[1], args[2]);
             return;
         }
+        // --sessiontest <video> [video2] [video3]：会话保存→清空→重载，断言路数/位置/自动播放
+        if (args.Length >= 2 && args[0] == "--sessiontest")
+        {
+            RunSessiontest(args[1..]);
+            return;
+        }
         // --autodemo <files...>：自动打开并播放（演示/巡检模式）
         if (args.Length >= 3 && args[0] == "--autodemo")
         {
@@ -68,7 +86,7 @@ internal static class Program
             var exitCode = 1;
             try
             {
-                BuildAvaloniaApp().StartWithClassicDesktopLifetime(new[] { "--autodemo-internal" });
+                BuildAvaloniaApp().StartWithClassicDesktopLifetime(OriginalArgs());
                 exitCode = 0;
             }
             catch (Exception ex)
@@ -82,20 +100,42 @@ internal static class Program
         BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }
 
+    /// <summary>进程原始命令行参数（去掉 argv[0] 的可执行文件路径）。
+    /// <para><b>为什么必须透传原始参数</b>：MainWindow 的模式分发读的是
+    /// <see cref="Environment.GetCommandLineArgs"/>（进程真实命令行），
+    /// <b>不是</b>传给 <c>StartWithClassicDesktopLifetime</c> 的这份数组。
+    /// 历史实现在这里手工拼了 "--selftest-internal" / "--sessiontest-internal" /
+    /// "--screentest-internal" / "--autodemo-internal" 之类的标记，
+    /// 它们从未被任何代码读到过，只是让后来者误以为分发靠的是这个数组。</para></summary>
+    private static string[] OriginalArgs() => Environment.GetCommandLineArgs()[1..];
+
     private static void RunSelftest(string videoPath, string? dropVideoPath = null)
     {
         var exitCode = 1;
         try
         {
-            var args = new List<string> { "--selftest-internal", videoPath };
-            if (dropVideoPath is not null)
-                args.Add(dropVideoPath);
-            BuildAvaloniaApp().StartWithClassicDesktopLifetime(args.ToArray());
+            BuildAvaloniaApp().StartWithClassicDesktopLifetime(OriginalArgs());
             exitCode = SelftestResult.Code;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"selftest: 异常 {ex}");
+            exitCode = 2;
+        }
+        Environment.Exit(exitCode);
+    }
+
+    private static void RunSessiontest(string[] videos)
+    {
+        var exitCode = 1;
+        try
+        {
+            BuildAvaloniaApp().StartWithClassicDesktopLifetime(OriginalArgs());
+            exitCode = SelftestResult.Code;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"sessiontest: 异常 {ex}");
             exitCode = 2;
         }
         Environment.Exit(exitCode);
@@ -111,8 +151,7 @@ internal static class Program
                 Console.Error.WriteLine($"screentest: 文件不存在 {input}");
                 Environment.Exit(2);
             }
-            BuildAvaloniaApp().StartWithClassicDesktopLifetime(
-                new[] { "--screentest-internal", input, outputPng });
+            BuildAvaloniaApp().StartWithClassicDesktopLifetime(OriginalArgs());
             exitCode = ScreentestResult;
         }
         catch (Exception ex)

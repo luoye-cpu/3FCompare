@@ -248,16 +248,21 @@ Invoke-7zMax 'a -t7z -mx9 -md=3840m -mfb=273 -ms=on -mmt=1 "out.7z" *'
 
 ### 5.1 版本号位置 / Version Location
 
-`src/3FCompare/3FCompare.csproj`:
+`src/3FCompare/3FCompare.csproj`（**唯一真源** / single source of truth）:
 ```xml
 <Version>0.2.0</Version>
 <VersionSuffix>BETA</VersionSuffix>
 ```
 
+`pack.ps1` 与 `tools/发布门禁.ps1` **不再硬编码版本号**：不传 `-Version` 时自动读取上面这两行；
+显式传入且与 csproj 不一致会告警（防止误发旧包——历史上出现过 `publish/` 里躺着 0.2.1 产物、
+而 README 与 csproj 仍是 0.2.0 的情况）。
+
 ### 5.2 更新流程 / Update Workflow
 
-1. 修改 `.csproj` 中的 `<Version>` 标签 / Update `<Version>` in `.csproj`
-2. 更新 `README.md` 中的版本号 / Update version in `README.md`
+1. 修改 `src/3FCompare/3FCompare.csproj` 的 `<Version>`（及 `3FCompare.Core.csproj`，两者保持一致）
+2. 更新 `README.md` 中的版本号与更新日志 / Update version + changelog in `README.md`
+3. 打包时**不要**手动传 `-Version`，让它从 csproj 派生 / Do not pass `-Version` manually
 3. 执行打包流程 / Run packaging (`pack.ps1`)
 4. 在 GitHub Releases 中创建对应 tag: `vX.Y.Z` / Create a GitHub Release with the tag
 

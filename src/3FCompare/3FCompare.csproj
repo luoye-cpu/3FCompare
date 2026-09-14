@@ -26,8 +26,8 @@
     <PackageReference Include="Avalonia.Desktop" Version="12.1.1" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.1" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
-    <!-- PoC-A GDI 绘制 + M4 WgcFrameCapture 位图路径 -->
-    <PackageReference Include="System.Drawing.Common" Version="10.0.11" />
+    <!-- PoC-A GDI 绘制 + ScreenFrameCapture 位图路径 -->
+    <PackageReference Include="System.Drawing.Common" Version="10.0.12" />
   </ItemGroup>
 
   <ItemGroup>
@@ -36,9 +36,23 @@
   </ItemGroup>
 
   <!-- 嵌入 FFF.Native.dll 实现单文件发布（3FP 播放器内核，始终内嵌） -->
+  <!-- P1-17：过去这里写死 x64\Release，与本项目的 $(Configuration) 完全脱钩，
+       且内核目录被 .gitignore 忽略 —— 干净 clone 后会以一个不知所云的错误失败。
+       现在：默认取 Release（发布产物应当是优化版内核），可用 -p:KernelConfiguration=Debug 覆盖；
+       文件不存在时给出可执行指引而不是让构建蒙头往下走。 -->
+  <PropertyGroup>
+    <KernelConfiguration Condition="'$(KernelConfiguration)' == ''">Release</KernelConfiguration>
+    <KernelDllPath>$(MSBuildThisFileDirectory)..\..\third_party\fff_project\FFF.Native\x64\$(KernelConfiguration)\FFF.Native.dll</KernelDllPath>
+  </PropertyGroup>
+
   <ItemGroup>
-    <EmbeddedResource Include="..\..\third_party\fff_project\FFF.Native\x64\Release\FFF.Native.dll" LogicalName="FFF.Native.dll" />
+    <EmbeddedResource Include="$(KernelDllPath)" LogicalName="FFF.Native.dll" Condition="Exists('$(KernelDllPath)')" />
   </ItemGroup>
+
+  <Target Name="CheckKernelDll" BeforeTargets="Build;Publish">
+    <Error Condition="!Exists('$(KernelDllPath)')"
+           Text="未找到内核 FFF.Native.dll（期望路径: $(KernelDllPath)）。请先运行 tools/构建全部.ps1 -Configuration $(KernelConfiguration) 构建并部署内核；若内核是用其它配置构建的，给本命令加 -p:KernelConfiguration=&lt;配置&gt;。" />
+  </Target>
 
   <!-- 嵌入 SkiaSharp 与 HarfBuzzSharp 原生 DLL，实现单文件发布（版本号与 deps.json 中的 resolved 版本一致） -->
   <ItemGroup Condition="'$(NuGetPackageRoot)' != ''">

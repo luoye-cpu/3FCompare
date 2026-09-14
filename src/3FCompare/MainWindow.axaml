@@ -7,7 +7,7 @@
         mc:Ignorable="d" d:DesignWidth="1600" d:DesignHeight="900"
         x:Class="_3FCompare.MainWindow"
         Title="{loc:Loc Win_Title}"
-        Width="1600" Height="900" MinWidth="640" MinHeight="400"
+        Width="1600" Height="900" MinWidth="960" MinHeight="540"
         Background="{DynamicResource BgBrush}">
 
   <DockPanel>
@@ -24,14 +24,20 @@
         <MenuItem Header="{loc:Loc Menu_Exit}" Click="OnExit" />
       </MenuItem>
       <MenuItem Header="{loc:Loc Menu_View}">
+        <!-- 视图模式（互斥/切换类） -->
         <MenuItem Header="{loc:Loc Menu_ToggleSingle}" Click="OnToggleSingleMulti" />
         <MenuItem Header="{loc:Loc Menu_AbSlider}" Click="OnToggleAbSlider" />
-        <MenuItem Header="{loc:Loc Menu_Probe}" Click="OnToggleProbe" />
-        <MenuItem Header="{loc:Loc Menu_Bookmarks}" Click="OnToggleBookmarks" />
-        <MenuItem Header="{loc:Loc Menu_Offset}" Click="OnToggleOffset" />
-        <MenuItem Header="{loc:Loc Menu_MediaInfo}" Click="OnToggleMediaInfo" />
-        <MenuItem Header="{loc:Loc Menu_Diff}" Click="OnToggleDiff" />
-        <MenuItem Header="{loc:Loc Menu_Audio}" Click="OnToggleAudio" />
+        <MenuItem Header="{loc:Loc Menu_ShowGrid}" Click="OnShowGridOnly" />
+        <Separator />
+        <!-- 面板：聚合成子菜单，避免 8 个平铺项淹没主菜单（对齐 Premiere「窗口」/ VS Code「视图」分组） -->
+        <MenuItem Header="{loc:Loc Menu_Panels}">
+          <MenuItem Header="{loc:Loc Menu_Probe}" Click="OnToggleProbe" />
+          <MenuItem Header="{loc:Loc Menu_Bookmarks}" Click="OnToggleBookmarks" />
+          <MenuItem Header="{loc:Loc Menu_Offset}" Click="OnToggleOffset" />
+          <MenuItem Header="{loc:Loc Menu_MediaInfo}" Click="OnToggleMediaInfo" />
+          <MenuItem Header="{loc:Loc Menu_Diff}" Click="OnToggleDiff" />
+          <MenuItem Header="{loc:Loc Menu_Audio}" Click="OnToggleAudio" />
+        </MenuItem>
         <Separator />
         <MenuItem Header="{loc:Loc Menu_GridLayout}">
           <MenuItem Header="{loc:Loc Menu_Grid_2x1}" Click="OnGridPreset" Tag="2x1" />
@@ -39,7 +45,6 @@
           <MenuItem Header="{loc:Loc Menu_Grid_3x3}" Click="OnGridPreset" Tag="3x3" />
           <MenuItem Header="{loc:Loc Menu_Grid_Auto}" Click="OnGridPreset" Tag="auto" />
         </MenuItem>
-        <MenuItem Header="{loc:Loc Menu_ShowGrid}" Click="OnShowGridOnly" />
         <Separator />
         <MenuItem Header="{loc:Loc Menu_Fullscreen}" InputGesture="F11" Click="OnToggleFullscreen" />
       </MenuItem>
@@ -48,8 +53,11 @@
       </MenuItem>
     </Menu>
 
-    <!-- 底部：状态栏 -->
-    <Border DockPanel.Dock="Bottom" Height="24" Background="{DynamicResource PanelBrush}"
+    <!-- 底部：状态栏（DockPanel 反向堆叠，声明顺序 = 由下往上）
+         视觉自下而上：状态栏 → 传输栏 → 时间轴 → 主区。
+         主流播放器（PotPlayer / MPC-HC / VLC）均把 seek 条紧贴画面、按钮置于其下；
+         原顺序（按钮在上、seek 条在下）与这一惯例相反，拖动时视线需跨过一行按钮。 -->
+    <Border DockPanel.Dock="Bottom" x:Name="StatusBarHost" Height="24" Background="{DynamicResource PanelBrush}"
             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="8,0">
       <DockPanel>
         <TextBlock DockPanel.Dock="Left" x:Name="StatusEngine" Text="—"
@@ -58,17 +66,20 @@
         <TextBlock x:Name="StatusInfo" Text="—"
                    Foreground="{DynamicResource TextMutedBrush}" FontSize="12"
                    VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+        <TextBlock DockPanel.Dock="Right" x:Name="StatusView" Text=""
+                   Foreground="{DynamicResource TextMutedBrush}" FontSize="12"
+                   VerticalAlignment="Center" Margin="16,0,0,0" />
       </DockPanel>
     </Border>
 
-    <!-- 底部：时间轴 -->
-    <Border DockPanel.Dock="Bottom" x:Name="TimelineHost" Height="34"
-            Background="{DynamicResource CanvasDarkBrush}"
-            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" />
-
-    <!-- 底部：传输栏 -->
+    <!-- 底部：传输栏（播放/步进/倍速/色彩/时间码） -->
     <Border DockPanel.Dock="Bottom" x:Name="TransportHost" Height="54"
             Background="{DynamicResource PanelBrush}"
+            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" />
+
+    <!-- 底部：时间轴（紧贴画面：刻度/播放头/A-B 区间） -->
+    <Border DockPanel.Dock="Bottom" x:Name="TimelineHost" Height="40"
+            Background="{DynamicResource CanvasDarkBrush}"
             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" />
 
     <!-- 主区：侧栏 | 分隔条 | 中央网格/AB滑块/放大镜 -->

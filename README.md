@@ -25,7 +25,7 @@
 | --- | --- |
 | 产品形态 / Type | Windows 桌面应用（**Avalonia 11**，.NET 11）；**NativeAOT 自包含（精简版 7z 分发约 9.3MB）** / Windows desktop app (**Avalonia 11**, .NET 11); **NativeAOT self-contained (lite 7z ~9.3MB)** |
 | 对标产品 / Reference | NVIDIA ICAT（最多 4 路视频/图像对比）——本项目**扩展至 1~9 路**，对齐、双步进、硬件解码开关、窗口/全屏、多显卡解码 / NVIDIA ICAT (up to 4-way) — **extended to 1–9 ways** with alignment, dual stepping, HW decode toggle, window/fullscreen, multi-GPU |
-| 后端 / Backend | FFF_Project 的 **3FP**（`FFF.Native` fork + 自研补丁，见 docs/03） / **3FP** from FFF_Project (forked `FFF.Native` + custom patches, see docs/03) |
+| 后端 / Backend | FFF_Project 的 **3FP**（`FFF.Native` fork + 自研补丁，见 docs/03-后端接入与能力映射.zh.md） / **3FP** from FFF_Project (forked `FFF.Native` + custom patches, see docs/03-后端接入与能力映射.en.md) |
 | 业务规模 / Scale | **1~9 路对比**（3x3 网格上限），架构按 N 路扩展 / **1–9 way comparison** (3×3 grid max), architecture scales to N-way |
 | 解码 / Decode | 3FP 原生能力：CPU（FFmpeg）/ GPU（CUDA/NVDEC、D3D11VA 优先）+ 自动回退；**硬件开关 + 多 GPU 指定** / 3FP native: CPU (FFmpeg) / GPU (CUDA/NVDEC, D3D11VA preferred) + auto fallback; **HW toggle + multi-GPU selection** |
 
@@ -37,8 +37,8 @@
 - **ACM/广色域**：完全遵循 3FP 的 Advanced Color 交换链契约（SDR `BGRA8/RGB10A2`、HDR `R10G10B10A2+PQ/BT.2020`），
   显示侧校色交给 DWM；本项目自行探测显示能力（DXGI 亮度读取）并计算智能色调映射参数，探针/截屏始终读取「颜色管理前」的原生缓冲，保证跨路对比一致。
 - **G-SYNC / FreeSync**：播放窗口为独立窗口，**不破坏桌面 VRR**；是否全时刻生效取决于 3FP 交换链
-  （Present 节奏 / `ALLOW_TEARING`，见 [docs/03](docs/03-后端接入与能力映射.md) 待确认项 **A8/A9**），待专项实测。
-- 专项验收清单见 [docs/01-需求分析.md §5.1](docs/01-需求分析.md)。
+  （Present 节奏 / `ALLOW_TEARING`，见 [docs/03](docs/03-后端接入与能力映射.zh.md) 待确认项 **A8/A9**），待专项实测。
+- 专项验收清单见 [docs/01-需求分析.zh.md §5.1](docs/01-需求分析.zh.md)。
 
 ## ⚖️ 依赖与许可提示 / License & Dependencies
 
@@ -47,9 +47,13 @@
 - FFmpeg 公共 API：Shared FFmpeg DLL 组（`avcodec` 等）由 BtbN 构建，**不纳入本仓库**，仅在发布说明中指引获取。
 - 本项目的 UI、同步逻辑、对比工具均为独立实现；本仓库不包含任何第三方 DLL 二进制。
 
-> 详细依赖清单、构建步骤与风险见 [docs/06-风险与依赖.md](docs/06-风险与依赖.md)。
+> 详细依赖清单、构建步骤与风险见 [docs/06-风险与依赖.zh.md](docs/06-风险与依赖.zh.md)。
 
 ## 🛠 工程状态（0.2.0-BETA，2026-08-25）
+
+> **版本号唯一真源**：`src/3FCompare/3FCompare.csproj` 的 `<Version>`（+`VersionSuffix`）。
+> `pack.ps1` 与 `tools/发布门禁.ps1` 不硬编码版本——不传 `-Version` 时自动从 csproj 派生，
+> 传入不一致会告警。详见 [PACKAGING_SPEC.md §5](PACKAGING_SPEC.md)。
 
 ```text
 src/
@@ -59,7 +63,7 @@ src/
 │                               #   2026-08-22 由 WinForms 迁移而来，WinForms 版归档于 tag `winforms-final`）
 tests/
 ├── 3FCompare.SmokeTests/       # E3 冒烟（控制台，演示引擎全流程验证）
-├── 3FCompare.Core.Tests/       # 单元测试（FrameTimeline / SyncController / GridLayout / ToneMapping 等，40 例）
+├── 3FCompare.Core.Tests/       # 单元测试（FrameTimeline / SyncController / GridLayout / ToneMapping 等，53 例）
 third_party/
 └── fff_project/                # FFF_Project submodule（内核，MIT）
     └── FFF.Native → x64/Release/FFF.Native.dll   # 已构建（Release x64）
@@ -71,7 +75,7 @@ third_party/
 ✅ **NativeAOT 已启用 / Enabled**: `dotnet publish -c Release -r win-x64` → 原生单文件 `3FCompare.exe`
 （含 Skia/ANGLE 原生栈约 21MB；完整版内嵌 FFF.Native），
 真实视频渲染 + `--selftest` / `--screentest` 均验证通过；精简版 7z 分发 9.3MB。
-迁移纪要见 [docs/07-Avalonia迁移规划.md](docs/07-Avalonia迁移规划.md)。
+迁移纪要见 [docs/07-Avalonia迁移规划.zh.md](docs/07-Avalonia迁移规划.zh.md)。
 `tools/构建全部.ps1` 一键复现内核构建与 DLL 部署。
 
 
@@ -97,6 +101,63 @@ third_party/
 - **真实内核已验证**：FFmpeg + libass + FFF.Native 全链路构建成功，App 真实渲染视频确认 / **Real kernel verified**: FFmpeg + libass + FFF.Native pipeline built, real video rendering confirmed.
 - **拖拽平移稳定性修复**：滚轮缩放后按住拖动跨画面边界不中断（鼠标捕获 + 不再由 MouseLeave 提前结束拖拽），多路同步平移连贯（0.1.4 新增） / **Drag-pan stability fix**: cross-surface drag without interruption via mouse capture, continuous multi-way sync pan (0.1.4)
 - **双语界面**：完整中英双语，启动应用已保存语言、语言切换即时刷新全部界面（菜单/工具栏/面板/状态栏/消息框/文件过滤器），此前英文模式仅设置对话框生效、主界面残留全中文（0.1.4 完善） / **Bilingual UI**: full zh/en support, applies saved language on startup and refreshes the entire UI on switch (menus/toolbars/panels/status/message dialogs/file filters); previously only the settings dialog honored English (0.1.4)
+
+### 🚀 快速开始（仅需下载包） / Quick Start (prebuilt package)
+
+> 面向只想试用、不打算从源码构建的用户。 / For users who just want to try it, without building from source.
+
+**1. 下载与解压** / **Download & extract**
+
+从 Releases 下载 `3FCompare-v<版本>-x64-full.7z`（自包含，推荐）或 `3FCompare-v<版本>-x64.7z`（精简版），解压到**任意可写目录**（不要解压到 `C:\Program Files`，程序会在 exe 同目录写入 `settings.json`）。
+
+_Download `3FCompare-v<version>-x64-full.7z` (self-contained, recommended) or `3FCompare-v<version>-x64.7z` (lite) from Releases and extract to **any writable folder** (avoid `C:\Program Files` — the app writes `settings.json` next to the exe)._
+
+> **完整版 / full**：已内置 `ffmpeg-full/`，解压即用，无需额外准备。
+> **精简版 / lite**：不含 FFmpeg，需按下面第 2 步自行放置 DLL。
+
+**2. 准备 FFmpeg（决定真实模式/演示模式）** / **Prepare FFmpeg (decides real vs. demo mode)**
+
+程序需要一组 Shared FFmpeg DLL（`avcodec-*.dll`、`avformat-*.dll`、`avutil-*.dll`、`swscale-*.dll` 等）。**完整版已内置，可跳过本步**；精简版从下面三种方式任选其一：
+
+_The app needs a set of shared FFmpeg DLLs. **The full package already bundles them — skip this step.** For the lite package, pick any one of:_
+
+| 方式 / Option | 做法 / How |
+| --- | --- |
+| ① 同目录 `ffmpeg-full/`（推荐） | 把 DLL 组放进 exe 同目录的 `ffmpeg-full/` 子文件夹 / Put the DLLs in an `ffmpeg-full/` subfolder next to the exe |
+| ② 同目录平铺 | DLL 与 exe 直接放同一目录 / DLLs directly beside the exe |
+| ③ 设置里手动指定 | 设置 → FFmpeg DLL 目录 → 浏览，选中 DLL 所在目录 / Settings → FFmpeg DLL folder → Browse |
+
+DLL 组来源：BtbN 的 FFmpeg-Builds（`ffmpeg-n8.x-*-win64-gpl-shared-*.7z`，取出 `bin/*.dll`；需含 `avcodec-63` / `avformat-63` / `avutil-61` / `swscale-10` / `swresample-7` / `avfilter-12` 及 `ass-9.dll`）。**本仓库不包含任何第三方 DLL。**
+
+_DLLs come from BtbN's FFmpeg-Builds (`ffmpeg-n8.x-*-win64-gpl-shared-*.7z`, take `bin/*.dll`; needs `avcodec-63` / `avformat-63` / `avutil-61` / `swscale-10` / `swresample-7` / `avfilter-12` plus `ass-9.dll`). This repo ships no third-party DLLs._
+
+> **找不到 FFmpeg 会怎样？** 程序**不会崩**，而是回退到**演示模式**（合成画面，可完整走通打开/播放/步进/分屏等操作），并在启动时弹窗说明原因、状态栏常驻显示降级原因。
+> _If FFmpeg is missing the app does **not** crash — it falls back to **demo mode** (synthetic frames) and tells you why in a startup dialog and the status bar._
+
+**3. 运行** / **Run**
+
+双击 `3FCompare.exe`。把视频文件**拖进窗口**（或「文件 → 打开视频」），最多可加到 9 路。
+
+_Double-click `3FCompare.exe`, then **drag video files into the window** (or File → Open Video), up to 9 ways._
+
+**4. 上手三招** / **Three things to try first**
+
+- **分屏盯帧**：拖入 2 个同源不同编码的文件 → ←/→ 逐帧对比（Shift+←/→ 按秒）
+- **A-B 滑块**：按 `B` 打点，拖动中间分割线直接对比同一帧的两个版本
+- **像素探针**：按 `P`，鼠标悬停读像素值（颜色管理前的原生缓冲，跨路可直接比）
+
+常用键：`Space` 播放/暂停 · `←/→` 逐帧 · `Shift+←/→` 逐秒 · `F11` 全屏 · `R` 重置视图 · `Esc` 退出全屏。
+
+_Key keys: `Space` play/pause · `←/→` frame step · `Shift+←/→` second step · `F11` fullscreen · `R` reset view · `Esc` exit fullscreen._
+
+**常见问题** / **Troubleshooting**
+
+| 现象 / Symptom | 处理 / Fix |
+| --- | --- |
+| 启动提示「未找到 FFmpeg 核心库」 | 按上面第 2 步放置 DLL，或在弹窗里点「打开设置」指定目录后**重启** / Place the DLLs (step 2) or point to the folder in Settings, then **restart** |
+| 一直是演示模式（画面是彩条/测试图） | 状态栏看引擎名与原因；确认 DLL 位数是 **x64**、文件名匹配 `avcodec-*.dll` / Check the engine name and reason in the status bar; make sure the DLLs are **x64** and named `avcodec-*.dll` |
+| HDR 画面偏灰/过曝 | 设置 → 色彩：自动即可；也可手动切 SDR/HDR，详见「显示链路」一节 / Settings → Color: leave on Auto, or switch SDR/HDR manually |
+| 窗口跑到看不见的地方了 | 窗口几何自动记忆；若上次坐标已不在任何屏幕内（显示器拔掉/分辨率变化），程序会跳过坐标恢复、改用系统默认位置，并在下次关闭时重新记录当前坐标自愈 / Geometry is remembered; if the last position is off every screen, position restore is skipped in favour of the system default and the next close re-records a valid one |
 
 ### 构建与运行 / Build & Run
 

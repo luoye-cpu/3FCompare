@@ -4,7 +4,7 @@
 
 | 工程 | 类型 | 用途 |
 |---|---|---|
-| `3FCompare.Core.Tests` | 单元测试（xunit，40 例全通过） | FrameTimeline 帧/秒步进换算、SyncController 多会话同步、GridLayout 网格布局、ToneMapping 色调映射参数、设置/会话 JSON 序列化 |
+| `3FCompare.Core.Tests` | 单元测试（xunit，53 例全通过） | FrameTimeline 帧/秒步进换算、SyncController 多会话同步、GridLayout 网格布局、ToneMapping 色调映射参数、设置/会话 JSON 序列化 |
 | `3FCompare.SmokeTests` | 控制台冒烟 | E3 可达性冒烟：演示引擎全流程（打开 → 步进 → 循环 → 一致性） |
 
 ## 运行
@@ -17,5 +17,6 @@ dotnet test tests/3FCompare.Core.Tests
 dotnet run --project tests/3FCompare.SmokeTests -- [--demo] <视频路径...>
 ```
 
-> 真实内核（FFF.Native）的验证请走 App 的 `--selftest`：需 WinForms 消息循环，
+> 真实内核（FFF.Native）的验证请走 App 的 `--selftest`：需 Avalonia UI 消息循环
+> （2026-08-22 起主程序已由 WinForms 迁移到 Avalonia 11，WinForms 版归档于 tag `winforms-final`），
 > 控制台冒烟不适用真实模式（见 `3FCompare.SmokeTests/Program.cs` 头部注释）。

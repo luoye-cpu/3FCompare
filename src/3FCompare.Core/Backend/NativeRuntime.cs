@@ -43,7 +43,10 @@ public static partial class NativeRuntime
                 }
                 else
                 {
-                    return; // 无可嵌入资源，保持现有
+                    // 无可嵌入资源：保持现有 DLL，但必须留痕——静默跳过会让
+                    // "内核更新不生效"这类问题无从排查（如 csproj 内嵌路径失效）。
+                    Diagnostics.AppLog.Warn("NativeRuntime", "嵌入资源中找不到 FFF.Native.dll，保留磁盘上的现有版本");
+                    return;
                 }
             }
 
@@ -51,12 +54,12 @@ public static partial class NativeRuntime
             if (data is not null)
             {
                 File.WriteAllBytes(targetPath, data);
-                Console.Error.WriteLine($"[NativeRuntime] 已释放 FFF.Native.dll ({data.Length / 1024} KB)");
+                Diagnostics.AppLog.Info("NativeRuntime", $"已释放 FFF.Native.dll ({data.Length / 1024} KB)");
             }
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[NativeRuntime] 释放 FFF.Native.dll 失败: {ex.Message}");
+            Diagnostics.AppLog.Warn("NativeRuntime", $"释放 FFF.Native.dll 失败: {ex.Message}");
         }
     }
 
@@ -148,33 +151,33 @@ public static partial class NativeRuntime
             // ① 手动指定（优先级最高）
             if (FfmpegDirectory is not null && HasAvcodec(FfmpegDirectory))
             {
-                Console.Error.WriteLine($"[NativeRuntime] IsFfmpegAvailable: found in FfmpegDirectory='{FfmpegDirectory}'");
+                Diagnostics.AppLog.Debug("NativeRuntime", $"IsFfmpegAvailable: found in FfmpegDirectory='{FfmpegDirectory}'");
                 return FfmpegDirectory;
             }
             // ② exe 同目录
             if (HasAvcodec(appDir))
             {
-                Console.Error.WriteLine($"[NativeRuntime] IsFfmpegAvailable: found in appDir");
+                Diagnostics.AppLog.Debug("NativeRuntime", "IsFfmpegAvailable: found in appDir");
                 return appDir;
             }
             // ③ ffmpeg-full/ 子目录（发布完整版运行时目录）
             if (TryRegisterSubDir(appDir, "ffmpeg-full", out var ffmpegFullDir))
             {
-                Console.Error.WriteLine($"[NativeRuntime] IsFfmpegAvailable: found in ffmpeg-full/ subdir, registered search path = {ffmpegFullDir}");
+                Diagnostics.AppLog.Debug("NativeRuntime", $"IsFfmpegAvailable: found in ffmpeg-full/ subdir, registered search path = {ffmpegFullDir}");
                 return ffmpegFullDir;
             }
             // ④ ffmpeg/ 子目录（旧完整版运行目录，兼容）
             if (TryRegisterSubDir(appDir, "ffmpeg", out var ffmpegSubDir))
             {
-                Console.Error.WriteLine($"[NativeRuntime] IsFfmpegAvailable: found in ffmpeg/ subdir, registered search path = {ffmpegSubDir}");
+                Diagnostics.AppLog.Debug("NativeRuntime", $"IsFfmpegAvailable: found in ffmpeg/ subdir, registered search path = {ffmpegSubDir}");
                 return ffmpegSubDir;
             }
-            Console.Error.WriteLine($"[NativeRuntime] IsFfmpegAvailable: NOT found (FfmpegDirectory='{FfmpegDirectory}')");
+            Diagnostics.AppLog.Warn("NativeRuntime", $"IsFfmpegAvailable: NOT found (FfmpegDirectory='{FfmpegDirectory}')");
             return null;
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[NativeRuntime] IsFfmpegAvailable exception: {ex.Message}");
+            Diagnostics.AppLog.Warn("NativeRuntime", $"IsFfmpegAvailable exception: {ex.Message}");
             return null;
         }
     }
@@ -223,34 +226,6 @@ public static partial class NativeRuntime
             SetFfmpegDirectory(existing);
         }
     }
-
-    /// <summary>将用户目录的 FFmpeg / ass DLL 复制到应用目录（用户手动设置优先，无条件覆盖）。</summary>
-    private static void CopyDlls(string sourceDir)
-    {
-        if (!Directory.Exists(sourceDir)) return;
-
-        var targetDir = AppContext.BaseDirectory;
-        if (!Directory.Exists(targetDir)) return;
-
-        var copied = 0;
-        foreach (var dll in Directory.GetFiles(sourceDir, "*.dll"))
-        {
-            var name = Path.GetFileName(dll);
-            if (!(name.StartsWith("av", StringComparison.OrdinalIgnoreCase) ||
-                  name.StartsWith("sw", StringComparison.OrdinalIgnoreCase) ||
-                  name.StartsWith("ass", StringComparison.OrdinalIgnoreCase) ||
-                  name.StartsWith("postproc", StringComparison.OrdinalIgnoreCase)))
-                continue;
-
-            var target = Path.Combine(targetDir, name);
-            try
-            {
-                File.Copy(dll, target, overwrite: true);
-                copied++;
-            }
-            catch { /* 个别文件复制失败不影响整体 */ }
-        }
-        if (copied > 0)
-            Console.Error.WriteLine($"[NativeRuntime] 已复制 {copied} 个 DLL 从 {sourceDir} 到 {targetDir}");
-    }
+    // P2 清理：原 CopyDlls(sourceDir) 是 private 且全仓库无调用者（实际走 SetDllDirectory），
+    // 已删除。它会把用户目录的 av*/sw*/ass* DLL 无条件覆盖到应用目录 —— 留着就是个定时炸弹。
 }
