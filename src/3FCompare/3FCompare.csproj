@@ -16,7 +16,7 @@
 
     <!-- 版本号：与 Core 保持一致，由 SDK 从 Version(+Suffix) 统一派生；
          pack.ps1 用 -p:Version=X.Y.Z 覆盖时全链路生效 -->
-    <Version>0.2.0</Version>
+    <Version>0.2.5</Version>
     <VersionSuffix>BETA</VersionSuffix>
   </PropertyGroup>
 
@@ -54,11 +54,34 @@
            Text="未找到内核 FFF.Native.dll（期望路径: $(KernelDllPath)）。请先运行 tools/构建全部.ps1 -Configuration $(KernelConfiguration) 构建并部署内核；若内核是用其它配置构建的，给本命令加 -p:KernelConfiguration=&lt;配置&gt;。" />
   </Target>
 
-  <!-- 嵌入 SkiaSharp 与 HarfBuzzSharp 原生 DLL，实现单文件发布（版本号与 deps.json 中的 resolved 版本一致） -->
+  <!-- 嵌入 SkiaSharp 与 HarfBuzzSharp 原生 DLL，实现单文件发布。
+       版本目录用通配符而不是写死：Avalonia 升版会改变 resolved 版本，
+       写死的话路径静默失效、嵌入资源缺失，而 Program.cs 的解压失败又被 catch 吞掉
+       ⇒ 构建与 pack 自检全绿、用户启动即崩（docs/14 §2.2）。
+       再配一个 CheckNativeGraphicsDlls 在 Build/Publish 前卡住，避免静默缺失。 -->
+  <!-- 这两个版本由 **Avalonia 的传递依赖** 决定，本工程并不直接 PackageReference 它们，
+       所以无法用包引用属性做单一真源。曾考虑用通配符匹配版本目录，但本机 NuGet 缓存里
+       同时存在多个版本（2.88.9 / 3.119.0 / 3.119.4），通配会导致同一 LogicalName 重复嵌入
+       而报 CS1508。故保留显式版本 + 缺失即报错：升级 Avalonia 后若 resolved 版本变了，
+       构建会明确失败并提示如何覆盖，而不是"嵌入静默缺失、用户启动才崩"（docs/14 §2.2）。 -->
+  <PropertyGroup>
+    <SkiaSharpNativeVersion Condition="'$(SkiaSharpNativeVersion)' == ''">3.119.4</SkiaSharpNativeVersion>
+    <HarfBuzzNativeVersion Condition="'$(HarfBuzzNativeVersion)' == ''">8.3.1.3</HarfBuzzNativeVersion>
+    <_SkiaNativePath>$(NuGetPackageRoot)skiasharp.nativeassets.win32\$(SkiaSharpNativeVersion)\runtimes\win-x64\native\libSkiaSharp.dll</_SkiaNativePath>
+    <_HarfBuzzNativePath>$(NuGetPackageRoot)harfbuzzsharp.nativeassets.win32\$(HarfBuzzNativeVersion)\runtimes\win-x64\native\libHarfBuzzSharp.dll</_HarfBuzzNativePath>
+  </PropertyGroup>
+
   <ItemGroup Condition="'$(NuGetPackageRoot)' != ''">
-    <EmbeddedResource Include="$(NuGetPackageRoot)skiasharp.nativeassets.win32\3.119.4\runtimes\win-x64\native\libSkiaSharp.dll" LogicalName="libSkiaSharp.dll" />
-    <EmbeddedResource Include="$(NuGetPackageRoot)harfbuzzsharp.nativeassets.win32\8.3.1.3\runtimes\win-x64\native\libHarfBuzzSharp.dll" LogicalName="libHarfBuzzSharp.dll" />
+    <EmbeddedResource Include="$(_SkiaNativePath)" LogicalName="libSkiaSharp.dll" Condition="Exists('$(_SkiaNativePath)')" />
+    <EmbeddedResource Include="$(_HarfBuzzNativePath)" LogicalName="libHarfBuzzSharp.dll" Condition="Exists('$(_HarfBuzzNativePath)')" />
   </ItemGroup>
+
+  <Target Name="CheckNativeGraphicsDlls" BeforeTargets="Build;Publish" Condition="'$(NuGetPackageRoot)' != ''">
+    <Error Condition="!Exists('$(_SkiaNativePath)')"
+           Text="未找到 SkiaSharp 原生库 libSkiaSharp.dll（期望: $(_SkiaNativePath)）。它由 Avalonia 传递引入，升级 Avalonia 后版本可能变化；请用 -p:SkiaSharpNativeVersion=&lt;实际版本&gt; 覆盖（可用版本见 $(NuGetPackageRoot)skiasharp.nativeassets.win32\ 下的目录名）。" />
+    <Error Condition="!Exists('$(_HarfBuzzNativePath)')"
+           Text="未找到 HarfBuzzSharp 原生库 libHarfBuzzSharp.dll（期望: $(_HarfBuzzNativePath)）。它由 Avalonia 传递引入；请用 -p:HarfBuzzNativeVersion=&lt;实际版本&gt; 覆盖（可用版本见 $(NuGetPackageRoot)harfbuzzsharp.nativeassets.win32\ 下的目录名）。" />
+  </Target>
 
   <!-- 本地化字符串与窗口帧捕获（自 App 项目迁入；命名空间保持 _3FCompare.App[.Capture] 不变以零改动引用） -->
 
