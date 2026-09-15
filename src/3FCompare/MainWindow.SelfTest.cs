@@ -197,13 +197,56 @@ public partial class MainWindow : Window
                 ExitSelfTest(1);
             }
             Log($"{videoPaths.Length} 路就绪 ✓");
+            var failures = new System.Collections.Generic.List<string>();
+
+            // docs/15 §2.1：帧步进必须让**所有路**进入暂停态。
+            // 单路测不出这条——master 走 StepFrame 时内核自己会 SetState(Paused)，
+            // 而从路走 Seek、Seek 不改变播放状态，缺陷只在多路下显现。
+            // 所以这条断言放在 sessiontest（天然多路），selftest 的单路断言只作兜底。
+            if (_realMode && videoPaths.Length >= 2)
+            {
+                _step = "多路帧步进后全路暂停";
+                _sync.Play();
+                await System.Threading.Tasks.Task.Delay(500);
+                var playingBefore = _sync.ReadAllSnapshots().Count(s => s?.State == PlayerState.Playing);
+                if (playingBefore < 2)
+                {
+                    failures.Add($"步进前置不足：{videoPaths.Length} 路中只有 {playingBefore} 路在播放，" +
+                                 "无法验证 docs/15 §2.1（此场景必须在播放态下步进）");
+                }
+                else
+                {
+                    _sync.StepFrames(_sync.StepProfile.FrameStep);
+                    await System.Threading.Tasks.Task.Delay(400);
+                    var stateDesc = string.Join(", ",
+                        _sync.ReadAllSnapshots().Select((s, i) => $"路{i}={s?.State}"));
+                    Log($"多路帧步进后状态: {stateDesc}");
+                    var stillPlaying = _sync.ReadAllSnapshots()
+                        .Select((s, i) => (Index: i, State: s?.State))
+                        .Where(x => x.State == PlayerState.Playing)
+                        .Select(x => x.Index)
+                        .ToArray();
+                    if (stillPlaying.Length > 0)
+                    {
+                        failures.Add($"帧步进后仍有路在播放: {stateDesc}" +
+                                     "（docs/15 §2.1：master 走 StepFrame 会被内核置 Paused，" +
+                                     "从路走 Seek 却继续播 ⇒ 画面立刻错帧）");
+                    }
+                }
+                _sync.Pause(); // 后续步骤按暂停态继续
+                await System.Threading.Tasks.Task.Delay(200);
+            }
 
             // C6 布局还原回归的基准：保存前把视图摆成"非单屏 + 3x3 预设"，
             // 保存后（清空阶段）再翻转成"单屏 + 3x3"。旧实现"快照只存不还原"会停在后者的状态——
             // 这类失效不崩溃、不报错，只能靠断言抓（C6 正是因此潜伏至今）。
             Grid.SingleView = false;
             Grid.SetGridLayout("3x3");
-            var expectLayoutCode = _3FCompare.Core.Display.GridLayout.CodeFor(false, videoPaths.Length);
+            // 期望必须来自"用户实际选择的预设"，而不是按路数推导——
+            // 旧代码用 CodeFor(false, count)，期望值与保存值同源，属自证，
+            // 于是"用户选 3x3 却被存成 2x2"这条回归永远测不出（docs/14 §1.1）。
+            var expectLayoutCode = _3FCompare.Core.Display.GridLayout
+                .CodeFromPreset(Grid.Preset, Grid.SingleView);
 
             // 挪到一个非零点，才能验证"位置被恢复"而不是恰好都在 0
             _step = "会话往返-定位";
@@ -283,7 +326,6 @@ public partial class MainWindow : Window
                 $"布局 SingleView={Grid.SingleView} 预设={Grid.Preset}");
 
             // 收集式断言：一次跑完把所有回归项都判掉，避免"修好一项才发现下一项坏了"。
-            var failures = new System.Collections.Generic.List<string>();
             if (after != videoPaths.Length)
             {
                 failures.Add($"路数不符 实际={after} 期望={videoPaths.Length}（P0-1 回归）");
@@ -426,9 +468,25 @@ public partial class MainWindow : Window
             Log($"VRR 媒体率节奏: {(pacingSupported ? "已启用 ✓" : "不支持")}");
 
             // 帧步进 +1：位置不得后退（真实模式）
+            // 且**必须**在播放态下步进——这是 docs/15 §2.1 的回归场景：
+            // master 走 StepFrame 时内核会 SetState(Paused)，从路走 Seek 却保持播放态，
+            // 于是"播放中步进"会让 master 停住、从路继续跑，画面立刻错帧。
+            // 旧实现恰好因为调用方（含 multitest）都先 Pause 才一直没暴露。
             _step = "帧步进";
             if (_realMode)
             {
+                _sync.Play();                                   // 刻意不暂停
+                await System.Threading.Tasks.Task.Delay(400);
+                // 前置条件必须坐实：若压根没进播放态，下面那条"步进后全路暂停"
+                // 的断言等于没测到目标场景，会变成一条假绿的回归用例。
+                var playingCount = _sync.ReadAllSnapshots().Count(s => s?.State == PlayerState.Playing);
+                if (playingCount == 0)
+                {
+                    throw new InvalidOperationException(
+                        "帧步进回归前置条件不足：无法进入播放态" +
+                        $"（运行时错误={_sync.LastRuntimeError ?? "无"}）——此场景必须在播放中步进才成立");
+                }
+                Log($"帧步进前置：{playingCount} 路处于播放态 ✓");
                 var before = _sync.GetMasterPosition100ns();
                 _sync.StepFrames(_sync.StepProfile.FrameStep);
                 await System.Threading.Tasks.Task.Delay(300);
@@ -436,6 +494,23 @@ public partial class MainWindow : Window
                 Log($"帧步进 {TimeSpan.FromTicks(before):g} → {TimeSpan.FromTicks(after):g}");
                 if (after < before)
                     Log($"⚠ 帧步进位置后退（已知问题）{before} → {after}");
+
+                // 核心断言：步进后**所有路**都必须是暂停态
+                await System.Threading.Tasks.Task.Delay(300);
+                var snaps = _sync.ReadAllSnapshots();
+                var stateDesc = string.Join(", ", snaps.Select((s, i) => $"路{i}={s?.State}"));
+                Log($"帧步进后状态: {stateDesc}（运行时错误={_sync.LastRuntimeError ?? "无"}）");
+                var stillPlaying = snaps
+                    .Select((s, i) => (Index: i, State: s?.State))
+                    .Where(x => x.State == PlayerState.Playing)
+                    .Select(x => x.Index)
+                    .ToArray();
+                if (stillPlaying.Length > 0)
+                {
+                    throw new InvalidOperationException(
+                        $"帧步进后仍有路在播放: {stateDesc}（docs/15 §2.1：步进必须先让全路暂停，" +
+                        "否则对比的是错帧）");
+                }
             }
 
             // 秒步进 +1：同上断言
@@ -791,6 +866,20 @@ public partial class MainWindow : Window
         durationSec = Math.Clamp(durationSec, 10, 120);
 
         Console.WriteLine($"multitest: 多路={routes} 时长={durationSec}s 素材={videoPath}");
+
+        // 崩溃现场追查：多路崩溃始终落在"复位后 presented 增长"与"帧步进"之间，
+        // 而该区间会命中 SetViewTransform → 内核 ZoomViewport 的资源重建路径。
+        // 异常处理器在场时换不出可用转储（本机 WER 也不写新转储了），
+        // 所以先按"崩溃前一步"缩小范围，再决定是否上 stowed exception。
+        var crashTraceIntervalMs = Environment.GetEnvironmentVariable("_3FC_CRASH_TRACE");
+        System.IDisposable? crashTrace = null;
+        if (!string.IsNullOrEmpty(crashTraceIntervalMs))
+        {
+            var interval = int.TryParse(crashTraceIntervalMs, out var iv) ? Math.Max(1, iv) : 50;
+            crashTrace = TraceMultislotState($"mt-trace-{interval}ms", interval, verbose: true);
+            Console.WriteLine($"multitest: 已启用崩溃现场追踪（每 {interval}ms 记录一次多路快照与线程数）");
+        }
+
         var code = 2;
         try
         {
@@ -893,8 +982,78 @@ public partial class MainWindow : Window
         }
         finally
         {
+            crashTrace?.Dispose();
             Console.Out.Flush();
             ExitSelfTest(code);
+        }
+    }
+
+    // ══════════ 崩溃现场追踪（诊断工具，默认关闭：设 _3FC_CRASH_TRACE=间隔ms 启用） ══════════
+    // 多路崩溃无法用托管异常处理器捕获（是原生侧访问违例，直接终止进程），
+    // 本机 WER 在 2026-09-14 15:00 之后也不再写新转储。
+    // 因此改为"崩溃前最后一次成功采样"策略：把关注的状态高频写进文件并 flush，
+    // 崩溃后再读文件的最后几行，即可把范围压到 ≤ 一个采样间隔。
+    private System.IDisposable? TraceMultislotState(string tag, int intervalMs, bool verbose)
+    {
+        var tracePath = System.IO.Path.Combine(
+            System.AppContext.BaseDirectory, $"crash_trace_{tag}.log");
+        try { System.IO.File.WriteAllText(tracePath, $"[trace] 开始 {System.DateTime.Now:HH:mm:ss.fff}\n"); }
+        catch { return null; }
+
+        var cts = new System.Threading.CancellationTokenSource();
+        var task = System.Threading.Tasks.Task.Run(async () =>
+        {
+            var n = 0;
+            while (!cts.IsCancellationRequested)
+            {
+                try
+                {
+                    var snaps = _sync.ReadAllSnapshots();
+                    var sb = new System.Text.StringBuilder(256);
+                    sb.Append(System.DateTime.Now.ToString("HH:mm:ss.fff"))
+                      .Append(" #").Append(n++)
+                      .Append(" 线程=").Append(System.Diagnostics.Process.GetCurrentProcess().Threads.Count)
+                      .Append(" 句柄=").Append(System.Diagnostics.Process.GetCurrentProcess().HandleCount)
+                      .Append(" 路数=").Append(snaps.Count).Append(" |");
+                    for (var i = 0; i < snaps.Count; i++)
+                    {
+                        var s = snaps[i];
+                        sb.Append(" L").Append(i).Append(':')
+                          .Append(s is null ? "null"
+                              : $"{(s.Position100ns / 10000)}ms/{s.PresentedVideoFrames}/{s.SwapChainPresents}/{s.State}");
+                    }
+                    System.IO.File.AppendAllText(tracePath, sb.Append('\n').ToString());
+                    if (verbose && n % 20 == 1) Console.WriteLine($"[trace] {sb}");
+                }
+                catch (Exception ex)
+                {
+                    try { System.IO.File.AppendAllText(tracePath, $"采样异常: {ex.Message}\n"); } catch { }
+                }
+                try { await System.Threading.Tasks.Task.Delay(intervalMs, cts.Token); }
+                catch (System.OperationCanceledException) { break; }
+            }
+        });
+
+        return new TraceScope(cts, task, tracePath);
+    }
+
+    private sealed class TraceScope(
+        System.Threading.CancellationTokenSource cts,
+        System.Threading.Tasks.Task task,
+        string path) : System.IDisposable
+    {
+        public void Dispose()
+        {
+            cts.Cancel();
+            try { task.Wait(2000); } catch { }
+            try
+            {
+                System.IO.File.AppendAllText(path,
+                    $"[trace] 结束 {System.DateTime.Now:HH:mm:ss.fff}（未崩溃）\n");
+            }
+            catch { }
+            Console.WriteLine($"[trace] 现场日志: {path}");
+            cts.Dispose();
         }
     }
 

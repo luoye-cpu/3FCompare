@@ -111,13 +111,12 @@ public sealed class CompareGridView : Control
     /// <summary>设置网格预设（"2x1"/"2x2"/"3x3"/"auto"）。</summary>
     public void SetGridLayout(string preset)
     {
-        switch (preset)
-        {
-            case "2x1": _presetCols = 2; _presetRows = 1; _preset = "2x1"; break;
-            case "2x2": _presetCols = 2; _presetRows = 2; _preset = "2x2"; break;
-            case "3x3": _presetCols = 3; _presetRows = 3; _preset = "3x3"; break;
-            default: _presetCols = null; _presetRows = null; _preset = "auto"; break;
-        }
+        // 复用 Core 的双向映射，不在 UI 再写一份 switch——
+        // 两份 switch 迟早漂移（docs/14 §1.1：PresetOf 漏了 "2x1" 就是这么来的）。
+        var (cols, rows) = GridLayout.OverrideOf(preset);
+        _presetCols = cols > 0 ? cols : null;
+        _presetRows = rows > 0 ? rows : null;
+        _preset = GridLayout.PresetOf(GridLayout.CodeFromPreset(preset, false));
         InvalidateMeasure();
         InvalidateVisual();
     }

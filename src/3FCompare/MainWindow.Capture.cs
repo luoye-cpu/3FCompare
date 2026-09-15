@@ -6,6 +6,7 @@ using Avalonia.Platform.Storage;
 using System.Drawing.Imaging;
 using _3FCompare.App;
 using _3FCompare.Core.Backend;
+using _3FCompare.Core.Imaging;
 
 namespace _3FCompare;
 
@@ -188,90 +189,9 @@ public partial class MainWindow : Window
             bmp.Save(ms, ImageFormat.Png);
             png = ms.ToArray();
         }
-
-        // 已有色彩信息（sRGB / gAMA / iCCP / cHRM）时不动，避免冲突
-        if (PngHasColorChunk(png))
-        {
-            File.WriteAllBytes(path, png);
-            return;
-        }
-
-        using var fs = File.Create(path);
-        fs.Write(png, 0, Math.Min(8, png.Length));   // PNG 签名
-        var pos = 8;
-        while (pos + 8 <= png.Length)
-        {
-            var len = ReadBigEndianInt32(png, pos);
-            var total = 12 + len;
-            if (len < 0 || pos + total > png.Length) break;
-            var type = System.Text.Encoding.ASCII.GetString(png, pos + 4, 4);
-            fs.Write(png, pos, total);
-            pos += total;
-            // sRGB 必须紧跟在 IHDR 之后（PNG 规范要求位于第一个 IDAT 之前）
-            if (type == "IHDR") WriteChunk(fs, "sRGB", new byte[] { 0 }); // 0 = Perceptual
-            if (type == "IEND") break;
-        }
-        if (pos < png.Length) fs.Write(png, pos, png.Length - pos); // 结构异常时兜底补齐
-    }
-
-    private static bool PngHasColorChunk(byte[] png)
-    {
-        var pos = 8;
-        while (pos + 8 <= png.Length)
-        {
-            var len = ReadBigEndianInt32(png, pos);
-            var total = 12 + len;
-            if (len < 0 || pos + total > png.Length) break;
-            var type = System.Text.Encoding.ASCII.GetString(png, pos + 4, 4);
-            if (type is "sRGB" or "gAMA" or "iCCP" or "cHRM") return true;
-            pos += total;
-            if (type == "IEND") break;
-        }
-        return false;
-    }
-
-    private static int ReadBigEndianInt32(byte[] b, int offset)
-        => (b[offset] << 24) | (b[offset + 1] << 16) | (b[offset + 2] << 8) | b[offset + 3];
-
-    private static void WriteChunk(Stream s, string type, byte[] data)
-    {
-        var lenBytes = BitConverter.GetBytes(data.Length);
-        if (BitConverter.IsLittleEndian) Array.Reverse(lenBytes);
-        s.Write(lenBytes, 0, 4);
-        var typeBytes = System.Text.Encoding.ASCII.GetBytes(type);
-        s.Write(typeBytes, 0, 4);
-        s.Write(data, 0, data.Length);
-
-        // CRC 覆盖 type + data
-        var crcInput = new byte[typeBytes.Length + data.Length];
-        Buffer.BlockCopy(typeBytes, 0, crcInput, 0, typeBytes.Length);
-        Buffer.BlockCopy(data, 0, crcInput, typeBytes.Length, data.Length);
-        var crcBytes = BitConverter.GetBytes(Crc32(crcInput));
-        if (BitConverter.IsLittleEndian) Array.Reverse(crcBytes);
-        s.Write(crcBytes, 0, 4);
-    }
-
-    private static uint[]? _crcTable;
-
-    private static uint Crc32(byte[] data)
-    {
-        _crcTable ??= BuildCrcTable();
-        var c = 0xFFFFFFFFu;
-        foreach (var b in data)
-            c = _crcTable[(c ^ b) & 0xFF] ^ (c >> 8);
-        return c ^ 0xFFFFFFFFu;
-    }
-
-    private static uint[] BuildCrcTable()
-    {
-        var t = new uint[256];
-        for (uint n = 0; n < 256; n++)
-        {
-            var c = n;
-            for (var k = 0; k < 8; k++)
-                c = (c & 1) != 0 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
-            t[n] = c;
-        }
-        return t;
+        // chunk 遍历 / CRC32 / sRGB 插入已下沉到 Core.Imaging.PngChunk（可单测）。
+        // 原先这些纯计算写在 UI 层，测试工程够不着，写错只会安静地产出损坏的 PNG
+        // （docs/14 §4.2）。
+        File.WriteAllBytes(path, PngChunk.InsertSrgbAfterIhdr(png));
     }
 }

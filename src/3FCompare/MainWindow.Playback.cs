@@ -192,9 +192,31 @@ public partial class MainWindow
         }
     }
 
+    /// <summary>设定轮询间隔（含"拖动释放后的高刷豁免窗"）。</summary>
+    private void SetPollInterval(int target)
+    {
+        // 3FCompare 优化项⑧：拖动释放后的 83ms 高刷豁免窗
+        //（否则会被调用方的覆盖逻辑立即改回，从未生效）
+        if (Environment.TickCount64 - _lastPanApplyTicks < 800)
+            target = Math.Min(target, 83);
+        var current = _pollTimer.Interval.TotalMilliseconds;
+        if (Math.Abs(current - target) > 1)
+        {
+            _pollTimer.Interval = TimeSpan.FromMilliseconds(target);
+        }
+    }
+
     private async System.Threading.Tasks.Task PollSnapshotsCoreAsync()
     {
-        if (_sync.Count == 0) return;
+        if (_sync.Count == 0)
+        {
+            // ⚠ 必须在这里先把频率降下来再返回：下面的"自适应三档"位于本方法**末尾**，
+            // 若直接 return，"无会话 → 1000ms"那一档永远执行不到，定时器会一直保持
+            // 16ms 的初值 ⇒ 空闲时（启动默认态）UI 线程被 62Hz 空转唤醒。
+            // 这一档此前等同于死代码（docs/15 §P2）。
+            SetPollInterval(1000);
+            return;
+        }
         if (_recovering != 0) return; // 会话重建中跳过，防止读取中间状态导致崩溃
 
         var snaps = _sync.ReadAllSnapshots();
@@ -259,7 +281,11 @@ public partial class MainWindow
                                 _sync.Pause();
                                 await Task.Delay(120);
                                 _sync.Play();
-                                Console.Error.WriteLine("[MainWindow] ✅ 轻量恢复完成");
+                                // 尺寸变化（最大化 / 还原 / 拖动分隔条）导致的停滞，
+                                // 根因是交换链停止 flips —— 内核要求由应用调 Redraw
+                                // 才会继续呈现，光 Pause→Play 唤不醒（见 SyncController.RedrawAll）。
+                                _sync.RedrawAll();
+                                Console.Error.WriteLine("[MainWindow] ✅ 轻量恢复完成（Pause→Play→Redraw）");
                             }
                             catch (Exception ex)
                             {
@@ -309,6 +335,10 @@ public partial class MainWindow
         // 循环回绕
         if (_sync.LoopEnabled) _sync.TickLoop();
 
+        // 漂移检测与校正（docs/15 §3.3）：各路独立时钟，播放中周期对齐。
+        // 内部自带 1s 节流，所以这里每拍调用即可。
+        if (_sync.Count > 1) _sync.TickDrift();
+
         // 伪变速：真实模式下按速度节流 Seek（A2 落地前的临时方案）。
         // 3FCompare 优化：Seek 最小间隔 1s——每次 Seek 是 9 路 av_seek_frame + 双解码器
         // flush（CPU 尖峰），250ms 一次会造成周期性顿挫；1s 粒度下跳变仍平滑可接受。
@@ -342,13 +372,8 @@ public partial class MainWindow
         else if (_sync.Count > 0)
             target = 250;  // 暂停有会话：保持状态同步
         else
-            target = 1000; // 无会话：纯 keepalive
-        // 3FCompare 优化项⑧：拖动释放后的 83ms 高刷豁免窗（否则被上面的覆盖逻辑立即改回，从未生效）
-        if (Environment.TickCount64 - _lastPanApplyTicks < 800)
-            target = Math.Min(target, 83);
-        var current = _pollTimer.Interval.TotalMilliseconds;
-        if (Math.Abs(current - target) > 1)
-            _pollTimer.Interval = TimeSpan.FromMilliseconds(target);
+            target = 1000; // 无会话：纯 keepalive（实际由方法开头的 early-return 承担）
+        SetPollInterval(target);
     }
 
     /// <summary>PR 时间码的秒内帧号（0 起；帧率由快照时间基估算，缺省 24）。

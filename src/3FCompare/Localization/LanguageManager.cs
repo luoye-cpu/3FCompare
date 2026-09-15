@@ -187,6 +187,8 @@ public static class LanguageManager
         ["Status_DemoHint"] = "演示模式 — 打开任意视频文件体验（画面为合成）",
         ["Status_GridMode"] = "网格",
         ["Status_SingleMode"] = "单屏",
+        // 各路帧率不同时，"第 N 帧"在各路指向的是不同时刻的内容
+        ["Status_FpsMismatch"] = "各路帧率不一致（按时间对齐）",
         ["Status_Color"] = "色彩",
         ["Status_ExportDone"] = "已导出截图",
         ["Status_Steps"] = "步进",
@@ -365,6 +367,8 @@ public static class LanguageManager
         ["Status_DemoHint"] = "Demo mode — open any video to try (synthetic frames)",
         ["Status_GridMode"] = "Grid",
         ["Status_SingleMode"] = "Single",
+        // Frame N points to a different instant per slot when frame rates differ
+        ["Status_FpsMismatch"] = "Frame rates differ (time-aligned)",
         ["Status_Color"] = "Color",
         ["Status_ColorModeUnified"] = "Color: HDR status differs across slots — tone mapping unified to HDR",
         ["Status_ExportDone"] = "Exported",

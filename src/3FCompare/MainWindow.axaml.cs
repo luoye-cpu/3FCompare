@@ -264,6 +264,13 @@ public partial class MainWindow : Window
     {
         System.Threading.Interlocked.Exchange(ref _recoveryAttempts, 0);
         _recoveryAbandoned = false;
+        // 停滞判定相关的三个状态也必须一并复位，否则上一次的"轻量恢复"痕迹会跨媒体残留：
+        // _stalledAfterLightRecovery 一旦为 true，打开新媒体后的**第一次**真实停滞就会被
+        // 跳级成完整会话重建（丢偏移与播放位置），而它本应先走 Pause→Play 轻量路径
+        // （docs/14 §3.2）。
+        _stalledAfterLightRecovery = false;
+        _stallWatch.Reset();
+        _lastPresentedCount = 0;
     }
 
     private void OnDragOver(object? sender, DragEventArgs e) =>
@@ -425,6 +432,10 @@ public partial class MainWindow : Window
         var sb = new System.Text.StringBuilder();
         sb.Append($"{mode}模式 | 路数 {_sync.Count}/9 | {LanguageManager.T("Status_Steps")}: {_sync.StepProfile.FrameStep}帧/{_sync.StepProfile.SecondsStep:0.#}秒");
         if (failed > 0) sb.Append($" | {failed} 路失败");
+        // 帧率不一致时"第 N 帧"在各路指向的是不同时刻的内容，
+        // 逐帧对比的语义随之改变，必须让用户看到（docs/15 §3.6）
+        if (_sync.Count > 1 && _sync.HasFpsMismatch)
+            sb.Append($" | ⚠ {LanguageManager.T("Status_FpsMismatch")}");
         if (runtimeError is not null) sb.Append($" | ⚠ {runtimeError}");
 
         // Try read RTInfo from selected session
@@ -692,7 +703,9 @@ public partial class MainWindow : Window
     /// 避免测试另写一套而与真实保存路径漂移）。</summary>
     internal SessionSnapshot BuildSessionSnapshot() => new()
     {
-        GridLayout = _3FCompare.Core.Display.GridLayout.CodeFor(Grid.SingleView, _sync.Count),
+        // 存"用户实际选择的预设"而不是按路数推导——否则 1/2/3/5/6 路的布局重载后会变
+        // （docs/14 §1.1）。CodeFor 仅保留给"无预设可依"的旧快照兼容路径。
+        GridLayout = _3FCompare.Core.Display.GridLayout.CodeFromPreset(Grid.Preset, Grid.SingleView),
         Position100ns = _sync.GetMasterPosition100ns(),
         LoopEnabled = _sync.LoopEnabled,
         LoopStart100ns = _sync.LoopStart100ns,
@@ -748,11 +761,45 @@ public partial class MainWindow : Window
         // SetGridLayout 只改预设覆盖、单屏与否由 SingleView 控制，两者必须一起设。
         Grid.SingleView = _3FCompare.Core.Display.GridLayout.IsSingleView(snapshot.GridLayout);
         Grid.SetGridLayout(_3FCompare.Core.Display.GridLayout.PresetOf(snapshot.GridLayout));
-        _coordinator.OpenFiles(snapshot.Items.Select(i => i.Path!).ToList(), autoPlay: true, onAllOpened: () =>
+        // 会话文件里的路径来自外部（.3fcs 可能是别人给的），必须先校验再打开：
+        // ① null / 空白 / **相对路径**：直接拒。相对路径会按当前工作目录解析，
+        //    可能意外命中一个同名文件——等于让外部文件决定打开哪个视频。
+        // ② UNC（\\server\share）：Windows 访问时会自动发起 NTLM 认证，把本机凭据
+        //    送到路径里指定的服务器 ⇒ 凭据外泄。确有需要可手动拖放/选择文件打开，
+        //    那是用户的主动意图，与本路径性质不同。
+        // 原实现用 i.Path! 强转后一律直传，异常还在 PlaybackCoordinator 里被吞掉
+        // ⇒ 静默标记该路失败，用户完全不知道少了路（docs/15 §5.1）。
+        var acceptedPaths = new System.Collections.Generic.List<string>(snapshot.Items.Count);
+        var acceptedIndex = new System.Collections.Generic.List<int>(snapshot.Items.Count);
+        var rejected = new System.Collections.Generic.List<string>();
+        for (var i = 0; i < snapshot.Items.Count; i++)
         {
-            // 先恢复偏移，再 SeekTo（SeekTo 内部会叠加偏移）
-            for (var i = 0; i < snapshot.Items.Count && i < _sync.Count; i++)
-                _sync.Slots[i].Offset100ns = snapshot.Items[i].Offset100ns;
+            var p = snapshot.Items[i].Path;
+            if (string.IsNullOrWhiteSpace(p) || !Path.IsPathRooted(p)
+                || p.StartsWith(@"\\", StringComparison.Ordinal))
+            {
+                rejected.Add(string.IsNullOrWhiteSpace(p) ? "(空路径)" : p);
+                continue;
+            }
+            acceptedPaths.Add(p);
+            acceptedIndex.Add(i);
+        }
+        if (rejected.Count > 0)
+        {
+            var msg = $"会话中有 {rejected.Count} 条路径未通过校验已跳过：{string.Join(", ", rejected)}";
+            _3FCompare.Core.Diagnostics.AppLog.Warn("Session", msg);
+            Console.Error.WriteLine($"[Session] {msg}");
+        }
+
+        _coordinator.OpenFiles(acceptedPaths, autoPlay: true, onAllOpened: () =>
+        {
+            // 先恢复偏移，再 SeekTo（SeekTo 内部会叠加偏移）。
+            // 注意用 acceptedIndex 对位：跳过若干路径后，槽位索引已不等于原始 Items 索引，
+            // 直接按 i 取会把偏移张冠李戴。
+            for (var k = 0; k < acceptedIndex.Count && k < _sync.Count; k++)
+                // master 偏移恒 0：老会话可能存了非 0 的 off0，加载时归零，
+                // 否则一加载就带着"基准被挪走"的状态（docs/15 §3.1）
+                _sync.Slots[k].Offset100ns = k == 0 ? 0 : snapshot.Items[acceptedIndex[k]].Offset100ns;
             _sync.SeekTo(snapshot.Position100ns);
             if (snapshot.LoopEnabled && snapshot.LoopEnd100ns > snapshot.LoopStart100ns)
             {
@@ -970,8 +1017,19 @@ public partial class MainWindow : Window
             _offsetPanel.SetPlaceholder();
             return;
         }
-        var master = _sync.ReadMasterSnapshot();
-        var fps = master is not null ? SyncController.EstimateFps(master) : 24;
+        // 用**选中路自己**的 fps 换算"±1 帧"。
+        // 原先一律取 master 的 fps：当选中路与 master 帧率不同时步长就算错了——
+        // 选中 60fps 的从路、master 是 24fps，一次"±1 帧"会挪 41.7ms 而不是 16.7ms，
+        // 用户微调时表现为"怎么都对不准"（docs/15 §3.6）。
+        // master 仅在本路拿不到帧率时兜底。
+        var targetSnap = slot.Session.ReadSnapshot();
+        var fps = targetSnap is not null ? SyncController.EstimateFps(targetSnap) : 0;
+        if (fps <= 0)
+        {
+            var masterSnap = _sync.ReadMasterSnapshot();
+            fps = masterSnap is not null ? SyncController.EstimateFps(masterSnap) : 0;
+        }
+        if (fps <= 0) fps = 24; // 最终兜底
         _offsetPanel.SetFps(fps);
         _offsetPanel.SetOffset(slot.Offset100ns, fps);
     }
@@ -991,7 +1049,16 @@ public partial class MainWindow : Window
         var local = e.GetPosition(surface);
 
         if (_sidebar.MagnifierOn)
-            Magnifier.UpdateAt(e.GetPosition(CenterPanel));
+        {
+            // 采样点必须用**该路 surface 内**的坐标并乘 DPI 缩放；原先传的是
+            // e.GetPosition(CenterPanel)（面板全局坐标）且不乘 RenderScaling，
+            // 于是多格布局 / DPI 非 100% 时显示的完全不是光标下的内容（docs/15 §2.2）。
+            // session 也要绑定到**指针命中的那一路**，而不是当前选中路。
+            var scaling = TopLevel.GetTopLevel(this)?.RenderScaling ?? 1.0;
+            if (_sync.Slots.ElementAtOrDefault(surface.Index)?.Session is { } ms)
+                Magnifier.AttachSession(ms);
+            Magnifier.UpdateAt(local, scaling);
+        }
         if (ReferenceEquals(_sidebar.Active, _probe) && surface.Selected)
         {
             var slot = _sync.Slots.ElementAtOrDefault(surface.Index);
@@ -1012,8 +1079,14 @@ public partial class MainWindow : Window
 
     // ---- 偏移校准（相对第 1 路） ----
 
+    /// <summary>第 1 路是规范时间轴的基准（master），**不允许**设偏移：
+    /// 给它加偏移等于把基准本身挪走，会让 SeekTo 与帧步进两套偏移语义互相矛盾
+    /// 且每次微调都累积（docs/15 §3.1）。选中它时偏移操作一律不生效。</summary>
+    private bool IsMasterSelected => Grid.SelectedIndex == 0;
+
     private void OnOffsetAlign()
     {
+        if (IsMasterSelected) return;
         var slot = _sync.Slots.ElementAtOrDefault(Grid.SelectedIndex);
         var master = _sync.ReadMasterSnapshot();
         var target = slot?.Session?.ReadSnapshot();
@@ -1025,6 +1098,7 @@ public partial class MainWindow : Window
 
     private void OnOffsetNudge(long delta100ns)
     {
+        if (IsMasterSelected) return;
         var slot = _sync.Slots.ElementAtOrDefault(Grid.SelectedIndex);
         if (slot is null) return;
         slot.Offset100ns += delta100ns;
@@ -1046,8 +1120,11 @@ public partial class MainWindow : Window
     private async void MaybeExitDemoMode()
     {
         if (_realMode) return;
-        var args = Environment.GetCommandLineArgs();
-        if (args.Contains("--selftest") || args.Contains("--autodemo")) return;
+        // 自测模式一律不弹窗，改用 _selfTestMode 判据：它在构造函数最前面就已置好，
+        // 覆盖全部自测模式。原先这里逐个比对命令行白名单，漏掉了
+        // --screentest / --sessiontest / --multitest，在缺 FFmpeg 的机器上会弹模态框
+        // 无人应答 ⇒ 永久挂起（只有 --selftest 有 40s 看门狗兜底）。
+        if (_selfTestMode) return;
 
         var openSettings = await Views.MessageBox.Show(this,
             LanguageManager.T("Msg_DemoModeTitle"),

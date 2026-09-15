@@ -71,10 +71,22 @@ public sealed class ProbePanel : StackPanel
         _value.Text = string.Empty;
     }
 
+    /// <summary>两次 GPU 回读之间的最小间隔（约 30Hz）。</summary>
+    private const long MinReadIntervalMs = 33;
+    private long _lastReadTicks;
+
     /// <summary>读取 (x,y) 像素（颜色管理前码值）。失败显示读取失败。</summary>
     public void UpdatePoint(int x, int y)
     {
         if (_session is null) return;
+
+        // TryReadPixel 是**同步** P/Invoke：GPU staging 回读会强制管线同步。
+        // 指针移动事件可达每帧数十次，逐个回读会白白拖慢渲染，而人眼分辨不出
+        // 30Hz 以上的数值刷新 —— 所以只对回读节流（docs/15 六章）。
+        var now = Environment.TickCount64;
+        if (now - _lastReadTicks < MinReadIntervalMs) return;
+        _lastReadTicks = now;
+
         try
         {
             if (_session.TryReadPixel(x, y, out var s))

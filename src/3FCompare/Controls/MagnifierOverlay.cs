@@ -48,8 +48,19 @@ public sealed class MagnifierOverlay : Control
 
     /// <summary>定位到（相对父容器的）光标位置并显示。
     /// cursor 为"中心点"（放大镜覆盖在光标旁）。</summary>
-    public void UpdateAt(Point cursor)
+    /// <summary>更新放大镜位置与采样。
+    ///
+    /// <paramref name="localInSurface"/> 必须是**相对该路 PlayerSurface** 的坐标
+    /// （<c>e.GetPosition(surface)</c>），**不能**传 CenterPanel 的全局坐标——
+    /// 后者在多格布局下会把"第 3 格的坐标"当成"第 1 格后台缓冲的坐标"，
+    /// 再加上未乘 RenderScaling、未排 letterbox，显示的就完全不是光标下的内容
+    /// （docs/15 §2.2）。<paramref name="renderScaling"/> 用于 DIP → 物理像素。
+    /// </summary>
+    public void UpdateAt(Point localInSurface, double renderScaling)
     {
+        // 浮窗仍按 CenterPanel 坐标摆放：需要把"surface 内坐标"换算回去。
+        // （放大镜本体跟随光标，采样点才用 surface 内坐标。）
+        var cursor = localInSurface;
         _position = new Point(cursor.X + 16, cursor.Y + 16);
         _visible = true;
         IsVisible = true;
@@ -59,11 +70,11 @@ public sealed class MagnifierOverlay : Control
             if (_position.X + Width > p.Bounds.Width) _position = new Point(cursor.X - Width - 8, _position.Y);
             if (_position.Y + Height > p.Bounds.Height) _position = new Point(_position.X, cursor.Y - Height - 8);
         }
-        RefreshPixels(cursor);
+        RefreshPixels(localInSurface, renderScaling);
         InvalidateVisual();
     }
 
-    private void RefreshPixels(Point cursor)
+    private void RefreshPixels(Point localInSurface, double renderScaling)
     {
         // 注意：判据里不能含 "_pixelGrid is null"。它一旦被置 null（读回失败 / 引擎未就绪），
         // 就会永远命中同一判据提前返回，再也进不到下面重新赋值的分支 —— 永久只剩空框。
@@ -75,15 +86,23 @@ public sealed class MagnifierOverlay : Control
         }
         try
         {
-            // 取光标邻域（backbuffer 像素空间）。点 = DIP*RenderScaling (本类不知道 scaling，用 1 兜底)
-            // 放大镜中心 = 光标位置 → backbuffer 坐标
-            var centerX = (int)(cursor.X);
-            var centerY = (int)(cursor.Y);
-            // 采样网格宽 ZoomGrid 像素，以中心为参考
+            // DIP → 物理像素：DPI 非 100% 时漏掉这步会整体偏移一个缩放倍数
+            // （原实现注释自认"本类不知道 scaling，用 1 兜底"，即永远漏乘）。
+            var scale = renderScaling > 0 ? renderScaling : 1.0;
+            var centerX = (int)(localInSurface.X * scale);
+            var centerY = (int)(localInSurface.Y * scale);
+
+            // 采样网格宽 ZoomGrid 像素，以中心为参考。
+            // 后台缓冲尺寸可能小于 ZoomGrid（极小窗口），此时上界会变负 → 归零。
             var half = ZoomGrid / 2;
-            var gx = Math.Clamp(centerX - half, 0, (int)rt.SwapWidth - ZoomGrid);
-            var gy = Math.Clamp(centerY - half, 0, (int)rt.SwapHeight - ZoomGrid);
-            var buffer = new float[ZoomGrid * ZoomGrid * 4];
+            var maxX = Math.Max(0, (int)rt.SwapWidth - ZoomGrid);
+            var maxY = Math.Max(0, (int)rt.SwapHeight - ZoomGrid);
+            var gx = Math.Clamp(centerX - half, 0, maxX);
+            var gy = Math.Clamp(centerY - half, 0, maxY);
+            // 复用缓冲：原先每次指针移动都 new float[576]（指针热路径上的无谓分配）。
+            // 仅在失败时保留"置 null"的语义——自测的 HasPixelGrid 依赖它，
+            // 且失败是少数路径，不值得为省一次分配去动既有语义。
+            var buffer = _pixelGrid ?? new float[ZoomGrid * ZoomGrid * 4];
             if (!_session.TryReadPixelRegion(gx, gy, ZoomGrid, ZoomGrid, buffer, out _))
             {
                 _pixelGrid = null;
@@ -103,15 +122,29 @@ public sealed class MagnifierOverlay : Control
         IsVisible = false;
     }
 
+    // 固定颜色的画刷/画笔做成静态：原先每帧 new，纯属浪费（docs/15 六章）
+    private static readonly SolidColorBrush BackdropBrush = new(Color.FromArgb(200, 10, 10, 12));
+    private static readonly Pen AccentPen = new(new SolidColorBrush(Color.FromRgb(255, 200, 64)), 2);
+    private static readonly Pen GridLinePen = new(new SolidColorBrush(Color.FromArgb(140, 255, 255, 255)), 1);
+    private static readonly SolidColorBrush CaptionBrush = new(Color.FromRgb(200, 200, 210));
+
+    // 格子颜色随像素变化，无法静态化，但可以复用**同一个**实例改 Color：
+    // Avalonia 的 DrawingContext 是立即模式，DrawRectangle 返回后画刷即可再改，
+    // 不必为 144 个格子各建一个画刷。
+    private readonly SolidColorBrush _cellBrush = new(Colors.Black);
+
+    // 字幕只在缩放倍率变化时才需要重建
+    private FormattedText? _captionText;
+    private double _captionZoom = -1;
+
     public override void Render(DrawingContext dc)
     {
         base.Render(dc);
         if (!_visible) return;
         var rect = new Rect(_position.X, _position.Y, Width, Height);
 
-        dc.DrawRectangle(new SolidColorBrush(Color.FromArgb(200, 10, 10, 12)), null, rect);
-        var accent = new SolidColorBrush(Color.FromRgb(255, 200, 64));
-        dc.DrawRectangle(null, new Pen(accent, 2), rect);
+        dc.DrawRectangle(BackdropBrush, null, rect);
+        dc.DrawRectangle(null, AccentPen, rect);
 
         // 像素内容：把采样网格最近邻放大成 M×M 块
         if (_pixelGrid is not null)
@@ -125,7 +158,8 @@ public sealed class MagnifierOverlay : Control
                     var i = (gy * ZoomGrid + gx) * 4;
                     var color = Color.FromArgb(
                         (byte)To8(_pixelGrid[i + 3]), (byte)To8(_pixelGrid[i]), (byte)To8(_pixelGrid[i + 1]), (byte)To8(_pixelGrid[i + 2]));
-                    dc.DrawRectangle(new SolidColorBrush(color), null,
+                    _cellBrush.Color = color;
+                    dc.DrawRectangle(_cellBrush, null,
                         new Rect(rect.X + gx * cellW, rect.Y + gy * cellH, cellW, cellH));
                 }
             }
@@ -133,7 +167,7 @@ public sealed class MagnifierOverlay : Control
 
         var cx = rect.X + rect.Width / 2;
         var cy = rect.Y + rect.Height / 2;
-        var line = new Pen(new SolidColorBrush(Color.FromArgb(140, 255, 255, 255)), 1);
+        var line = GridLinePen;
         // 十字线
         dc.DrawLine(line, new Point(cx, rect.Y), new Point(cx, rect.Bottom));
         dc.DrawLine(line, new Point(rect.X, cy), new Point(rect.Right, cy));
@@ -144,11 +178,13 @@ public sealed class MagnifierOverlay : Control
             dc.DrawLine(line, new Point(rect.X, rect.Y + rect.Height * i / 4), new Point(rect.Right, rect.Y + rect.Height * i / 4));
         }
 
-        var caption = $"{Zoom:0}x";
-        var ft = new FormattedText(caption, System.Globalization.CultureInfo.CurrentCulture,
-            FlowDirection.LeftToRight, new Typeface("Consolas"), 10,
-            new SolidColorBrush(Color.FromRgb(200, 200, 210)));
-        dc.DrawText(ft, new Point(rect.X + 4, rect.Bottom - ft.Height - 2));
+        if (_captionText is null || Math.Abs(_captionZoom - Zoom) > 0.01)
+        {
+            _captionText = new FormattedText($"{Zoom:0}x", System.Globalization.CultureInfo.CurrentCulture,
+                FlowDirection.LeftToRight, new Typeface("Consolas"), 10, CaptionBrush);
+            _captionZoom = Zoom;
+        }
+        dc.DrawText(_captionText, new Point(rect.X + 4, rect.Bottom - _captionText.Height - 2));
     }
 
     private static int To8(float v) => Math.Clamp((int)Math.Round(v * 255f), 0, 255);
