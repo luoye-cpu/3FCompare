@@ -31,6 +31,7 @@ public class PipelineRegressionTests
         => Assert.Equal(expected, GridLayout.IsSingleView(code));
 
     [Theory]
+    [InlineData(GridLayout.Code2x1, "2x1")]
     [InlineData(GridLayout.Code2x2, "2x2")]
     [InlineData(GridLayout.Code3x3, "3x3")]
     [InlineData(GridLayout.CodeSingle, "auto")]
@@ -38,19 +39,70 @@ public class PipelineRegressionTests
     public void PresetOf_代码映射到预设名(int code, string expected)
         => Assert.Equal(expected, GridLayout.PresetOf(code));
 
-    [Fact]
-    public void 保存与还原是同一套映射_往返不丢布局()
+    /// <summary>UI 侧 <c>CompareGridView.SetGridLayout</c> 认得的全部预设。
+    /// PresetOf 必须与之逐一对齐——漏一个就是"存了却还原成别的"（docs/14 §1.1）。</summary>
+    public static TheoryData<string> AllPresets => new()
+    {
+        "auto", "2x1", "2x2", "3x3",
+    };
+
+    [Theory]
+    [MemberData(nameof(AllPresets))]
+    public void CodeFromPreset_与PresetOf互逆(string preset)
+        => Assert.Equal(preset, GridLayout.PresetOf(GridLayout.CodeFromPreset(preset, false)));
+
+    /// <summary>
+    /// 真·往返：保存前的实际网格 == 还原后的实际网格。
+    ///
+    /// 旧断言是 <c>Contains(PresetOf(code), {"auto","2x2","3x3"})</c>，而 PresetOf 的返回集合
+    /// 恰好就是这三个值 ⇒ 对任何输入恒真，从未验证任何东西（docs/14 §1.1）。
+    /// 这里改成对比"网格"这个最终可观测量，用旧的 CodeFor 会失败。
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(AllPresets))]
+    public void 保存与还原是同一套映射_往返不丢布局(string preset)
     {
         foreach (var singleView in new[] { true, false })
         {
             for (var count = 1; count <= 9; count++)
             {
-                var code = GridLayout.CodeFor(singleView, count);
+                // 保存前用户看到的网格
+                var (c0, r0) = GridLayout.OverrideOf(preset);
+                var before = GridLayout.ResolveGrid(count, singleView, c0, r0);
+
+                var code = GridLayout.CodeFromPreset(preset, singleView);
                 Assert.Equal(singleView, GridLayout.IsSingleView(code));
-                // 还原侧用的预设名必须是 SetGridLayout 认得的四个取值之一
-                Assert.Contains(GridLayout.PresetOf(code), new[] { "auto", "2x2", "3x3" });
+
+                // 单屏只用一个码，预设信息按设计不保留；非单屏必须原样往返
+                var restored = GridLayout.PresetOf(code);
+                if (!singleView)
+                    Assert.Equal(preset, restored);
+
+                var (c1, r1) = GridLayout.OverrideOf(restored);
+                var after = GridLayout.ResolveGrid(count, singleView, c1, r1);
+                Assert.Equal(before, after);
             }
         }
+    }
+
+    /// <summary>反向验证守卫：钉死"按路数推导（CodeFor）会丢布局"这一事实。
+    /// 若哪天有人把保存路径改回 CodeFor，这条会先炸，而不是等用户报告布局变了。</summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(5)]
+    [InlineData(6)]
+    public void CodeFor_按路数推导会丢布局_故不得用于保存(int count)
+    {
+        // 用户选 auto 时的真实布局
+        var expected = GridLayout.ResolveGrid(count, false, 0, 0);
+        // 旧实现存下来的码，还原后得到的布局
+        var code = GridLayout.CodeFor(false, count);
+        var (c, r) = GridLayout.OverrideOf(GridLayout.PresetOf(code));
+        var restored = GridLayout.ResolveGrid(count, false, c, r);
+
+        Assert.NotEqual(expected, restored);   // 证实 CodeFor 确实丢布局
     }
 
     // ══════════ C4：探针坐标 → 源视频像素 ══════════

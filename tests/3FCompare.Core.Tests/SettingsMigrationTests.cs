@@ -12,12 +12,42 @@ public class SettingsMigrationTests
     [Fact]
     public void MigrateLegacy_MinusOneSentinel_BecomesNull()
     {
+        // 未标注 Version ⇒ 视为老文件（本字段引入之前的旧格式），走 -1 哨兵迁移
         var s = new AppSettings { WindowX = -1, WindowY = -1 };
 
         SettingsStore.MigrateLegacy(s, "{}");
 
         Assert.Null(s.WindowX);
         Assert.Null(s.WindowY);
+    }
+
+    // ══════ docs/15 §4.2：迁移必须按版本触发，不能无条件跑 ══════
+
+    /// <summary>
+    /// 已带版本号的文件：-1 是**合法坐标**（副屏在主屏左侧），迁移不得再清掉它。
+    /// 无条件执行迁移的后果：用户把窗口停在 X=-1 的副屏上，每次启动位置都被丢弃。
+    /// </summary>
+    [Fact]
+    public void MigrateLegacy_带版本号时_负一坐标被保留()
+    {
+        var s = new AppSettings { Version = AppSettings.CurrentVersion, WindowX = -1, WindowY = -1 };
+
+        SettingsStore.MigrateLegacy(s, "{}");
+
+        Assert.Equal(-1, s.WindowX);
+        Assert.Equal(-1, s.WindowY);
+    }
+
+    /// <summary>老文件迁移后应被盖上当前版本号，避免下次启动重复迁移。</summary>
+    [Fact]
+    public void MigrateLegacy_老文件迁移后写入当前版本号()
+    {
+        var s = new AppSettings { Version = 0, WindowX = -1 };
+
+        SettingsStore.MigrateLegacy(s, "{}");
+
+        Assert.Equal(AppSettings.CurrentVersion, s.Version);
+        Assert.Null(s.WindowX);
     }
 
     [Fact]

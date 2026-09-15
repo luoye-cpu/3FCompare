@@ -51,12 +51,24 @@ public sealed class Fff3FpEngine : IPlayerEngine
 
         session.AttachHandle(handle);
 
-        // 创建会话后立即设置智能参数与呈现节奏
-        session.ApplyInitialColorMode(options.ColorMode, options.OutputWindow, options.ForceHdrOutput);
-        if (options.TearingPresent)
-            session.SetPresentConfig(true); // 不支持时静默保持 VSync（返回值忽略）
-        if (options.PacingEnabled)
-            session.SetPacingConfig(true);
+        // 创建会话后立即设置智能参数与呈现节奏。
+        // 任一环节抛异常都必须销毁已创建的原生句柄：session 持有**强** GCHandle
+        // （原生侧保存的是 GetFunctionPointerForDelegate 的函数指针，需要 session 存活来
+        // 保住委托，见 Fff3FpSession 构造），因此漏 Dispose = 原生句柄 + 整个会话图
+        // 永久泄漏，且没有终结器兜底。
+        try
+        {
+            session.ApplyInitialColorMode(options.ColorMode, options.OutputWindow, options.ForceHdrOutput);
+            if (options.TearingPresent)
+                session.SetPresentConfig(true); // 不支持时静默保持 VSync（返回值忽略）
+            if (options.PacingEnabled)
+                session.SetPacingConfig(true);
+        }
+        catch
+        {
+            session.Dispose();
+            throw;
+        }
 
         return session;
     }
@@ -65,7 +77,14 @@ public sealed class Fff3FpEngine : IPlayerEngine
     {
         private readonly EngineSessionOptions _options;
         private nint _handle;
-        private bool _disposed;
+        /// <summary>销毁状态（0=活着 1=已销毁），兼作"只销毁一次"的原子守卫。
+        /// 原先用一个普通 bool 做判断-置位，那不是原子操作：两个线程可以同时通过判断
+        /// 并各自调用一次 FFF3FP_Destroy（double-free）。</summary>
+        private int _disposedFlag;
+        /// <summary>原生临界区：FFF3FP_Destroy 与所有原生调用互斥。
+        /// 轮询线程每 16ms 调 ReadSnapshot，而 RemoveSlotAt 刻意把 Dispose 放在 _gate 锁外，
+        /// 二者可以并发 ⇒ 拿着正在销毁的句柄进 GetSnapshot 就是 use-after-free。</summary>
+        private readonly object _nativeGate = new();
 
         /// <summary>创建会话时的输出窗口（用于运行时重新读取显示器能力）。</summary>
         private nint _outputWindow;
@@ -84,6 +103,12 @@ public sealed class Fff3FpEngine : IPlayerEngine
             _options = options;
             _outputWindow = options.OutputWindow;
             _callback = OnEngineEvent;
+            // 必须是 **强** 句柄（GCHandleType.Normal）。
+            // 原生侧保存的是 Marshal.GetFunctionPointerForDelegate(_callback) 的函数指针；
+            // 一旦 session 被 GC，委托随之回收，那个函数指针就变成悬空指针，
+            // 原生工作线程再回调就是调用已释放的 thunk ⇒ 进程崩溃。
+            // 强句柄通过保住 session 间接保住委托，是此设计的必要条件，不是泄漏源。
+            // 真正的泄漏风险在"未走 Dispose 的路径"——见 CreateSession 的异常分支。
             _callbackContext = GCHandle.Alloc(this);
         }
 
@@ -152,7 +177,12 @@ public sealed class Fff3FpEngine : IPlayerEngine
         public void Seek(long position100ns)
         {
             ThrowIfDisposed();
-            Check(Fff3FpNative.FFF3FP_Seek(_handle, position100ns), nameof(Seek));
+            // 同步校正线程会并发 Seek，同样必须与 Dispose 互斥（理由同 ReadSnapshot）
+            lock (_nativeGate)
+            {
+                ThrowIfDisposed();
+                Check(Fff3FpNative.FFF3FP_Seek(_handle, position100ns), nameof(Seek));
+            }
         }
 
         public void SeekFrame(long frameIndex)
@@ -256,7 +286,14 @@ public sealed class Fff3FpEngine : IPlayerEngine
             ThrowIfDisposed();
             var snapshotSize = Marshal.SizeOf<Fff3FpSnapshot>();
             var snap = new Fff3FpSnapshot { Size = (uint)snapshotSize, Version = 8 };
-            Check(Fff3FpNative.FFF3FP_GetSnapshot(_handle, ref snap), $"GetSnapshot(size={snapshotSize})");
+            // ReadSnapshot 是轮询线程每 16ms 一次的热路径，而 Dispose 在 _gate 锁外执行，
+            // 二者必须互斥，否则会拿着正在销毁的句柄进 GetSnapshot（use-after-free）。
+            // 进锁后要复查：等锁期间 Dispose 可能已经跑完。
+            lock (_nativeGate)
+            {
+                ThrowIfDisposed();
+                Check(Fff3FpNative.FFF3FP_GetSnapshot(_handle, ref snap), $"GetSnapshot(size={snapshotSize})");
+            }
             return new EngineSnapshot
             {
                 Position100ns = snap.Position100ns,
@@ -533,7 +570,10 @@ private EngineMediaInfo? _cachedMediaInfo;
         {
             ThrowIfDisposed();
             outputBitDepth = 0;
-            if (width <= 0 || height <= 0 || buffer.Length < width * height * 4)
+            // 必须按 long 比较：width * height * 4 是 **int** 运算，
+            // 极端尺寸下会溢出成负数（如 65536×65536×4 溢出为 0），从而绕过长度校验，
+            // 而原生侧会按 width×height 实际写入 ⇒ 托管堆越界写（不可 catch）。
+            if (width <= 0 || height <= 0 || (long)width * height * 4 > buffer.Length)
                 return false;
             var result = Fff3FpNative.FFF3FP_ReadVideoPixelRegion(_handle,
                 (uint)Math.Max(0, x), (uint)Math.Max(0, y),
@@ -576,12 +616,21 @@ private EngineMediaInfo? _cachedMediaInfo;
 
         public void Dispose()
         {
-            if (_disposed) return;
-            _disposed = true;
+            // 原子守卫：并发 Dispose 只有一个线程能进入销毁路径，杜绝 double-free
+            if (Interlocked.Exchange(ref _disposedFlag, 1) != 0) return;
 
             EngineEvent = null; // 脱离回调，防止释放后仍在触发
-            if (_handle != 0)
-                Fff3FpNative.FFF3FP_Destroy(_handle);
+            lock (_nativeGate)
+            {
+                if (_handle != 0)
+                {
+                    var handle = _handle;
+                    // 先置 0 再 Destroy：即使此刻有线程正准备发起别的原生调用，
+                    // 它取到的也是 0 而不是一个即将无效的句柄。
+                    _handle = 0;
+                    Fff3FpNative.FFF3FP_Destroy(handle);
+                }
+            }
             if (_callbackContext.IsAllocated)
                 _callbackContext.Free();
 
@@ -611,6 +660,9 @@ private EngineMediaInfo? _cachedMediaInfo;
                 throw new EngineException((int)result, $"{op} 失败: {result}");
         }
 
-        private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
+        // 用 _disposedFlag（Dispose 的第一步就置位，且是原子写）而不是 _disposed（普通 bool，
+        // 写入的可见性无保证）。这样"已决定销毁"能在 Destroy 之前就被其它线程看到。
+        private void ThrowIfDisposed()
+            => ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposedFlag) != 0, this);
     }
 }

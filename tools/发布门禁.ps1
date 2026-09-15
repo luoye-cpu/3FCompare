@@ -128,12 +128,12 @@ Write-Host "━━━━━━━━━━━━━━━━━━━━━━�
 Write-Host "  3FCompare 发布门禁  v$Version" -ForegroundColor Cyan
 Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
 
-# ── [1/6] 内核基线：产物内核必须是发布基线（P1-8）──
+# ── [1/7] 内核基线：产物内核必须是发布基线（P1-8）──
 #   旧流程里 -AllowKernelDrift 与"内核工作区脏"都只 Write-Warning 就继续，
 #   构建出的 DLL 照常部署，之后 pack.ps1 与本脚本都不再校验 SHA ——
 #   脏内核 / 错误内核可以一路绿灯进发布包。
 #   基线值从 tools/构建全部.ps1 正则提取，保持单一来源，避免两处硬编码漂移。
-Write-Host "`n[1/6] 内核基线（产物内核 SHA == 发布基线）" -ForegroundColor Yellow
+Write-Host "`n[1/7] 内核基线（产物内核 SHA == 发布基线）" -ForegroundColor Yellow
 $KernelBaselineSha = ""
 $buildAll = Join-Path $PSScriptRoot "构建全部.ps1"
 if (Test-Path $buildAll) {
@@ -153,8 +153,8 @@ if (-not $KernelBaselineSha) {
         "实际 $short / 基线 $($KernelBaselineSha.Substring(0,12))"
 }
 
-# ── [2/6] Release 编译：0 error，且非白名单告警必须为 0 ──
-Write-Host "`n[2/6] Release 编译（0 error / 0 非白名单 warning）" -ForegroundColor Yellow
+# ── [2/7] Release 编译：0 error，且非白名单告警必须为 0 ──
+Write-Host "`n[2/7] Release 编译（0 error / 0 非白名单 warning）" -ForegroundColor Yellow
 $build    = Invoke-Cmd $Dotnet @("build", $AppProject, "-c", "Release", "--no-restore", "--nologo")
 $buildOut = $build.Out
 $buildOk  = $build.Exit -eq 0
@@ -172,8 +172,8 @@ if ($realWarnings.Count -gt 0) {
 }
 Add-Result "Release 编译" $buildOk (Format-FailDetail $build.Exit "错误 $($c.Error) / 告警 $($c.Warning)（白名单外 $($realWarnings.Count)）")
 
-# ── [3/6] 单元测试全绿 ──
-Write-Host "`n[3/6] 单元测试" -ForegroundColor Yellow
+# ── [3/7] 单元测试全绿 ──
+Write-Host "`n[3/7] 单元测试" -ForegroundColor Yellow
 $test    = Invoke-Cmd $Dotnet @("test", $TestProject, "-c", "Release", "--no-restore", "--nologo")
 $testOut = $test.Out
 $testOk  = $test.Exit -eq 0
@@ -181,17 +181,39 @@ $summary = ($testOut | Where-Object { $_ -match '已通过!|失败!|Passed!|Fail
 Add-Result "单元测试" $testOk (Format-FailDetail $test.Exit $summary)
 
 if (-not $SkipSelfTest) {
-    # ── [4/6] 会话往返（拦 P0-1 / P0-3）──
-    Write-Host "`n[4/6] 会话存取往返回归（--sessiontest）" -ForegroundColor Yellow
+    # 素材列表供 [4-6/7] 三步共用，先统一解析（原先只在会话往返那步内定义，
+    # 新增的 selftest 排在它前面会拿不到）。
     if (-not (Test-Path $Exe)) {
+        Add-Result "单路全量" $false "找不到 $Exe（请先运行 tools/构建全部.ps1 -Configuration Release）"
         Add-Result "会话往返" $false "找不到 $Exe（请先运行 tools/构建全部.ps1 -Configuration Release）"
+        Add-Result "帧导出" $false "找不到 $Exe（请先运行 tools/构建全部.ps1 -Configuration Release）"
     } else {
-        $mediaList = @()
-        if ($Media) { $mediaList = @($Media) }
-        else {
-            $mediaList = @(Get-ChildItem (Join-Path $ProjectRoot "testmedia\media\real\*.mp4") -ErrorAction SilentlyContinue |
-                Sort-Object Name | Select-Object -First 2 | ForEach-Object { $_.FullName })
-        }
+    $mediaList = @()
+    if ($Media) { $mediaList = @($Media) }
+    else {
+        $mediaList = @(Get-ChildItem (Join-Path $ProjectRoot "testmedia\media\real\*.mp4") -ErrorAction SilentlyContinue |
+            Sort-Object Name | Select-Object -First 2 | ForEach-Object { $_.FullName })
+    }
+    # 用 -join 而不是 Join-String：后者是 pwsh7 专有，本脚本可能被 Windows PowerShell 5.1 调用
+    $mediaNames = ($mediaList | ForEach-Object { [IO.Path]::GetFileName($_) }) -join ' + '
+    Write-Host "  素材: $mediaNames" -ForegroundColor Gray
+
+    # ── [4/7] 单路全量（覆盖面最广：布局/探针/倍速/消息注入/最大化……）──
+    # docs/14 §4.3：它此前**从不被任何脚本调用**，等于这条最宽的回归网一直是空的。
+    Write-Host "`n[4/7] 单路全量回归（--selftest）" -ForegroundColor Yellow
+    if ($mediaList.Count -lt 1) {
+        Add-Result "单路全量" $false "需要至少 1 个真实素材（testmedia/media/real/*.mp4），实际 $($mediaList.Count) 个"
+    } else {
+        $stArgs = @("--selftest", $mediaList[0])
+        if ($mediaList.Count -ge 2) { $stArgs += $mediaList[1] } # 第二个给了才跑"文件拖入"分支
+        $run  = Invoke-Cmd $Exe $stArgs
+        $code = $run.Exit
+        $line = ($run.Out | Where-Object { $_ -match 'selftest\[|全部通过' } | Select-Object -Last 1)
+        Add-Result "单路全量" ($code -eq 0) (Format-FailDetail $code "$line (exit=$code)")
+    }
+
+    # ── [5/7] 会话往返（拦 P0-1 / P0-3）──
+    Write-Host "`n[5/7] 会话存取往返回归（--sessiontest）" -ForegroundColor Yellow
         if ($mediaList.Count -lt 2) {
             Add-Result "会话往返" $false "需要 2 个真实素材（testmedia/media/real/*.mp4），实际 $($mediaList.Count) 个"
         } else {
@@ -203,11 +225,10 @@ if (-not $SkipSelfTest) {
             $detail = Format-FailDetail $code "$line (exit=$code)"
             Add-Result "会话往返" ($code -eq 0) $detail
         }
-    }
 
-    # ── [5/6] 抓帧导出（拦 P0-2）──
-    Write-Host "`n[5/6] 帧导出回归（--screentest）" -ForegroundColor Yellow
-    if ((Test-Path $Exe) -and $mediaList -and $mediaList.Count -ge 1) {
+    # ── [6/7] 抓帧导出（拦 P0-2）──
+    Write-Host "`n[6/7] 帧导出回归（--screentest）" -ForegroundColor Yellow
+    if ($mediaList.Count -ge 1) {
         New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
         $png = Join-Path $TmpDir "gate_frame.png"
         if (Test-Path $png) { Remove-Item $png -Force }
@@ -220,18 +241,19 @@ if (-not $SkipSelfTest) {
     } else {
         Add-Result "帧导出" $false "缺少 exe 或素材，跳过前置条件不足"
     }
+    }   # 关闭上面的 else（exe 存在分支）
 } else {
-    Write-Host "`n[4-5/6] 实机自测已按 -SkipSelfTest 跳过" -ForegroundColor Yellow
+    Write-Host "`n[4-6/7] 实机自测已按 -SkipSelfTest 跳过" -ForegroundColor Yellow
 }
 
-# ── [6/6] 打包 + 产物自检（可选）与仓库卫生 ──
+# ── [7/7] 打包 + 产物自检（可选）与仓库卫生 ──
 if ($WithPack) {
-    Write-Host "`n[6/6] 打包与产物自检（pack.ps1 内含 Assert-Package）" -ForegroundColor Yellow
+    Write-Host "`n[7/7] 打包与产物自检（pack.ps1 内含 Assert-Package）" -ForegroundColor Yellow
     $pack = Invoke-Cmd "powershell" @("-NoProfile", "-ExecutionPolicy", "Bypass",
         "-File", (Join-Path $ProjectRoot "pack.ps1"), "-Version", $Version, "-Mode", "all")
     Add-Result "打包与产物自检" ($pack.Exit -eq 0) (Format-FailDetail $pack.Exit "pack.ps1 exit=$($pack.Exit)")
 } else {
-    Write-Host "`n[6/6] 打包已跳过（加 -WithPack 启用）" -ForegroundColor Yellow
+    Write-Host "`n[7/7] 打包已跳过（加 -WithPack 启用）" -ForegroundColor Yellow
 }
 
 Write-Host "`n[仓库卫生] git 工作区" -ForegroundColor Yellow

@@ -58,14 +58,59 @@ function Resolve-Tool {
     throw "未找到 $Name。请安装后重试，或加入 PATH。已尝试: $($Fallbacks -join ', ')"
 }
 
+# 安全截断 SHA 用于日志：戳记文件可能被人改坏或写了一半，
+# 直接 Substring(0,12) 会抛"索引和长度必须引用该字符串内的位置"这种与真实原因
+# （DLL 来源不明/需重建）无关的异常，把 S5 的判断逻辑整个盖掉（docs/14 §P2-9）。
+function Short-Sha {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return '<空>' }
+    if ($Value.Length -le 12) { return $Value }
+    return $Value.Substring(0, 12)
+}
+
 $Dotnet = Resolve-Tool "dotnet" @("$env:ProgramFiles\dotnet\dotnet.exe", "C:\Program Files\dotnet\dotnet.exe")
 $Git    = Resolve-Tool "git"    @("$env:ProgramFiles\Git\cmd\git.exe", "C:\Program Files\Git\cmd\git.exe",
                                   "C:\Program Files\Git\bin\git.exe")
+# 原先直接裸写 `powershell`：pwsh7 环境下它未必在 PATH，报出的却是"找不到文件"这类
+# 误导性错误。这里同样走 Resolve-Tool，并把子脚本的调用统一收敛到 Invoke-SubScript。
+# 注意：pwsh7 会话里 Get-Command powershell 常返回 NOT FOUND（已在 Windows 11 实测），
+# 因此 fallback 必须给全；这里额外硬编码一份，避免 $env:SystemRoot 为空时解析失败。
+$Pwsh   = Resolve-Tool "powershell" @("$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe",
+                                      "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+
+# ---------------------------------------------------------------------------
+# 调用子脚本：除了退出码，还要拦子脚本里**非终止**的 Write-Error。
+# 只判 $LASTEXITCODE 会漏——Write-Error 默认不终止脚本，退出码仍是 0，
+# 于是"子脚本报错了但构建继续"这种假绿会一路带到打包（docs/14 §P2-7）。
+# ---------------------------------------------------------------------------
+function Invoke-SubScript {
+    param(
+        [Parameter(Mandatory)] [string]$ScriptPath,
+        [Parameter(Mandatory)] [string]$What
+    )
+    if (-not (Test-Path $ScriptPath)) { throw "$What：找不到子脚本 $ScriptPath" }
+
+    $out = & $Pwsh -NoProfile -ExecutionPolicy Bypass -File $ScriptPath 2>&1
+    $code = $LASTEXITCODE
+    if ($out) { $out | ForEach-Object { Write-Host "    $_" } }
+
+    # ErrorRecord 是明确的错误信号，不受 $ErrorActionPreference 影响
+    $errs = @($out | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] })
+    if ($code -ne 0) { throw "$What 失败（退出码 $code）" }
+    if ($errs.Count -gt 0) {
+        throw "$What 输出了 $($errs.Count) 条错误（退出码却是 0）：$($errs[0].Exception.Message)"
+    }
+}
 
 # ---- 内核基线（改基线 = 改这里，必须同时是 PATCHES.md 里的归档 tag 指向的提交）----
 $KernelRepo        = "https://github.com/Lake1059/FFF_Project.git"
-$KernelBaselineTag = "3fcompare-kernel-2026.9.11.1"
-$KernelBaselineSha = "6bc8d61c7fd0a2053e806a627c6db1b4f112e2d9"
+$KernelBaselineTag = "3fcompare-kernel-2026.9.14.1"
+$KernelBaselineSha = "025198f36f5735248b087a050afbe88b3801382a"
+# 上一基线（回滚点）：3fcompare-kernel-2026.9.11.1 / 6bc8d61c7fd0a2053e806a627c6db1b4f112e2d9
+# 2026-09-15 升级至上游 2026.9.14（d8b2c038）。上游该区间只改了 2 个 vbproj（版本号 +
+# Vortice.DirectComposition 包引用），FFF.Native 源码零改动，故 4 项 API 扩展无需重移植。
+# ⚠ 该基线在打包时**尚未做内核构建验证**（本机无 MSBuild）。首次在装有 Visual Studio
+# 的机器上构建时，S5 的戳记校验会检测到 FFF.Native.dll 仍属旧基线并自动 /t:Rebuild。
 
 # 3FCompare 扩展的云端归档：主仓库自带的 kernel/* 分支 + 同名 tag。
 # 上游 Lake1059/FFF_Project **不含**这些扩展，且本机账号对它只有读权限（push=false），
@@ -314,8 +359,7 @@ $ffmpegMarker = Join-Path $ForkRoot "third_party\ffmpeg\include\libavcodec\avcod
 if (-not (Test-Path $ffmpegMarker)) {
     Push-Location $ForkRoot
     try {
-        powershell -NoProfile -ExecutionPolicy Bypass -File ".\tools\准备FFmpeg.ps1"
-        if ($LASTEXITCODE -ne 0) { throw "准备 FFmpeg 失败" }
+        Invoke-SubScript -ScriptPath ".\tools\准备FFmpeg.ps1" -What "准备 FFmpeg"
         # 补齐上游脚本偶发遗漏的生成头
         $cache = Join-Path $env:LOCALAPPDATA "fff-ffmpeg-download\extracted\ffmpeg-master-latest-win64-lgpl-shared\include"
         if (Test-Path (Join-Path $cache "libavutil\avconfig.h")) {
@@ -332,8 +376,7 @@ $assMarker = Join-Path $ForkRoot "third_party\vcpkg_installed\x64-windows\includ
 if (-not (Test-Path $assMarker)) {
     Push-Location $ForkRoot
     try {
-        powershell -NoProfile -ExecutionPolicy Bypass -File ".\tools\准备Libass.ps1"
-        if ($LASTEXITCODE -ne 0) { throw "准备 libass 失败" }
+        Invoke-SubScript -ScriptPath ".\tools\准备Libass.ps1" -What "准备 libass"
     } finally { Pop-Location }
 } else {
     Write-Host "  libass 已就绪，跳过"
@@ -364,7 +407,7 @@ if (Test-Path $kernelDll) {
         $stampHead = (Get-Content $stampPath -TotalCount 1).Trim()
         if ($stampHead -ne $kernelSha) {
             $needRebuild = $true
-            Write-Host "  DLL 由旧内核 HEAD 编出（戳记 $($stampHead.Substring(0, 12)) ≠ 当前 $($kernelSha.Substring(0, 12))）→ 强制重建（S5）" -ForegroundColor Yellow
+            Write-Host "  DLL 由旧内核 HEAD 编出（戳记 $(Short-Sha $stampHead) ≠ 当前 $(Short-Sha $kernelSha)）→ 强制重建（S5）" -ForegroundColor Yellow
         }
     }
 }

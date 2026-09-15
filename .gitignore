@@ -84,6 +84,15 @@ _corrupt_pack_backup/
 .3fc_kernel_sha
 
 # 注意：.3fc_kernel_baseline.bundle 是**有意入库**的（约 2MB），不要加到这里。
-# 它是内核基线归档（分支 3fcompare/zoom-viewport-cover + tag 3fcompare-kernel-2026.9.11.1），
+# 它是内核基线归档（分支 3fcompare/zoom-viewport-cover + tag 3fcompare-kernel-2026.9.14.1），
 # 上游 Lake1059/FFF_Project 不含 3FCompare 扩展，没有它换机器就无法复现构建。
 # 重建方式：git clone .3fc_kernel_baseline.bundle third_party/fff_project
+
+# ── 调试残留（历次实机自测/崩溃排查产生，勿入库；2026-09-15 第二轮审查补）──
+/_*.log
+/_dumps/
+/_crash_*.txt
+/_probe.txt
+/_newsha.txt
+/_pscheck.txt
+/crash_trace_*.log

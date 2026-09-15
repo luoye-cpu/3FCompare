@@ -35,6 +35,21 @@ if (-not ($mTag.Success -and $mSha.Success)) {
 $KernelBaselineTag = $mTag.Groups[1].Value
 $KernelBaselineSha = $mSha.Groups[1].Value
 
+# docs/14 §P2-8：原先这里裸写 `git`。PATH 里没有 git 时 `& git` 直接失败，
+# 而下面函数内 $ErrorActionPreference='Continue' 又不抛异常 ⇒ $raw 为 null、
+# $LASTEXITCODE **沿用上一次调用的值**，体检结论会建立在陈旧退出码上。
+# 与构建全部.ps1 一样先解析出可执行文件，缺失即明确报错。
+function Resolve-Git {
+    $cmd = Get-Command git -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    foreach ($f in @("$env:ProgramFiles\Git\cmd\git.exe", "C:\Program Files\Git\cmd\git.exe",
+                     "C:\Program Files\Git\bin\git.exe")) {
+        if ($f -and (Test-Path $f)) { return $f }
+    }
+    throw "未找到 git。请安装 Git for Windows 后重试，或把它加入 PATH。"
+}
+$GitExe = Resolve-Git
+
 function Invoke-Git {
     param(
         [Parameter(Mandatory)] [string]$Path,
@@ -42,7 +57,7 @@ function Invoke-Git {
     )
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    $raw = & git -C $Path @GitArgs 2>&1
+    $raw = & $GitExe -C $Path @GitArgs 2>&1
     $code = $LASTEXITCODE
     $ErrorActionPreference = $prev
     return [pscustomobject]@{

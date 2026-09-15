@@ -166,11 +166,27 @@ function Invoke-Pack([string]$mode) {
     }
 
     # 清理调试符号（.pdb 对用户无意义）/ Remove debug symbols (.pdb)
-    $pdbFiles = Get-ChildItem "$OutputDir\*.pdb" -ErrorAction SilentlyContinue
+    # ⚠ 必须 -Recurse：原先只匹配顶层 "$OutputDir\*.pdb"，子目录里的 pdb 会随包分发
+    # （docs/14 §P2-10）。
+    $pdbFiles = Get-ChildItem $OutputDir -Filter *.pdb -Recurse -File -ErrorAction SilentlyContinue
     if ($pdbFiles) {
         $pdbFiles | Remove-Item -Force
         $savedMB = [math]::Round(($pdbFiles | Measure-Object Length -Sum).Sum / 1MB, 1)
-        Write-Host "   ✅ 已删除调试符号，节省 ${savedMB}MB / Debug symbols removed, saved ${savedMB}MB" -ForegroundColor Green
+        Write-Host "   ✅ 已删除调试符号（递归），共 $($pdbFiles.Count) 个，节省 ${savedMB}MB / Debug symbols removed, saved ${savedMB}MB" -ForegroundColor Green
+    }
+
+    # 单文件发布后不该再出现这些中间产物；出现说明发布配置被改过或有残留。
+    # 只警告不失败：某些合法的发布形态会保留 deps.json，硬拦会误伤打包。
+    $leftovers = @()
+    $leftovers += Get-ChildItem $OutputDir -Filter *.deps.json -Recurse -File -ErrorAction SilentlyContinue
+    $leftovers += Get-ChildItem $OutputDir -Filter *.runtimeconfig.json -Recurse -File -ErrorAction SilentlyContinue
+    $leftovers += Get-ChildItem $OutputDir -Directory -Recurse -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Name -in @('bin', 'obj') }
+    if ($leftovers.Count -gt 0) {
+        Write-Host "   ⚠ 发行包内发现 $($leftovers.Count) 个中间产物（通常不应随包分发）:" -ForegroundColor Yellow
+        $leftovers | Select-Object -First 10 | ForEach-Object {
+            Write-Host "     - $($_.FullName.Substring($OutputDir.Length).TrimStart('\'))" -ForegroundColor DarkYellow
+        }
     }
 
     # Step 2/3: 复制 FFmpeg 运行时 + 生成使用说明 (仅完整版)

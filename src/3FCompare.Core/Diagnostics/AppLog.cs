@@ -99,7 +99,24 @@ public static class AppLog
     {
         Enqueue("INFO", "App", "会话结束");
         _flushRequested = true;
-        try { _worker?.Join(2000); } catch { }
+
+        // worker 在 _flushRequested 且队列排空后自行 return。
+        // 原先固定 Join(2000)，超时就往下走把 _writer 置 null；而 worker 可能只是在
+        // Sleep(150)，醒来后 _writer 已为 null，它的写入被 `?.` 静默丢弃
+        // ⇒ 最后一批日志（往往正是崩溃前最有价值的那几行）丢失。
+        // 改为等线程真正结束（上限 5s）再释放 writer。lock(WriterLock) 保证
+        // Dispose 不会与写入并发，这里补的是"别在它还没写完时就把 writer 抽走"。
+        try
+        {
+            if (_worker is not null && _worker.IsAlive)
+            {
+                var deadline = Environment.TickCount64 + 5000;
+                while (_worker.IsAlive && Environment.TickCount64 < deadline)
+                    Thread.Sleep(10);
+            }
+        }
+        catch { }
+
         lock (WriterLock)
         {
             try { _writer?.Flush(); _writer?.Dispose(); } catch { }

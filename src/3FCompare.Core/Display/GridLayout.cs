@@ -49,6 +49,9 @@ public static class GridLayout
     public const int Code2x2 = 2;
     /// <summary>3×3 网格。</summary>
     public const int Code3x3 = 3;
+    /// <summary>2×1 网格。新增码（旧快照不会产生），与 UI 的第四个预设 "2x1" 对齐——
+    /// 原先 PresetOf 只能映射 2x2/3x3/auto，导致用户选 2x1 时无处可存。</summary>
+    public const int Code2x1 = 4;
 
     /// <summary>当前视图状态 → 布局代码（保存会话时用）。
     /// 与 <see cref="IsSingleView"/> / <see cref="PresetOf"/> 三件套成对使用——
@@ -59,11 +62,38 @@ public static class GridLayout
     /// <summary>该布局代码是否表示单屏。</summary>
     public static bool IsSingleView(int code) => code == CodeSingle;
 
-    /// <summary>布局代码 → 网格预设名（与 <c>CompareGridView.SetGridLayout</c> 的取值一致）。</summary>
+    /// <summary>布局代码 → 网格预设名（与 <c>CompareGridView.SetGridLayout</c> 的取值一致）。
+    /// 注意 UI 侧共四个预设（auto/2x1/2x2/3x3），这里必须全部覆盖，漏一个就是"存了却还原成别的"。</summary>
     public static string PresetOf(int code) => code switch
     {
+        Code2x1 => "2x1",
         Code2x2 => "2x2",
         Code3x3 => "3x3",
         _ => "auto",
     };
+
+    /// <summary>预设名 → 网格覆盖值；(0,0) 表示不覆盖，交由 <see cref="ComputeGrid"/> 自动布局。
+    /// 与 <see cref="PresetOf"/> 同为上/下行映射，UI 的 SetGridLayout 应复用本函数而非再写一份。</summary>
+    public static (int Cols, int Rows) OverrideOf(string? preset) => preset switch
+    {
+        "2x1" => (2, 1),
+        "2x2" => (2, 2),
+        "3x3" => (3, 3),
+        _ => (0, 0),
+    };
+
+    /// <summary>用户实际选择的预设 → 布局代码（保存会话时用），与 <see cref="PresetOf"/> 互逆。
+    ///
+    /// 为什么不能用 <see cref="CodeFor"/>：它按"路数"推导，会丢弃用户显式选择的预设。
+    /// 例：2 路时用户选了 3x3，CodeFor 仍返回 Code2x2，重载后变成 2x2——
+    /// 1/2/3/5/6 路都会因此改变布局（详见 docs/14 §1.1）。
+    /// </summary>
+    public static int CodeFromPreset(string? preset, bool singleView)
+        => singleView ? CodeSingle : preset switch
+        {
+            "2x1" => Code2x1,
+            "2x2" => Code2x2,
+            "3x3" => Code3x3,
+            _ => CodeAuto,
+        };
 }
