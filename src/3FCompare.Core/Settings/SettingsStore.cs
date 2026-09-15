@@ -27,6 +27,9 @@ public static class SettingsStore
             Console.Error.WriteLine($"[SettingsStore] Read {json.Length} chars");
             var result = JsonSerializer.Deserialize(json, JsonAotContext.Default.AppSettings) ?? new AppSettings();
             MigrateLegacy(result, json);
+            // 收敛越界值：合法 JSON 里的 FrameStep=int.MaxValue / ColorMode=99 之类
+            // 不会被反序列化拦下，会一路传到内核（docs/15 §4.3）
+            result.Normalize();
             Console.Error.WriteLine($"[SettingsStore] Deserialized, FfmpegDirectory='{result.FfmpegDirectory}'");
             return result;
         }
@@ -50,28 +53,39 @@ public static class SettingsStore
     /// </summary>
     public static void MigrateLegacy(AppSettings s, string json)
     {
-        // ① -1 哨兵 → null（尺寸同理：非正值一律视为无效）
-        if (s.WindowX == -1) s.WindowX = null;
-        if (s.WindowY == -1) s.WindowY = null;
-        if (s.WindowWidth is <= 0) s.WindowWidth = null;
-        if (s.WindowHeight is <= 0) s.WindowHeight = null;
+        // 只有**老文件**（缺 Version 字段 → 反序列化为 0）才做迁移。
+        // 无条件执行的后果：新语义下 -1 是**合法坐标**（副显示器在主屏左侧时坐标为负），
+        // 每次启动都被当成哨兵清成 null ⇒ 用户把窗口停在负坐标上，位置每次都丢
+        //（docs/15 §4.2）。
+        var isLegacy = s.Version < AppSettings.CurrentVersion;
 
-        // ② WindowMaximized（已移除字段）→ WindowState
-        try
+        // ① -1 哨兵 → null（尺寸同理：非正值一律视为无效）
+        if (isLegacy)
         {
-            using var doc = JsonDocument.Parse(json);
-            if (doc.RootElement.ValueKind == JsonValueKind.Object
-                && doc.RootElement.TryGetProperty("WindowMaximized", out var maximized)
-                && maximized.ValueKind == JsonValueKind.True
-                && s.WindowState is null)
+            if (s.WindowX == -1) s.WindowX = null;
+            if (s.WindowY == -1) s.WindowY = null;
+            if (s.WindowWidth is <= 0) s.WindowWidth = null;
+            if (s.WindowHeight is <= 0) s.WindowHeight = null;
+            s.Version = AppSettings.CurrentVersion;
+
+            // ② WindowMaximized（已移除字段）→ WindowState
+            // 这是老格式独有的字段，同样只在 legacy 下有意义。
+            try
             {
-                s.WindowState = 2; // Avalonia WindowState.Maximized（0=Normal 1=Minimized 2=Maximized）
+                using var doc = JsonDocument.Parse(json);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object
+                    && doc.RootElement.TryGetProperty("WindowMaximized", out var maximized)
+                    && maximized.ValueKind == JsonValueKind.True
+                    && s.WindowState is null)
+                {
+                    s.WindowState = 2; // Avalonia WindowState.Maximized（0=Normal 1=Minimized 2=Maximized）
+                }
             }
-        }
-        catch (Exception ex)
-        {
-            // 迁移失败不影响启动，退化成"无几何记忆"
-            Console.Error.WriteLine($"[SettingsStore] WindowMaximized migration skipped: {ex.GetType().Name}");
+            catch (Exception ex)
+            {
+                // 迁移失败不影响启动，退化成"无几何记忆"
+                Console.Error.WriteLine($"[SettingsStore] WindowMaximized migration skipped: {ex.GetType().Name}");
+            }
         }
     }
 
@@ -81,9 +95,13 @@ public static class SettingsStore
         {
             var path = GetConfigPath();
             Console.Error.WriteLine($"[SettingsStore] Save to {path}");
+            // 写入时盖上当前结构版本：读回时据此判断是否需要迁移
+            settings.Version = AppSettings.CurrentVersion;
             var json = JsonSerializer.Serialize(settings, JsonAotContext.Default.AppSettings);
             Console.Error.WriteLine($"[SettingsStore] Serialized {json.Length} chars");
-            File.WriteAllText(path, json);
+            // 原子写（tmp + fsync + Move）：File.WriteAllText 会先截断目标文件，
+            // 写入失败就把 settings.json 变成半截 JSON ⇒ 静默回退默认（docs/15 §4.1）
+            AtomicFile.WriteAllText(path, json);
             Console.Error.WriteLine($"[SettingsStore] File written OK");
         }
         catch (Exception ex)

@@ -40,8 +40,11 @@ public sealed class SessionSnapshot
         }
     }
 
+    /// <summary>保存到文件（原子写）。
+    /// 会话文件保存失败的代价是"上次会话整个丢失"，所以同样不能用
+    /// 会先截断的 File.WriteAllText（docs/15 §4.1）。</summary>
     public static void SaveToFile(string path, SessionSnapshot snapshot)
-        => File.WriteAllText(path, snapshot.ToJson());
+        => AtomicFile.WriteAllText(path, snapshot.ToJson());
 
     public static SessionSnapshot? LoadFromFile(string path)
         => File.Exists(path) ? FromJson(File.ReadAllText(path)) : null;

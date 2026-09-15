@@ -67,9 +67,57 @@ public static partial class NativeRuntime
     /// 将指定目录加入 DLL 搜索路径，使内核 Delay-Load 可命中（不再复制 DLL 到应用目录）。</summary>
     public static void SetFfmpegDirectory(string? directory)
     {
-        FfmpegDirectory = string.IsNullOrWhiteSpace(directory) ? null : directory.Trim();
-        if (FfmpegDirectory is not null)
-            SetDllDirectoryW(FfmpegDirectory);
+        var trimmed = string.IsNullOrWhiteSpace(directory) ? null : directory.Trim();
+        if (trimmed is not null && !IsAcceptableFfmpegDirectory(trimmed, out var reason))
+        {
+            // 配置写在 exe 同目录以支撑便携部署，等同"可被投放"，所以要校验后再用：
+            // 否则一个 settings.json 就能让内核去加载任意目录里的同名 DLL（docs/15 §5.2）。
+            Diagnostics.AppLog.Warn("NativeRuntime", $"忽略不可用的 FFmpeg 目录 “{trimmed}”：{reason}");
+            trimmed = null;
+        }
+        FfmpegDirectory = trimmed;
+        // 传 null 会恢复默认搜索顺序，所以"被拒绝"时必须显式清掉上一次的设置
+        SetDllDirectoryW(FfmpegDirectory);
+    }
+
+    /// <summary>FFmpeg 目录是否可接受。判据见下，任一不满足即拒绝。</summary>
+    private static bool IsAcceptableFfmpegDirectory(string dir, out string reason)
+    {
+        // ① UNC：Windows 访问网络路径时会自动发起 NTLM 认证，把本机凭据送出去
+        if (dir.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            reason = "不接受 UNC 网络路径（会泄露本机凭据）";
+            return false;
+        }
+        // ② 相对路径：会按当前工作目录解析，等于让配置决定加载哪个目录的 DLL
+        if (!Path.IsPathRooted(dir))
+        {
+            reason = "必须是绝对路径";
+            return false;
+        }
+        if (!Directory.Exists(dir))
+        {
+            reason = "目录不存在";
+            return false;
+        }
+        // ③ 目录里必须有 avcodec 核心 DLL。
+        //    设置这个目录的唯一目的就是让内核 Delay-Load 命中 avcodec；
+        //    没有它说明配错了，同时也能挡住"指向任意目录去加载同名 DLL"。
+        try
+        {
+            if (!System.IO.Directory.EnumerateFiles(dir, "avcodec-*.dll").Any())
+            {
+                reason = "目录中没有 avcodec-*.dll";
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            reason = $"无法列举目录：{ex.Message}";
+            return false;
+        }
+        reason = "";
+        return true;
     }
 
     /// <summary>自动探测 FFmpeg 目录：FFMPEG_DIR 环境变量 → PATH 逐项（含 bin/bin64）→
