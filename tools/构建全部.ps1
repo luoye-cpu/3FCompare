@@ -104,13 +104,18 @@ function Invoke-SubScript {
 
 # ---- 内核基线（改基线 = 改这里，必须同时是 PATCHES.md 里的归档 tag 指向的提交）----
 $KernelRepo        = "https://github.com/Lake1059/FFF_Project.git"
-$KernelBaselineTag = "3fcompare-kernel-2026.9.14.1"
-$KernelBaselineSha = "025198f36f5735248b087a050afbe88b3801382a"
-# 上一基线（回滚点）：3fcompare-kernel-2026.9.11.1 / 6bc8d61c7fd0a2053e806a627c6db1b4f112e2d9
+$KernelBaselineTag = "3fcompare-kernel-2026.9.14.3"
+$KernelBaselineSha = "0fe33c4e3af06336e8cc65bf6dce7911dfde3333"
+# 上一基线（回滚点）：3fcompare-kernel-2026.9.14.2 / 68e196567e595e3cf639df830131fabc43685a77
+# 2026-09-16 在 3fcompare/zoom-viewport-cover 上追加 issue #7 修复
+# （PresentTimedText 与交换链改写竞态，上游 824093d cherry-pick 为 0fe33c4）
 # 2026-09-15 升级至上游 2026.9.14（d8b2c038）。上游该区间只改了 2 个 vbproj（版本号 +
 # Vortice.DirectComposition 包引用），FFF.Native 源码零改动，故 4 项 API 扩展无需重移植。
-# ⚠ 该基线在打包时**尚未做内核构建验证**（本机无 MSBuild）。首次在装有 Visual Studio
-# 的机器上构建时，S5 的戳记校验会检测到 FFF.Native.dll 仍属旧基线并自动 /t:Rebuild。
+# 2026-09-16：在本基线上新增 A11 扩展（preferredAdapterIndex），PlayerApiVersion 14→15，
+#   归档为 3fcompare-kernel-2026.9.14.2。**已用 MSVC 构建并实机验证通过**
+#   （本机有 VS 18 Community 的 MSBuild + MSVC 14.51，旧注释"本机无 MSBuild"已作废）。
+#   ⚠ A11 是 ABI 破坏性变更：托管 Fff3FpEngine.ConfigVersion 必须同为 15，
+#     两者错开会让 FFF3FP_Create 全部返回 InvalidArgument。
 
 # 3FCompare 扩展的云端归档：主仓库自带的 kernel/* 分支 + 同名 tag。
 # 上游 Lake1059/FFF_Project **不含**这些扩展，且本机账号对它只有读权限（push=false），
