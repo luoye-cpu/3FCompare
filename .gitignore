@@ -84,9 +84,16 @@ _corrupt_pack_backup/
 .3fc_kernel_sha
 
 # 注意：.3fc_kernel_baseline.bundle 是**有意入库**的（约 2MB），不要加到这里。
-# 它是内核基线归档（分支 3fcompare/zoom-viewport-cover + tag 3fcompare-kernel-2026.9.14.1），
+# 它是内核基线归档（当前：分支 3fc/integrate-issue7 @ 0d5856e +
+# tag 3fcompare-kernel-2026.9.18.2，回滚点 3fcompare-kernel-2026.9.18.1），
 # 上游 Lake1059/FFF_Project 不含 3FCompare 扩展，没有它换机器就无法复现构建。
-# 重建方式：git clone .3fc_kernel_baseline.bundle third_party/fff_project
+# 恢复方式：git clone .3fc_kernel_baseline.bundle third_party/fff_project
+#
+# ⚠ 重建时必须把 HEAD 一起打进 bundle，否则克隆后 "remote HEAD refers to
+#   nonexistent ref"，工作区不会 checkout（得到空目录）。旧 bundle 就缺 HEAD。
+#   git -C third_party/fff_project bundle create <输出路径> \
+#     HEAD 3fc/integrate-issue7 3fcompare/zoom-viewport-cover \
+#     3fcompare-kernel-2026.9.18.2 3fcompare-kernel-2026.9.18.1
 
 # ── 调试残留（历次实机自测/崩溃排查产生，勿入库；2026-09-15 第二轮审查补）──
 /_*.log
