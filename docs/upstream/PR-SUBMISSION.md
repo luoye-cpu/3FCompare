@@ -1,10 +1,11 @@
-# PR 提交文本（待最终审核）
+# PR 提交文本（已提交）
 
-分支：`upstream/pr-b-adapter` → 目标 `Lake1059/FFF_Project:main`
+**已提交**：<https://github.com/Lake1059/FFF_Project/pull/9>（#9，open）
+
+分支：`upstream/pr-b-adapter` → 目标 `Lake1059/FFF_Project:master`（上游默认分支是 `master`，不是 `main`）
 内容：2 个提交 / 11 文件 / +425 −18，基于 `ea3ce05`
 
-> 使用方式：审核通过后，复制下面「标题」与「正文」两节的内容，
-> 在 GitHub 上对 `luoye-cpu/FFF_Project` 的 `upstream/pr-b-adapter` 分支发起 PR 即可。
+> 以下内容即提交到 #9 的标题与正文原文，留档备查。
 > 正文从 `## 概要` 开始，到 `## English summary` 结束。
 
 ---
@@ -223,7 +224,7 @@ Two commits: one for `FFF.Native`, one for `FFF.Player`. **Breaking change — p
 
 ---
 
-## 提交前 checklist
+## 提交 checklist
 
 - [x] 分支已推到 fork：`luoye-cpu/FFF_Project` → `upstream/pr-b-adapter` = `7deabbd`
 - [x] 补丁可干净应用到 `ea3ce05`（`git am --3way` 2/2）
@@ -231,4 +232,10 @@ Two commits: one for `FFF.Native`, one for `FFF.Player`. **Breaking change — p
 - [x] 内核 API 级端到端：3 路真实 4K 素材 × 18 项断言 = 54/54
 - [x] 托管播放器端到端：`--startup-regression` 2/3 轮全绿（6 路 drop 全 0）
 - [x] 无品牌名 / 内部编号 / 本机实测数字残留
-- [ ] 您确认后 → 在 GitHub 发起 PR
+- [x] **已在 GitHub 发起 PR → #9**
+
+## 提交后跟进
+
+- 关注 maintainer 对 `SetViewTransform` 语义变更的意见（正文 §二.4 已标注）。
+- 若 maintainer 要求拆分合并，需提醒「先 `FFF.Player`，后 `FFF.Native`」。
+- 若需补充背景，可把验证程序（`.review_pr/test_pr_e2e_probe.cpp`）一并提上去。
