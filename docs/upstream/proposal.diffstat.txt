@@ -1,0 +1,12 @@
+ .gitignore                                         |   5 +
+ FFF.Native/3FP/Api/FFF.Player.Api.h                |  41 +++++
+ FFF.Native/3FP/Api/PlayerApi.cpp                   |  23 ++-
+ FFF.Native/3FP/Core/PlayerSession.cpp              |  68 +++++--
+ FFF.Native/3FP/Core/PlayerSession.h                |  12 ++
+ FFF.Native/3FP/Render/VideoRenderer.cpp            | 200 ++++++++++++++++++++-
+ FFF.Native/3FP/Render/VideoRenderer.h              |  40 +++++
+ FFF.Native/FFF.Native.rc                           |  37 ++++
+ FFF.Native/FFF.Native.vcxproj                      |   3 +
+ ...224\276\345\231\250\344\274\232\350\257\235.vb" |  11 +-
+ ...216\237\347\224\237\346\216\245\345\217\243.vb" |   3 +
+ 11 files changed, 425 insertions(+), 18 deletions(-)

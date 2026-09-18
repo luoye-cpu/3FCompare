@@ -3,6 +3,16 @@
 > **提交状态：✅ 已于 2026-09-15 提交为上游 issue #7**
 > <https://github.com/Lake1059/FFF_Project/issues/7>
 >
+> ---
+>
+> ⚠ **2026-09-17 追加：上游 PR #8（`ea3ce05` / `824093d`）已合并，但复测证明未解决。**
+> 修复后 12 次 `--multitest` 崩溃 6 次（50%），与修复前 23 次 12 崩（52%）无差异。
+> PR #8 只覆盖了本文建议的第 1、2 条（`PresentTimedText` ↔ `EnsureSwapChain`）；
+> **第 4 条 `RequestRecoveryIfDeviceLost()`（§3.4，500 ms 空闲轮询路径）与
+> 第 5 条 `ClearSurface()`（§3.5）未处理**，而"零交互静置播放也会崩"正由它们导致。
+> 完整复测与源码核对见 `docs/18-上游PR8合并与issue7复测.zh.md`。
+> 下文行号仍基于提交时的上游基线，作历史记录保留。
+>
 > 提交位置：<https://github.com/Lake1059/FFF_Project/issues/new>
 > 标题：`[3FP] 多路播放随机崩溃：PresentTimedText 的 Present 与 EnsureSwapChain 的锁不同，导致 DXGI 内部访问违例`
 > 语言：中文（上游为中文项目）。以下行号基于 `FFF.Native/3FP/Render/VideoRenderer.cpp`
