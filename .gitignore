@@ -96,3 +96,17 @@ _corrupt_pack_backup/
 /_newsha.txt
 /_pscheck.txt
 /crash_trace_*.log
+
+# ── 本地工作目录（验证/评审/转储的临时产物，勿入库；2026-09-18 追踪审查补）──
+# 这些目录累计约 3.6 GB（.review_pr 独占 2.1 GB），此前未忽略 ⇒ 每次 git status 都冒出来。
+/.3fc_dumps/
+/.3fc_verify_*
+/.review_pr/
+/.verify_halffix/
+/.verify_pr_e2e/
+/.verify_rpe/
+
+# ── 根目录杂项（外部资料 / 驱动日志目录，勿入库）──
+/_hdr.png
+/lunarlake_factsheet.pdf
+/NVIDIA Corporation/
