@@ -121,3 +121,6 @@ _corrupt_pack_backup/
 # 崩溃取证运行产物（工具本身入库，运行数据不入库）
 tools/crashscope/runs/
 tools/crashscope/scenes/
+
+# 清理隔离区（一次性验证工程与历史产物，可确认后删除）
+_quarantine_*/
