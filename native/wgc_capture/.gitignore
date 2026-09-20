@@ -1,0 +1,17 @@
+# 构建产物不入库（由 build.sh 重新生成）
+*.dll
+*.lib
+*.exp
+*.obj
+*.pdb
+*.exe
+*.ilk
+
+# 自测/调试时落盘的截图
+*.bmp
+*.png
+
+# 自测取证日志：--repeat 时每遍的完整输出写到 selftest_iter_<pid>.log，
+# 失败的那遍改名为 selftest_fail_<时间戳>_iter<N>.log 保留现场
+selftest_iter_*.log
+selftest_fail_*.log
