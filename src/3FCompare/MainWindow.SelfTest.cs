@@ -1474,7 +1474,12 @@ public partial class MainWindow : Window
         var snaps = _sync.ReadAllSnapshots();
         if (snaps.Count != routes) return;
         var masterPos = _sync.GetMasterPosition100ns();
-        const long Tolerance = 100_0000; // 100ms
+        // 250ms，不是 100ms。理由（2026-09-20 实测）：本项目既有的漂移实测值为 4K 双路静置 8s
+        // 偏差 138~195ms，也就是说 100ms 阈值**低于正常抖动本身**，会稳定产出假失败——
+        // 在当天的 A/B 复测里，8 次漂移失败有 7 次是 0.103~0.119s 的擦线，与被测变量无关，
+        // 却把"任何失败"口径的对照结果完全抹平（6/12 vs 6/12）。
+        // 250ms 仍远小于真正的严重失步（同批复测中出现的 6.21s 失步会被照常判红）。
+        const long Tolerance = 250_0000; // 250ms
         var checkedRoutes = 0;
         for (var i = 0; i < snaps.Count; i++)
         {
@@ -1485,10 +1490,10 @@ public partial class MainWindow : Window
             var drift = Math.Abs(snap.Position100ns - expect);
             if (drift > Tolerance)
                 throw new InvalidOperationException(
-                    $"第 {i} 路漂移 {TimeSpan.FromTicks(drift):g} > 100ms（pos={TimeSpan.FromTicks(snap.Position100ns):g} 期望 {TimeSpan.FromTicks(expect):g}）");
+                    $"第 {i} 路漂移 {TimeSpan.FromTicks(drift):g} > {Tolerance / 10_000}ms（pos={TimeSpan.FromTicks(snap.Position100ns):g} 期望 {TimeSpan.FromTicks(expect):g}）");
             checkedRoutes++;
         }
-        Console.WriteLine($"multitest[{phase}]: 漂移 OK（{checkedRoutes} 路 ≤100ms）✓");
+        Console.WriteLine($"multitest[{phase}]: 漂移 OK（{checkedRoutes} 路 ≤{Tolerance / 10_000}ms）✓");
     }
 
     /// <summary>把 ReadAllSnapshots 的引用数组转成值元组副本（避免缓存复用导致前后对比同对象）。</summary>
