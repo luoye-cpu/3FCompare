@@ -104,9 +104,19 @@ function Invoke-SubScript {
 
 # ---- 内核基线（改基线 = 改这里，必须同时是 PATCHES.md 里的归档 tag 指向的提交）----
 $KernelRepo        = "https://github.com/Lake1059/FFF_Project.git"
-$KernelBaselineTag = "3fcompare-kernel-2026.9.14.3"
-$KernelBaselineSha = "0fe33c4e3af06336e8cc65bf6dce7911dfde3333"
-# 上一基线（回滚点）：3fcompare-kernel-2026.9.14.2 / 68e196567e595e3cf639df830131fabc43685a77
+$KernelBaselineTag = "3fcompare-kernel-2026.9.18.2"
+$KernelBaselineSha = "0d5856edd0465d5b5613dd2447af02d536c0c934"
+# 2026-09-18 上游正式合并 PR #9（440e662 = a6c74b3 Native + 7deabbd Player），
+#   吸收了我方 5 项扩展：A11 preferredAdapterIndex、FFF3FP_ReadVideoPixelRegion、
+#   FFF3FP_GetRenderTargetInfo、SetViewTransform 直写原子路径、16F/HDR HALF 越界修复，
+#   以及 FFF.Native.rc / .gitignore 两个本地产物。PlayerApiVersion 仍为 15。
+#   本基线 = 上游 master 440e662 与我方扩展的合并提交 23bcb09 + PATCHES.md 更新 0d5856e。
+#   重移植负担 8 项 -> 4 项，详见 third_party/fff_project/PATCHES.md 类别四。
+# 上一基线（回滚点）：3fcompare-kernel-2026.9.18.1 / ba6d8759cf8edf58ecaea8eafd2baacdb6b4a061
+# 2026-09-17 上游正式合并 PR #8（= 我方 issue #7 的修复 824093d），本基线迁移到
+#   上游 master（ea3ce05）与我方扩展分支（68e1965）的合并提交 b6b96a6，
+#   外加一条 PATCHES.md 升级记录提交（3ac124a）。
+#   FFF.Native 源码与上一基线 0fe33c4 逐字节一致（差异仅 README），属基线溯源归正。
 # 2026-09-16 在 3fcompare/zoom-viewport-cover 上追加 issue #7 修复
 # （PresentTimedText 与交换链改写竞态，上游 824093d cherry-pick 为 0fe33c4）
 # 2026-09-15 升级至上游 2026.9.14（d8b2c038）。上游该区间只改了 2 个 vbproj（版本号 +
@@ -359,7 +369,7 @@ $kernelSha = Ensure-KernelBaseline
 Assert-KernelExtensions
 Invoke-KernelPatches -HeadSha $kernelSha
 
-Write-Host "=== [1/5] 准备 FFmpeg（若缺失） ==="
+Write-Host "=== [1/6] 准备 FFmpeg（若缺失） ==="
 $ffmpegMarker = Join-Path $ForkRoot "third_party\ffmpeg\include\libavcodec\avcodec.h"
 if (-not (Test-Path $ffmpegMarker)) {
     Push-Location $ForkRoot
@@ -376,7 +386,7 @@ if (-not (Test-Path $ffmpegMarker)) {
     Write-Host "  FFmpeg 已就绪，跳过"
 }
 
-Write-Host "=== [2/5] 准备 libass（若缺失） ==="
+Write-Host "=== [2/6] 准备 libass（若缺失） ==="
 $assMarker = Join-Path $ForkRoot "third_party\vcpkg_installed\x64-windows\include\ass\ass.h"
 if (-not (Test-Path $assMarker)) {
     Push-Location $ForkRoot
@@ -387,7 +397,7 @@ if (-not (Test-Path $assMarker)) {
     Write-Host "  libass 已就绪，跳过"
 }
 
-Write-Host "=== [3/5] 构建 FFF.Native ==="
+Write-Host "=== [3/6] 构建 FFF.Native ==="
 $msbuild = Get-MSBuildPath
 
 # ---- S5：把「实际部署的 DLL」与「内核 HEAD」绑定 ----
@@ -428,7 +438,7 @@ try {
     Set-Content -Path $stampPath -Value "$kernelSha`n$(Get-FileSha256 $kernelDll)" -Encoding ASCII
 } finally { Pop-Location }
 
-Write-Host "=== [4/5] 部署 DLL 到应用与冒烟目录 ==="
+Write-Host "=== [4/6] 部署 DLL 到应用与冒烟目录 ==="
 function Deploy-To($targetDir) {
     $src = Join-Path $ForkRoot "FFF.Native\x64\$Configuration\FFF.Native.dll"
     if (-not (Test-Path $src)) { throw "未找到构建产物: $src" }
@@ -469,7 +479,28 @@ Deploy-To $smokeBin
 # P0-2 修复：主程序构建原先被塞在 `if (-not $SkipTests)` 里，
 # 结果 -SkipTests 会把 3FCompare.exe 本身一起跳过，脚本末尾却照样打印"✔ 全部完成"
 # ——典型的假成功。主程序是产物本体，永远不能被"跳过测试"连带跳过。
-Write-Host "=== [5/5] 构建 .NET 解决方案 ==="
+# ---------------------------------------------------------------------------
+# S3：WGC 原生抓屏库（3FC.WgcCapture.dll）
+#   托管侧把它作为 EmbeddedResource 嵌进 exe，因此**必须在构建 .NET 之前**确保它是最新的：
+#   原先本脚本不含 wgc 构建，csproj 的 CheckWgcCaptureDll 又只查 Exists 不查新旧，
+#   改了 native/wgc_capture/*.cpp 忘跑 build.sh 就会静默嵌入旧 DLL
+#   （构建全绿、原生行为却与源码对不上）。csproj 侧已补时间戳校验做兜底。
+#   这里只构建（--no-run）：自测是独立环节，不塞进构建链路。
+# ---------------------------------------------------------------------------
+Write-Host "=== [5/6] 构建 WGC 原生抓屏库（3FC.WgcCapture.dll） ==="
+$wgcScript = Join-Path $ProjectRoot "native\wgc_capture\build.sh"
+if (-not (Test-Path $wgcScript)) { throw "找不到 WGC 构建脚本：$wgcScript" }
+# 必须用 Git 自带的 bash：WSL 的 bash 跑不了这个脚本（路径/环境都不对）。
+$gitRoot = Split-Path (Split-Path $Git -Parent) -Parent
+$gitBash = Join-Path $gitRoot "bin\bash.exe"
+$Bash = Resolve-Tool "bash" @($gitBash, "$env:ProgramFiles\Git\bin\bash.exe", "C:\Program Files\Git\bin\bash.exe")
+& $Bash ($wgcScript -replace '\\', '/') --no-run
+if ($LASTEXITCODE -ne 0) { throw "3FC.WgcCapture.dll 构建失败（退出码 $LASTEXITCODE）" }
+$wgcDll = Join-Path $ProjectRoot "native\wgc_capture\3FC.WgcCapture.dll"
+if (-not (Test-Path $wgcDll)) { throw "构建后未找到产物：$wgcDll" }
+Write-Host "  已构建 -> $wgcDll"
+
+Write-Host "=== [6/6] 构建 .NET 解决方案 ==="
 Push-Location $ProjectRoot
 try {
     # KernelConfiguration 必须随 -Configuration 透传：

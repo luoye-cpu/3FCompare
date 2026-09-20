@@ -262,6 +262,127 @@ public class SyncControllerIntegrationTests
         finally { sync.Clear(); }
     }
 
+    // ══════════ 漂移校正（docs/15 §3.3 / 交接 §2.4）补充覆盖 ══════════
+    // 真实多路长片调参被上游崩溃（issue #7）阻塞，这里用 SimulatedEngine 3 路
+    // 先把**可确定性验证**的语义面钉死：节流、阈值下界、只动 follower、尊重偏移、
+    // 以及"1s 冷却 + 半帧阈值"这组参数能否每次都收敛。
+
+    private static long Pos(SyncController sync, int index)
+        => sync.Slots.ElementAt(index).Session.ReadSnapshot()!.Position100ns;
+
+    /// <summary>1s 冷却：冷却期内的重复调用必须被忽略。
+    /// 否则 4Hz 轮询下每秒 4 次 av_seek_frame，多路就是周期性 CPU 尖峰。</summary>
+    [Fact]
+    public void TickDrift_冷却期内不重复校正()
+    {
+        var (sync, _) = CreateSync(3);
+        try
+        {
+            sync.Play();
+            sync.SeekTo(2 * TimeSpan.TicksPerSecond);
+
+            // 第一次：推走 500ms，应被拉回
+            sync.Slots.ElementAt(1).Session.Seek(Pos(sync, 0) + 500 * TimeSpan.TicksPerMillisecond);
+            sync.TickDrift();
+            Assert.True(Math.Abs(Pos(sync, 1) - Pos(sync, 0)) < 60 * TimeSpan.TicksPerMillisecond,
+                "首次漂移未被校正");
+
+            // 冷却期内再次推走：不应被拉回
+            sync.Slots.ElementAt(1).Session.Seek(Pos(sync, 0) + 500 * TimeSpan.TicksPerMillisecond);
+            sync.TickDrift();
+            var d = Math.Abs(Pos(sync, 1) - Pos(sync, 0));
+            Assert.True(d > 400 * TimeSpan.TicksPerMillisecond, $"1s 冷却被绕过：Δ={d}");
+        }
+        finally { sync.Clear(); }
+    }
+
+    /// <summary>半帧阈值下界：小于半帧的偏差不校正。
+    /// SimulatedEngine 默认 24fps ⇒ 半帧 = 1/(2×24)s ≈ 20.83ms。</summary>
+    [Fact]
+    public void TickDrift_偏差小于半帧_不校正()
+    {
+        var (sync, _) = CreateSync(3);
+        try
+        {
+            sync.Play();
+            sync.SeekTo(2 * TimeSpan.TicksPerSecond);
+            // 10ms < 20.83ms
+            sync.Slots.ElementAt(1).Session.Seek(Pos(sync, 0) + 10 * TimeSpan.TicksPerMillisecond);
+            sync.TickDrift();
+            var d = Math.Abs(Pos(sync, 1) - Pos(sync, 0));
+            Assert.True(d > 5 * TimeSpan.TicksPerMillisecond,
+                $"半帧内的正常抖动被误校正（每 1s 一次无谓 Seek）：Δ={d}");
+        }
+        finally { sync.Clear(); }
+    }
+
+    /// <summary>只动 follower：master 是基准轴，漂移校正绝不能改动它
+    /// （给它校正 ⇒ 与 SeekTo 语义矛盾、每次微调会累积，docs/15 §3.1）。</summary>
+    [Fact]
+    public void TickDrift_不改动Master()
+    {
+        var (sync, _) = CreateSync(3);
+        try
+        {
+            sync.Play();
+            sync.SeekTo(2 * TimeSpan.TicksPerSecond);
+            // 让 master 自己相对其它路漂出去 800ms
+            sync.Slots.ElementAt(0).Session.Seek(
+                2 * TimeSpan.TicksPerSecond + 800 * TimeSpan.TicksPerMillisecond);
+            var before = Pos(sync, 0);
+            sync.TickDrift();
+            var after = Pos(sync, 0);
+            // 只允许真实时间推进，绝不允许被"拉回"
+            Assert.True(after >= before, "master 被回退了：基准路不允许被校正");
+            Assert.True(after - before < 100 * TimeSpan.TicksPerMillisecond,
+                $"master 位置被异常改动 Δ={after - before}");
+        }
+        finally { sync.Clear(); }
+    }
+
+    /// <summary>期望值 = master + offset：有偏移的从路不该被当成漂移拉平。</summary>
+    [Fact]
+    public void TickDrift_尊重各路偏移()
+    {
+        var (sync, _) = CreateSync(3);
+        try
+        {
+            sync.Play();
+            sync.Slots.ElementAt(1).Offset100ns = 500 * TimeSpan.TicksPerMillisecond;
+            sync.SeekTo(2 * TimeSpan.TicksPerSecond);   // 路1 落在 2.5s
+            sync.TickDrift();
+            var d = Pos(sync, 1) - Pos(sync, 0) - 500 * TimeSpan.TicksPerMillisecond;
+            Assert.True(Math.Abs(d) < 60 * TimeSpan.TicksPerMillisecond,
+                $"偏移被漂移校正抹掉：残差={d}");
+        }
+        finally { sync.Clear(); }
+    }
+
+    /// <summary>交接 §2.4 参数实测的可确定性替代：跨过 1s 冷却反复注入漂移，
+    /// 每次都必须收敛到半帧内。这里验证的是"1s + 半帧"这组参数**确实能收敛**，
+    /// 至于真实长片下的漂移速率是否会超过校正能力，仍需实机（被上游崩溃阻塞）。</summary>
+    [Fact]
+    public void TickDrift_反复漂移_每次都收敛到半帧内()
+    {
+        var (sync, _) = CreateSync(3);
+        try
+        {
+            sync.Play();
+            sync.SeekTo(2 * TimeSpan.TicksPerSecond);
+            for (var round = 0; round < 3; round++)
+            {
+                sync.Slots.ElementAt(1).Session.Seek(
+                    Pos(sync, 0) + (round + 1) * 300 * TimeSpan.TicksPerMillisecond);
+                sync.TickDrift();
+                var d = Math.Abs(Pos(sync, 1) - Pos(sync, 0));
+                Assert.True(d < 60 * TimeSpan.TicksPerMillisecond,
+                    $"第 {round} 轮未收敛：Δ={d}");
+                if (round < 2) System.Threading.Thread.Sleep(1050); // 跨过 1s 冷却
+            }
+        }
+        finally { sync.Clear(); }
+    }
+
     /// <summary>Clear 后再开循环应能正常工作（复位没有把状态机搞坏）。</summary>
     [Fact]
     public void Clear_之后仍可重新启用循环()

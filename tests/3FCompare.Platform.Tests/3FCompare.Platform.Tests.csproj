@@ -1,0 +1,39 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- 必须与被测工程（src/3FCompare）同 TFM：本工程测的是 UI 层的 Platform 辅助类。
+         这里的用例只覆盖纯逻辑（入参校验 / 矩形归一化），不实际调用 Win32。 -->
+    <TargetFramework>net11.0-windows</TargetFramework>
+    <RootNamespace>_3FCompare.Platform.Tests</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <!-- WgcFrameCapture.CopyToBitmap 用指针直接比对原生缓冲 → 托管位图的行序/stride，
+         测试需要以 unsafe 构造合成缓冲（纯托管内存，不加载原生库）。 -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="10.0.1">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="4.0.0">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 本工程是 tests/ 下唯一引用 UI 工程的测试：WindowRegionClipper 属 UI/平台层，
+         按设计不放进 Core（Core 为 net11.0，无 Windows TFM）。 -->
+    <ProjectReference Include="..\..\src\3FCompare\3FCompare.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -25,12 +25,27 @@
 新机器裸克隆无法复现基线，此时脚本会**报错中止**，绝不会静默退回上游默认分支
 （旧版本正是这么做的，会拿没有 3FCompare 扩展的内核构建出"成功"的假象）。
 
-修复可复现性：
+修复可复现性（按优先级取用）：
 
-```bash
-git -C third_party/fff_project push origin 3fcompare/zoom-viewport-cover
-git -C third_party/fff_project push origin 3fcompare-kernel-2026.9.11.1
-```
+1. **首选 —— 随仓库携带的基线归档**（无需网络、无需远端权限）：
+
+   ```bash
+   git clone .3fc_kernel_baseline.bundle third_party/fff_project
+   ```
+
+2. 云端归档分支（需网络，但**不需要上游写权限**）：
+
+   ```bash
+   git clone --branch kernel/3fcompare-zoom-viewport-cover \
+     https://github.com/luoye-cpu/3FCompare.git third_party/fff_project
+   ```
+
+3. ⚠ **不要再尝试 push 到上游** `Lake1059/FFF_Project`：本机账号对它**只有读权限**
+   （admin=false, push=false），推不上去。上面"该分支只存在于本机"的说法已随
+   bundle 入仓失效。
+
+**当前基线**：`3fcompare-kernel-2026.9.14.1` / `025198f36f5735248b087a050afbe88b3801382a`
+（上一基线 `3fcompare-kernel-2026.9.11.1` / `6bc8d61c…` 为回滚点）。
 
 升级内核是**人工重移植**流程，见 `third_party/fff_project/PATCHES.md`。
 
@@ -44,6 +59,11 @@ git -C third_party/fff_project push origin 3fcompare-kernel-2026.9.11.1
 > 说明：本仓库不包含第三方二进制；FFmpeg DLL 取自 `third_party/fff_project/runtime/`（BtbN 构建），libass 由 vcpkg 准备。
 > 单元测试与 E3 冒烟分别通过 `dotnet test tests/3FCompare.Core.Tests` 与 `dotnet run --project tests/3FCompare.SmokeTests` 执行。
 
-> ⚠️ 本机 `dotnet restore` 全域失败（`Value cannot be null. (Parameter 'path1')`）。
+> ~~⚠️ 本机 `dotnet restore` 全域失败（`Value cannot be null. (Parameter 'path1')`）。
 > 根因是沙箱里 `APPDATA` 为空。所有 build/test 必须前置环境变量：
-> `APPDATA="C:\Users\<用户>\AppData\Roaming" dotnet build ... --no-restore`
+> `APPDATA="C:\Users\<用户>\AppData\Roaming" dotnet build ... --no-restore`~~
+>
+> **2026-09-16 更新**：本机 `dotnet restore` **已能成功**（`APPDATA` 已有值），
+> 上面这条约定**已失效**，不再需要 `--no-restore`。
+> 仅当换环境后再次出现 `path1` 报错时才照此处理，且**不必重复穷举根因**
+> （见 `HANDOFF-v0.2.5` §3.2）。

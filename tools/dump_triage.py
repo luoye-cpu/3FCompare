@@ -250,6 +250,14 @@ def report(path):
     print("=" * 78)
     print("转储: %s" % os.path.basename(path))
     print("大小: %.1f MB   模块数: %d" % (len(d.data) / 1048576.0, len(mods)))
+    if not exc and FORCED_EXC:
+        # 本机的 MiniDumpWriteDump 在本进程（调试器）地址空间提供异常信息时会
+        # ERROR_INVALID_PARAMETER，只能退化为不带 ExceptionStream 的转储。
+        # 但崩溃现场由 dump_capture.py 直接打印（异常码 + 地址 + 模块归属），
+        # 用 --crash <tid>:<addr> 把它喂回来即可继续做栈扫描。
+        exc = dict(code=FORCED_EXC[1], addr=FORCED_EXC[0], tid=FORCED_EXC[2],
+                   info=[], ctx=None)
+        print("  无异常流 → 采用 --crash 指定的现场（TID=%d）" % exc["tid"])
     if not exc:
         print("  无异常流（该转储可能不是崩溃转储）")
         return
@@ -364,14 +372,26 @@ def exc_name(code):
 
 
 DO_CENSUS = False
+FORCED_EXC = None       # (addr, code, tid)
 
 
 def main():
-    global DO_CENSUS
+    global DO_CENSUS, FORCED_EXC
     args = sys.argv[1:]
     if "--threads" in args:
         DO_CENSUS = True
         args = [a for a in args if a != "--threads"]
+    if "--crash" in args:
+        i = args.index("--crash")
+        spec = args[i + 1]
+        # 允许 <addr>:<codeHex>:<tid> 或 <addr>:<tid>（后者默认 0xC0000005）
+        parts = spec.split(":")
+        addr = int(parts[0], 16)
+        if len(parts) >= 3:
+            FORCED_EXC = (addr, int(parts[1], 16), int(parts[2]))
+        else:
+            FORCED_EXC = (addr, 0xC0000005, int(parts[1]))
+        args = args[:i] + args[i + 2:]
     if not args:
         print(__doc__)
         return 2

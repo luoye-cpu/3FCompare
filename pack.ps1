@@ -168,9 +168,11 @@ function Invoke-Pack([string]$mode) {
     # 清理调试符号（.pdb 对用户无意义）/ Remove debug symbols (.pdb)
     # ⚠ 必须 -Recurse：原先只匹配顶层 "$OutputDir\*.pdb"，子目录里的 pdb 会随包分发
     # （docs/14 §P2-10）。
-    $pdbFiles = Get-ChildItem $OutputDir -Filter *.pdb -Recurse -File -ErrorAction SilentlyContinue
-    if ($pdbFiles) {
-        $pdbFiles | Remove-Item -Force
+    $pdbFiles = @(Get-ChildItem $OutputDir -Filter *.pdb -Recurse -File -ErrorAction SilentlyContinue)
+    if ($pdbFiles.Count -gt 0) {
+        # ⚠ 不能写 `$pdbFiles | Remove-Item`：当结果为单个 FileInfo 时管道绑定会失败
+        # （"输入对象无法绑定到该命令的任何参数"），导致打包中断。显式循环更可靠。
+        foreach ($f in $pdbFiles) { Remove-Item -LiteralPath $f.FullName -Force }
         $savedMB = [math]::Round(($pdbFiles | Measure-Object Length -Sum).Sum / 1MB, 1)
         Write-Host "   ✅ 已删除调试符号（递归），共 $($pdbFiles.Count) 个，节省 ${savedMB}MB / Debug symbols removed, saved ${savedMB}MB" -ForegroundColor Green
     }

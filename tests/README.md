@@ -4,7 +4,7 @@
 
 | 工程 | 类型 | 用途 |
 |---|---|---|
-| `3FCompare.Core.Tests` | 单元测试（xunit，53 例全通过） | FrameTimeline 帧/秒步进换算、SyncController 多会话同步、GridLayout 网格布局、ToneMapping 色调映射参数、设置/会话 JSON 序列化 |
+| `3FCompare.Core.Tests` | 单元测试（xunit，**175 例全通过**） | FrameTimeline 帧/秒步进换算、SyncController 多会话同步（含漂移校正）、GridLayout 网格布局、ToneMapping 色调映射参数、设置/会话 JSON 序列化、**PixelReadback 片源↔后台缓冲坐标域换算**、**RenderStallWatchdog 呈现停滞判定** |
 | `3FCompare.SmokeTests` | 控制台冒烟 | E3 可达性冒烟：演示引擎全流程（打开 → 步进 → 循环 → 一致性） |
 
 ## 运行
