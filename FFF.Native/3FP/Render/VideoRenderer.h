@@ -46,6 +46,11 @@ struct IDWriteFactory;
 struct IDWriteTextLayout;
 struct IDWriteRenderingParams;
 
+// Process-wide single presenter. See the definition in VideoRenderer.cpp: the
+// overlay hooks shipped with RTSS / Afterburner assume a one-pipeline process,
+// so the whole process keeps exactly one thread inside IDXGISwapChain::Present.
+class PresentationPump;
+
 struct TimedTextRenderCommand {
     FFF3FPTimedTextCommandType type = FFF3FPTimedTextCommandType::Text;
     FFF3FPTimedTextFlags flags = FFF3FPTimedTextFlags::None;
@@ -298,8 +303,17 @@ private:
     FFFResult PresentCurrentFrame(IDXGISwapChain4* swapChain,
         std::uint64_t renderedVideoGeneration) noexcept;
     FFFResult DrawTimedText(TimedTextLayerSlot slot) noexcept;
-    void TimedTextThread() noexcept;
-    void StopTimedTextThread() noexcept;
+    friend class PresentationPump;
+    // Presenter pump membership (see PresentationPump in VideoRenderer.cpp).
+    // The renderer keeps its per-instance pacing state here; the pump thread
+    // drives it and is the only thread that ever reaches PresentCurrentFrame.
+    void StartPresentationPumpMembership() noexcept;
+    void StopPresentationPumpMembership() noexcept;
+    // One pump round for this renderer. Returns the earliest time this renderer
+    // wants to be pumped again. Called by the pump thread only.
+    std::chrono::steady_clock::time_point PumpPresentationOnce() noexcept;
+    // Composition + Present for one frame. Must only run on the pump thread.
+    FFFResult PresentTimedTextOnPump() noexcept;
     void CompositeTimedText(ID3D11RenderTargetView* target, TimedTextLayerSlot slot) noexcept;
     void ReleaseTimedTextSlotResources(TimedTextLayerSlot slot) noexcept;
     void ReleaseTimedTextResources(bool resetRenderedState = true) noexcept;
@@ -435,12 +449,25 @@ private:
     mutable std::mutex presentMutex_;
     mutable std::mutex timedTextMutex_;
     mutable std::mutex coverBackdropThreadMutex_;
-    std::condition_variable timedTextCondition_;
     std::condition_variable coverBackdropCondition_;
-    std::thread timedTextThread_;
     std::thread coverBackdropThread_;
     bool timedTextThreadStop_;
     bool timedTextThreadRunning_;
+    // Presenter pump membership. The pump thread drives PumpPresentationOnce
+    // for every registered renderer, so the loop state that used to live on the
+    // per-instance thread stack lives here instead.
+    std::atomic<bool> pumpRegistered_;
+    std::atomic<std::thread::id> pumpThreadId_;
+    std::uint64_t pumpObservedPresentationGeneration_;
+    std::uint64_t pumpObservedVideoGeneration_;
+    std::chrono::steady_clock::time_point pumpNextPresentation_;
+    std::chrono::steady_clock::time_point pumpNextDevicePoll_;
+    // First/last-frame presents issued by the session thread are handed to the
+    // pump and awaited here so that Present never runs off the pump thread.
+    bool pumpHandoffPending_;
+    bool pumpHandoffDone_;
+    FFFResult pumpHandoffResult_;
+    std::condition_variable pumpHandoffCondition_;
     bool coverBackdropThreadStop_;
     bool coverBackdropRequestPending_;
     std::uint64_t coverBackdropRequestGeneration_;

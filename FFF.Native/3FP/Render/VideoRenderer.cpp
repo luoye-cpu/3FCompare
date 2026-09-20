@@ -1703,6 +1703,135 @@ FFFResult MeasureTimedTextWidth(const char* textUtf8, const char* fontFamilyUtf8
     }
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// Process-wide presenter.
+//
+// Every PlayerVideoRenderer used to own a TimedTextThread that called
+// IDXGISwapChain::Present on its own swap chain. The overlay hooks installed by
+// RTSS / MSI Afterburner are written for a single-pipeline application: the
+// measured crash rate scales with the number of presenter pipelines alive at
+// once, not with the decoded load and not with the number of D3D11 devices or
+// swap chains (docs/33, docs/35, .review_pr/device_vs_thread). Serialising
+// Present behind a lock did not help, so the pipelines themselves are the
+// variable.
+//
+// This class keeps exactly one thread in the process inside Present. Renderers
+// register here instead of spawning a presenter thread; the pump walks the
+// registry and lets each renderer pace itself through PumpPresentationOnce().
+// A renderer whose owner thread needs a synchronous present (the session's
+// first/last-frame boundary) publishes a handoff flag and waits for the pump
+// instead of presenting from its own thread.
+//
+// Lock order: timedTextMutex_ may be held while entering Register/Unregister;
+// the pump never takes its own mutex_ while it is inside a renderer, so the
+// two can never form a cycle.
+// ══════════════════════════════════════════════════════════════════════════
+class PresentationPump {
+public:
+    static PresentationPump& Instance() noexcept {
+        static PresentationPump pump;
+        return pump;
+    }
+
+    void Register(PlayerVideoRenderer* renderer) noexcept {
+        std::lock_guard lock(mutex_);
+        if (std::find(members_.begin(), members_.end(), renderer) == members_.end())
+            members_.push_back(renderer);
+        if (!thread_.joinable())
+            thread_ = std::thread(&PresentationPump::Run, this, ++generation_);
+        wake_.notify_all();
+    }
+
+    void Unregister(PlayerVideoRenderer* renderer) noexcept {
+        std::unique_lock lock(mutex_);
+        members_.erase(std::remove(members_.begin(), members_.end(), renderer),
+            members_.end());
+        // Wait out the round in flight. The pump never takes mutex_ while it is
+        // inside a renderer, so this cannot deadlock against it; the wait is
+        // bounded by one Present of each remaining renderer.
+        idle_.wait(lock, [this] { return inFlight_ == 0; });
+        if (!members_.empty() || !thread_.joinable()) return;
+        // Bumping the generation retires the current pump thread for good: even
+        // if a registration races with the join below, the retired thread stops
+        // pumping instead of running side by side with its replacement.
+        ++generation_;
+        auto retiring = std::move(thread_);
+        lock.unlock();
+        wake_.notify_all();
+        if (retiring.joinable()) retiring.join();
+    }
+
+    void Wake() noexcept {
+        std::lock_guard lock(mutex_);
+        // A wake that lands while the pump is inside a batch would otherwise be
+        // lost (nobody is waiting on the condition variable at that moment), so
+        // latch it and let the pump start another round immediately.
+        if (!members_.empty()) wakePending_ = true;
+        wake_.notify_all();
+    }
+
+private:
+    PresentationPump() = default;
+    PresentationPump(const PresentationPump&) = delete;
+    PresentationPump& operator=(const PresentationPump&) = delete;
+    ~PresentationPump() {
+        std::thread retiring;
+        {
+            std::lock_guard lock(mutex_);
+            ++generation_;
+            retiring = std::move(thread_);
+        }
+        wake_.notify_all();
+        if (retiring.joinable()) retiring.join();
+    }
+
+    void Run(const unsigned long long generation) noexcept {
+        for (;;) {
+            std::vector<PlayerVideoRenderer*> batch;
+            {
+                std::unique_lock lock(mutex_);
+                if (generation_ != generation) return;
+                while (members_.empty() && !wakePending_) {
+                    wake_.wait(lock, [this, generation] {
+                        return generation_ != generation || !members_.empty() ||
+                            wakePending_;
+                    });
+                    if (generation_ != generation) return;
+                }
+                wakePending_ = false;
+                batch = members_;
+                inFlight_ = static_cast<int>(batch.size());
+            }
+            auto next = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+            for (auto* renderer : batch) {
+                const auto due = renderer->PumpPresentationOnce();
+                if (due < next) next = due;
+            }
+            {
+                std::lock_guard lock(mutex_);
+                inFlight_ = 0;
+            }
+            idle_.notify_all();
+            std::unique_lock lock(mutex_);
+            if (generation_ != generation) return;
+            if (wakePending_) continue;
+            const auto now = std::chrono::steady_clock::now();
+            if (next <= now) continue;
+            wake_.wait_until(lock, next);
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable wake_;
+    std::condition_variable idle_;
+    std::vector<PlayerVideoRenderer*> members_;
+    std::thread thread_;
+    // Read without mutex_ on the pump's fast path, written under mutex_.
+    std::atomic<unsigned long long> generation_{0};
+    int inFlight_ = 0;
+    bool wakePending_ = false;
+};
+
 PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback) noexcept
     : window_(nullptr), device_(nullptr), context_(nullptr), swapChain_(nullptr),
       vertexShader_(nullptr), pixelShader_(nullptr), coverBackdropPixelShader_(nullptr),
@@ -1761,6 +1890,12 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
       view360PitchBits_(std::bit_cast<float>(0.0f)),
       view360FovYBits_(std::bit_cast<float>(90.0f)),
       timedTextThreadStop_(false), timedTextThreadRunning_(false),
+      pumpRegistered_(false), pumpThreadId_(std::thread::id{}),
+      pumpObservedPresentationGeneration_(0), pumpObservedVideoGeneration_(0),
+      pumpNextPresentation_(std::chrono::steady_clock::time_point::min()),
+      pumpNextDevicePoll_(std::chrono::steady_clock::now()),
+      pumpHandoffPending_(false), pumpHandoffDone_(false),
+      pumpHandoffResult_(FFFResult::Success),
       coverBackdropThreadStop_(false), coverBackdropRequestPending_(false),
       coverBackdropRequestGeneration_(0),
       presentationGeneration_(0), presentationFrameRate_(60.0f),
@@ -1809,7 +1944,7 @@ FFFResult PlayerVideoRenderer::SetWindow(const HWND window) noexcept {
             presentationFrameRate_ = DetectDisplayRefreshRate(window_);
             ++presentationGeneration_;
         }
-        timedTextCondition_.notify_one();
+        PresentationPump::Instance().Wake();
         return FFFResult::Success;
     }
     if (swapChain_ != nullptr) {
@@ -3015,18 +3150,12 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
                         std::clamp(item->targetFrameRate, 1.0f, 240.0f));
                 }
             }
-            if (hasVisibleLayer) {
-                timedTextThreadRunning_ = true;
-                if (!timedTextThread_.joinable()) {
-                    timedTextThreadStop_ = false;
-                    timedTextThread_ = std::thread(&PlayerVideoRenderer::TimedTextThread, this);
-                }
-            }
+            if (hasVisibleLayer) StartPresentationPumpMembership();
             ++presentationGeneration_;
         }
         // Submission is intentionally publish-and-wake only. The UI timer must
         // never wait for 4K conversion, the D3D immediate-context lock or DXGI.
-        timedTextCondition_.notify_one();
+        PresentationPump::Instance().Wake();
         return FFFResult::Success;
     } catch (...) {
         SetError("Could not retain the timed-text command layer.");
@@ -3034,81 +3163,99 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
     }
 }
 
-void PlayerVideoRenderer::TimedTextThread() noexcept {
-    std::uint64_t observedPresentationGeneration = 0;
-    std::uint64_t observedVideoGeneration = 0;
-    auto nextPresentation = std::chrono::steady_clock::time_point::min();
-    for (;;) {
-        float frameRate = 60.0f;
-        bool videoChanged = false;
-        bool devicePollOnly = false;
-        {
-            std::unique_lock lock(timedTextMutex_);
-            const auto signaled = timedTextCondition_.wait_for(lock,
-                std::chrono::milliseconds(500), [this, &observedPresentationGeneration,
-                    &observedVideoGeneration] {
-                return timedTextThreadStop_ ||
-                    presentationGeneration_ != observedPresentationGeneration ||
-                    (timedTextThreadRunning_ &&
-                        videoGeneration_.load() != observedVideoGeneration);
-            });
-            if (timedTextThreadStop_) return;
-            if (!signaled) {
-                devicePollOnly = true;
-            }
-            if (!timedTextThreadRunning_) {
-                observedPresentationGeneration = presentationGeneration_;
-                observedVideoGeneration = videoGeneration_.load();
-                continue;
-            }
-            if (!devicePollOnly) {
-                videoChanged = videoGeneration_.load() != observedVideoGeneration;
-                const auto cameraLive = projection360Enabled_.load(std::memory_order_acquire) != 0;
-                // A new decoded frame is never held behind the overlay cadence. Static
-                // subtitle/danmaku updates are still coalesced to their requested rate.
-                // A live 360 camera follows the same rule as decoded video: submit
-                // the newest view immediately and let the swap-chain frame-latency
-                // contract pace it to the physical display (including 120 Hz).
-                if (const auto now = std::chrono::steady_clock::now();
-                    !videoChanged && !cameraLive &&
-                    nextPresentation != std::chrono::steady_clock::time_point::min() &&
-                    now < nextPresentation) {
-                    timedTextCondition_.wait_until(lock, nextPresentation,
-                        [this, &observedVideoGeneration] {
-                            return timedTextThreadStop_ ||
-                                videoGeneration_.load() != observedVideoGeneration;
-                        });
-                    if (timedTextThreadStop_) return;
-                }
-                observedPresentationGeneration = presentationGeneration_;
-                observedVideoGeneration = videoGeneration_.load();
-                frameRate = presentationFrameRate_;
-            }
-        }
-        if (devicePollOnly) {
-            RequestRecoveryIfDeviceLost();
-            continue;
-        }
-        const auto presentationStart = std::chrono::steady_clock::now();
-        const auto result = PresentTimedText();
-        if (result != FFFResult::Success) {
-            if (result == FFFResult::DeviceFailure && RequestRecoveryIfDeviceLost()) continue;
-            SetError("The independent timed-text presenter could not compose the latest layer.");
-        }
-        nextPresentation = presentationStart + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-            std::chrono::duration<double>(1.0 / std::clamp(static_cast<double>(frameRate), 1.0, 240.0)));
-    }
+void PlayerVideoRenderer::StartPresentationPumpMembership() noexcept {
+    // Precondition: the caller holds timedTextMutex_. Registering here (rather
+    // than spawning a thread) is what collapses N presenter pipelines into the
+    // one process-wide pump.
+    timedTextThreadStop_ = false;
+    timedTextThreadRunning_ = true;
+    if (pumpRegistered_.load(std::memory_order_acquire)) return;
+    pumpRegistered_.store(true, std::memory_order_release);
+    pumpNextPresentation_ = std::chrono::steady_clock::time_point::min();
+    pumpNextDevicePoll_ = std::chrono::steady_clock::now();
+    PresentationPump::Instance().Register(this);
 }
 
-void PlayerVideoRenderer::StopTimedTextThread() noexcept {
+void PlayerVideoRenderer::StopPresentationPumpMembership() noexcept {
     {
         std::lock_guard lock(timedTextMutex_);
         timedTextThreadStop_ = true;
+        pumpHandoffPending_ = false;
+        pumpHandoffDone_ = true;
     }
-    timedTextCondition_.notify_all();
-    if (timedTextThread_.joinable()) timedTextThread_.join();
+    pumpHandoffCondition_.notify_all();
+    // Unregister waits for the round in flight, so after this returns the pump
+    // is guaranteed not to touch this renderer again. Never call it with
+    // deviceMutex_ held: the pump takes that lock to present.
+    if (pumpRegistered_.exchange(false, std::memory_order_acq_rel))
+        PresentationPump::Instance().Unregister(this);
     std::lock_guard lock(timedTextMutex_);
     timedTextThreadRunning_ = false;
+}
+
+std::chrono::steady_clock::time_point PlayerVideoRenderer::PumpPresentationOnce() noexcept {
+    pumpThreadId_.store(std::this_thread::get_id(), std::memory_order_release);
+    bool present = false;
+    bool handoff = false;
+    bool devicePoll = false;
+    float frameRate = 60.0f;
+    std::chrono::steady_clock::time_point presentationStart;
+    {
+        std::lock_guard lock(timedTextMutex_);
+        const auto now = std::chrono::steady_clock::now();
+        if (timedTextThreadStop_) return now + std::chrono::milliseconds(500);
+        if (now >= pumpNextDevicePoll_) {
+            devicePoll = true;
+            pumpNextDevicePoll_ = now + std::chrono::milliseconds(500);
+        }
+        handoff = pumpHandoffPending_;
+        if (handoff) pumpHandoffPending_ = false;
+        if (handoff) {
+            // A first/last-frame boundary asked for this frame explicitly.
+            present = true;
+        } else if (timedTextThreadRunning_) {
+            const auto presentationChanged =
+                presentationGeneration_ != pumpObservedPresentationGeneration_;
+            const auto videoChanged = videoGeneration_.load() != pumpObservedVideoGeneration_;
+            const auto cameraLive = projection360Enabled_.load(std::memory_order_acquire) != 0;
+            // A new decoded frame is never held behind the overlay cadence. Static
+            // subtitle/danmaku updates are still coalesced to their requested rate.
+            // A live 360 camera follows the same rule as decoded video: submit
+            // the newest view immediately and let the swap-chain frame-latency
+            // contract pace it to the physical display (including 120 Hz).
+            present = presentationChanged || videoChanged || cameraLive ||
+                now >= pumpNextPresentation_;
+        }
+        if (!present) {
+            const auto next = std::min(pumpNextPresentation_, pumpNextDevicePoll_);
+            return next > now ? next : now + std::chrono::milliseconds(1);
+        }
+        pumpObservedPresentationGeneration_ = presentationGeneration_;
+        pumpObservedVideoGeneration_ = videoGeneration_.load();
+        frameRate = presentationFrameRate_;
+        presentationStart = now;
+    }
+    if (devicePoll) RequestRecoveryIfDeviceLost();
+    const auto result = PresentTimedTextOnPump();
+    if (result != FFFResult::Success) {
+        if (result != FFFResult::DeviceFailure || !RequestRecoveryIfDeviceLost())
+            SetError("The process presenter could not compose the latest layer.");
+    }
+    std::chrono::steady_clock::time_point next;
+    {
+        std::lock_guard lock(timedTextMutex_);
+        pumpNextPresentation_ = presentationStart +
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(
+                    1.0 / std::clamp(static_cast<double>(frameRate), 1.0, 240.0)));
+        if (handoff) {
+            pumpHandoffResult_ = result;
+            pumpHandoffDone_ = true;
+        }
+        next = std::min(pumpNextPresentation_, pumpNextDevicePoll_);
+    }
+    if (handoff) pumpHandoffCondition_.notify_all();
+    return next;
 }
 
 FFFResult PlayerVideoRenderer::GetTimedTextStatus(FFF3FPTimedTextStatus& status,
@@ -4087,17 +4234,11 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
     if (coverArt) RequestCoverBackdropRender();
     {
         std::lock_guard lock(timedTextMutex_);
-        if (!timedTextThread_.joinable()) {
-            timedTextThreadStop_ = false;
-            timedTextThreadRunning_ = true;
-            timedTextThread_ = std::thread(&PlayerVideoRenderer::TimedTextThread, this);
-        } else {
-            timedTextThreadRunning_ = true;
-        }
+        StartPresentationPumpMembership();
         ++presentationGeneration_;
     }
     deviceLock.unlock();
-    timedTextCondition_.notify_one();
+    PresentationPump::Instance().Wake();
     return FFFResult::Success;
 }
 
@@ -4111,13 +4252,10 @@ FFFResult PlayerVideoRenderer::Redraw() noexcept {
     }
     {
         std::lock_guard lock(timedTextMutex_);
-        if (!timedTextThread_.joinable()) {
-            timedTextThreadStop_ = false; timedTextThreadRunning_ = true;
-            timedTextThread_ = std::thread(&PlayerVideoRenderer::TimedTextThread, this);
-        }
+        StartPresentationPumpMembership();
         ++presentationGeneration_;
     }
-    timedTextCondition_.notify_one();
+    PresentationPump::Instance().Wake();
     return FFFResult::Success;
 }
 
@@ -4286,7 +4424,7 @@ PlayerVideoRenderer::TryRenderCoverBackdropCache() noexcept {
             std::lock_guard lock(timedTextMutex_);
             ++presentationGeneration_;
         }
-        timedTextCondition_.notify_one();
+        PresentationPump::Instance().Wake();
     }
     return CoverBackdropRenderResult::Complete;
 }
@@ -4479,7 +4617,7 @@ FFFResult PlayerVideoRenderer::Set360View(const bool enabled, const float yaw,
             std::lock_guard lock(timedTextMutex_);
             ++presentationGeneration_;
         }
-        timedTextCondition_.notify_one();
+        PresentationPump::Instance().Wake();
     }
     return FFFResult::Success;
 }
@@ -4782,6 +4920,35 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
 }
 
 FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
+    // The pump owns every Present. A caller that is not the pump (the session's
+    // first/last-frame boundary runs on the session queue) hands the request to
+    // the pump and waits, so the process still never has two threads inside
+    // IDXGISwapChain::Present at the same time.
+    if (pumpThreadId_.load(std::memory_order_acquire) == std::this_thread::get_id())
+        return PresentTimedTextOnPump();
+    {
+        std::lock_guard lock(timedTextMutex_);
+        // No pump membership means no pump thread is composing for this
+        // renderer; fall back to the historical direct path.
+        if (!pumpRegistered_.load(std::memory_order_acquire))
+            return PresentTimedTextOnPump();
+        pumpHandoffPending_ = true;
+        pumpHandoffDone_ = false;
+        pumpHandoffResult_ = FFFResult::Success;
+    }
+    PresentationPump::Instance().Wake();
+    std::unique_lock lock(timedTextMutex_);
+    if (!pumpHandoffCondition_.wait_for(lock, std::chrono::seconds(2),
+            [this] { return pumpHandoffDone_; })) {
+        // The pump is wedged (device recovery, a blocked Present). Do not stall
+        // the caller for good: take the historical direct path instead.
+        lock.unlock();
+        return PresentTimedTextOnPump();
+    }
+    return pumpHandoffResult_;
+}
+
+FFFResult PlayerVideoRenderer::PresentTimedTextOnPump() noexcept {
     std::unique_lock deviceLock(deviceMutex_);
     const auto lyricsLayout = lyricsLayoutEnabled_.load(std::memory_order_acquire);
     if (window_ == nullptr || (!hasCachedVideo_ && swapChain_ == nullptr && !lyricsLayout))
@@ -4969,7 +5136,7 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
 
 FFFResult PlayerVideoRenderer::RecreateDeviceResources() noexcept {
     StopCoverBackdropThread();
-    StopTimedTextThread();
+    StopPresentationPumpMembership();
     std::lock_guard deviceLock(deviceMutex_);
     ReleaseDeviceObjects();
     const auto result = EnsureDevice();
@@ -4980,7 +5147,7 @@ FFFResult PlayerVideoRenderer::RecreateDeviceResources() noexcept {
 
 void PlayerVideoRenderer::ResetMedia() noexcept {
     StopCoverBackdropThread();
-    StopTimedTextThread();
+    StopPresentationPumpMembership();
     std::lock_guard deviceLock(deviceMutex_);
     ClearSurface();
     if (scaler_ != nullptr) { sws_freeContext(scaler_); scaler_ = nullptr; }
@@ -5028,14 +5195,15 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
             timedTextPresentCounts_[index] = 0;
         }
     }
-    timedTextCondition_.notify_one();
+    PresentationPump::Instance().Wake();
 }
 
 void PlayerVideoRenderer::Close() noexcept {
-    // Join before taking deviceMutex_: the presenter may already be waiting in
-    // PresentTimedText and must be allowed to leave that critical section.
+    // Leave the pump before taking deviceMutex_: the presenter may already be
+    // waiting in PresentTimedText and must be allowed to leave that critical
+    // section.
     StopCoverBackdropThread();
-    StopTimedTextThread();
+    StopPresentationPumpMembership();
     std::lock_guard deviceLock(deviceMutex_);
     ClearSurface();
     if (scaler_ != nullptr) { sws_freeContext(scaler_); scaler_ = nullptr; }
