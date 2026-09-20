@@ -52,6 +52,23 @@ public sealed class AppSettings
         // 窗口状态只恢复 Normal(0) / Maximized(2)：
         // Minimized(1) 无意义，FullScreen(3) 会让用户莫名全屏
         if (WindowState is not (null or 0 or 2)) WindowState = null;
+
+        // 界面语言只有 0=中文 / 1=英文 两个取值。少收敛这一条的话，
+        // 手改配置文件写 Language=99 ⇒ 走 else 分支显示中文（看起来"能工作"），
+        // 随后又被 Save 原样写回，脏值就长久留在盘上且无人知晓。
+        Language = (Language == 1) ? 1 : 0;
+
+        // 版本号同样要收敛，而且**上界比下界更要紧**：
+        // 用户从新版回退到旧版时，盘上文件带着 Version=2 进来，
+        // MigrateLegacy 的 `Version < CurrentVersion` 判不出它是"未来版本"（2 > 1），
+        // 迁移被整体跳过，旧代码按旧语义读新结构，最后 Save 再把 2 静默降级成 1。
+        // 收敛到 [0, CurrentVersion] 至少让版本号不会往外漂；
+        // "来自更新版"这件事本身由 SettingsStore.Load 显式告警。
+        //
+        // ⚠ 下界必须是 0：System.Text.Json 反序列化先跑属性初始化器再覆盖，
+        // 老文件缺 Version 字段时读到的就是初始化器给的 0 —— 0 是"legacy"的唯一判据，
+        // 这里绝不能把 0 收敛成 CurrentVersion（会把迁移判定彻底废掉）。
+        Version = Math.Clamp(Version, 0, CurrentVersion);
     }
 
     /// <summary>窗口状态记忆（可用性 P0-2）：上次关闭时的位置/尺寸/状态。
@@ -72,6 +89,23 @@ public sealed class AppSettings
 
     /// <summary>工具侧栏是否处于折叠（图标导航栏）状态。</summary>
     public bool SidebarCollapsed { get; set; }
+
+    /// <summary>底部时间轴是否被用户折叠（docs/31 阶段 4）。默认 false = 展开。
+    /// 与 <see cref="SidebarCollapsed"/> 同风格：bool 无越界值，故不必进 <see cref="Normalize"/>，
+    /// 序列化由 <c>JsonAotContext</c> 的 <c>[JsonSerializable(typeof(AppSettings))]</c> 自动覆盖。</summary>
+    public bool TimelineCollapsed { get; set; }
+
+    /// <summary>底部状态栏是否被用户折叠（docs/31 阶段 4）。默认 false = 展开。</summary>
+    public bool StatusBarCollapsed { get; set; }
+
+    /// <summary>传输栏是否改为<b>悬浮自动隐藏</b>（docs/31 阶段 4.3）。默认 false = 既有常驻布局。
+    ///
+    /// <para>默认关闭是刻意的：开启后传输栏由 owned 顶层窗承载（逐像素透明 + <c>WM_NCHITTEST</c>
+    /// 穿透），是本次改动里唯一依赖真机合成能力的路径；保持默认关闭可让"既有常驻布局"完全不受影响，
+    /// 由用户在「视图」菜单显式选择。</para>
+    ///
+    /// <para>与 <see cref="TimelineCollapsed"/> 同风格：bool 无越界值，故不必进 <see cref="Normalize"/>。</para></summary>
+    public bool FloatingTransport { get; set; }
 
     public bool HardwareDecode { get; set; } = true;
 
@@ -106,7 +140,6 @@ public sealed class AppSettings
 
     /// <summary>媒体率呈现节奏（内核扩展 A9）：pacing=true 时抑制叠加层固定周期重翻转，
     /// 使呈现节奏跟随源视频帧率。需 VrrTearingPresent=true 发挥完整效果。</summary>
-    public bool VrrPacingEnabled { get; set; }
 
     /// <summary>时间轴拖动缩略图预览（默认开启）：拖动时每 150ms 抓帧显示弹窗。
     /// 低配设备可关闭，关闭后仅更新时间码和播放头，不触发 BitBlt 屏幕抓取。</summary>

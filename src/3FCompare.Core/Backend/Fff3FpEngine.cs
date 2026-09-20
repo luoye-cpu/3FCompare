@@ -1,6 +1,7 @@
 ﻿using System.Runtime.InteropServices;
 using System.Text;
 using _3FCompare.Core.Backend.Interop;
+using _3FCompare.Core.Diagnostics;
 using _3FCompare.Core.Display;
 
 namespace _3FCompare.Core.Backend;
@@ -8,8 +9,11 @@ namespace _3FCompare.Core.Backend;
 /// <summary>3FP 后端适配器（基于 fork 的 FFF.Native，MIT）。</summary>
 public sealed class Fff3FpEngine : IPlayerEngine
 {
-    // 内核 2026.9.11 合并（f25c28f）起 PlayerApiVersion=14（FFF3FP_Create 严格校验）。
-    private const uint ConfigVersion = 14;
+    // 内核 PlayerApiVersion。FFF3FP_Create 用 `version != PlayerApiVersion` **严格相等**校验，
+    // 且要求 `size >= sizeof(FFF3FPConfiguration)` ⇒ 内核与托管侧必须同步递增，否则全部会话创建失败。
+    //   14 = 内核 2026.9.11 合并（f25c28f）起
+    //   15 = 3FCompare A11 扩展：新增 FFF3FPConfiguration.preferredAdapterIndex（2026-09-16）
+    private const uint ConfigVersion = 15;
 
     public IReadOnlyList<AdapterInfo> EnumerateAdapters()
     {
@@ -40,6 +44,9 @@ public sealed class Fff3FpEngine : IPlayerEngine
             EventCallbackContext = session.CallbackContext,
             VideoScalingQuality = 1, // HighQuality
             ForceHdrOutput = options.ForceHdrOutput ? 1u : 0u, // v12：强制尝试 scRGB HDR 链
+            // A11：把用户在设置里选的解码 GPU 真正交给内核（此前该字段一直被丢弃）。
+            // -1 = 跟随窗口所在显示器；≥0 = DXGI 适配器索引（与 GpuEnumeration 的 DXGI 枚举同源）。
+            PreferredAdapterIndex = options.PreferredAdapterIndex,
         };
 
         var result = Fff3FpNative.FFF3FP_Create(in config, out var handle);
@@ -61,8 +68,6 @@ public sealed class Fff3FpEngine : IPlayerEngine
             session.ApplyInitialColorMode(options.ColorMode, options.OutputWindow, options.ForceHdrOutput);
             if (options.TearingPresent)
                 session.SetPresentConfig(true); // 不支持时静默保持 VSync（返回值忽略）
-            if (options.PacingEnabled)
-                session.SetPacingConfig(true);
         }
         catch
         {
@@ -83,8 +88,47 @@ public sealed class Fff3FpEngine : IPlayerEngine
         private int _disposedFlag;
         /// <summary>原生临界区：FFF3FP_Destroy 与所有原生调用互斥。
         /// 轮询线程每 16ms 调 ReadSnapshot，而 RemoveSlotAt 刻意把 Dispose 放在 _gate 锁外，
-        /// 二者可以并发 ⇒ 拿着正在销毁的句柄进 GetSnapshot 就是 use-after-free。</summary>
-        private readonly object _nativeGate = new();
+        /// 二者可以并发 ⇒ 拿着正在销毁的句柄进 GetSnapshot 就是 use-after-free。
+        ///
+        /// ⚠ 必须用<b>读写锁</b>而不是普通 lock：
+        /// FFF3FP_Open 是耗时调用（数百 ms～数秒，在线程池线程上执行）。若用独占 lock，
+        /// 它持锁期间 UI 线程的轮询 ReadSnapshot 会全部阻塞在锁上；UI 线程一旦停止泵消息，
+        /// 依赖窗口消息推进的原生流程就有被拖死的风险，且自测看门狗也投递在 UI 线程上，
+        /// 会连带失效 ⇒ 从"卡住后退出"退化成"永久挂起"。
+        /// 读写锁的语义：
+        ///   · 读锁 = 绝大多数短小调用（快照/播放/定位/探针…）⇒ 彼此可并发，UI 线程不被挡；
+        ///   · 写锁 = 仅 Dispose 的 Destroy ⇒ 独占，且会等所有在飞的读锁退出，
+        ///     从而在"取句柄"与"销毁句柄"之间建立真正的互斥，消除 use-after-free。
+        /// Open 走读锁：它不销毁句柄，与并发读快照的语义和加锁前完全一致。</summary>
+        /// 递归策略选 SupportsRecursion 而非 NoRecursion：原实现是 <c>lock</c>（完全可重入），
+        /// 若某条调用链上存在"持读锁时又进入另一个 WithNative"的嵌套路径（例如原生同步回调
+        /// 里再发一次查询），NoRecursion 会直接抛 LockRecursionException —— 在未被测试覆盖
+        /// 的路径上等于凭空引入一次崩溃。选可重入是为了**保持与加锁前相同的行为**，
+        /// 代价只是极小的记账开销，远小于生产环境崩一次。
+        private readonly ReaderWriterLockSlim _nativeGate =
+            new(LockRecursionPolicy.SupportsRecursion);
+
+        // ---- 结构尺寸（进程内恒定，静态缓存）----
+        // 这三个尺寸只取决于结构布局，但 Marshal.SizeOf<T>() 每次调用都要再走一遍
+        // 布局计算（反射式查表 + 缓存查找），而它们分别位于 ReadSnapshot（轮询线程
+        // 每 16ms 一次）、TryReadPixel（放大镜/探针每次移动）等热路径上。
+        // 提升为静态只读字段 ⇒ 进程内只算一次，且消除每次调用的额外分配。
+        private static readonly int SnapshotSize = Marshal.SizeOf<Fff3FpSnapshot>();
+        private static readonly int PixelProbeSize = Marshal.SizeOf<Fff3FpVideoPixelProbe>();
+        private static readonly int RenderTargetInfoSize = Marshal.SizeOf<Fff3FpRenderTargetInfo>();
+
+        /// <summary>GetSnapshot 的失败标签（内容恒定，进程内只算一次）。
+        /// ReadSnapshot 是 16ms 一次的热路径：若像原来那样在<b>调用前</b>就把
+        /// <c>$"GetSnapshot(size={...})"</c> 拼好，那么成功路径（绝大多数调用）
+        /// 也要先付一次插值 + 一次 Marshal.SizeOf；改用预生成常量后，
+        /// 成功路径不再有任何字符串分配。</summary>
+        private static readonly string SnapshotOpLabel = $"GetSnapshot(size={SnapshotSize})";
+
+        /// <summary>内核文本输出（媒体信息 JSON / 错误信息）的缓冲区上限。
+        /// 内核回写的 requiredSize 来自它自己的内部结构，一旦内核与托管侧版本错配
+        /// （或内核侧内存被踩），requiredSize 可能是个天文数字；直接 new byte[required]
+        /// 会 OOM 或造成 2GB+ 的单次分配。4MB 对媒体信息 JSON 已绰绰有余。</summary>
+        private const int MaxTextBufferBytes = 4 * 1024 * 1024;
 
         /// <summary>创建会话时的输出窗口（用于运行时重新读取显示器能力）。</summary>
         private nint _outputWindow;
@@ -114,12 +158,63 @@ public sealed class Fff3FpEngine : IPlayerEngine
 
         internal void AttachHandle(nint handle) => _handle = handle;
 
+        // ------------------------------------------------------------------
+        // 原生调用的统一入口（A1）
+        // ------------------------------------------------------------------
+        // 过去每个方法都是"先 ThrowIfDisposed() 再裸调 P/Invoke"，而 Dispose 的顺序是
+        //   ① Interlocked.Exchange(_disposedFlag,1) → ② lock(_nativeGate) → ③ Destroy
+        // 于是存在这样的窗口：线程 A 通过 ① 之后的标志位检查（此时还没到 ②），
+        // 线程 B 走完 ③ 把句柄销毁，A 随后拿着已释放的句柄进原生 ⇒ 0xC0000005，
+        // 托管侧不可 catch。必须把"取句柄"和"用句柄"放进同一个临界区，
+        // 且标志位要在**持锁之后**再复查一次（等锁期间 Dispose 可能已经跑完）。
+        //
+        // 只包住 P/Invoke 本身：锁内不能有等待/回调/长时间计算，否则轮询线程会把
+        // Dispose 挡在外面，反而制造卡顿。Open 这类耗时调用也只在线程池线程上持锁
+        // 执行原生那一段，锁的范围不变大。
+        private T WithNative<T>(Func<nint, T> call)
+        {
+            // 读锁：短小调用之间可并发。Open 也走这里（见 _nativeGate 注释）。
+            _nativeGate.EnterReadLock();
+            try
+            {
+                ThrowIfDisposed();
+                if (_handle == 0) throw new ObjectDisposedException(nameof(Fff3FpSession));
+                return call(_handle);
+            }
+            finally
+            {
+                _nativeGate.ExitReadLock();
+            }
+        }
+
+        private void WithNative(Action<nint> call)
+        {
+            _nativeGate.EnterReadLock();
+            try
+            {
+                ThrowIfDisposed();
+                if (_handle == 0) throw new ObjectDisposedException(nameof(Fff3FpSession));
+                call(_handle);
+            }
+            finally
+            {
+                _nativeGate.ExitReadLock();
+            }
+        }
+
         private void OnEngineEvent(nint contextPtr, uint eventType, nint detailJsonUtf8)
         {
             // 校验 context 仍是本会话（防御性）
             try
             {
-                if (GCHandle.FromIntPtr(contextPtr).Target is not Fff3FpSession) return;
+                var handle = GCHandle.FromIntPtr(contextPtr);
+                // 两道检查缺一不可：
+                // ① IsAllocated —— 句柄已 Free 时 FromIntPtr 得到的 GCHandle 是悬空的，
+                //    读 .Target 属于未定义行为（Dispose 后原生工作线程仍可能回调一次）。
+                // ② ReferenceEquals —— 只判 "is Fff3FpSession" 挡不住另一个会话的 context
+                //    （原生侧复用/错传指针时会把 A 的事件派发到 B）。
+                if (!handle.IsAllocated) return;
+                if (!ReferenceEquals(handle.Target, this)) return;
             }
             catch
             {
@@ -150,69 +245,61 @@ public sealed class Fff3FpEngine : IPlayerEngine
             return Task.Run(() =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var result = Fff3FpNative.FFF3FP_Open(_handle, localPath);
-                if (result != FffResult.Success)
-                    throw new EngineException((int)result, $"FFF3FP_Open 失败: {result} ({LastError()})");
+                // OpenAsync 跑在线程池线程上，同样必须与 Dispose 互斥：
+                // 否则"打开文件的同时关闭这一路"会拿到已销毁句柄（use-after-free，不可 catch）。
+                WithNative(h =>
+                {
+                    var result = Fff3FpNative.FFF3FP_Open(h, localPath);
+                    if (result != FffResult.Success)
+                        throw new EngineException((int)result, $"FFF3FP_Open 失败: {result} ({LastError(h)})");
+                });
             }, cancellationToken);
         }
 
         public void Play()
         {
-            ThrowIfDisposed();
-            Check(Fff3FpNative.FFF3FP_Play(_handle), nameof(Play));
+            WithNative(h => Check(Fff3FpNative.FFF3FP_Play(h), nameof(Play)));
         }
 
         public void Pause()
         {
-            ThrowIfDisposed();
-            Check(Fff3FpNative.FFF3FP_Pause(_handle), nameof(Pause));
+            WithNative(h => Check(Fff3FpNative.FFF3FP_Pause(h), nameof(Pause)));
         }
 
         public void Stop()
         {
-            ThrowIfDisposed();
-            Check(Fff3FpNative.FFF3FP_Stop(_handle), nameof(Stop));
+            WithNative(h => Check(Fff3FpNative.FFF3FP_Stop(h), nameof(Stop)));
         }
 
         public void Seek(long position100ns)
         {
-            ThrowIfDisposed();
             // 同步校正线程会并发 Seek，同样必须与 Dispose 互斥（理由同 ReadSnapshot）
-            lock (_nativeGate)
-            {
-                ThrowIfDisposed();
-                Check(Fff3FpNative.FFF3FP_Seek(_handle, position100ns), nameof(Seek));
-            }
+            WithNative(h => Check(Fff3FpNative.FFF3FP_Seek(h, position100ns), nameof(Seek)));
         }
 
         public void SeekFrame(long frameIndex)
         {
-            ThrowIfDisposed();
-            Check(Fff3FpNative.FFF3FP_SeekFrame(_handle, frameIndex), nameof(SeekFrame));
+            WithNative(h => Check(Fff3FpNative.FFF3FP_SeekFrame(h, frameIndex), nameof(SeekFrame)));
         }
 
         public void StepFrame(int direction)
         {
-            ThrowIfDisposed();
-            Check(Fff3FpNative.FFF3FP_StepFrame(_handle, direction), nameof(StepFrame));
+            WithNative(h => Check(Fff3FpNative.FFF3FP_StepFrame(h, direction), nameof(StepFrame)));
         }
 
         public void SelectAudioStream(int streamIndex)
         {
-            ThrowIfDisposed();
-            Check(Fff3FpNative.FFF3FP_SelectAudioStream(_handle, streamIndex), nameof(SelectAudioStream));
+            WithNative(h => Check(Fff3FpNative.FFF3FP_SelectAudioStream(h, streamIndex), nameof(SelectAudioStream)));
         }
 
         public void SelectVideoStream(int streamIndex)
         {
-            ThrowIfDisposed();
-            Check(Fff3FpNative.FFF3FP_SelectVideoStream(_handle, streamIndex), nameof(SelectVideoStream));
+            WithNative(h => Check(Fff3FpNative.FFF3FP_SelectVideoStream(h, streamIndex), nameof(SelectVideoStream)));
         }
 
         public void SetVolume(float volume, bool muted)
         {
-            ThrowIfDisposed();
-            Check(Fff3FpNative.FFF3FP_SetVolume(_handle, volume, muted ? 1u : 0u), nameof(SetVolume));
+            WithNative(h => Check(Fff3FpNative.FFF3FP_SetVolume(h, volume, muted ? 1u : 0u), nameof(SetVolume)));
         }
 
         /// <summary>设置色彩模式（运行时切换 HDR/SDR）。</summary>
@@ -245,8 +332,8 @@ public sealed class Fff3FpEngine : IPlayerEngine
             var isHdr = contentIsHdr ?? (ReadMediaInfo()?.IsHdr ?? false);
             var config = ToneMappingParameters.Calculate(mode, displayCapabilities, isHdr);
 
-            var result = Fff3FpNative.FFF3FP_SetColorMode(_handle, (uint)mode, config.SdrPeakNits,
-                config.HdrPeakNits, config.PaperWhiteNits, forceHdrOutput ? 1u : 0u);
+            var result = WithNative<FffResult>(h => Fff3FpNative.FFF3FP_SetColorMode(h, (uint)mode, config.SdrPeakNits,
+                config.HdrPeakNits, config.PaperWhiteNits, forceHdrOutput ? 1u : 0u));
             // NotSupported 视为软失败：旧内核或某些模式不支持设置色调映射参数，
             // 不应让整个色彩模式切换中断（两份旧实现对此处理不一致，此处统一）。
             if (result != FffResult.Success && result != FffResult.NotSupported)
@@ -259,41 +346,23 @@ public sealed class Fff3FpEngine : IPlayerEngine
         /// 返回 false 表示显示器链不支持撕裂（已静默保持 VSync 锁定）。</summary>
         public bool SetPresentConfig(bool tearing)
         {
-            ThrowIfDisposed();
-            var result = Fff3FpNative.FFF3FP_SetPresentConfig(_handle, tearing ? 1u : 0u);
-            return result == FffResult.Success;
-        }
-
-        /// <summary>媒体率呈现节奏（内核扩展 A9）：抑制叠加层固定周期重翻转，
-        /// 使呈现节奏跟随源视频帧率。返回 false 表示不支持。</summary>
-        public bool SetPacingConfig(bool pacing)
-        {
-            ThrowIfDisposed();
-            var result = Fff3FpNative.FFF3FP_SetPacingConfig(_handle, pacing ? 1u : 0u);
-            return result == FffResult.Success;
+            return WithNative<FffResult>(h => Fff3FpNative.FFF3FP_SetPresentConfig(h, tearing ? 1u : 0u)) == FffResult.Success;
         }
 
         public void SetViewTransform(float zoom, float panX, float panY)
         {
-            ThrowIfDisposed();
-            var result = Fff3FpNative.FFF3FP_SetViewTransform(_handle, zoom, panX, panY);
+            var result = WithNative<FffResult>(h => Fff3FpNative.FFF3FP_SetViewTransform(h, zoom, panX, panY));
             if (result != FffResult.Success)
                 throw new EngineException((int)result, $"SetViewTransform 失败: {result}");
         }
 
         public EngineSnapshot ReadSnapshot()
         {
-            ThrowIfDisposed();
-            var snapshotSize = Marshal.SizeOf<Fff3FpSnapshot>();
-            var snap = new Fff3FpSnapshot { Size = (uint)snapshotSize, Version = 8 };
+            var snap = new Fff3FpSnapshot { Size = (uint)SnapshotSize, Version = 8 };
             // ReadSnapshot 是轮询线程每 16ms 一次的热路径，而 Dispose 在 _gate 锁外执行，
             // 二者必须互斥，否则会拿着正在销毁的句柄进 GetSnapshot（use-after-free）。
-            // 进锁后要复查：等锁期间 Dispose 可能已经跑完。
-            lock (_nativeGate)
-            {
-                ThrowIfDisposed();
-                Check(Fff3FpNative.FFF3FP_GetSnapshot(_handle, ref snap), $"GetSnapshot(size={snapshotSize})");
-            }
+            // WithNative 会在进锁后复查标志位：等锁期间 Dispose 可能已经跑完。
+            WithNative(h => Check(Fff3FpNative.FFF3FP_GetSnapshot(h, ref snap), SnapshotOpLabel));
             return new EngineSnapshot
             {
                 Position100ns = snap.Position100ns,
@@ -314,26 +383,26 @@ public sealed class Fff3FpEngine : IPlayerEngine
             };
         }
 
-private EngineMediaInfo? _cachedMediaInfo;
-	        private DisplayLuminanceCapabilities? _cachedDisplayCaps;
-	        private DateTime _cachedDisplayCapsAt;
-	        private static readonly TimeSpan _displayCapsTtl = TimeSpan.FromSeconds(5);
+        private EngineMediaInfo? _cachedMediaInfo;
+        private DisplayLuminanceCapabilities? _cachedDisplayCaps;
+        private DateTime _cachedDisplayCapsAt;
+        private static readonly TimeSpan _displayCapsTtl = TimeSpan.FromSeconds(5);
 
-	        /// <summary>获取显示器能力（5s TTL 缓存：与 DisplayCapabilities 静态缓存对齐，
-	        /// 用户中途开关 Windows HDR 后最多 5s 感知，不再会话级永不过期）。</summary>
-	        private DisplayLuminanceCapabilities? GetDisplayCapabilities()
-	        {
-	            if (_cachedDisplayCaps is not null &&
-	                DateTime.UtcNow - _cachedDisplayCapsAt < _displayCapsTtl)
-	                return _cachedDisplayCaps;
-	            _cachedDisplayCaps = _outputWindow != 0
-	                ? DisplayCapabilities.ReadForWindow(_outputWindow) : null;
-	            _cachedDisplayCapsAt = DateTime.UtcNow;
-	            return _cachedDisplayCaps;
-	        }
+        /// <summary>获取显示器能力（5s TTL 缓存：与 DisplayCapabilities 静态缓存对齐，
+        /// 用户中途开关 Windows HDR 后最多 5s 感知，不再会话级永不过期）。</summary>
+        private DisplayLuminanceCapabilities? GetDisplayCapabilities()
+        {
+            if (_cachedDisplayCaps is not null &&
+                DateTime.UtcNow - _cachedDisplayCapsAt < _displayCapsTtl)
+                return _cachedDisplayCaps;
+            _cachedDisplayCaps = _outputWindow != 0
+                ? DisplayCapabilities.ReadForWindow(_outputWindow) : null;
+            _cachedDisplayCapsAt = DateTime.UtcNow;
+            return _cachedDisplayCaps;
+        }
 
-	        /// <summary>读取媒体信息（结果缓存：媒体元数据在 Open 后不变，无需每次 P/Invoke + JSON 解析）。
-    /// 引擎未就绪时返回 null 且不写入缓存，避免换片间隙读到旧数据。</summary>
+        /// <summary>读取媒体信息（结果缓存：媒体元数据在 Open 后不变，无需每次 P/Invoke + JSON 解析）。
+        /// 引擎未就绪时返回 null 且不写入缓存，避免换片间隙读到旧数据。</summary>
         public EngineMediaInfo? ReadMediaInfo()
         {
             ThrowIfDisposed();
@@ -347,20 +416,25 @@ private EngineMediaInfo? _cachedMediaInfo;
                 if (state is not (PlayerState.Ready or PlayerState.Playing or PlayerState.Paused))
                     return null;
             }
-            catch
+            catch (Exception ex)
             {
+                // 静默吞异常曾让"媒体信息永远读不出来"无从排查（只会表现为 UI 上一片空白）。
+                // 这里至少留一条 Debug：正常情况下换片间隙会命中，属预期；持续刷屏则说明有真问题。
+                AppLog.Debug("Fff3Fp", $"ReadMediaInfo: 引擎未就绪，本次不读取媒体信息: {ex.GetType().Name}: {ex.Message}");
                 return null;
             }
             var required = 0u;
-            var result = Fff3FpNative.FFF3FP_GetMediaInfo(_handle, 0, 0, out required);
-            if (result == FffResult.BufferTooSmall && required > 0 && required <= 4 * 1024 * 1024)
+            var result = WithNative<FffResult>(h => Fff3FpNative.FFF3FP_GetMediaInfo(h, 0, 0, out required));
+            if (result == FffResult.BufferTooSmall && required > 0 && required <= MaxTextBufferBytes)
             {
                 var buffer = new byte[required];
                 unsafe
                 {
                     fixed (byte* p = buffer)
                     {
-                        result = Fff3FpNative.FFF3FP_GetMediaInfo(_handle, (nint)p, required, out _);
+                        // 指针不能进 lambda（闭包字段不能是指针类型）⇒ 先固化成 nint
+                        var ptr = (nint)p;
+                        result = WithNative<FffResult>(h => Fff3FpNative.FFF3FP_GetMediaInfo(h, ptr, required, out _));
                         if (result == FffResult.Success)
                         {
                             var json = DecodeNulTerminatedUtf8(buffer);
@@ -510,8 +584,13 @@ private EngineMediaInfo? _cachedMediaInfo;
                     AudioSampleRate = audioSampleRate,
                 };
             }
-            catch
+            catch (Exception ex)
             {
+                // 解析失败原本完全静默（返回 null）。媒体信息里出现新的/畸形字段时
+                // 表现为"信息面板全空"，无从判断是内核没给还是我们没解析出来。
+                // 记 Warn + JSON 长度（不落全文，避免把整份元数据写进日志）。
+                AppLog.Warn("Fff3Fp",
+                    $"ParseMediaInfoJson 失败（{ex.GetType().Name}: {ex.Message}），JSON 长度={json.Length}");
                 return null;
             }
         }
@@ -546,15 +625,14 @@ private EngineMediaInfo? _cachedMediaInfo;
 
         public bool TryReadPixel(int x, int y, out PixelSample sample)
         {
-            ThrowIfDisposed();
             var probe = new Fff3FpVideoPixelProbe
             {
-                Size = (uint)Marshal.SizeOf<Fff3FpVideoPixelProbe>(),
+                Size = (uint)PixelProbeSize,
                 Version = 1,
                 X = (uint)Math.Max(0, x),
                 Y = (uint)Math.Max(0, y),
             };
-            var result = Fff3FpNative.FFF3FP_ReadVideoPixel(_handle, ref probe);
+            var result = WithNative<FffResult>(h => Fff3FpNative.FFF3FP_ReadVideoPixel(h, ref probe));
             if (result != FffResult.Success)
             {
                 sample = default;
@@ -575,9 +653,10 @@ private EngineMediaInfo? _cachedMediaInfo;
             // 而原生侧会按 width×height 实际写入 ⇒ 托管堆越界写（不可 catch）。
             if (width <= 0 || height <= 0 || (long)width * height * 4 > buffer.Length)
                 return false;
-            var result = Fff3FpNative.FFF3FP_ReadVideoPixelRegion(_handle,
+            var bits = 0u;
+            var result = WithNative<FffResult>(h => Fff3FpNative.FFF3FP_ReadVideoPixelRegion(h,
                 (uint)Math.Max(0, x), (uint)Math.Max(0, y),
-                (uint)width, (uint)height, buffer, (uint)buffer.Length, out var bits);
+                (uint)width, (uint)height, buffer, (uint)buffer.Length, out bits));
             if (result != FffResult.Success)
                 return false;
             outputBitDepth = bits;
@@ -587,20 +666,18 @@ private EngineMediaInfo? _cachedMediaInfo;
         /// <summary>3FCompare K5：请求 presenter 线程重绘/执行挂起的 resize。</summary>
         public void Redraw()
         {
-            ThrowIfDisposed();
-            Fff3FpNative.FFF3FP_Redraw(_handle);
+            WithNative(h => { Fff3FpNative.FFF3FP_Redraw(h); });
         }
 
         /// <summary>3FCompare K4：读取 swap/client/dest 尺寸诊断信息。</summary>
         public bool ReadRenderTargetInfo(out RenderTargetInfo info)
         {
-            ThrowIfDisposed();
             var rtInfo = new Fff3FpRenderTargetInfo
             {
-                Size = (uint)Marshal.SizeOf<Fff3FpRenderTargetInfo>(),
+                Size = (uint)RenderTargetInfoSize,
                 Version = 1,
             };
-            var result = Fff3FpNative.FFF3FP_GetRenderTargetInfo(_handle, ref rtInfo);
+            var result = WithNative<FffResult>(h => Fff3FpNative.FFF3FP_GetRenderTargetInfo(h, ref rtInfo));
             if (result != FffResult.Success)
             {
                 info = default;
@@ -620,7 +697,10 @@ private EngineMediaInfo? _cachedMediaInfo;
             if (Interlocked.Exchange(ref _disposedFlag, 1) != 0) return;
 
             EngineEvent = null; // 脱离回调，防止释放后仍在触发
-            lock (_nativeGate)
+            // 写锁：等待所有在飞的读锁（含耗时最长的 Open）退出后才销毁句柄 ——
+            // 这正是 use-after-free 的修复点；同时读锁之间仍可并发，不会冻住 UI 线程。
+            _nativeGate.EnterWriteLock();
+            try
             {
                 if (_handle != 0)
                 {
@@ -628,8 +708,14 @@ private EngineMediaInfo? _cachedMediaInfo;
                     // 先置 0 再 Destroy：即使此刻有线程正准备发起别的原生调用，
                     // 它取到的也是 0 而不是一个即将无效的句柄。
                     _handle = 0;
+                    // 原生声明为 void（FFF.Player.Api.h）：早期这里按 FffResult 声明，
+                    // 实际读到的是 RAX 里的垃圾值（无人使用 ⇒ 一直没暴露，但声明必须对齐真实 ABI）。
                     Fff3FpNative.FFF3FP_Destroy(handle);
                 }
+            }
+            finally
+            {
+                _nativeGate.ExitWriteLock();
             }
             if (_callbackContext.IsAllocated)
                 _callbackContext.Free();
@@ -637,23 +723,37 @@ private EngineMediaInfo? _cachedMediaInfo;
             GC.SuppressFinalize(this);
         }
 
-        private string LastError()
+        /// <summary>读取内核最后一次错误文本。必须在持锁（WithNative）内调用，
+        /// 因为它同样要用到原生句柄。</summary>
+        private static string LastError(nint handle)
         {
             var required = 0u;
-            var result = Fff3FpNative.FFF3FP_GetLastError(_handle, 0, 0, out required);
+            var result = Fff3FpNative.FFF3FP_GetLastError(handle, 0, 0, out required);
             if (result != FffResult.BufferTooSmall || required == 0) return string.Empty;
+            // 与 ReadMediaInfo 一样加上限：内核回写的长度不可信（版本错配/内存踩踏时会是巨值）
+            if (required > MaxTextBufferBytes)
+            {
+                AppLog.Warn("Fff3Fp", $"GetLastError 要求缓冲区 {required} 字节，超过上限 {MaxTextBufferBytes}，已忽略");
+                return string.Empty;
+            }
             var buffer = new byte[required];
             unsafe
             {
                 fixed (byte* p = buffer)
                 {
-                    Fff3FpNative.FFF3FP_GetLastError(_handle, (nint)p, required, out _);
+                    var ptr = (nint)p;
+                    // 第二次调用的返回值此前被丢弃：失败时 buffer 仍是未初始化内存，
+                    // 解出来的"错误信息"是随机字节，比没信息更糟（会把排查带偏）。
+                    var second = Fff3FpNative.FFF3FP_GetLastError(handle, ptr, required, out _);
+                    if (second != FffResult.Success) return string.Empty;
                     var len = buffer.AsSpan().IndexOf((byte)0);
                     return Encoding.UTF8.GetString(buffer, 0, len < 0 ? buffer.Length : len);
                 }
             }
         }
 
+        /// <summary>仅在失败时做字符串插值。op 应当尽量是常量（见 <see cref="SnapshotOpLabel"/>）：
+        /// 成功路径才是常态，把消息拼好再传进来等于每次都付一次插值开销。</summary>
         private static void Check(FffResult result, string op)
         {
             if (result != FffResult.Success)

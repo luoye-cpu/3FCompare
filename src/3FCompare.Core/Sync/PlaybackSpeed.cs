@@ -17,8 +17,16 @@ public static class PlaybackSpeed
     /// <param name="speed">目标倍速（&gt;1 才加速；≤1 表示原生不支持减速，恒返回 0）。</param>
     public static long SeekAdvanceTicks(long mediaElapsedTicks, double speed)
     {
-        if (speed <= 1.0) return 0;
+        // 非有限倍速必须显式挡掉：NaN 会让下面所有比较（含这个 <=1.0 的早退）恒为
+        // false，从而绕过全部保护；±∞ 会让乘积溢出 —— 而 .NET Core 3.0 起浮点→整型
+        // 是**饱和**转换，结果是 long.MaxValue，一次就把播放位置推到近乎片尾。
+        if (!double.IsFinite(speed) || speed <= 1.0) return 0;
         if (mediaElapsedTicks <= 0 || mediaElapsedTicks > MaxElapsedTicks) return 0;
-        return (long)(mediaElapsedTicks * (speed - 1.0));
+
+        var advance = mediaElapsedTicks * (speed - 1.0);
+        // 乘积仍可能非有限（倍速极大）或超出 long 范围：保守跳过本次跳变。
+        // 宁可这一拍不加速，也绝不把位置推到未知处（伪变速下位置错了无法回退）。
+        if (!double.IsFinite(advance) || advance >= long.MaxValue) return 0;
+        return (long)advance;
     }
 }

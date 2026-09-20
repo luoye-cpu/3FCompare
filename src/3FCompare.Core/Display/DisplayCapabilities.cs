@@ -52,8 +52,20 @@ public static class DisplayCapabilities
     {
         try
         {
-            // DXGI 1.6 读取显示器真实 HDR 能力
-            // （Min/Max/FullFrame 亮度单位均为 nits；ColorSpace>=3 表示 HDR 输出）。
+            // DXGI 1.6 读取显示器亮度参数（Min/Max/FullFrame 亮度单位均为 nits）。
+            //
+            // ⚠ 关于 Supported（hdrCapable）的语义，别被字段名误导：
+            // 判据是 ColorSpace >= 12（DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020，
+            // 见 dxgicommon.h），不是 >= 3 —— 0..11 里还夹着 G22/BT709 等一大票 SDR
+            // 色彩空间，用 3 会把普通 SDR 显示器误判成 HDR（常量与比较在 DxgiOutputInfo 内）。
+            // 而 DXGI 的 ColorSpace 描述的是**当前输出**的色彩空间，不是显示器硬件上限：
+            // 用户在系统设置里关掉 HDR 后它会回落到 SDR 值，此时即使 MaxLuminance 仍上报
+            // 几百 nits，Supported 也会是 false。
+            // 这**正是本项目想要的行为**：本结果用于 ColorModeHelper.Resolve 自动选择
+            // HDR/SDR 输出，理应跟随系统当前的 HDR 开关状态 —— 系统没开 HDR 时，
+            // 应用按 HDR 输出也不会被正确呈现。
+            // 若将来需要"显示器硬件是否支持 HDR"这一独立语义，应改为用
+            // MaxLuminance（如 > 400 nits）或 BitsPerColor >= 10 判定，另开字段，不要复用本值。
             if (DxgiOutputInfo.TryReadLuminance(
                     monitor,
                     out var minNits,

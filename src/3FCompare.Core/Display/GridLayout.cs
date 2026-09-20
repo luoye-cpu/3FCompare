@@ -53,9 +53,17 @@ public static class GridLayout
     /// 原先 PresetOf 只能映射 2x2/3x3/auto，导致用户选 2x1 时无处可存。</summary>
     public const int Code2x1 = 4;
 
-    /// <summary>当前视图状态 → 布局代码（保存会话时用）。
-    /// 与 <see cref="IsSingleView"/> / <see cref="PresetOf"/> 三件套成对使用——
-    /// 保存侧与还原侧各写一份 switch 是"存了却不还原"这类缺陷的温床。</summary>
+    /// <summary><b>历史遗留，禁止用于保存路径</b>：按"路数"推导布局代码。
+    ///
+    /// <para>它的映射与 <see cref="ComputeGrid"/> <b>并不一致</b>（2 路时这里给 2×2，
+    /// 而 ComputeGrid 给的是 2×1），把两种实现并存正是"存了却还原成别的"这类缺陷的
+    /// 温床（docs/14 §1.1）。保存会话一律走 <see cref="CodeFromPreset"/>，
+    /// 由用户显式选择的预设决定代码，而不是由路数反推。</para>
+    ///
+    /// <para>本方法当前仅被回归测试引用，用来钉死"按路数推导会丢布局"这一历史事实
+    ///（<c>tests/3FCompare.Core.Tests/PipelineRegressionTests.cs</c> 的
+    /// <c>CodeFor_按路数推导会丢布局_故不得用于保存</c>）。要真正删掉它，必须先同步
+    /// 调整该测试，属跨工程改动。</para></summary>
     public static int CodeFor(bool singleView, int count)
         => singleView ? CodeSingle : (count <= 4 ? Code2x2 : Code3x3);
 

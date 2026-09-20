@@ -53,7 +53,6 @@ public interface IPlayerSession : IDisposable
     /// <summary>媒体率呈现节奏（内核扩展 A9）：
     /// pacing=true 抑制叠加层固定周期的重翻转，使呈现节奏跟随源视频帧率而非叠加层帧率。
     /// 对 VRR 显示器消除 3:2 抖动；对 VSync 锁定显示器无害。需配合 SetPresentConfig(true) 发挥完整效果。</summary>
-    bool SetPacingConfig(bool pacing);
 
     /// <summary>设置视口变换（缩放 + 平移）。zoom=1.0 表示适应窗口；
     /// panX/panY 为相对未缩放视频框的归一化偏移 [-1,1]。</summary>
@@ -119,7 +118,6 @@ public sealed record EngineSessionOptions
 
     /// <summary>媒体率呈现节奏（内核扩展 A9）：pacing=true 抑制叠加层固定周期的重翻转，
     /// 使呈现节奏跟随源视频帧率。需 TearingPresent=true 发挥完整效果。</summary>
-    public bool PacingEnabled { get; init; }
 }
 
 /// <summary>解码适配器信息（用于多显卡指定，F26/A11）。</summary>
@@ -128,6 +126,16 @@ public sealed record AdapterInfo
     public int Index { get; init; }
     public required string Description { get; init; }
     public ulong DedicatedMemoryBytes { get; init; }
+
+    /// <summary>PCI 厂商 ID（0x10DE=NVIDIA、0x8086=Intel、0x1002=AMD、0x1414=Microsoft 软件渲染器）。
+    /// 与内核诊断日志比对用。</summary>
+    public uint VendorId { get; init; }
+    /// <summary>PCI 设备 ID。与 <see cref="VendorId"/> 一起可唯一定位一张卡的型号。</summary>
+    public uint DeviceId { get; init; }
+    /// <summary>DXGI 适配器 LUID。
+    /// ⚠ **同型号多卡的唯一区分依据**：<c>DXGI_ADAPTER_DESC.Description</c> 对同型号两张卡
+    /// 返回**完全相同**的字符串（实测双 RTX 4060 Laptop），此时只有 LUID 能分辨它们。</summary>
+    public long AdapterLuid { get; init; }
 }
 
 public enum ColorMode

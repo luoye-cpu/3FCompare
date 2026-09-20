@@ -26,6 +26,32 @@ public static class EngineFactory
         }
     }
 
+    /// <summary>清除原生可用性探测缓存。
+    /// 探测结果此前一旦算出就永久缓存，而全仓库没有任何重置点 ⇒ 用户改完 FFmpeg 目录后
+    /// （<see cref="NativeRuntime.SetFfmpegDirectory"/> 成功）拿到的仍是进程启动那次探测的
+    /// 结论，表现为"配好了却还是演示模式，重启才生效"。凡是改变了 DLL 加载条件的入口
+    /// （设置 FFmpeg 目录、释放内嵌 DLL）都必须调用本方法。</summary>
+    public static void ResetNativeProbe()
+    {
+        lock (_modeLock)
+        {
+            _nativeAvailable = null;
+            _lastUnavailableReason = null;
+        }
+    }
+
+    /// <summary>非缓存探测：每次都真正走一遍加载流程。
+    /// 用于设置页"测试"这类需要反映<b>当前</b>目录真实可用性的场合
+    /// （<see cref="IsNativeAvailable"/> 走缓存，改完目录后不重置就永远是旧结论）。</summary>
+    public static bool ProbeNow()
+    {
+        lock (_modeLock)
+        {
+            _nativeAvailable = ProbeNativeAvailable(out _lastUnavailableReason);
+            return _nativeAvailable.Value;
+        }
+    }
+
     /// <summary>上次探测为不可用时的降级原因（可用于 UI 透出；可用时为 null）。</summary>
     public static string? LastUnavailableReason
     {

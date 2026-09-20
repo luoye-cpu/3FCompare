@@ -65,6 +65,13 @@ internal struct Fff3FpConfiguration
     public nint EventCallbackContext;
     public uint VideoScalingQuality; // FFF3FPVideoScalingQuality: 0=Balanced, 1=HighQuality
     public uint ForceHdrOutput;      // 新增 v12: 非 0 = 强制尝试 scRGB HDR 链（绕过显示器能力门控）
+    /// <summary>3FCompare 扩展（A11，api 15）：偏好的 DXGI 适配器索引。
+    /// -1 = 沿用内核默认策略（窗口所在显示器所属的适配器）；
+    /// ≥0 作为 <c>IDXGIFactory1::EnumAdapters1</c> 的下标。
+    /// ⚠ 索引空间必须与内核一致 ⇒ 托管侧枚举必须走 DXGI（<see cref="Display.GpuEnumeration"/>），
+    /// 不能用 Win32 <c>EnumDisplayDevices</c>（那是 DISPLAY 设备索引，两者不对应）。
+    /// 越界或枚举失败时内核静默回落到默认策略。</summary>
+    public int PreferredAdapterIndex;
 }
 
 /// <summary>FFF3FPSnapshot 完整布局（对照 FFF.Player.Api.h v8，逐字段对齐）。</summary>
@@ -182,8 +189,14 @@ internal static partial class Fff3FpNative
     internal static partial FffResult FFF3FP_Create(
         in Fff3FpConfiguration configuration, out nint player);
 
+    /// <summary>销毁播放器句柄。
+    /// ⚠ 原生声明是 <c>void FFF3FP_Destroy(FFF3FPHandle) noexcept</c>
+    /// （FFF.Player.Api.h:571），<b>不返回</b> FFFResult。
+    /// 按 FffResult 声明时，x64 下托管侧会把 RAX 里的残留值当成返回值
+    /// （被调用者不保证在 RAX 中留下有效值）⇒ 读到的是一个无意义的结果码。
+    /// 当前调用点不使用返回值所以没暴露成 bug，但声明必须与真实 ABI 一致。</summary>
     [LibraryImport(DllName)]
-    internal static partial FffResult FFF3FP_Destroy(nint player);
+    internal static partial void FFF3FP_Destroy(nint player);
 
     // ---- 控制 ----
 
@@ -233,10 +246,6 @@ internal static partial class Fff3FpNative
     // 3FCompare 扩展（VRR 低延迟呈现）：1 = Present(0, ALLOW_TEARING)，0 = VSync 锁定
     [LibraryImport(DllName)]
     internal static partial FffResult FFF3FP_SetPresentConfig(nint player, uint enableTearing);
-
-    // 3FCompare 扩展（A9 媒体率呈现节奏）：1 = 抑制叠加层周期性重翻转
-    [LibraryImport(DllName)]
-    internal static partial FffResult FFF3FP_SetPacingConfig(nint player, uint enablePacing);
 
     // ---- 读取 ----
 

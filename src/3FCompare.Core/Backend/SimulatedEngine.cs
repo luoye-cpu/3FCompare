@@ -28,7 +28,11 @@ public sealed class SimulatedEngine : IPlayerEngine
         private long _frameIndex;
         private bool _playing;
         private bool _opened;
-        private bool _disposed;
+        /// <summary>销毁标志（0=活着 1=已销毁）。
+        /// 原先是普通 bool：Dispose 可能被 UI 关闭与播放器线程同时调用，
+        /// "判断-置位"不是原子操作 ⇒ 两条线程都能通过判断（虽然后果只是重复置 null，
+        /// 但 Dispose 语义应当是"只有一个线程执行销毁"）。改用 Interlocked 与真实引擎对齐。</summary>
+        private int _disposedFlag;
         private string _path = string.Empty;
         private readonly object _lock = new();
         private DateTime _lastTick;
@@ -118,7 +122,10 @@ public sealed class SimulatedEngine : IPlayerEngine
                 ThrowIfDisposed();
                 if (!_opened) return;
                 _playing = false;
-                _frameIndex = Math.Clamp(_frameIndex + direction, 0, (long)(_duration100ns / (TimeSpan.TicksPerSecond / _fps)));
+                // 先按 long 累加再钳制：direction 是 int，若直接放进 int 上下文
+                // （例如极端值 int.MinValue）会溢出成符号翻转的帧号；long 累加不会。
+                var maxFrame = (long)(_duration100ns / (TimeSpan.TicksPerSecond / _fps));
+                _frameIndex = Math.Clamp(_frameIndex + direction, 0L, maxFrame);
                 _position100ns = (long)(_frameIndex * (TimeSpan.TicksPerSecond / _fps));
             }
         }
@@ -132,7 +139,6 @@ public sealed class SimulatedEngine : IPlayerEngine
         public void SetColorMode(ColorMode mode, bool? contentIsHdr = null) { /* 演示模式略过 */ }
 
         public bool SetPresentConfig(bool tearing) => !tearing; // 演示模式无呈现链，仅"关闭"语义成立
-        public bool SetPacingConfig(bool pacing) => !pacing; // 演示模式无叠加层，仅"关闭"语义成立
 
         public void SetViewTransform(float zoom, float panX, float panY) { /* 演示模式略过 */ }
 
@@ -161,6 +167,9 @@ public sealed class SimulatedEngine : IPlayerEngine
 
         public EngineMediaInfo? ReadMediaInfo()
         {
+            // 与其余成员一致补 disposed 校验：会话释放后 UI 侧的轮询仍可能来问一次，
+            // 此前只有本方法不抛 ObjectDisposedException，出错时表现为"读到一个凭空的 1920×1080"。
+            ThrowIfDisposed();
             if (!_opened) return null;
             return new()
             {
@@ -183,8 +192,11 @@ public sealed class SimulatedEngine : IPlayerEngine
             float[] buffer, out uint outputBitDepth)
         {
             outputBitDepth = 8;
-            // 与真实引擎一致：缓冲区必须容纳 width*height*4 个 float，否则拒绝
-            if (buffer.Length < width * height * 4) return false;
+            // 与真实引擎（Fff3FpEngine.TryReadPixelRegion）完全一致的两道校验：
+            // ① 尺寸必须为正；② 按 long 比较长度 —— `width * height * 4` 是 **int** 运算，
+            //    极端尺寸下会溢出成负数（如 65536×65536×4 溢出为 0），负数的 `buffer.Length < 负数`
+            //    恒为 false ⇒ 校验被绕过，随后却按 width×height 真正写入 ⇒ 托管堆越界写。
+            if (width <= 0 || height <= 0 || (long)width * height * 4 > buffer.Length) return false;
             for (var i = 0; i + 3 < buffer.Length; i += 4)
             {
                 buffer[i] = 0.5f;
@@ -205,9 +217,10 @@ public sealed class SimulatedEngine : IPlayerEngine
 
         public void Dispose()
         {
-            if (_disposed) return;
-            _disposed = true;
+            // 原子守卫：并发 Dispose 只有一个线程真正执行销毁（与 Fff3FpEngine 对齐）
+            if (Interlocked.Exchange(ref _disposedFlag, 1) != 0) return;
             EngineEvent = null; // 脱离回调，防止释放后仍在触发
+            GC.SuppressFinalize(this);
         }
 
         private void AdvanceClockLocked()
@@ -224,6 +237,9 @@ public sealed class SimulatedEngine : IPlayerEngine
             _frameIndex = (long)(_position100ns / (TimeSpan.TicksPerSecond / _fps));
         }
 
-        private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
+        // 用 Volatile.Read 读 int 标志而不是普通 bool：Dispose 可能来自另一条线程，
+        // 非 volatile 的 bool 写入不保证对其它线程可见 ⇒ 可能"销毁了还在用"。
+        private void ThrowIfDisposed()
+            => ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposedFlag) != 0, this);
     }
 }
