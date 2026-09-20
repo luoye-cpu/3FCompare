@@ -1,0 +1,186 @@
+diff --git a/FFF.Native/3FP/Render/VideoRenderer.cpp b/FFF.Native/3FP/Render/VideoRenderer.cpp
+index 7f45985..93539c7 100644
+--- a/FFF.Native/3FP/Render/VideoRenderer.cpp
++++ b/FFF.Native/3FP/Render/VideoRenderer.cpp
+@@ -1703,6 +1703,33 @@ FFFResult MeasureTimedTextWidth(const char* textUtf8, const char* fontFamilyUtf8
+     }
+ }
+ 
++// 3FCompare (F-LOG): process log sink, defined in 3FP/Api/PlayerApi.cpp and
++// forwarded to the callback installed through FFF3FP_SetLogCallback. It is a
++// plain C++ symbol rather than FFF3FP_API, so using it adds nothing to the
++// exported surface (which must stay at 82 symbols / API version 15).
++void FFF3FP_KernelLogImpl(const char* utf8Line) noexcept;
++
++namespace {
++// Cooldown for the Present-observability lines. Without it a route that is slow
++// rather than hung emits one line per frame, and every line is written to disk
++// by the managed sink — that would drown logs/app-*.log and add I/O to the very
++// thread whose stall is being investigated.
++constexpr auto PresentObservabilityLogCooldown = std::chrono::seconds(10);
++
++// True (and arms the deadline) when the cooldown since the last line has
++// elapsed. Deadlines are steady_clock milliseconds since epoch, 0 = never.
++bool ObservabilityLogAllowed(std::atomic<std::int64_t>& deadline) noexcept {
++    const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
++        std::chrono::steady_clock::now().time_since_epoch()).count();
++    const auto previous = deadline.load(std::memory_order_acquire);
++    if (previous != 0 && nowMs - previous <
++        std::chrono::duration_cast<std::chrono::milliseconds>(
++            PresentObservabilityLogCooldown).count()) return false;
++    deadline.store(nowMs, std::memory_order_release);
++    return true;
++}
++}
++
+ // ══════════════════════════════════════════════════════════════════════════
+ // Process-wide presenter.
+ //
+@@ -1896,6 +1923,8 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
+       pumpNextDevicePoll_(std::chrono::steady_clock::now()),
+       pumpHandoffPending_(false), pumpHandoffDone_(false),
+       pumpHandoffResult_(FFFResult::Success),
++      pumpSlowPresentCount_(0), pumpPresentMax100ns_(0), pumpSlowPresentLogAt_(0),
++      offPumpClearSurfacePresents_(0), handoffTimeoutFallbacks_(0), offPumpPresentLogAt_(0),
+       coverBackdropThreadStop_(false), coverBackdropRequestPending_(false),
+       coverBackdropRequestGeneration_(0),
+       presentationGeneration_(0), presentationFrameRate_(60.0f),
+@@ -3236,7 +3265,13 @@ std::chrono::steady_clock::time_point PlayerVideoRenderer::PumpPresentationOnce(
+         presentationStart = now;
+     }
+     if (devicePoll) RequestRecoveryIfDeviceLost();
++    // docs/39 §3.1: one pump thread now drives every route, so a route whose
++    // Present stalls (TDR, driver hang, device recovery) stops *all* routes from
++    // presenting. Timing the whole compose+Present call makes the culprit
++    // identifiable from the log instead of having to guess.
++    const auto presentStarted = std::chrono::steady_clock::now();
+     const auto result = PresentTimedTextOnPump();
++    NotePumpPresentDuration(std::chrono::steady_clock::now() - presentStarted);
+     if (result != FFFResult::Success) {
+         if (result != FFFResult::DeviceFailure || !RequestRecoveryIfDeviceLost())
+             SetError("The process presenter could not compose the latest layer.");
+@@ -3258,6 +3293,57 @@ std::chrono::steady_clock::time_point PlayerVideoRenderer::PumpPresentationOnce(
+     return next;
+ }
+ 
++void PlayerVideoRenderer::NotePumpPresentDuration(
++    const std::chrono::steady_clock::duration elapsed) noexcept {
++    // Threshold = 100 ms, i.e. several frame periods (~6 frames at 60 Hz, ~24 at
++    // 240 Hz). A healthy Present is paced by the swap chain's vblank wait, so it
++    // lands well under one frame period; anything in the 100 ms range is either
++    // a stall or a first-frame setup cost, and both are worth a line. The worst
++    // value is kept unconditionally so a later investigation can see how close
++    // the healthy path runs to the threshold.
++    constexpr auto slowPresentThreshold = std::chrono::milliseconds(100);
++    const auto elapsed100ns = static_cast<std::uint64_t>(
++        std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count() / 100);
++    auto worst = pumpPresentMax100ns_.load(std::memory_order_relaxed);
++    while (elapsed100ns > worst && !pumpPresentMax100ns_.compare_exchange_weak(
++            worst, elapsed100ns, std::memory_order_relaxed)) {}
++    if (elapsed < slowPresentThreshold) return;
++    // Counted unconditionally; only the line is cooldown-suppressed.
++    const auto overCount = pumpSlowPresentCount_.fetch_add(1, std::memory_order_relaxed) + 1;
++    if (!ObservabilityLogAllowed(pumpSlowPresentLogAt_)) return;
++    // Fixed-size stack buffer: this runs on the pump thread inside a noexcept
++    // function, so a std::string/std::to_string allocation here could turn an
++    // OutOfMemory into std::terminate.
++    char line[224]{};
++    _snprintf_s(line, sizeof(line), _TRUNCATE,
++        "FFF.Native: presenter pump slow Present window=%p elapsed=%.1fms max=%.1fms over=%llu",
++        static_cast<void*>(window_),
++        std::chrono::duration<double, std::milli>(elapsed).count(),
++        static_cast<double>(pumpPresentMax100ns_.load(std::memory_order_relaxed)) / 10000.0,
++        static_cast<unsigned long long>(overCount));
++    FFF3FP_KernelLogImpl(line);
++    OutputDebugStringA(line);
++}
++
++void PlayerVideoRenderer::NoteOffPumpPresent(const char* reason) noexcept {
++    // docs/39 §3.3: the invariant "only one thread in the process is inside
++    // Present" has exactly two exceptions, and both were previously invisible.
++    // The counters are bumped by the callers (unconditionally); only this line is
++    // cooldown-suppressed, because ClearSurface repeats on every device rebuild
++    // and the handoff timeout repeats whenever the pump is wedged.
++    if (!ObservabilityLogAllowed(offPumpPresentLogAt_)) return;
++    char line[224]{};
++    _snprintf_s(line, sizeof(line), _TRUNCATE,
++        "FFF.Native: off-pump Present window=%p reason=%s clearSurface=%llu handoffTimeout=%llu",
++        static_cast<void*>(window_), reason == nullptr ? "unknown" : reason,
++        static_cast<unsigned long long>(
++            offPumpClearSurfacePresents_.load(std::memory_order_relaxed)),
++        static_cast<unsigned long long>(
++            handoffTimeoutFallbacks_.load(std::memory_order_relaxed)));
++    FFF3FP_KernelLogImpl(line);
++    OutputDebugStringA(line);
++}
++
+ FFFResult PlayerVideoRenderer::GetTimedTextStatus(FFF3FPTimedTextStatus& status,
+     const TimedTextLayerSlot slot) noexcept {
+     const auto slotIndex = static_cast<std::size_t>(slot);
+@@ -4943,6 +5029,10 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
+         // The pump is wedged (device recovery, a blocked Present). Do not stall
+         // the caller for good: take the historical direct path instead.
+         lock.unlock();
++        // docs/39 §3.3: this fallback briefly allows two threads inside Present.
++        // Count it so an intermittent crash can be correlated with it.
++        handoffTimeoutFallbacks_.fetch_add(1, std::memory_order_relaxed);
++        NoteOffPumpPresent("handoff-timeout");
+         return PresentTimedTextOnPump();
+     }
+     return pumpHandoffResult_;
+@@ -5042,8 +5132,17 @@ void PlayerVideoRenderer::ClearSurface() noexcept {
+             context_->ClearRenderTargetView(backBufferTarget.Get(), black);
+             context_->OMSetRenderTargets(0, nullptr, nullptr);
+             context_->Flush();
+-            std::lock_guard presentLock(presentMutex_);
+-            swapChain_->Present(0, 0);
++            {
++                std::lock_guard presentLock(presentMutex_);
++                swapChain_->Present(0, 0);
++            }
++            // docs/39 §3.3: this Present runs on the caller's thread (device
++            // rebuild / close), not on the pump. Count it so an intermittent
++            // crash can be correlated with the one off-pump Present that stays
++            // in the media-reset path. Logged outside presentMutex_ so the sink
++            // never runs while that lock is held.
++            offPumpClearSurfacePresents_.fetch_add(1, std::memory_order_relaxed);
++            NoteOffPumpPresent("ClearSurface");
+         }
+     }
+     if (window_ != nullptr && IsWindow(window_))
+diff --git a/FFF.Native/3FP/Render/VideoRenderer.h b/FFF.Native/3FP/Render/VideoRenderer.h
+index 59b6445..5ebcbcd 100644
+--- a/FFF.Native/3FP/Render/VideoRenderer.h
++++ b/FFF.Native/3FP/Render/VideoRenderer.h
+@@ -314,6 +314,11 @@ private:
+     std::chrono::steady_clock::time_point PumpPresentationOnce() noexcept;
+     // Composition + Present for one frame. Must only run on the pump thread.
+     FFFResult PresentTimedTextOnPump() noexcept;
++    // Present observability (docs/39 §3.1 / §3.3). These never change what is
++    // presented, when, or in what order: they only record duration and count the
++    // two paths that can still Present off the pump thread.
++    void NotePumpPresentDuration(std::chrono::steady_clock::duration elapsed) noexcept;
++    void NoteOffPumpPresent(const char* reason) noexcept;
+     void CompositeTimedText(ID3D11RenderTargetView* target, TimedTextLayerSlot slot) noexcept;
+     void ReleaseTimedTextSlotResources(TimedTextLayerSlot slot) noexcept;
+     void ReleaseTimedTextResources(bool resetRenderedState = true) noexcept;
+@@ -468,6 +473,19 @@ private:
+     bool pumpHandoffDone_;
+     FFFResult pumpHandoffResult_;
+     std::condition_variable pumpHandoffCondition_;
++    // Present observability. The pump serialises every route behind one thread,
++    // so a single route whose Present stalls freezes all of them; these counters
++    // are the only trace that survives such a stall.
++    std::atomic<std::uint64_t> pumpSlowPresentCount_;
++    std::atomic<std::uint64_t> pumpPresentMax100ns_;
++    // Suppression deadlines, steady_clock milliseconds since epoch; 0 = never
++    // logged. A route that is merely slow rather than hung would otherwise emit
++    // one line per frame, and every line is written to disk by the managed sink.
++    // Atomic because the two off-pump paths below run on different threads.
++    std::atomic<std::int64_t> pumpSlowPresentLogAt_;
++    std::atomic<std::uint64_t> offPumpClearSurfacePresents_;
++    std::atomic<std::uint64_t> handoffTimeoutFallbacks_;
++    std::atomic<std::int64_t> offPumpPresentLogAt_;
+     bool coverBackdropThreadStop_;
+     bool coverBackdropRequestPending_;
+     std::uint64_t coverBackdropRequestGeneration_;
