@@ -314,6 +314,11 @@ private:
     std::chrono::steady_clock::time_point PumpPresentationOnce() noexcept;
     // Composition + Present for one frame. Must only run on the pump thread.
     FFFResult PresentTimedTextOnPump() noexcept;
+    // Present observability (docs/39 §3.1 / §3.3). These never change what is
+    // presented, when, or in what order: they only record duration and count the
+    // two paths that can still Present off the pump thread.
+    void NotePumpPresentDuration(std::chrono::steady_clock::duration elapsed) noexcept;
+    void NoteOffPumpPresent(const char* reason) noexcept;
     void CompositeTimedText(ID3D11RenderTargetView* target, TimedTextLayerSlot slot) noexcept;
     void ReleaseTimedTextSlotResources(TimedTextLayerSlot slot) noexcept;
     void ReleaseTimedTextResources(bool resetRenderedState = true) noexcept;
@@ -468,6 +473,19 @@ private:
     bool pumpHandoffDone_;
     FFFResult pumpHandoffResult_;
     std::condition_variable pumpHandoffCondition_;
+    // Present observability. The pump serialises every route behind one thread,
+    // so a single route whose Present stalls freezes all of them; these counters
+    // are the only trace that survives such a stall.
+    std::atomic<std::uint64_t> pumpSlowPresentCount_;
+    std::atomic<std::uint64_t> pumpPresentMax100ns_;
+    // Suppression deadlines, steady_clock milliseconds since epoch; 0 = never
+    // logged. A route that is merely slow rather than hung would otherwise emit
+    // one line per frame, and every line is written to disk by the managed sink.
+    // Atomic because the two off-pump paths below run on different threads.
+    std::atomic<std::int64_t> pumpSlowPresentLogAt_;
+    std::atomic<std::uint64_t> offPumpClearSurfacePresents_;
+    std::atomic<std::uint64_t> handoffTimeoutFallbacks_;
+    std::atomic<std::int64_t> offPumpPresentLogAt_;
     bool coverBackdropThreadStop_;
     bool coverBackdropRequestPending_;
     std::uint64_t coverBackdropRequestGeneration_;
