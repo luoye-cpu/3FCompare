@@ -205,14 +205,10 @@ dotnet build -c Release -p:KernelConfiguration=Release_pr9
    （`docs/33 §九` 局限）。本次修复恰好把 4 条 presenter 线程收敛为 1 条（线程 184→181），
    两个变量一起动了；没有做"保持 4 条线程但只让 1 条 Present"的对照。
 
-6. **当前部署产物是旧的（务必先重部署再复验）。**
-   实测：`src/3FCompare/bin/Release/net11.0-windows/FFF.Native.dll`
-   （mtime 2026-09-20 12:53，即修复构建 **之后**）**不含**本次修复
-   （`grep "The process presenter"` = 0，且含旧的 `independent timed-text presenter` 字符串）。
-   原因是它由未带 `-p:KernelConfiguration=Release_pr9` 的托管构建内嵌了
-   `x64/Release/FFF.Native.dll`（2026-09-18 旧产物）。
-   ⇒ **§一 的 0/8 结论是在手工换入的修复产物上得到的，不是当前 Release 输出。**
-   提交 / 复验前先按 §三 第 3 步重部署。
+6. ~~当前部署产物是旧的~~ —— **已于 2026-09-20 13:0x 解决，见 §五「部署状态」。**
+   （原文保留以备追溯：修复构建完成后，托管 Release 构建一度仍内嵌 9-18 的旧内核产物，
+   导致 `bin/Release/.../FFF.Native.dll` 不含修复。现已把修复产物部署到嵌入路径并重编托管，
+   实测新标识 `The process presenter` = 1、旧标识 `independent timed-text presenter` = 0。）
 
 ## 五、归档与版本控制
 
@@ -221,8 +217,23 @@ dotnet build -c Release -p:KernelConfiguration=Release_pr9
 | 留档补丁 | `tools/patches/0010-single-presenter-pipeline.patch`（545 行） |
 | 涉及文件 | `FFF.Native/3FP/Render/VideoRenderer.cpp`、`VideoRenderer.h` |
 | 补丁内容纯度 | **只含本次修复**（见下） |
-| 内核仓 | `third_party/fff_project`，分支 `3fc/integrate-issue7`，HEAD `0d5856e` |
-| 内核改动状态 | **未提交**（工作区脏） |
+| 内核仓 | `third_party/fff_project`，分支 `3fc/integrate-issue7` |
+| 内核改动状态 | ✅ **已提交**：`c84ec2f65a2a3dc6e7ee2494624869d669da0580`（短 `c84ec2f`），**仅本地、未 push**（origin 为只读上游） |
+| `.3fc_kernel_sha` | 已由 `0d5856e…` 更新为 `c84ec2f…` |
+| 内核二进制 | `x64/Release/` 已替换为修复产物（762368 B，sha256 `273ae8399b6f03cb…`）；旧件备份在 `.3fc_dumps/kernel-pre-single-presenter-20260920-130012/` |
+
+### 部署状态（2026-09-20 13:0x 复核，主 Agent 独立验证）
+
+| 判据 | 结果 |
+|---|---|
+| `bin/Release/.../FFF.Native.dll` 含新标识 `The process presenter` | **1**（存在） |
+| 同文件含旧标识 `independent timed-text presenter` | **0**（已消失） |
+| 导出面 | **82 个 / API version = 15**（与基线一致） |
+| 托管重编 | `dotnet build -c Release` **0 错误**；内嵌资源与输出目录逐字节一致 |
+| 4 路冒烟（**RTSS + Afterburner 在场**） | `multitest <4K> 4 30` **全部通过 ✓，EXIT=0**（跑 3 次均过） |
+| 回归 | `--selftest`（4K）EXIT=0；`--comparemodetest 2` EXIT=0；Core 492 / Platform 248 |
+
+⚠ 注：运行时策略是"磁盘已存在则不覆盖"，因此**陈旧副本需先删除**才会重新解压出含修复的 DLL。
 
 ### 补丁纯度核验方法
 
@@ -265,8 +276,10 @@ dotnet build -c Release -p:KernelConfiguration=Release_pr9
 
 ## 六、待办
 
-- [ ] 在嵌套仓提交本次修复并打归档 tag，同步 `.3fc_kernel_sha` 与 `$KernelBaselineSha`
-- [ ] 用 `-p:KernelConfiguration=Release_pr9` 重部署 Release 产物，再复跑 4 路 A/B
+- [x] 在嵌套仓提交本次修复（`c84ec2f`），同步 `.3fc_kernel_sha`
+- [x] 重部署 Release 产物并复验（含修复，4 路冒烟 3/3 通过）— 见「部署状态」
+- [ ] 打归档 tag `3fcompare-kernel-<上游版本>.<序号>`，并同步 `构建全部.ps1` 的 `$KernelBaselineSha`（**本次有意未改**：该文件按钉死 SHA checkout，改错会导致未来构建 checkout 失败，需单独评估）
+- [ ] 重建 `.3fc_kernel_baseline.bundle`（**必须带 `HEAD`**，否则克隆后工作区为空）
 - [ ] `PATCHES.md` 增加"类别一之外"的条目：本次修复性质上是**上游设计缺陷的本地收敛**
       （上游无等价实现），应作为**必须重放**项登记，并写清重移植要点（`PresentationPump`
       全量替换 per-instance presenter 线程）
