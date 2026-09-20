@@ -1,6 +1,9 @@
 # 📦 3FCompare 打包规范 / Packaging Specification
 
 > 版本 / Version: 1.1 | 最后更新 / Last updated: 2026-08-19 | 适用于 / Applies to: v0.1.0+
+>
+> **当前项目版本 / Current project version: `v0.2.5`**（2026-09-16 核对：两个 csproj 均为
+> `<Version>0.2.5</Version>` + `<VersionSuffix>BETA</VersionSuffix>`，已与 git tag `v0.2.5` 同步）。
 
 ---
 
@@ -250,9 +253,13 @@ Invoke-7zMax 'a -t7z -mx9 -md=3840m -mfb=273 -ms=on -mmt=1 "out.7z" *'
 
 `src/3FCompare/3FCompare.csproj`（**唯一真源** / single source of truth）:
 ```xml
-<Version>0.2.0</Version>
+<Version>0.2.5</Version>
 <VersionSuffix>BETA</VersionSuffix>
 ```
+
+> **2026-09-16 校正**：本节此前仍写着 `0.2.0`，与 csproj 真源（两个工程均为 `0.2.5`）
+> 严重脱节 —— 正是本节 §5.2 想防止的"README/规范与 csproj 不一致"问题本身。
+> 改版本时**本处必须与 csproj 同步**。
 
 `pack.ps1` 与 `tools/发布门禁.ps1` **不再硬编码版本号**：不传 `-Version` 时自动读取上面这两行；
 显式传入且与 csproj 不一致会告警（防止误发旧包——历史上出现过 `publish/` 里躺着 0.2.1 产物、

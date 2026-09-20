@@ -14,7 +14,10 @@
 
 3FCompare 面向视频编码评测（VCB-Studio 等圈子）的场景：把多个编码版本的视频按帧对齐，
 提供**分屏（1~9 路网格）/ 单屏切换 / A-B 滑块 / 双步进（帧&秒）/ 像素探针 / 放大镜**等贴合“盯帧”工作流的操作，
-支持**硬件编解码开关与多显卡解码指定**、**窗口/全屏双模式**，
+支持**硬件编解码开关与多显卡解码指定**与**窗口/全屏双模式**，
+（**多显卡指定 2026-09-16 真正接线生效**：此前该选项只保存不生效——内核配置无 adapter 字段；
+现新增内核扩展 `preferredAdapterIndex`（PlayerApiVersion 14→15），索引与 DXGI `EnumAdapters1` 一致，
+越界自动回落默认策略。详见 `docs/06` §3 A11）
 并原生支持 **Windows Advanced Color（广色域 / ACM）** 与 **G-SYNC / FreeSync（VRR）** 显示链路。
 
 ---
@@ -27,7 +30,7 @@
 | 对标产品 / Reference | NVIDIA ICAT（最多 4 路视频/图像对比）——本项目**扩展至 1~9 路**，对齐、双步进、硬件解码开关、窗口/全屏、多显卡解码 / NVIDIA ICAT (up to 4-way) — **extended to 1–9 ways** with alignment, dual stepping, HW decode toggle, window/fullscreen, multi-GPU |
 | 后端 / Backend | FFF_Project 的 **3FP**（`FFF.Native` fork + 自研补丁，见 docs/03-后端接入与能力映射.zh.md） / **3FP** from FFF_Project (forked `FFF.Native` + custom patches, see docs/03-后端接入与能力映射.en.md) |
 | 业务规模 / Scale | **1~9 路对比**（3x3 网格上限），架构按 N 路扩展 / **1–9 way comparison** (3×3 grid max), architecture scales to N-way |
-| 解码 / Decode | 3FP 原生能力：CPU（FFmpeg）/ GPU（CUDA/NVDEC、D3D11VA 优先）+ 自动回退；**硬件开关 + 多 GPU 指定** / 3FP native: CPU (FFmpeg) / GPU (CUDA/NVDEC, D3D11VA preferred) + auto fallback; **HW toggle + multi-GPU selection** |
+| 解码 / Decode | 3FP 原生能力：CPU（FFmpeg）/ GPU（CUDA/NVDEC、D3D11VA 优先）+ 自动回退；**硬件开关 + 多 GPU 指定（2026-09-16 起生效）** / 3FP native: CPU (FFmpeg) / GPU (CUDA/NVDEC, D3D11VA preferred) + auto fallback; **HW toggle + multi-GPU selection** |
 
 
 | [PACKAGING_SPEC.md](PACKAGING_SPEC.md) | 打包规范：NativeAOT 双版本发布流程、命名规则、压缩配置 |
@@ -36,8 +39,10 @@
 
 - **ACM/广色域**：完全遵循 3FP 的 Advanced Color 交换链契约（SDR `BGRA8/RGB10A2`、HDR `R10G10B10A2+PQ/BT.2020`），
   显示侧校色交给 DWM；本项目自行探测显示能力（DXGI 亮度读取）并计算智能色调映射参数，探针/截屏始终读取「颜色管理前」的原生缓冲，保证跨路对比一致。
-- **G-SYNC / FreeSync**：播放窗口为独立窗口，**不破坏桌面 VRR**；是否全时刻生效取决于 3FP 交换链
-  （Present 节奏 / `ALLOW_TEARING`，见 [docs/03](docs/03-后端接入与能力映射.zh.md) 待确认项 **A8/A9**），待专项实测。
+- **G-SYNC / FreeSync**：播放窗口为独立窗口，**不破坏桌面 VRR**。
+  ~~是否全时刻生效取决于 3FP 交换链（Present 节奏 / `ALLOW_TEARING`），待专项实测~~
+  → **2026-09-16 已实测支持**：`SetPresentConfig`（撕裂呈现）「显示器链支持 ✓」、
+  `SetPacingConfig`（媒体率节奏）「已启用 ✓」，见 [docs/03](docs/03-后端接入与能力映射.zh.md) 的 **A8/A9**。
 - 专项验收清单见 [docs/01-需求分析.zh.md §5.1](docs/01-需求分析.zh.md)。
 
 ## ⚖️ 依赖与许可提示 / License & Dependencies
@@ -49,7 +54,10 @@
 
 > 详细依赖清单、构建步骤与风险见 [docs/06-风险与依赖.zh.md](docs/06-风险与依赖.zh.md)。
 
-## 🛠 工程状态（0.2.0-BETA，2026-08-25）
+## 🛠 工程状态（v0.2.5，2026-09-15）
+
+> ⚠ 本节标题此前长期停留在 `0.2.0-BETA，2026-08-25`，与实际版本严重脱节，现已更正。
+> 版本唯一真源是 csproj 的 `<Version>`，改版本时记得同步此处。
 
 > **版本号唯一真源**：`src/3FCompare/3FCompare.csproj` 的 `<Version>`（+`VersionSuffix`）。
 > `pack.ps1` 与 `tools/发布门禁.ps1` 不硬编码版本——不传 `-Version` 时自动从 csproj 派生，
@@ -63,7 +71,7 @@ src/
 │                               #   2026-08-22 由 WinForms 迁移而来，WinForms 版归档于 tag `winforms-final`）
 tests/
 ├── 3FCompare.SmokeTests/       # E3 冒烟（控制台，演示引擎全流程验证）
-├── 3FCompare.Core.Tests/       # 单元测试（FrameTimeline / SyncController / GridLayout / ToneMapping 等，53 例）
+├── 3FCompare.Core.Tests/       # 单元测试（FrameTimeline / SyncController / GridLayout / ToneMapping / PixelReadback / RenderStallWatchdog 等，175 例）
 third_party/
 └── fff_project/                # FFF_Project submodule（内核，MIT）
     └── FFF.Native → x64/Release/FFF.Native.dll   # 已构建（Release x64）
@@ -84,7 +92,7 @@ third_party/
 - **多路对比 1~9 路**（2x2/3x2/3x3 自动网格，点击选中，单屏/多屏切换，数字键 1-9 加路） / **1–9 way comparison** (2×2/3×2/3×3 automatic grid, click selection, single/multi view toggle, number keys 1-9)
 - **双步进**：按帧（←/→）与按秒（Shift+←/→）两组前进/后退，步长可在设置中调整 / **Dual stepping**: frame-stepping (←/→) and second-stepping (Shift+←/→), configurable step sizes
 - **同步播放/暂停/停止/Seek/循环**：以第 0 路为 master 的媒体时间同步（SyncController）/ **Sync play/pause/stop/seek/loop**: SyncController with slot 0 as master
-- **二级设置窗口**：硬件解码开关、GPU 选择（多显卡）、步进步长、色彩模式、默认布局、窗口/全屏行为（F25/F26） / **Settings dialog**: HW decode toggle, multi-GPU selection, step sizes, color mode, layout, window/fullscreen behavior (F25/F26)
+- **二级设置窗口**：硬件解码开关、GPU 选择（多显卡，按 DXGI 适配器列出，2026-09-16 起生效）、步进步长、色彩模式、默认布局、窗口/全屏行为（F25/F26） / **Settings dialog**: HW decode toggle, multi-GPU selection (DXGI adapters, effective since 2026-09-16), step sizes, color mode, layout, window/fullscreen behavior (F25/F26)
 - **全屏模式**（F11）+ 窗口模式，全屏可隐藏工具栏/时间轴 / **Fullscreen mode** (F11) + window mode, hide chrome in fullscreen
 - **会话保存/加载**（`.3fcs` JSON：文件列表/偏移/布局/位置/循环区间） / **Session save/load** (`.3fcs` JSON: file list, offsets, layout, position, loop range)
 - **快捷键** / **Keyboard shortcuts**: Space play/pause, ←→ frame step, Shift+←→ second step, ↑↓ 10s step, F11 fullscreen, B A-B marker, P probe, O open, R reset view, Esc exit fullscreen
@@ -101,6 +109,12 @@ third_party/
 - **真实内核已验证**：FFmpeg + libass + FFF.Native 全链路构建成功，App 真实渲染视频确认 / **Real kernel verified**: FFmpeg + libass + FFF.Native pipeline built, real video rendering confirmed.
 - **拖拽平移稳定性修复**：滚轮缩放后按住拖动跨画面边界不中断（鼠标捕获 + 不再由 MouseLeave 提前结束拖拽），多路同步平移连贯（0.1.4 新增） / **Drag-pan stability fix**: cross-surface drag without interruption via mouse capture, continuous multi-way sync pan (0.1.4)
 - **双语界面**：完整中英双语，启动应用已保存语言、语言切换即时刷新全部界面（菜单/工具栏/面板/状态栏/消息框/文件过滤器），此前英文模式仅设置对话框生效、主界面残留全中文（0.1.4 完善） / **Bilingual UI**: full zh/en support, applies saved language on startup and refreshes the entire UI on switch (menus/toolbars/panels/status/message dialogs/file filters); previously only the settings dialog honored English (0.1.4)
+- **播放期漂移检测与周期校正**：各路时钟必然发散，以 master 为基准，偏差超半帧才校正、1s 冷却防抖（0.2.5 新增） / **Playback drift detection & periodic correction**: master-referenced, corrects only beyond half a frame with 1s cooldown (0.2.5)
+- **帧步进先全路暂停**：避免 master 被内核置 Paused 而从路继续播导致的错帧（0.2.5） / **Frame-step pauses all routes first**: prevents master stalling while followers keep playing (0.2.5)
+- **像素回读坐标域修正**：内核 `ReadVideoPixel` 的坐标域是后台缓冲而非片源分辨率，展示仍用片源坐标、仅读取走换算（0.2.5） / **Pixel readback coordinate-domain fix**: kernel reads in backbuffer space; source coords kept for display, converted only for reads (0.2.5)
+- **滚轮缩放最终值不再被节流吞掉**：16ms 节流原为直接丢弃，现改为挂一次性 UI 线程补发（0.2.5） / **Wheel zoom final value no longer swallowed by throttle**: throttled updates are now re-flushed once on the UI thread (0.2.5)
+- **配置原子写 + 会话/FFmpeg 路径校验**：写失败不再损坏配置；拒绝相对路径与 UNC（后者会外泄 NTLM 凭据）（0.2.5） / **Atomic config writes + path validation**: no more corrupted settings; rejects relative and UNC paths (the latter leaks NTLM credentials) (0.2.5)
+- **内核基线 SHA 绑定**：`构建全部.ps1` 钉死内核 SHA，DLL 与 HEAD 不一致即强制重建（0.2.0 新增） / **Kernel baseline SHA pinning**: build script pins the kernel SHA and forces rebuild on mismatch (0.2.0)
 
 ### 🚀 快速开始（仅需下载包） / Quick Start (prebuilt package)
 
