@@ -1749,6 +1749,11 @@ bool ObservabilityLogAllowed(std::atomic<std::int64_t>& deadline) noexcept {
 // first/last-frame boundary) publishes a handoff flag and waits for the pump
 // instead of presenting from its own thread.
 //
+// docs/40: the two remaining exceptions to that invariant — ClearSurface()'s
+// Present(0, 0) on the caller thread and the handoff timeout fallback — are both
+// excluded now (see ClearSurface() and PresentTimedText()). The pump thread is
+// the only thread in the process that reaches IDXGISwapChain::Present.
+//
 // Lock order: timedTextMutex_ may be held while entering Register/Unregister;
 // the pump never takes its own mutex_ while it is inside a renderer, so the
 // two can never form a cycle.
@@ -3325,16 +3330,20 @@ void PlayerVideoRenderer::NotePumpPresentDuration(
     OutputDebugStringA(line);
 }
 
-void PlayerVideoRenderer::NoteOffPumpPresent(const char* reason) noexcept {
-    // docs/39 §3.3: the invariant "only one thread in the process is inside
-    // Present" has exactly two exceptions, and both were previously invisible.
-    // The counters are bumped by the callers (unconditionally); only this line is
-    // cooldown-suppressed, because ClearSurface repeats on every device rebuild
-    // and the handoff timeout repeats whenever the pump is wedged.
+void PlayerVideoRenderer::NotePumpOwnedPresentExcluded(const char* reason) noexcept {
+    // docs/40: "only one thread in the process is inside Present" used to have
+    // exactly two exceptions — ClearSurface()'s Present(0, 0) on the caller
+    // thread and the handoff 2 s timeout fallback. Both are now *excluded*
+    // instead of performed, so this line reports a suppressed Present rather than
+    // an off-pump one (the former "off-pump Present ... reason=..." line no
+    // longer exists anywhere in the binary). The counters are bumped by the
+    // callers unconditionally; only this line is cooldown-suppressed, because
+    // ClearSurface repeats on every device rebuild and a wedged pump repeats on
+    // every boundary present.
     if (!ObservabilityLogAllowed(offPumpPresentLogAt_)) return;
     char line[224]{};
     _snprintf_s(line, sizeof(line), _TRUNCATE,
-        "FFF.Native: off-pump Present window=%p reason=%s clearSurface=%llu handoffTimeout=%llu",
+        "FFF.Native: pump-owned Present excluded window=%p reason=%s clearSurface=%llu handoffTimeout=%llu",
         static_cast<void*>(window_), reason == nullptr ? "unknown" : reason,
         static_cast<unsigned long long>(
             offPumpClearSurfacePresents_.load(std::memory_order_relaxed)),
@@ -5026,14 +5035,26 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
     std::unique_lock lock(timedTextMutex_);
     if (!pumpHandoffCondition_.wait_for(lock, std::chrono::seconds(2),
             [this] { return pumpHandoffDone_; })) {
-        // The pump is wedged (device recovery, a blocked Present). Do not stall
-        // the caller for good: take the historical direct path instead.
+        // docs/40 §二: the wait stays bounded (the caller is never stalled for
+        // good), but the timeout no longer falls back to Presenting from this
+        // thread — that fallback was the second off-pump Present path, and it
+        // fired precisely when the pump was wedged, i.e. when the device is
+        // already in trouble (TDR / driver hang / device recovery). Opening a
+        // second presenter pipeline on a device in that state is both the most
+        // dangerous and the least useful thing to do, and it is the one
+        // condition this whole change exists to remove.
+        //
+        // Two seconds is five times the worst pump round measured so far
+        // (slowest Present 372.9 ms, docs/40 §一), so reaching it means the pump
+        // is not merely slow. The pending flag is deliberately left set: the pump
+        // still presents this frame as soon as it unwedges, and the caller
+        // reports a device failure — which both call sites already handle by
+        // requesting device recovery (PlayerSession.cpp:672 / :2900) instead of
+        // failing the session when the device is genuinely gone.
         lock.unlock();
-        // docs/39 §3.3: this fallback briefly allows two threads inside Present.
-        // Count it so an intermittent crash can be correlated with it.
         handoffTimeoutFallbacks_.fetch_add(1, std::memory_order_relaxed);
-        NoteOffPumpPresent("handoff-timeout");
-        return PresentTimedTextOnPump();
+        NotePumpOwnedPresentExcluded("handoff-timeout");
+        return FFFResult::DeviceFailure;
     }
     return pumpHandoffResult_;
 }
@@ -5120,8 +5141,38 @@ FFFResult PlayerVideoRenderer::PresentTimedTextOnPump() noexcept {
 }
 
 void PlayerVideoRenderer::ClearSurface() noexcept {
-    // Precondition: the caller holds deviceMutex_. Presenting here only needs
-    // presentMutex_; swapChain_ was already validated under deviceMutex_.
+    // Precondition: the caller holds deviceMutex_. The clear only needs the
+    // device/context it was already validated against under that lock.
+    //
+    // docs/39 §3.3 / docs/40 §一: the clear itself is unchanged, but the
+    // Present(0, 0) that used to follow it is gone — this is the (B) option, and
+    // it is the *whole* fix, not a deferral, because of where the two callers
+    // reach here from:
+    //
+    //   * ResetMedia() and Close() both call StopPresentationPumpMembership()
+    //     *before* taking deviceMutex_, so by the time ClearSurface() runs this
+    //     renderer is no longer a pump member and no later pump round will ever
+    //     compose for it. A "present it on the next round" hand-off is therefore
+    //     not available without re-registering a renderer that is being torn
+    //     down.
+    //   * The pump is process-wide, so the danger is not this renderer's own
+    //     membership: it is that *another* route's pump round is inside Present
+    //     right now. That is the normal case during a 4-route open/close batch
+    //     (4 clear-surface Presents were observed clustered within ~1 ms in
+    //     app-2026-09-20.log), and it is exactly the "two threads inside
+    //     IDXGISwapChain::Present" condition the pump exists to remove.
+    //   * Checking "is the pump idle?" here would not close it either: several
+    //     closers can all observe members_ == empty and then Present
+    //     concurrently. Only an unconditional skip is race-free without adding a
+    //     new pump API and a new lock-order edge.
+    //
+    // What is lost: the black frame is not shown. Both call sites are "the media
+    // is going away" — media replaced, or session closed/window destroyed — so
+    // the surface keeps *this route's own* last frame (never another route's
+    // content) until the new media's first composed frame or the window
+    // teardown. No stale pixels can leak into a later frame either: every
+    // compose path fully repaints the back buffer before Present
+    // (DrawCachedVideo() clears the target first, VideoRenderer.cpp:4769).
     if (context_ != nullptr && device_ != nullptr && swapChain_ != nullptr) {
         ComPtr<ID3D11Texture2D> backBuffer;
         ComPtr<ID3D11RenderTargetView> backBufferTarget;
@@ -5132,17 +5183,10 @@ void PlayerVideoRenderer::ClearSurface() noexcept {
             context_->ClearRenderTargetView(backBufferTarget.Get(), black);
             context_->OMSetRenderTargets(0, nullptr, nullptr);
             context_->Flush();
-            {
-                std::lock_guard presentLock(presentMutex_);
-                swapChain_->Present(0, 0);
-            }
-            // docs/39 §3.3: this Present runs on the caller's thread (device
-            // rebuild / close), not on the pump. Count it so an intermittent
-            // crash can be correlated with the one off-pump Present that stays
-            // in the media-reset path. Logged outside presentMutex_ so the sink
-            // never runs while that lock is held.
+            // docs/40 §一: counted (not logged per frame) so the next round of
+            // 4-route runs can prove this path was taken and no Present happened.
             offPumpClearSurfacePresents_.fetch_add(1, std::memory_order_relaxed);
-            NoteOffPumpPresent("ClearSurface");
+            NotePumpOwnedPresentExcluded("ClearSurface");
         }
     }
     if (window_ != nullptr && IsWindow(window_))
