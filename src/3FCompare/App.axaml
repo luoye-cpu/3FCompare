@@ -2,4 +2,7 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              x:Class="_3FCompare.AppEntry"
              RequestedThemeVariant="Dark">
+  <!-- 上面的 Dark 只是 Initialize 期间的兜底默认；真正的主题由 ThemeManager.ApplySaved()
+       在 AvaloniaXamlLoader.Load 之后按用户偏好（跟随系统/浅色/深色）覆盖。
+       令牌与两套取值见 Themes/ThemeTokens.cs、Themes/ThemeResources.cs。 -->
 </Application>

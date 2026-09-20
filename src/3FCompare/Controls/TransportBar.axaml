@@ -6,19 +6,20 @@
              x:Class="_3FCompare.Controls.TransportBar">
 
   <Grid ColumnDefinitions="*,Auto,*" Margin="12,7">
+    <!-- 图标不用字形（会因字体缺字渲染成豆腐块），改由 AppIcons 在构造时装配矢量几何 -->
     <StackPanel Grid.Column="0" Orientation="Horizontal" HorizontalAlignment="Left" Spacing="6">
-      <Button x:Name="BtnAdd" Width="36" Height="36" Click="OnAdd" Content="+" FontSize="16" />
-      <Button x:Name="BtnRemove" Width="36" Height="36" Click="OnRemove" Content="−" FontSize="16" />
+      <Button x:Name="BtnAdd" Width="36" Height="36" Click="OnAdd" />
+      <Button x:Name="BtnRemove" Width="36" Height="36" Click="OnRemove" />
     </StackPanel>
 
     <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" Spacing="6">
-      <Button x:Name="BtnSecPrev" Width="40" Height="36" Click="OnSecPrev" Content="◀◀" />
-      <Button x:Name="BtnFramePrev" Width="38" Height="36" Click="OnFramePrev" Content="◀" />
-      <Button x:Name="BtnPlayPause" Width="46" Height="36" Click="OnPlayPause" Content="▶" FontSize="16" />
-      <Button x:Name="BtnStop" Width="38" Height="36" Click="OnStop" Content="■" />
-      <Button x:Name="BtnFrameNext" Width="38" Height="36" Click="OnFrameNext" Content="▶" />
-      <Button x:Name="BtnSecNext" Width="40" Height="36" Click="OnSecNext" Content="▶▶" />
-      <Button x:Name="BtnLoop" Width="40" Height="36" Click="OnLoop" Content="🔁" />
+      <Button x:Name="BtnSecPrev" Width="40" Height="36" Click="OnSecPrev" />
+      <Button x:Name="BtnFramePrev" Width="38" Height="36" Click="OnFramePrev" />
+      <Button x:Name="BtnPlayPause" Width="46" Height="36" Click="OnPlayPause" />
+      <Button x:Name="BtnStop" Width="38" Height="36" Click="OnStop" />
+      <Button x:Name="BtnFrameNext" Width="38" Height="36" Click="OnFrameNext" />
+      <Button x:Name="BtnSecNext" Width="40" Height="36" Click="OnSecNext" />
+      <Button x:Name="BtnLoop" Width="40" Height="36" Click="OnLoop" />
     </StackPanel>
 
     <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
@@ -28,9 +29,9 @@
                 SelectionChanged="OnColorModeChanged" />
       <TextBlock x:Name="TextTime" Width="168" Margin="10,0,0,0" VerticalAlignment="Center"
                  HorizontalAlignment="Right" TextAlignment="Right" FontFamily="Consolas" FontSize="13"
-                 Foreground="#FFC8C8D2" Text="00:00:00:00 / 00:00:00" />
+                 Foreground="{DynamicResource TextSecondaryBrush}" Text="00:00:00:00 / 00:00:00" />
       <TextBlock x:Name="TextInfo" MaxWidth="120" VerticalAlignment="Center"
-                 TextTrimming="CharacterEllipsis" FontSize="12" Foreground="#8C8C96" Text="" />
+                 TextTrimming="CharacterEllipsis" FontSize="12" Foreground="{DynamicResource TextMutedBrush}" Text="" />
     </StackPanel>
   </Grid>
 </UserControl>

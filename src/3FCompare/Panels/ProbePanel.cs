@@ -4,6 +4,7 @@ using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
 using _3FCompare.App;
+using _3FCompare.Controls;
 using _3FCompare.Core.Backend;
 
 namespace _3FCompare.Panels;
@@ -28,19 +29,31 @@ public sealed class ProbePanel : StackPanel
         {
             FontFamily = new FontFamily("Consolas"),
             FontSize = 14, FontWeight = FontWeight.Bold,
-            Foreground = Brush("#FFFFC840"), TextWrapping = TextWrapping.Wrap,
-        };
-        var hint = Mk(11);
-        hint.Foreground = Brush("#8C8C96");
+            TextWrapping = TextWrapping.Wrap,
+        }.Themed("AccentTextBrush");
+        var hint = Mk(11).Themed("TextMutedBrush");
         hint.Text = LanguageManager.T("Probe_Hint");
 
-        var copy = new Button { Content = "⧉ JSON", Height = 26, HorizontalAlignment = HorizontalAlignment.Left };
+        // 图标改矢量（docs/31 阶段 4）。"JSON" 文本刻意保留：本地化表里没有"复制"类键，
+        // 而本批约定不动 LanguageManager，可见标签是这里最省事的可发现性来源（零新键）。
+        var copy = new Button { Height = 26, HorizontalAlignment = HorizontalAlignment.Left };
+        copy.Content = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 4,
+            Children =
+            {
+                AppIcons.Create("Copy", 13),
+                new TextBlock { Text = "JSON", VerticalAlignment = VerticalAlignment.Center }
+                    .Themed("TextPrimaryBrush"),
+            },
+        };
+        ToolTip.SetTip(copy, "JSON");
         copy.Click += (_, _) => CopyToClipboard();
 
         var header = new TextBlock
         {
             Text = LanguageManager.T("Probe_Title"), FontSize = 13, FontWeight = FontWeight.Bold,
-            Foreground = Brush("#FFFFFFFF"),
         };
         Children.Add(header);
         Children.Add(_coord);
@@ -56,12 +69,10 @@ public sealed class ProbePanel : StackPanel
     private void RefreshCoord() =>
         _coord.Text = _hasSample ? $"X:{_lastX} Y:{_lastY} {_last.BitDepth}bit" : LanguageManager.T("Probe_Coord");
 
-    private static TextBlock Mk(double size) => new()
+    private static TextBlock Mk(double size) => new TextBlock
     {
-        FontSize = size, TextWrapping = TextWrapping.Wrap, Foreground = Brush("#FFC8C8D2"),
-    };
-
-    private static SolidColorBrush Brush(string hex) => new(Color.Parse(hex));
+        FontSize = size, TextWrapping = TextWrapping.Wrap,
+    }.Themed("TextSecondaryBrush");
 
     public void AttachSession(IPlayerSession? session)
     {
@@ -89,7 +100,11 @@ public sealed class ProbePanel : StackPanel
 
         try
         {
-            if (_session.TryReadPixel(x, y, out var s))
+            // 展示给用户的仍是**片源像素坐标**（"源第几行第几列"才有意义），
+            // 但内核 FFF3FP_ReadVideoPixel 的坐标域是后台缓冲 ⇒ 读取前必须换算
+            // （PixelReadback.TryReadPixelAtSource）。漏掉这步在窗口小于片源时
+            // 会读到偏右下的错误位置。
+            if (_session.TryReadPixelAtSource(x, y, out var s))
             {
                 _last = s;
                 _lastX = x; _lastY = y;

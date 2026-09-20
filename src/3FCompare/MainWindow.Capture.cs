@@ -7,6 +7,7 @@ using System.Drawing.Imaging;
 using _3FCompare.App;
 using _3FCompare.Core.Backend;
 using _3FCompare.Core.Imaging;
+using _3FCompare.Diagnostics;
 
 namespace _3FCompare;
 
@@ -25,73 +26,98 @@ public partial class MainWindow : Window
 
     private async void OnExportFrame(object? sender, RoutedEventArgs e)
     {
-        var surface = Grid.GetSurface(Math.Max(0, Grid.SelectedIndex));
-        if (surface is null || _sync.Count == 0)
-        {
-            await Views.MessageBox.Show(this, LanguageManager.T("Msg_AppName"),
-                LanguageManager.T("Msg_SelectMedia"), LanguageManager.T("Settings_Ok"));
-            return;
-        }
-
-        var top = TopLevel.GetTopLevel(this);
-        if (top is null) return;
-        var file = await top.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
-        {
-            Title = LanguageManager.T("Menu_ExportFrame"),
-            SuggestedFileName = $"frame_{DateTime.Now:yyyyMMdd_HHmmss}.png",
-            FileTypeChoices = new[] { new FilePickerFileType("PNG") { Patterns = new[] { "*.png" } } },
-        });
-        var path = file?.TryGetLocalPath();
-        if (path is null) return;
-
-        var session = _sync.Slots.ElementAtOrDefault(Grid.SelectedIndex)?.Session;
-
-        // 路径①（首选）：内核原生回读 —— 颜色管理前的原生缓冲，任意分辨率
-        // 路径②（兜底）：GDI 抓屏 —— 仅在引擎不支持回读时使用，会在状态栏标注来源
-        System.Drawing.Bitmap? bmp = null;
-        var source = "native";
+        // D1：async void 顶层边界。文件选择器（SavedFilePicker）与 MessageBox.ShowDialog
+        // 都可能抛，而方法体内原有的两段 try/catch 只覆盖"抓帧"与"写盘"，
+        // 覆盖不到选择器与提示框本身 ⇒ 漏网异常直接冒泡到 Dispatcher ⇒ 进程闪退。
+        // 成功路径与既有的两段内部分支完全不变。
         try
         {
-            if (session is not null)
-                bmp = CaptureNativeFrame(session);
-            if (bmp is null && surface.Hwnd != 0)
+            var surface = Grid.GetSurface(Math.Max(0, Grid.SelectedIndex));
+            if (surface is null || _sync.Count == 0)
             {
-                bmp = _3FCompare.App.Capture.ScreenFrameCapture.CaptureWindowFrame(surface.Hwnd);
-                source = "screen";
+                await Views.MessageBox.Show(this, LanguageManager.T("Msg_AppName"),
+                    LanguageManager.T("Msg_SelectMedia"), LanguageManager.T("Settings_Ok"));
+                return;
+            }
+
+            var top = TopLevel.GetTopLevel(this);
+            if (top is null) return;
+            var file = await top.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+            {
+                Title = LanguageManager.T("Menu_ExportFrame"),
+                SuggestedFileName = $"frame_{DateTime.Now:yyyyMMdd_HHmmss}.png",
+                FileTypeChoices = new[] { new FilePickerFileType("PNG") { Patterns = new[] { "*.png" } } },
+            });
+            var path = file?.TryGetLocalPath();
+            if (path is null) return;
+
+            var session = _sync.Slots.ElementAtOrDefault(Grid.SelectedIndex)?.Session;
+
+            // 路径①（首选）：内核原生回读 —— 颜色管理前的原生缓冲，任意分辨率
+            // 路径②（兜底）：抓屏双线（WGC 主 + GDI 备，docs/27 §三）—— 仅在引擎不支持回读时使用，
+            //   会在状态栏标注实际来源。两条抓屏线的可信度不等价（WGC 能抓到 flip-model 内容且被遮挡
+            //   时结果正确；GDI 对 flip-model 不可靠、被遮挡时会抓到遮挡物，docs/26 §3.2/§八），
+            //   所以这里必须区分标注，不能笼统写"抓屏回退"。
+            System.Drawing.Bitmap? bmp = null;
+            var source = "native";
+            try
+            {
+                if (session is not null)
+                    bmp = CaptureNativeFrame(session);
+                if (bmp is null && surface.Hwnd != 0)
+                {
+                    var captured = _3FCompare.App.Capture.FrameCapture.CaptureWindowFrame(surface.Hwnd);
+                    bmp = captured?.Bitmap;
+                    source = captured?.Route == _3FCompare.Core.Capture.CaptureRoute.Wgc ? "wgc" : "screen";
+                    // 组件日志：抓屏请求与其实际选路（WGC / GDI 回退 / 无结果）。
+                    // 抓屏要读子 HWND 的合成结果，是"呈现线程 + 窗口生命周期"的交叉点。
+                    ComponentLog.Log(Comp.Capture, "WindowFrame", Grid.SelectedIndex,
+                        $"hwnd=0x{surface.Hwnd:X} route={source} ok={(bmp is not null)}");
+                }
+            }
+            catch (Exception ex)
+            {
+                await Views.MessageBox.Show(this, LanguageManager.T("Msg_AppName"),
+                    $"{LanguageManager.T("Msg_CaptureFail")}: {ex.Message}", LanguageManager.T("Settings_Ok"));
+                return;
+            }
+
+            if (bmp is null)
+            {
+                await Views.MessageBox.Show(this, LanguageManager.T("Msg_AppName"),
+                    LanguageManager.T("Msg_CaptureUnavailable"), LanguageManager.T("Settings_Ok"));
+                return;
+            }
+
+            try
+            {
+                using (bmp)
+                {
+                    var size = $"{bmp.Width}×{bmp.Height}";
+                    WritePngWithSrgbChunk(bmp, path);
+                    // 明确标注来源与分辨率：抓屏结果与内核回读不等价，用户做对比报告时需要知道。
+                    // 注意：内核 ReadVideoPixelRegion 回读的是"已呈现帧"，故分辨率 = 呈现分辨率
+                    // （随窗口/显示器大小变化），不是源视频分辨率——用词避免误导为"原生分辨率"。
+                    StatusInfo.Text = source switch
+                    {
+                        "native" => $"{LanguageManager.T("Status_ExportDone")}: {Path.GetFileName(path)} ({size}, 内核回读)",
+                        "wgc" => $"{LanguageManager.T("Status_ExportDone")}: {Path.GetFileName(path)} ({size}, WGC 抓屏)",
+                        _ => $"{LanguageManager.T("Status_ExportDone")}: {Path.GetFileName(path)} ({size}, GDI 抓屏回退)",
+                    };
+                }
+            }
+            catch (Exception ex)
+            {
+                await Views.MessageBox.Show(this, LanguageManager.T("Msg_AppName"),
+                    $"{LanguageManager.T("Msg_CaptureFail")}: {ex.Message}", LanguageManager.T("Settings_Ok"));
             }
         }
-        catch (Exception ex)
+        catch (Exception fatal)
         {
-            await Views.MessageBox.Show(this, LanguageManager.T("Msg_AppName"),
-                $"{LanguageManager.T("Msg_CaptureFail")}: {ex.Message}", LanguageManager.T("Settings_Ok"));
-            return;
-        }
-
-        if (bmp is null)
-        {
-            await Views.MessageBox.Show(this, LanguageManager.T("Msg_AppName"),
-                LanguageManager.T("Msg_CaptureUnavailable"), LanguageManager.T("Settings_Ok"));
-            return;
-        }
-
-        try
-        {
-            using (bmp)
-            {
-                var size = $"{bmp.Width}×{bmp.Height}";
-                WritePngWithSrgbChunk(bmp, path);
-                // 明确标注来源与分辨率：抓屏结果与内核回读不等价，用户做对比报告时需要知道。
-                // 注意：内核 ReadVideoPixelRegion 回读的是"已呈现帧"，故分辨率 = 呈现分辨率
-                // （随窗口/显示器大小变化），不是源视频分辨率——用词避免误导为"原生分辨率"。
-                StatusInfo.Text = source == "native"
-                    ? $"{LanguageManager.T("Status_ExportDone")}: {Path.GetFileName(path)} ({size}, 内核回读)"
-                    : $"{LanguageManager.T("Status_ExportDone")}: {Path.GetFileName(path)} ({size}, 抓屏回退)";
-            }
-        }
-        catch (Exception ex)
-        {
-            await Views.MessageBox.Show(this, LanguageManager.T("Msg_AppName"),
-                $"{LanguageManager.T("Msg_CaptureFail")}: {ex.Message}", LanguageManager.T("Settings_Ok"));
+            // 变量名刻意不叫 ex：方法体内两个内层 catch 已用 ex（CS0136 禁止在外层
+            // 作用域重名），改名后仍指同一个"漏到顶层的异常"。
+            await ReportErrorAsync("Menu.ExportFrame",
+                Loc("导出当前帧失败。", "Failed to export the current frame."), fatal);
         }
     }
 

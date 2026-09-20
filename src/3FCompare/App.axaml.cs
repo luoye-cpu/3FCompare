@@ -17,6 +17,9 @@ public partial class AppEntry : Application
         Avalonia.Threading.Dispatcher.UIThread.UnhandledException += (_, e) =>
             _3FCompare.Core.Diagnostics.AppLog.Warn("Global",
                 $"UI 未处理异常: {e.Exception.GetType().Name}: {e.Exception.Message}");
+        // 组件日志的同类钩子（崩溃前 dump ring buffer）。放在这里而不是 ComponentLog.Initialize()：
+        // 后者跑在 Avalonia 启动前，那时触碰 Dispatcher.UIThread 会提前实例化 Dispatcher。
+        _3FCompare.Diagnostics.ComponentLog.InstallUiHook();
         System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (_, e) =>
         {
             e.SetObserved();
@@ -28,10 +31,18 @@ public partial class AppEntry : Application
         var theme = new ThemeResources();
         Resources.MergedDictionaries.Add(theme);
         Styles.Add(new FluentTheme());
-        foreach (var s in ThemeResources.BuildBaseStyles(theme))
+        foreach (var s in ThemeResources.BuildBaseStyles())
             Styles.Add(s);
 
         AvaloniaXamlLoader.Load(this);
+
+        // 主题必须在窗口创建前落地：放在 OnFrameworkInitializationCompleted 会让首帧
+        // 先按 App.axaml 的 Dark 画一次，浅色偏好的用户看到一次黑闪。
+        ThemeManager.ApplySaved();
+        // 组件日志：主题应用（启动期）。主题切换会重建全部主题令牌画刷，
+        // 若崩溃发生在切换之后，这条是时间线起点。
+        _3FCompare.Diagnostics.ComponentLog.Log(_3FCompare.Diagnostics.Comp.Theme,
+            "ApplySaved", -1, $"pref={ThemeManager.Preference}");
     }
 
     public override void OnFrameworkInitializationCompleted()

@@ -23,7 +23,7 @@
         <Separator />
         <MenuItem Header="{loc:Loc Menu_Exit}" Click="OnExit" />
       </MenuItem>
-      <MenuItem Header="{loc:Loc Menu_View}">
+      <MenuItem Header="{loc:Loc Menu_View}" SubmenuOpened="OnViewMenuOpened">
         <!-- 视图模式（互斥/切换类） -->
         <MenuItem Header="{loc:Loc Menu_ToggleSingle}" Click="OnToggleSingleMulti" />
         <MenuItem Header="{loc:Loc Menu_AbSlider}" Click="OnToggleAbSlider" />
@@ -45,6 +45,32 @@
           <MenuItem Header="{loc:Loc Menu_Grid_3x3}" Click="OnGridPreset" Tag="3x3" />
           <MenuItem Header="{loc:Loc Menu_Grid_Auto}" Click="OnGridPreset" Tag="auto" />
         </MenuItem>
+        <!-- 模式家族（docs/31 阶段 3）：叠加 / 分屏 / 网格 三选一。
+             与上面「网格布局」的分工：那组调的是**均匀网格的预设**（2x1/2x2/3x3），
+             这组调的是**模式家族**（叠加=两路铺满揭示，分屏=按路数收敛的非均匀分格，
+             网格=退出前两者、回到均匀网格）。
+             三项用 Click+Tag（与本菜单既有写法一致）；勾选状态在父菜单 SubmenuOpened 时刷新，
+             避免用 C/S 键改了模式后菜单里留下陈旧勾选。ToggleType=CheckBox 才能画出勾（见 Fluent 主题 ^:checked:toggle）。 -->
+        <MenuItem Header="{loc:Loc Menu_CompareMode}" SubmenuOpened="OnCompareModeMenuOpened">
+          <MenuItem x:Name="MenuModeOverlay" Header="{loc:Loc Menu_Mode_Overlay}"
+                    ToggleType="CheckBox" Click="OnCompareModePreset" Tag="overlay" />
+          <MenuItem x:Name="MenuModeSplit" Header="{loc:Loc Menu_Mode_Split}"
+                    ToggleType="CheckBox" Click="OnCompareModePreset" Tag="split" />
+          <MenuItem x:Name="MenuModeGrid" Header="{loc:Loc Menu_Mode_Grid}"
+                    ToggleType="CheckBox" Click="OnCompareModePreset" Tag="grid" />
+        </MenuItem>
+        <Separator />
+        <!-- 底部栏折叠（docs/31 阶段 4）：时间轴 / 状态栏，两项互相独立。
+             与「对比模式」三项同为可勾选项（Click+Tag、ToggleType=CheckBox），
+             勾选刷新时机与"框架先取反再 RaiseClick"的坑见 RefreshBottomBarChecks 的注释。 -->
+        <MenuItem x:Name="MenuTimeline" Header="{loc:Loc Menu_Timeline}"
+                  ToggleType="CheckBox" Click="OnToggleBottomBar" Tag="timeline" />
+        <MenuItem x:Name="MenuStatusBar" Header="{loc:Loc Menu_StatusBar}"
+                  ToggleType="CheckBox" Click="OnToggleBottomBar" Tag="statusbar" />
+        <!-- 悬浮传输栏（docs/31 阶段 4.3）：开启后传输栏改由 owned 顶层窗承载、鼠标靠近底边才浮现，
+             常驻位让出的 54px 归视频区。默认关闭 = 既有常驻布局不变（见 AppSettings.FloatingTransport）。 -->
+        <MenuItem x:Name="MenuFloatingTransport" Header="{loc:Loc Menu_FloatingTransport}"
+                  ToggleType="CheckBox" Click="OnToggleBottomBar" Tag="floating" />
         <Separator />
         <MenuItem Header="{loc:Loc Menu_Fullscreen}" InputGesture="F11" Click="OnToggleFullscreen" />
       </MenuItem>
@@ -86,7 +112,7 @@
     <Grid ColumnDefinitions="264,Auto,*" x:Name="MainArea">
       <ContentControl x:Name="SidebarHost" Grid.Column="0" />
       <GridSplitter x:Name="SidebarSplitter" Grid.Column="1" Width="4"
-                    ResizeDirection="Columns" Background="#50505A" MinWidth="4" />
+                    ResizeDirection="Columns" Background="{DynamicResource BorderBrush}" MinWidth="4" />
       <Panel Grid.Column="2" x:Name="CenterPanel">
         <ctrl:CompareGridView x:Name="Grid" DragDrop.AllowDrop="True" ClipToBounds="True" />
         <ctrl:AbSliderView x:Name="AbSlider" IsVisible="False" />

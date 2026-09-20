@@ -6,26 +6,29 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using _3FCompare.App;
 using _3FCompare.Panels;
+// 本工程开了 ImplicitUsings，System.IO.Path 在作用域内 ⇒ 必须起别名，否则 Path 二义
+using Path = Avalonia.Controls.Shapes.Path;
 
 namespace _3FCompare.Controls;
 
 /// <summary>Fluent 风格工具侧栏：纵向导航、常驻放大镜开关与可折叠内容区。</summary>
 public sealed class ToolsSidebar : UserControl
 {
-    private static readonly IBrush PanelBackground = new SolidColorBrush(Color.FromRgb(30, 30, 36));
-    private static readonly IBrush CardBackground = new SolidColorBrush(Color.FromRgb(38, 38, 45));
-    private static readonly IBrush ActiveBackground = new SolidColorBrush(Color.FromArgb(36, 255, 200, 64));
-    private static readonly IBrush Accent = new SolidColorBrush(Color.FromRgb(255, 200, 64));
-    private static readonly IBrush SecondaryText = new SolidColorBrush(Color.FromRgb(200, 200, 210));
-    private static readonly IBrush Divider = new SolidColorBrush(Color.FromRgb(62, 62, 70));
+    // 配色一律经令牌解析（不能 static readonly：会把首次解析结果固化，切主题后停在旧值）。
+    // 静态外观用 DynamicResource 绑定（自动跟随）；随状态切换的前景/背景在
+    // ActualThemeVariantChanged 里重跑 Activate/SyncRailMagnifier。
+    private IBrush Token(string key) => ThemePalette.Brush(this, key);
 
     private readonly TextBlock _title = new() { FontSize = 16, FontWeight = FontWeight.SemiBold };
+
+    /// <summary>折叠按钮的箭头（docs/31 阶段 4）：展开态指向左、折叠态指向右，只换几何不换控件。</summary>
+    private readonly Path _collapseIcon = AppIcons.Create("ChevronLeft", 12, "TextSecondaryBrush");
+
     private readonly Button _collapseButton = new()
     {
         Width = 32, // 折叠态可视宽度 32（RailWidth 48 - 边距 16），保证不溢出
         Height = 32,
-        FontSize = 12,
-        Content = "◀",
+        Content = null, // 实例字段初始化器不能引用另一个实例字段 ⇒ 图标在构造函数里装配
         HorizontalAlignment = HorizontalAlignment.Right,
     };
     private readonly StackPanel _navigation = new() { Spacing = 4 };
@@ -70,6 +73,7 @@ public sealed class ToolsSidebar : UserControl
         Media = media;
         Audio = audio;
 
+        _collapseButton.Content = _collapseIcon;
         ToolTip.SetTip(_collapseButton, "折叠/展开");
         _collapseButton.Click += (_, _) => ToggleCollapse();
 
@@ -93,15 +97,16 @@ public sealed class ToolsSidebar : UserControl
             // 折叠态：图标按钮（点一下 = 展开并激活该面板）
             // 宽度不写死：折叠后可视宽度 = RailWidth(48) - 布局边距(16) = 32，
             // 让 StackPanel 自动撑满，边距调整时不会溢出。
+            // 图标是矢量几何（docs/31 阶段 4）：不再用"探/签/偏…"字形，面板名靠 ToolTip 兜底
+            // （ApplyLanguage 里设置），中文首字/英文两字母方案随之退场。
             var rail = new Button
             {
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 Height = 38,
-                FontSize = 13,
                 HorizontalContentAlignment = HorizontalAlignment.Center,
                 VerticalContentAlignment = VerticalAlignment.Center,
                 CornerRadius = new CornerRadius(6),
-                Content = RailGlyph(key),
+                Content = AppIcons.Create(IconKey(key), 18, "TextSecondaryBrush"),
             };
             var captured = panel; // 闭包捕获
             rail.Click += (_, _) => { Expand(); Activate(captured); };
@@ -123,11 +128,10 @@ public sealed class ToolsSidebar : UserControl
         {
             HorizontalAlignment = HorizontalAlignment.Stretch,
             Height = 38,
-            FontSize = 13,
             HorizontalContentAlignment = HorizontalAlignment.Center,
             VerticalContentAlignment = VerticalAlignment.Center,
             CornerRadius = new CornerRadius(6),
-            Content = RailGlyph("Mag_Magnifier"),
+            Content = AppIcons.Create("Magnifier", 18, "TextSecondaryBrush"),
         };
         _railMagnifier.Click += (_, _) =>
         {
@@ -136,7 +140,7 @@ public sealed class ToolsSidebar : UserControl
         };
         _magnifierHost = new Border
         {
-            Background = CardBackground,
+            Background = Token("CardBgBrush"),
             CornerRadius = new CornerRadius(7),
             Padding = new Thickness(12, 8),
             Margin = new Thickness(0, 8, 0, 0),
@@ -156,7 +160,6 @@ public sealed class ToolsSidebar : UserControl
 
         var contentHost = new Border
         {
-            BorderBrush = Divider,
             BorderThickness = new Thickness(0, 1, 0, 0),
             Margin = new Thickness(0, 10, 0, 0),
             Padding = new Thickness(0, 10, 0, 0),
@@ -182,10 +185,17 @@ public sealed class ToolsSidebar : UserControl
 
         Content = new Border
         {
-            Background = PanelBackground,
-            BorderBrush = Divider,
             BorderThickness = new Thickness(0, 0, 1, 0),
             Child = layout,
+        };
+
+        ThemePalette.SetBrush((Border)Content, Border.BorderBrushProperty, "DividerBrush");
+        ThemePalette.SetBrush(contentHost, Border.BorderBrushProperty, "DividerBrush");
+        // 主题切换后：状态色是命令式赋值的，不会自动跟随 ⇒ 重跑一遍
+        ActualThemeVariantChanged += (_, _) =>
+        {
+            if (_active is not null) Activate(_active);
+            SyncRailMagnifier();
         };
 
         ApplyCollapsedState();
@@ -243,11 +253,16 @@ public sealed class ToolsSidebar : UserControl
         foreach (var (_, tab, rail, item) in _tabs)
         {
             var active = ReferenceEquals(item, panel);
-            tab.Background = active ? ActiveBackground : null;
-            tab.Foreground = active ? Accent : SecondaryText;
+            tab.Background = active ? Token("AccentSubtleBrush") : null;
+            tab.Foreground = active ? Token("AccentBrush") : Token("TextSecondaryBrush");
             tab.FontWeight = active ? FontWeight.SemiBold : FontWeight.Normal;
-            rail.Background = active ? ActiveBackground : null;
-            rail.Foreground = active ? Accent : SecondaryText;
+            rail.Background = active ? Token("AccentSubtleBrush") : null;
+            rail.Foreground = active ? Token("AccentBrush") : Token("TextSecondaryBrush");
+            // 图标是 Shape，不吃 Foreground ⇒ 单独改绑 Fill（同优先级绑定互相替换）。
+            // 本方法在主题切换时会被重跑（ActualThemeVariantChanged），故这里不用再管主题。
+            if (rail.Content is Path railIcon)
+                ThemePalette.SetBrush(railIcon, Path.FillProperty,
+                    active ? "AccentBrush" : "TextSecondaryBrush");
         }
     }
 
@@ -258,45 +273,33 @@ public sealed class ToolsSidebar : UserControl
         _content.IsVisible = !Collapsed;
         _magnifierHost.IsVisible = !Collapsed;
         _rail.IsVisible = Collapsed;
-        _collapseButton.Content = Collapsed ? "▶" : "◀";
+        _collapseIcon.Data = AppIcons.Get(Collapsed ? "ChevronRight" : "ChevronLeft");
         SyncRailMagnifier();
     }
 
     private void SyncRailMagnifier()
     {
         var on = _magnifierCheck.IsChecked == true;
-        _railMagnifier.Background = on ? ActiveBackground : null;
-        _railMagnifier.Foreground = on ? Accent : SecondaryText;
+        _railMagnifier.Background = on ? Token("AccentSubtleBrush") : null;
+        _railMagnifier.Foreground = on ? Token("AccentBrush") : Token("TextSecondaryBrush");
+        // 图标是 Shape，不吃 Foreground ⇒ 单独改绑 Fill（同优先级绑定互相替换）。
+        // DynamicResource 绑定本身会跟随主题切换，这里只需处理"状态"变化。
+        if (_railMagnifier.Content is Path icon)
+            ThemePalette.SetBrush(icon, Path.FillProperty, on ? "AccentBrush" : "TextSecondaryBrush");
     }
 
-    /// <summary>图标导航栏字形：中文取名称首字，英文取两字母缩写。
-    /// 刻意不用 Unicode 符号字体（Segoe UI Symbol 字形覆盖不稳，缺字会显示豆腐块）。</summary>
-    private static string RailGlyph(string key)
+    /// <summary>侧栏入口的本地化键 → <see cref="AppIcons"/> 图标键。
+    /// 键写错是编程错误，直接抛（不返回"?"占位：占位会变成"按钮上一个问号"，比图标画歪更难排查）。</summary>
+    private static string IconKey(string key) => key switch
     {
-        if (LanguageManager.IsEnglish)
-        {
-            return key switch
-            {
-                "Tab_Probe" => "Pr",
-                "Tab_Bookmarks" => "Bk",
-                "Tab_Offset" => "Of",
-                "Tab_Media" => "Md",
-                "Tab_Audio" => "Au",
-                "Mag_Magnifier" => "Mg",
-                _ => "?",
-            };
-        }
-        return key switch
-        {
-            "Tab_Probe" => "探",
-            "Tab_Bookmarks" => "签",
-            "Tab_Offset" => "偏",
-            "Tab_Media" => "媒",
-            "Tab_Audio" => "音",
-            "Mag_Magnifier" => "镜",
-            _ => "?",
-        };
-    }
+        "Tab_Probe" => "Probe",
+        "Tab_Bookmarks" => "Bookmarks",
+        "Tab_Offset" => "Offset",
+        "Tab_Media" => "Media",
+        "Tab_Audio" => "Audio",
+        "Mag_Magnifier" => "Magnifier",
+        _ => throw new ArgumentOutOfRangeException(nameof(key), key, "未登记的侧栏图标键"),
+    };
 
     private void ApplyLanguage()
     {
@@ -306,11 +309,9 @@ public sealed class ToolsSidebar : UserControl
         {
             var name = LanguageManager.T(key);
             tab.Content = name;
-            rail.Content = RailGlyph(key);
             ToolTip.SetTip(tab, name);
             ToolTip.SetTip(rail, name);
         }
-        _railMagnifier.Content = RailGlyph("Mag_Magnifier");
         ToolTip.SetTip(_railMagnifier, LanguageManager.T("Mag_Magnifier"));
     }
 

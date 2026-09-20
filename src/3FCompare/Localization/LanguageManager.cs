@@ -1,10 +1,14 @@
+using System.Globalization;
 using System.Text;
 
 namespace _3FCompare.App;
 
 /// <summary>双语语言管理器。
 /// 提供 <see cref="T"/> 资源查找与 <see cref="LanguageChanged"/> 语言切换通知；
-/// 主窗体及各控件订阅该事件以在运行时刷新文本。</summary>
+/// 主窗体及各控件订阅该事件以在运行时刷新文本。
+/// <para><b>维护约定</b>：<see cref="Chinese"/> 与 <see cref="English"/> 必须<b>键集合完全一致</b>。
+/// <c>T()</c> 只查当前语言表，缺键会原样返回 key（用户看到 <c>Status_ColorModeUnified</c> 这类裸键名），
+/// 且不会有任何报错 —— 新增键时请<b>两张表同时加</b>；可用 <see cref="FindMissingKeys"/> 自检。</para></summary>
 public static class LanguageManager
 {
     private static int _currentLanguage = 0; // 0=中文, 1=英文
@@ -177,6 +181,13 @@ public static class LanguageManager
         ["Menu_Grid_2x2"] = "2×2",
         ["Menu_Grid_3x3"] = "3×3",
         ["Menu_Grid_Auto"] = "自动",
+        ["Menu_CompareMode"] = "对比模式",
+        ["Menu_Mode_Overlay"] = "叠加（2 路铺满）",
+        ["Menu_Mode_Split"] = "分屏",
+        ["Menu_Mode_Grid"] = "网格（全部路数）",
+        ["Menu_Timeline"] = "时间轴 (T)",
+        ["Menu_StatusBar"] = "状态栏 (Shift+T)",
+        ["Menu_FloatingTransport"] = "浮动传输栏",
         ["Menu_Settings"] = "设置(&S)",
         ["Menu_SettingsDialog"] = "设置…",
         ["Menu_Settings_Lang"] = "语言",
@@ -190,6 +201,16 @@ public static class LanguageManager
         // 各路帧率不同时，"第 N 帧"在各路指向的是不同时刻的内容
         ["Status_FpsMismatch"] = "各路帧率不一致（按时间对齐）",
         ["Status_Color"] = "色彩",
+        // 设置窗口「外观」节
+        ["Theme_SectionTitle"] = "外观",
+        ["Theme_Mode"] = "主题",
+        ["Theme_System"] = "跟随系统",
+        ["Theme_Light"] = "浅色",
+        ["Theme_Dark"] = "深色",
+        ["Theme_Hint"] = "改选立即生效；点「确定」后保存，取消则还原。",
+        ["Status_ColorModeUnified"] = "色彩：各路 HDR 状态不一致 — 色调映射统一为 HDR",
+        // 注入钩子防护（docs/33 §八）：RTSS/MSI Afterburner 在场 + 多路时的一次性提醒
+        ["Status_OverlayHookWarning"] = "检测到 RTSS/MSI Afterburner 钩子，多路播放可能崩溃，建议将 3FCompare.exe 加入 RTSS 排除列表",
         ["Status_ExportDone"] = "已导出截图",
         ["Status_Steps"] = "步进",
         ["Sidebar_Title"] = "工具",
@@ -219,17 +240,19 @@ public static class LanguageManager
         ["Probe_Bits"] = "码值(8位)",
         ["Bookmark_Title"] = "书签",
         ["Bookmark_NotePlaceholder"] = "备注内容…",
-        ["Bookmark_Add"] = "＋ 添加当前帧",
-        ["Bookmark_Export"] = "⇩ 导出…",
+        // 书签/偏移按钮的文案：字形（＋ ⇩ ◎ ◀ ▶ ↺）已改为 Controls/AppIcons.cs 的矢量图标，
+        // 消费端（BookmarkPanel / OffsetPanel）用"图标 + 本文案"装配 —— 这里只留纯文本。
+        ["Bookmark_Add"] = "添加当前帧",
+        ["Bookmark_Export"] = "导出…",
         ["Offset_Title"] = "偏移校准（相对第 1 路）",
         ["Offset_Value"] = "偏移: 0ms (0帧@24fps)",
         ["Offset_ValueFmt"] = "偏移: {0}ms ({1:0.#}帧 @{2})",
-        ["Offset_Align"] = "◎ 对齐于此帧",
-        ["Offset_MsMinus"] = "◀ 100ms",
-        ["Offset_MsPlus"] = "100ms ▶",
-        ["Offset_FrameMinus"] = "◀ 1帧",
-        ["Offset_FramePlus"] = "1帧 ▶",
-        ["Offset_Reset"] = "↺ 归零",
+        ["Offset_Align"] = "对齐于此帧",
+        ["Offset_MsMinus"] = "100ms",
+        ["Offset_MsPlus"] = "100ms",
+        ["Offset_FrameMinus"] = "1帧",
+        ["Offset_FramePlus"] = "1帧",
+        ["Offset_Reset"] = "归零",
         ["Offset_NotSelected"] = "未选中路",
         ["MediaInfo_Title"] = "媒体信息",
         ["MediaInfo_Empty"] = "选中一个已打开的媒体以查看信息",
@@ -280,7 +303,6 @@ public static class LanguageManager
         ["Vrr_SectionTitle"] = "VRR / 可变刷新率",
         ["Vrr_TearingPresent"] = "VRR 低延迟呈现 (G-SYNC/FreeSync，实验)",
         ["Vrr_TearingHint"] = "开启后以 Present(0+ALLOW_TEARING) 呈现，让 G-SYNC/FreeSync 显示器按自身节奏扫描输出（可消除 24fps 内容的 3:2 抖动）。显示器或驱动不支持时自动回退 VSync 锁定。盯帧逐帧对比建议关闭。对新打开的会话生效。",
-        ["Vrr_PacingEnabled"] = "媒体率呈现节奏 (VRR Pacing，实验)",
         ["Vrr_PacingHint"] = "开启后抑制叠加层固定周期的重翻转，使呈现节奏跟随源视频帧率而非叠加层帧率。需与 VRR 低延迟呈现配合使用，在叠加层无活动时消除额外翻转。",
         ["Scrub_PreviewEnabled"] = "时间轴拖动缩略图预览",
         ["Scrub_SectionTitle"] = "时间轴预览",
@@ -357,6 +379,13 @@ public static class LanguageManager
         ["Menu_Grid_2x2"] = "2×2",
         ["Menu_Grid_3x3"] = "3×3",
         ["Menu_Grid_Auto"] = "Auto",
+        ["Menu_CompareMode"] = "Compare Mode",
+        ["Menu_Mode_Overlay"] = "Overlay (2 routes, full area)",
+        ["Menu_Mode_Split"] = "Split Screen",
+        ["Menu_Mode_Grid"] = "Grid (all routes)",
+        ["Menu_Timeline"] = "Timeline (T)",
+        ["Menu_StatusBar"] = "Status Bar (Shift+T)",
+        ["Menu_FloatingTransport"] = "Floating Transport Bar",
         ["Menu_Settings"] = "Settings(&S)",
         ["Menu_SettingsDialog"] = "Settings…",
         ["Menu_Settings_Lang"] = "Language",
@@ -370,7 +399,16 @@ public static class LanguageManager
         // Frame N points to a different instant per slot when frame rates differ
         ["Status_FpsMismatch"] = "Frame rates differ (time-aligned)",
         ["Status_Color"] = "Color",
+        // Settings window "Appearance" section
+        ["Theme_SectionTitle"] = "Appearance",
+        ["Theme_Mode"] = "Theme",
+        ["Theme_System"] = "Follow system",
+        ["Theme_Light"] = "Light",
+        ["Theme_Dark"] = "Dark",
+        ["Theme_Hint"] = "Applies immediately; saved on OK, reverted on Cancel.",
         ["Status_ColorModeUnified"] = "Color: HDR status differs across slots — tone mapping unified to HDR",
+        // Injected-hook guard (docs/33 §八): one-shot notice when RTSS/MSI Afterburner is present with 2+ lanes
+        ["Status_OverlayHookWarning"] = "RTSS/MSI Afterburner hook detected — multi-lane playback may crash; add 3FCompare.exe to the RTSS exclusion list",
         ["Status_ExportDone"] = "Exported",
         ["Status_Steps"] = "Step",
         ["Sidebar_Title"] = "Tools",
@@ -400,17 +438,20 @@ public static class LanguageManager
         ["Probe_Bits"] = "8-bit values",
         ["Bookmark_Title"] = "Bookmarks",
         ["Bookmark_NotePlaceholder"] = "Note…",
-        ["Bookmark_Add"] = "＋ Add Current Frame",
-        ["Bookmark_Export"] = "⇩ Export…",
+        // Bookmark/offset button captions: the glyphs (＋ ⇩ ◎ ◀ ▶ ↺) moved into
+        // Controls/AppIcons.cs vector geometry and are composed at the call site
+        // (BookmarkPanel / OffsetPanel) — the values below are plain text only.
+        ["Bookmark_Add"] = "Add Current Frame",
+        ["Bookmark_Export"] = "Export…",
         ["Offset_Title"] = "Offset Calibration (relative to Lane 1)",
         ["Offset_Value"] = "Offset: 0ms (0 frames @24fps)",
         ["Offset_ValueFmt"] = "Offset: {0}ms ({1:0.#} frames @{2})",
-        ["Offset_Align"] = "◎ Align Here",
-        ["Offset_MsMinus"] = "◀ 100ms",
-        ["Offset_MsPlus"] = "100ms ▶",
-        ["Offset_FrameMinus"] = "◀ 1 frame",
-        ["Offset_FramePlus"] = "1 frame ▶",
-        ["Offset_Reset"] = "↺ Reset",
+        ["Offset_Align"] = "Align Here",
+        ["Offset_MsMinus"] = "100ms",
+        ["Offset_MsPlus"] = "100ms",
+        ["Offset_FrameMinus"] = "1 frame",
+        ["Offset_FramePlus"] = "1 frame",
+        ["Offset_Reset"] = "Reset",
         ["Offset_NotSelected"] = "No lane selected",
         ["MediaInfo_Title"] = "Media Info",
         ["MediaInfo_Empty"] = "Select an opened media to view info",
@@ -461,7 +502,6 @@ public static class LanguageManager
         ["Vrr_SectionTitle"] = "VRR / Variable Refresh Rate",
         ["Vrr_TearingPresent"] = "VRR low-latency present (G-SYNC/FreeSync, experimental)",
         ["Vrr_TearingHint"] = "When enabled, frames are presented with Present(0+ALLOW_TEARING) so a G-SYNC/FreeSync display scans out on its own schedule (removes 3:2 judder for 24fps content). Falls back to vsync lock when the display chain does not support tearing. Recommended off for frame-by-frame comparison. Applies to newly opened sessions.",
-        ["Vrr_PacingEnabled"] = "Media-rate presentation pacing (VRR Pacing, experimental)",
         ["Vrr_PacingHint"] = "When enabled, suppresses the timed-text layer's periodic keepalive presents so the presentation cadence follows the source video frame rate instead of the overlay frame rate. Requires VRR tearing present for full effect; harmless on vsync-locked displays. Eliminates extra flips on VRR displays when no overlay content is active.",
         ["Scrub_PreviewEnabled"] = "Timeline scrub thumbnail preview",
         ["Scrub_SectionTitle"] = "Timeline Preview",
@@ -479,7 +519,29 @@ public static class LanguageManager
     public static string Tf(string key, params object[] args)
     {
         var s = T(key);
-        try { return string.Format(s, args); }
+        try
+        {
+            // 必须显式指定 CultureInfo：string.Format 默认取 CurrentCulture，
+            // 但显式写出来既是静态分析的硬性要求（CA1305），也把语义钉死 ——
+            // 这里是**显示给用户**的数字（{1:0.#} 帧 / {2:0.0}%），应当跟随用户区域设置
+            // （de-DE 显示逗号小数点是正确行为）；若将来出现需要被再次解析的格式化文本，
+            // 那才该用 InvariantCulture。
+            return string.Format(CultureInfo.CurrentCulture, s, args);
+        }
         catch { return s; }
+    }
+
+    /// <summary>轻量自检：返回"一张表有、另一张表没有"的键（格式 "语言:键"）。
+    /// <para>为什么提供它：缺键不会抛异常也不会报错，只在界面上原样显示 key，
+    /// 靠肉眼很难发现（Status_ColorModeUnified 就是这样漏掉的）。
+    /// 供自检/测试断言调用；正常路径不调用，无运行时开销。</para></summary>
+    public static IReadOnlyList<string> FindMissingKeys()
+    {
+        var missing = new List<string>();
+        foreach (var key in Chinese.Keys)
+            if (!English.ContainsKey(key)) missing.Add("English:" + key);
+        foreach (var key in English.Keys)
+            if (!Chinese.ContainsKey(key)) missing.Add("Chinese:" + key);
+        return missing;
     }
 }

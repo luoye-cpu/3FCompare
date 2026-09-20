@@ -31,16 +31,16 @@ public sealed class ThumbnailPopup : Window
         ShowInTaskbar = false;
         IsHitTestVisible = false;
         Width = 220; Height = 130;
-        Background = new SolidColorBrush(global::Avalonia.Media.Color.FromRgb(16, 16, 18));
+        ThemePalette.SetBrush(this, BackgroundProperty, "CanvasDarkBrush");
 
         var border = new Border
         {
-            BorderBrush = new SolidColorBrush(global::Avalonia.Media.Color.FromRgb(80, 80, 90)),
             BorderThickness = new global::Avalonia.Thickness(1),
             Padding = new global::Avalonia.Thickness(2),
             Child = _image,
         };
-        _hint.Foreground = new SolidColorBrush(global::Avalonia.Media.Color.FromRgb(140, 140, 150));
+        ThemePalette.SetBrush(border, Border.BorderBrushProperty, "BorderBrush");
+        ThemePalette.SetBrush(_hint, TextBlock.ForegroundProperty, "TextMutedBrush");
         _hint.FontSize = 11;
         _hint.HorizontalAlignment = global::Avalonia.Layout.HorizontalAlignment.Center;
         _hint.VerticalAlignment = global::Avalonia.Layout.VerticalAlignment.Center;
@@ -111,10 +111,16 @@ public sealed class ThumbnailPopup : Window
                     global::Avalonia.Platform.PixelFormat.Bgra8888);
             }
                         using var l = _writeable.Lock();
+            // GDI+ **底向上**位图的 Stride 是负数。原先 Math.Min(l.RowBytes, data.Stride)
+            // 会取到这个负数，而 Buffer.MemoryCopy 的长度参数是 nuint ⇒ 负数被当成
+            // 一个接近 ulong.MaxValue 的无符号巨值 ⇒ 越界拷贝、进程直接崩（不可 catch）。
+            // 行字节数取**绝对值**；行首地址仍按带符号的 data.Stride 计算（底向上时向上走）。
+            var absStride = Math.Abs(data.Stride);
             for (var y = 0; y < src.Height; y++)
             unsafe
             {
-                var rowBytes = Math.Min(l.RowBytes, data.Stride);
+                var rowBytes = Math.Min(l.RowBytes, absStride);
+                if (rowBytes <= 0) break; // 尺寸/格式异常时宁可不画，也不要越界写
                 global::System.Buffer.MemoryCopy(
                     (void*)(data.Scan0 + y * data.Stride),
                     (void*)(l.Address + y * l.RowBytes),

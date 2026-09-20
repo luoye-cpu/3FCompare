@@ -15,18 +15,24 @@ public static class MessageBox
         var dlg = new Window
         {
             Title = title,
-            Width = 460, Height = 220,
-            CanResize = false,
+            // 允许调整大小 + 正文可滚动：长文本（内核错误 JSON、异常堆栈）在固定 460×220、
+            // 不可缩放的窗口里会被直接裁掉，用户看不到后半段，只能靠日志排查。
+            Width = 460, Height = 260,
+            CanResize = true,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
             ShowInTaskbar = false,
-            Background = new SolidColorBrush(Color.FromRgb(24, 24, 28)),
         };
+        ThemePalette.SetBrush(dlg, Window.BackgroundProperty, "BgBrush");
 
         var result = false;
         var primary = new Button { Content = primaryText, Width = 110, Height = 30 };
         primary.Click += (_, _) => { result = true; dlg.Close(); };
 
-        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12, HorizontalAlignment = HorizontalAlignment.Right };
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal, Spacing = 12, HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new global::Avalonia.Thickness(16),
+        };
         if (secondaryText is not null)
         {
             var secondary = new Button { Content = secondaryText, Width = 110, Height = 30 };
@@ -38,14 +44,16 @@ public static class MessageBox
         var messageBlock = new TextBlock
         {
             Text = $"⚠ {message}", TextWrapping = TextWrapping.Wrap, FontSize = 13,
-            Foreground = new SolidColorBrush(Color.FromRgb(255, 255, 255)),
             Margin = new global::Avalonia.Thickness(16),
         };
+
+        // 正文套一层 ScrollViewer：文本超出可视高度时可滚动查看，而不是被裁掉
+        var bodyScroll = new ScrollViewer { Content = messageBlock };
 
         var root = new DockPanel();
         DockPanel.SetDock(buttons, Dock.Bottom);
         root.Children.Add(buttons);
-        root.Children.Add(messageBlock);
+        root.Children.Add(bodyScroll);
         dlg.Content = root;
 
         var tcs = new TaskCompletionSource<bool>();

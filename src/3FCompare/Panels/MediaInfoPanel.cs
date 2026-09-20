@@ -10,12 +10,11 @@ namespace _3FCompare.Panels;
 /// <summary>媒体信息面板（WinForms MediaInfoPanel 对应）：选中路的完整技术报告。</summary>
 public sealed class MediaInfoPanel : ScrollViewer
 {
-    private readonly TextBlock _text = new()
+    private readonly TextBlock _text = new TextBlock
     {
         FontFamily = new FontFamily("Consolas"), FontSize = 11.5,
-        Foreground = new SolidColorBrush(Color.Parse("#FFC8C8D2")),
         TextWrapping = TextWrapping.Wrap,
-    };
+    }.Themed("TextSecondaryBrush");
 
     public MediaInfoPanel()
     {
@@ -27,7 +26,6 @@ public sealed class MediaInfoPanel : ScrollViewer
                 new TextBlock
                 {
                     Text = LanguageManager.T("MediaInfo_Title"), FontSize = 13, FontWeight = FontWeight.Bold,
-                    Foreground = new SolidColorBrush(Color.Parse("#FFFFFFFF")),
                 },
                 _text,
             },

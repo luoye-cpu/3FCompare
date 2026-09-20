@@ -4,6 +4,8 @@ using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Media;
 using _3FCompare.App;
+// 本工程开了 ImplicitUsings，System.IO.Path 在作用域内 ⇒ 必须起别名，否则 Path 二义
+using Path = Avalonia.Controls.Shapes.Path;
 
 namespace _3FCompare.Controls;
 
@@ -14,6 +16,9 @@ public partial class TransportBar : UserControl
     // 更慢的档位会被静默忽略（见 PlaybackCoordinator 的每秒 Seek 逻辑）
     private static readonly double[] Speeds = { 1.0, 2.0, 4.0 };
     private bool _suppressComboEvents;
+
+    /// <summary>播放/暂停图标（docs/31 阶段 4）：<see cref="SetPlaying"/> 只换几何，不换控件。</summary>
+    private Path? _playPauseIcon;
 
     public event EventHandler? PlayPauseClicked;
     public event EventHandler? StopClicked;
@@ -42,6 +47,7 @@ public partial class TransportBar : UserControl
     public TransportBar()
     {
         InitializeComponent();
+        InitIcons();
         foreach (var s in Speeds)
             ComboSpeed.Items.Add($"{s:0.#}x");
         ComboSpeed.SelectedIndex = 0; // 1.0x
@@ -71,6 +77,23 @@ public partial class TransportBar : UserControl
         ComboSpeed.Width = w >= MediumThreshold ? 82 : 68;
     }
 
+    /// <summary>装配矢量图标（docs/31 阶段 4）。此前 <c>Content</c> 是 <c>+ − ◀ ▶ ■ 🔁</c> 这类字形，
+    /// 字体缺字时会渲染成豆腐块；几何图标与字体无关，颜色一律由 <see cref="AppIcons.Create"/>
+    /// 绑到主题令牌（无硬编码颜色）。</summary>
+    private void InitIcons()
+    {
+        BtnAdd.Content = AppIcons.Create("Add");
+        BtnRemove.Content = AppIcons.Create("Remove");
+        BtnSecPrev.Content = AppIcons.Create("PrevSecond");
+        BtnFramePrev.Content = AppIcons.Create("PrevFrame");
+        BtnStop.Content = AppIcons.Create("Stop");
+        BtnFrameNext.Content = AppIcons.Create("NextFrame");
+        BtnSecNext.Content = AppIcons.Create("NextSecond");
+        BtnLoop.Content = AppIcons.Create("Loop");
+        _playPauseIcon = AppIcons.Create("Play");
+        BtnPlayPause.Content = _playPauseIcon;
+    }
+
     private void ApplyLanguage()
     {
         ToolTip.SetTip(BtnPlayPause, LanguageManager.T("Tb_Play"));
@@ -90,15 +113,15 @@ public partial class TransportBar : UserControl
 
     public void SetPlaying(bool playing)
     {
-        BtnPlayPause.Content = playing ? "⏸" : "▶";
+        if (_playPauseIcon is not null)
+            _playPauseIcon.Data = AppIcons.Get(playing ? "Pause" : "Play");
         ToolTip.SetTip(BtnPlayPause, LanguageManager.T(playing ? "Tb_Pause" : "Tb_Play"));
     }
 
     public void SetLoop(bool on)
     {
-        BtnLoop.Background = on
-            ? new SolidColorBrush(Color.FromRgb(60, 90, 60))
-            : null;
+        if (on) ThemePalette.SetBrush(BtnLoop, Button.BackgroundProperty, "ButtonActiveBrush");
+        else BtnLoop.ClearValue(Button.BackgroundProperty);
         ToolTip.SetTip(BtnLoop, LanguageManager.T(on ? "Tb_LoopOn" : "Tb_LoopOff"));
     }
 

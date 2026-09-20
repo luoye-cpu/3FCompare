@@ -6,6 +6,7 @@ using Avalonia.Input;
 using Avalonia.Platform;
 using Avalonia.Threading;
 using _3FCompare.Core.Backend;
+using _3FCompare.Diagnostics;
 
 namespace _3FCompare.Controls;
 
@@ -179,6 +180,10 @@ public sealed class PlayerSurface : NativeControlHost
         if (_hwnd == nint.Zero)
             throw new InvalidOperationException($"CreateWindowEx 失败: {Marshal.GetLastWin32Error()}");
 
+        // 组件日志：子 HWND 生命周期起点。句柄值一并记下——崩溃现场若出现"Present / SetWindowRgn
+        // 作用在一个已销毁的 HWND"的迹象，这里是唯一的对照点。
+        ComponentLog.Log(Comp.Surface, "HwndCreate", _index, $"hwnd=0x{_hwnd:X}");
+
         _origWndProc = SetWindowLongPtr(_hwnd, GWLP_WNDPROC, Marshal.GetFunctionPointerForDelegate(_subclassProc));
 
         // 3FCompare 修复：启用子 HWND 文件拖放（WM_DROPFILES），否则 NativeControlHost
@@ -191,6 +196,9 @@ public sealed class PlayerSurface : NativeControlHost
     protected override void DestroyNativeControlCore(IPlatformHandle control)
     {
         Console.Error.WriteLine($"[PlayerSurface:{_index}] DestroyNativeControlCore hwnd={_hwnd}");
+        // 组件日志：先记再销毁。若此后崩溃在 Present 路径上，"HWND 已销毁但仍有 Present" 这一
+        // 时序就能直接读出来（这正是字幕/presenter 线程崩溃的高嫌疑成因之一）。
+        ComponentLog.Log(Comp.Surface, "HwndDestroy", _index, $"hwnd=0x{_hwnd:X}");
         if (_hwnd != nint.Zero && _origWndProc != nint.Zero)
             SetWindowLongPtr(_hwnd, GWLP_WNDPROC, _origWndProc);
         if (_hwnd != nint.Zero)
@@ -327,18 +335,28 @@ public sealed class PlayerSurface : NativeControlHost
             {
                 if (isRealModeActive && _session is not null)
                 {
-                    var w = (short)(lParam & 0xFFFF);
-                    var h = (short)((lParam >> 16) & 0xFFFF);
+                    // 必须按**无符号** LOWORD/HIWORD 取：WM_SIZE 的 lParam 低 16 位是宽、
+                    // 高 16 位是高，用 (short) 强转在客户端宽/高 > 32767（多屏拼接、8K 拉伸）
+                    // 时会溢出成负数，于是 resize 检测把一次合法尺寸变化当成非法而丢弃，
+                    // 内核不再换成链 ⇒ 画面停在旧分辨率。
+                    var w = (int)(lParam & 0xFFFF);
+                    var h = (int)((lParam >> 16) & 0xFFFF);
                     if (w > 0 && h > 0 && (w != _clientW || h != _clientH))
                     {
                         _clientW = w;
                         _clientH = h;
+                        // 组件日志：Surface resize。已被 _clientW/_clientH 去重，只在尺寸真变时写一行，
+                        // 不是逐帧路径（WM_SIZE 本身也被 Windows 合并）。
+                        ComponentLog.Log(Comp.Surface, "Resize", _index, $"w={w} h={h}");
                         // 3FCompare M1: debounce resize → Redraw
                         // 捕获会话引用而不是在闭包里延迟读字段：会话可能在 Post 执行前被释放。
                         // Avalonia Dispatcher 作业里的未处理异常会击穿整个进程，必须兜住。
                         var redrawTarget = _session;
                         Dispatcher.UIThread.Post(() =>
                         {
+                            // Render 埋点：记在 Post 回调内而非 WndProc 上——语义是"真的发起 Redraw
+                            // 的那一刻"，与排队/被丢弃区分开（来源 WM_SIZE，即窗口尺寸变化）。
+                            ComponentLog.Log(Comp.Render, "RedrawRequest", _index, "src=WM_SIZE");
                             try { redrawTarget?.Redraw(); }
                             catch (ObjectDisposedException) { /* 会话已释放，无需重绘 */ }
                         }, DispatcherPriority.Background);
@@ -351,7 +369,9 @@ public sealed class PlayerSurface : NativeControlHost
     }
 
     // ---------- GDI 绘制（WM_PAINT） ----------
-
+    // ⚠ 本组配色**刻意不接主题令牌**：它们画在视频子 HWND（_hwnd）的 D3D11 交换链上，
+    // 属"视频区"而非应用表面（docs/31 §三：视频区是子 HWND，不参与主题）。
+    // 恒定深色同时保证覆盖信息（帧号/时间码/选中框）在任何片源上都可读。
     private static readonly System.Drawing.SolidBrush BrushPanelBg = new(System.Drawing.Color.FromArgb(30, 30, 36));
     private static readonly System.Drawing.SolidBrush BrushTextWhite = new(System.Drawing.Color.FromArgb(220, 255, 255, 255));
     private static readonly System.Drawing.SolidBrush BrushTextShadow = new(System.Drawing.Color.FromArgb(120, 0, 0, 0));
@@ -490,7 +510,9 @@ public sealed class PlayerSurface : NativeControlHost
         // 缩放小地图（缩放 > 1 且开启时显示）
         if (SharedMinimapEnabled && SharedZoom > 1.001f)
         {
-            var miniSize = Math.Min(rect.Width, rect.Height) / 5;
+            // 窗口极小时 Math.Min(w,h)/5 会得 0 ⇒ 下面所有尺寸（含 viewW/viewH）归零，
+            // GDI 画零宽矩形虽不崩，但视口指示器会消失；至少保证 1px。
+            var miniSize = Math.Max(1, Math.Min(rect.Width, rect.Height) / 5);
             var miniRect = new System.Drawing.Rectangle(rect.Right - miniSize - 8, rect.Bottom - miniSize - 8, miniSize, miniSize);
             // 半透明背景
             using var bgBrush = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(160, 20, 20, 24));
@@ -499,8 +521,10 @@ public sealed class PlayerSurface : NativeControlHost
             using var borderPen = new System.Drawing.Pen(System.Drawing.Color.FromArgb(100, 100, 110), 1);
             g.DrawRectangle(borderPen, miniRect);
             // 视口指示器（当前缩放/平移对应的可见区域）
-            var viewW = miniSize / SharedZoom;
-            var viewH = miniSize / SharedZoom;
+            // 同样至少 1px：SharedZoom 极大（缩放上限 8）而 miniSize 为 1 时会得 0.125，
+            // GDI 画 0 宽矩形等于什么都不画 ⇒ 用户以为小地图没工作。
+            var viewW = Math.Max(1, miniSize / SharedZoom);
+            var viewH = Math.Max(1, miniSize / SharedZoom);
             // panX/panY 范围 [-1,1]，映射到小地图偏移
             var vpX = (miniSize - viewW) / 2f + (SharedPanX * (miniSize - viewW) / 2f);
             var vpY = (miniSize - viewH) / 2f + (SharedPanY * (miniSize - viewH) / 2f);
@@ -530,20 +554,44 @@ public sealed class PlayerSurface : NativeControlHost
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT { public int Left, Top, Right, Bottom; }
 
-    /// <summary>原生 <c>tagPAINTSTRUCT</c>（x64）为 72 字节：尾部还有 <c>BYTE rgbReserved[32]</c>。
-    /// <para>本结构按字段算只有 40 字节，若少了 <c>Size = 72</c>，
-    /// <c>BeginPaint</c> 会按原生大小写入 <c>ref</c> 传入的托管栈上局部变量，
-    /// 越界写 32 字节，踩坏同栈帧的相邻局部变量 —— 每次重绘都触发，
-    /// 表现为偶发随机崩溃（与已知多路 SIGSEGV/SIGILL 现象重叠，难以归因）。</para>
-    /// <para>我们从不读 <c>rgbReserved</c>，故只需保证缓冲区足够大；
-    /// 大小由 <see cref="NativePaintStructSize"/> 处的静态校验兜底，防止将来再漏。</para>
+    /// <summary>原生 <c>tagPAINTSTRUCT</c>：
+    /// <c>HDC hdc; BOOL fErase; RECT rcPaint; BOOL fRestore; BOOL fIncUpdate; BYTE rgbReserved[32];</c>
+    /// <para><b>为什么去掉 <c>Size = 72</c></b>：带 <c>Size</c> 特性时
+    /// <c>Marshal.SizeOf&lt;PAINTSTRUCT&gt;()</c> 必然返回 72，于是下面的静态校验
+    /// 只是在检查"Size 特性还在不在"，<b>永远不可能失败</b> —— 它防不住任何回归，
+    /// 反而营造出"我们校验过了"的假象；而 x86 下原生结构只有 64 字节，
+    /// 这个恒真断言还会变成"启动即抛异常"。
+    /// 现在尾部把 <c>rgbReserved[32]</c> 作为**真实字段**补齐（见 <see cref="Reserved32"/>），
+    /// 让 <c>Marshal.SizeOf</c> 由**字段布局**算出来，断言才真正有意义：
+    /// 谁再删掉这个字段，<c>Marshal.SizeOf</c> 就会掉到 40（x64）并在这里启动即失败。</para>
+    /// <para><c>BeginPaint</c> 会按原生大小写入 <c>ref</c> 传入的托管栈上局部变量；
+    /// 结构体偏小会越界写、踩坏同栈帧的相邻局部变量 —— 每次重绘都触发，
+    /// 表现为偶发随机崩溃（与已知多路崩溃现象重叠，难以归因）。
+    /// 我们从不读 <c>rgbReserved</c>，只需保证缓冲区与原生一致。</para>
     /// </summary>
-    [StructLayout(LayoutKind.Sequential, Size = 72)]
-    private struct PAINTSTRUCT { public nint HDC; public bool fErase; public RECT rcPaint; public bool fRestore; public bool fIncUpdate; }
+    private struct PAINTSTRUCT
+    {
+        public nint HDC;
+        public bool fErase;
+        public RECT rcPaint;
+        public bool fRestore;
+        public bool fIncUpdate;
+        /// <summary>原生尾部保留区 <c>BYTE rgbReserved[32]</c>。仅用于占位撑到原生大小，从不读写。
+        /// 用 8 个 int 而不是 <c>fixed byte[32]</c> 表达：前者让 <c>Marshal.SizeOf</c>
+        /// 完全由普通字段算出（32 字节，与平台无关），不依赖运行时对定长缓冲的封送行为。</summary>
+        public Reserved32 rgbReserved;
+    }
+
+    /// <summary><c>BYTE rgbReserved[32]</c> 的占位等价物：8 × int = 32 字节。</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Reserved32 { public int R0, R1, R2, R3, R4, R5, R6, R7; }
 
     /// <summary>PAINTSTRUCT 与原生布局的一致性校验（防回归）。
+    /// <para>按指针宽度取期望值：x64 = 8+4+16+4+4+32 = 72；x86 = 4+4+16+4+4+32 = 64。
+    /// （<c>IntPtr.Size</c> 不是编译期常量，故为 static readonly 而非常量；
+    /// 静态字段初始化器先于静态构造函数体执行，取值一定是已初始化的。）</para>
     /// 放在静态构造函数里：进程启动即校验一次，不在 WM_PAINT 热路径上。</summary>
-    private const int NativePaintStructSize = 72;
+    private static readonly int NativePaintStructSize = IntPtr.Size == 8 ? 72 : 64;
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct WNDCLASSEX

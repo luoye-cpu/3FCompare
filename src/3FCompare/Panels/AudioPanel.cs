@@ -38,19 +38,18 @@ public sealed class AudioPanel : StackPanel
             if (!_suppress) ApplyVolume();
         };
 
-        var trackLabel = new TextBlock { Text = LanguageManager.T("Audio_Track"), FontSize = 12, Foreground = new SolidColorBrush(Color.Parse("#FFC8C8D2")) };
-        var volLabel = new TextBlock { Text = LanguageManager.T("Audio_Volume"), FontSize = 12, Foreground = new SolidColorBrush(Color.Parse("#FFC8C8D2")) };
+        var trackLabel = new TextBlock { Text = LanguageManager.T("Audio_Track"), FontSize = 12 }.Themed("TextSecondaryBrush");
+        var volLabel = new TextBlock { Text = LanguageManager.T("Audio_Volume"), FontSize = 12 }.Themed("TextSecondaryBrush");
         _mute.Content = LanguageManager.T("Audio_Mute");
         var hint = new TextBlock
         {
             Text = LanguageManager.T("Audio_Hint"), FontSize = 11, TextWrapping = TextWrapping.Wrap,
-            Foreground = new SolidColorBrush(Color.Parse("#8C8C96")),
-        };
+        }.Themed("TextMutedBrush");
 
+        // 标题不再显式指定白色：全局 TextBlock 基础样式已把前景设为 TextPrimaryBrush
         Children.Add(new TextBlock
         {
             Text = LanguageManager.T("Audio_Title"), FontSize = 13, FontWeight = FontWeight.Bold,
-            Foreground = new SolidColorBrush(Color.Parse("#FFFFFFFF")),
         });
         Children.Add(trackLabel);
         Children.Add(_track);

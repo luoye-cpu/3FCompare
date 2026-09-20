@@ -10,6 +10,30 @@ internal static class Program
     [STAThread]
     public static void Main(string[] args)
     {
+        // 进程级未处理异常兜底（必须最先注册，早于任何可能抛异常的初始化）。
+        // App.axaml.cs 只覆盖了 UI 线程调度异常（Dispatcher.UnhandledException）与
+        // 未观察任务异常；工作线程——内核回调线程、Task.Run 里的 StepFramesAsync / 抓帧
+        // 任务——抛出的未处理异常既不留痕也不落盘，进程直接静默终止，事后连崩溃点都看不到。
+        // ⚠ 本处理器内**不得**再抛出任何异常：异常处理器里二次抛异常会让进程以更糟的方式
+        // 退出并丢掉原始信息。故每一步都单独 try/catch 兜底。
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            try
+            {
+                // 日志系统此时可能尚未初始化（AppLog.Initialize 在下面几行），
+                // 也可能已经在跑——两种情况都要安全：前者 Enqueue 会自动丢弃。
+                var text = e.ExceptionObject is Exception ex
+                    ? $"{ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}"
+                    : e.ExceptionObject?.ToString() ?? "(未知异常对象)";
+                try { _3FCompare.Core.Diagnostics.AppLog.Error("Unhandled", $"IsTerminating={e.IsTerminating} {text}"); } catch { }
+                try { Console.Error.WriteLine($"[UnhandledException] IsTerminating={e.IsTerminating} {text}"); Console.Error.Flush(); } catch { }
+                // 进程马上就要没了，后台写线程来不及自然轮转 ⇒ 显式冲刷，
+                // 否则最关键的"最后几行"永远留在内存队列里。
+                try { _3FCompare.Core.Diagnostics.AppLog.Shutdown(); } catch { }
+            }
+            catch { }
+        };
+
         // 进程退出钩子：卸载内核日志 sink + 冲刷日志。
         // 内核解码/播放线程可能活过托管侧——不注销回调，CLR 停机后它们反向 P/Invoke
         // 会触发 coreclr ceemain.cpp:1750 断言（"Attempt to execute managed code after the
@@ -18,10 +42,16 @@ internal static class Program
         {
             try { _3FCompare.Core.Diagnostics.KernelLogBridge.Uninstall(); } catch { }
             try { _3FCompare.Core.Diagnostics.AppLog.Shutdown(); } catch { }
+            try { _3FCompare.Diagnostics.ComponentLog.Shutdown(); } catch { }
         };
 
         // F-LOG：落盘日志最先初始化（捕获从第一行起的全部内容）
         _3FCompare.Core.Diagnostics.AppLog.Initialize();
+        // 组件生命周期日志（逐条 flush，硬崩也不丢最后几秒）：与 AppLog 并列，写 logs/component-*.log
+        _3FCompare.Diagnostics.ComponentLog.Initialize();
+        // 已知注入钩子在场检测（RTSS/MSI Afterburner / NVIDIA 覆盖层，docs/33 §八）：
+        // 只记一条组件日志，不弹窗、不阻断启动。注入发生在进程创建期，故此刻即可探到。
+        try { _3FCompare.Diagnostics.HookDetector.ProbeAndLog(); } catch { }
         // 双写器：全代码库 Console.Error.WriteLine 自动同步落盘（55 处调用点零改动）
         _3FCompare.Core.Diagnostics.ConsoleErrorRerouter.Install();
         _3FCompare.Core.Diagnostics.AppLog.Info("App",
@@ -51,6 +81,18 @@ internal static class Program
         catch (Exception ex)
         {
             _3FCompare.Core.Diagnostics.AppLog.Warn("Kernel", $"sink 安装失败: {ex.Message}");
+        }
+
+        // 内嵌 WGC 抓屏原生库自解压（3FC.WgcCapture.dll；docs/27 §九 阶段 3）
+        try
+        {
+            ExtractEmbedded("3FC.WgcCapture.dll");
+            _3FCompare.Core.Diagnostics.AppLog.Debug("Native", "3FC.WgcCapture.dll 自解压完成");
+        }
+        catch (Exception ex)
+        {
+            // 不崩：FrameCapture 探测到 DLL 缺失会 WARN 一次并走 GDI 兜底（docs/27 §三）
+            _3FCompare.Core.Diagnostics.AppLog.Warn("Native", $"3FC.WgcCapture.dll 自解压跳过: {ex.Message}");
         }
 
         // 内嵌 Avalonia 原生 DLL 自解压（libSkiaSharp.dll / libHarfBuzzSharp.dll）
@@ -190,11 +232,17 @@ internal static class Program
         return ms.ToArray();
     }
 
-    /// <summary>将嵌入的资源 DLL 提取到应用目录（供 P/Invoke 加载）。</summary>
+    /// <summary>将嵌入的资源 DLL 提取到应用目录（供 P/Invoke 加载）。
+    /// <para><b>安全策略：目标文件已存在时绝不覆盖</b>（FFF.Native.dll / libSkiaSharp.dll /
+    /// libHarfBuzzSharp.dll / 3FC.WgcCapture.dll 一视同仁）。理由：这些原生库都由本仓库的
+    /// 构建脚本（构建全部.ps1 / native/wgc_capture/build.sh）单独产出，开发者磁盘上的版本
+    /// 可能比当前发布批次里内嵌的那份**更新**；按内容覆盖会把新版降级成旧基线
+    /// （2026-09-16 内核事故：API 15 被覆盖成 API 14，表现为会话全部创建失败）。
+    /// 内嵌资源只作"磁盘上确实没有"时的兜底，所以写盘仅限缺失时。</para></summary>
     private static void ExtractEmbedded(string dllName)
     {
         var target = Path.Combine(AppContext.BaseDirectory, dllName);
-        if (File.Exists(target)) return; // 已存在则跳过
+        if (File.Exists(target)) return; // 已存在则跳过（见上方安全策略）
         var asm = System.Reflection.Assembly.GetExecutingAssembly();
         using var stream = asm.GetManifestResourceStream(dllName);
         if (stream is null) return; // 未嵌入（开发运行或非内嵌发布）

@@ -35,6 +35,13 @@
     <ProjectReference Include="..\3FCompare.Core\3FCompare.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- 可测试性：抓屏胶水层（FrameCapture 的选路/回退/降级、WgcFrameCapture 的位图转换与释放）
+         是 internal，且它的正确性只能靠替身驱动（真实 WGC 抓帧慢且依赖窗口）。
+         仅对测试工程开放，不扩大对外 API 面。 -->
+    <InternalsVisibleTo Include="3FCompare.Platform.Tests" />
+  </ItemGroup>
+
   <!-- 嵌入 FFF.Native.dll 实现单文件发布（3FP 播放器内核，始终内嵌） -->
   <!-- P1-17：过去这里写死 x64\Release，与本项目的 $(Configuration) 完全脱钩，
        且内核目录被 .gitignore 忽略 —— 干净 clone 后会以一个不知所云的错误失败。
@@ -81,6 +88,50 @@
            Text="未找到 SkiaSharp 原生库 libSkiaSharp.dll（期望: $(_SkiaNativePath)）。它由 Avalonia 传递引入，升级 Avalonia 后版本可能变化；请用 -p:SkiaSharpNativeVersion=&lt;实际版本&gt; 覆盖（可用版本见 $(NuGetPackageRoot)skiasharp.nativeassets.win32\ 下的目录名）。" />
     <Error Condition="!Exists('$(_HarfBuzzNativePath)')"
            Text="未找到 HarfBuzzSharp 原生库 libHarfBuzzSharp.dll（期望: $(_HarfBuzzNativePath)）。它由 Avalonia 传递引入；请用 -p:HarfBuzzNativeVersion=&lt;实际版本&gt; 覆盖（可用版本见 $(NuGetPackageRoot)harfbuzzsharp.nativeassets.win32\ 下的目录名）。" />
+  </Target>
+
+  <!-- 嵌入 3FC.WgcCapture.dll（抓屏主线路的原生 WGC 库，docs/27 §九 阶段 3） -->
+  <!-- 与内核同款：路径由 PropertyGroup 定义、可用 -p:WgcCaptureDllPath=<绝对路径> 覆盖。
+       注意这里**没有 Debug/Release 配置维度**：build.sh 直接把产物落在 native/wgc_capture/
+       根目录，不像内核那样按配置分子目录（所以不引入会被静默忽略的 *Configuration 开关）。
+
+       缺失时**降级为 Warning**（不再硬失败）的理由：该 DLL 被 native/wgc_capture/.gitignore 忽略、
+       仓库内也没有可还原的基线归档（内核有 .3fc_kernel_baseline.bundle，WGC 没有），
+       于是任何没有 VS C++ 工具链 + cppwinrt 头的机器（CI、新克隆）连 dotnet build / dotnet test
+       都跑不起来 —— 而运行时 FrameCapture.GetProbe() 探测到缺库已有 GDI 兜底、本就不会崩。
+       用构建失败去拦一个运行时不崩、且多数机器上根本修不了的条件，代价明显大于收益。
+       需要严格把关的场合（发布/CI 门禁）用 -p:WgcCaptureRequired=true 强制缺失即 Error。 -->
+  <PropertyGroup>
+    <WgcCaptureDllPath Condition="'$(WgcCaptureDllPath)' == ''">$(MSBuildThisFileDirectory)..\..\native\wgc_capture\3FC.WgcCapture.dll</WgcCaptureDllPath>
+    <WgcCaptureRequired Condition="'$(WgcCaptureRequired)' == ''">false</WgcCaptureRequired>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="$(WgcCaptureDllPath)" LogicalName="3FC.WgcCapture.dll" Condition="Exists('$(WgcCaptureDllPath)')" />
+  </ItemGroup>
+
+  <Target Name="CheckWgcCaptureDll" BeforeTargets="Build;Publish">
+    <Error Condition="!Exists('$(WgcCaptureDllPath)') AND '$(WgcCaptureRequired)' == 'true'"
+           Text="[WgcCaptureRequired=true] 未找到 WGC 抓屏原生库 3FC.WgcCapture.dll（期望路径: $(WgcCaptureDllPath)）。请在 Git Bash 中运行 native/wgc_capture/build.sh 构建（需 Visual Studio 的「使用 C++ 的桌面开发」负载，含 Windows SDK 的 cppwinrt 头）；若产物在别处，加 -p:WgcCaptureDllPath=&lt;绝对路径&gt;。" />
+
+    <Warning Condition="!Exists('$(WgcCaptureDllPath)') AND '$(WgcCaptureRequired)' != 'true'"
+             Text="⚠ 未找到 WGC 抓屏原生库 3FC.WgcCapture.dll（期望路径: $(WgcCaptureDllPath)）—— 本次构建**不会**嵌入它，运行时抓屏会全程退回 GDI 兜底（对 D3D flip-model 不可靠、窗口被遮挡时会抓到遮挡物，docs/26 §3.2）。要拿到完整功能，请在 Git Bash 中运行 native/wgc_capture/build.sh 构建（需 Visual Studio 的「使用 C++ 的桌面开发」负载，含 Windows SDK 的 cppwinrt 头）。发布/CI 请加 -p:WgcCaptureRequired=true 让本项缺失变成错误。" />
+
+    <!-- S3：DLL 只查 Exists 不查新旧 ⇒ 改了 wgc_capture.cpp/.h 忘跑 build.sh 会**静默嵌入旧 DLL**
+         （构建全绿，但原生行为与源码对不上，排查成本极高）。这里比对修改时间，旧了直接报错。
+         ⚠ 这一条**不**跟随 WgcCaptureRequired 开关：它拦的是"本机源码与产物自相矛盾"，
+         与"有没有 C++ 工具链"无关（DLL 不存在时下面两条都不成立，自然跳过）。
+         只比对 DLL 真正的源文件（.cpp/.h）；selftest.cpp 只影响自测程序，不参与本嵌入。 -->
+    <PropertyGroup Condition="Exists('$(WgcCaptureDllPath)')">
+      <_WgcCaptureDllAbs>$([MSBuild]::NormalizePath('$(WgcCaptureDllPath)'))</_WgcCaptureDllAbs>
+      <_WgcCaptureCppAbs>$([MSBuild]::NormalizePath('$(MSBuildThisFileDirectory)..\..\native\wgc_capture\wgc_capture.cpp'))</_WgcCaptureCppAbs>
+      <_WgcCaptureHAbs>$([MSBuild]::NormalizePath('$(MSBuildThisFileDirectory)..\..\native\wgc_capture\wgc_capture.h'))</_WgcCaptureHAbs>
+      <_WgcCaptureDllTicks>$([System.IO.File]::GetLastWriteTimeUtc('$(_WgcCaptureDllAbs)').Ticks)</_WgcCaptureDllTicks>
+    </PropertyGroup>
+    <Error Condition="Exists('$(_WgcCaptureDllAbs)') AND Exists('$(_WgcCaptureCppAbs)') AND $([System.IO.File]::GetLastWriteTimeUtc('$(_WgcCaptureCppAbs)').Ticks) &gt; $(_WgcCaptureDllTicks)"
+           Text="3FC.WgcCapture.dll 比原生源文件 wgc_capture.cpp 旧 —— 改了原生代码后必须重新构建，否则会静默嵌入旧 DLL（构建全绿但行为对不上）。请在 Git Bash 中运行 native/wgc_capture/build.sh（或 tools/构建全部.ps1）。" />
+    <Error Condition="Exists('$(_WgcCaptureDllAbs)') AND Exists('$(_WgcCaptureHAbs)') AND $([System.IO.File]::GetLastWriteTimeUtc('$(_WgcCaptureHAbs)').Ticks) &gt; $(_WgcCaptureDllTicks)"
+           Text="3FC.WgcCapture.dll 比原生源文件 wgc_capture.h 旧 —— 改了原生代码后必须重新构建，否则会静默嵌入旧 DLL（构建全绿但行为对不上）。请在 Git Bash 中运行 native/wgc_capture/build.sh（或 tools/构建全部.ps1）。" />
   </Target>
 
   <!-- 本地化字符串与窗口帧捕获（自 App 项目迁入；命名空间保持 _3FCompare.App[.Capture] 不变以零改动引用） -->
