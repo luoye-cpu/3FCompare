@@ -8,7 +8,9 @@ class Program {
             var list = GpuEnumeration.Enumerate();
             sw.Stop();
             Console.WriteLine($"完成: {list.Count} 个适配器, 耗时 {sw.ElapsedMilliseconds}ms");
-            foreach (var a in list) Console.WriteLine($"  [{a.Index}] {a.Description}");
+            foreach (var a in list)
+                Console.WriteLine($"  [{a.Index}] {a.Description}" +
+                    $"  vendor={a.VendorId} device={a.DeviceId} luid=0x{a.AdapterLuid:X}");
         } catch (Exception ex) {
             Console.WriteLine($"异常: {ex.GetType().Name}: {ex.Message}");
         }

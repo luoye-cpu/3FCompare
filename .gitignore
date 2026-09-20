@@ -117,3 +117,7 @@ _corrupt_pack_backup/
 /_hdr.png
 /lunarlake_factsheet.pdf
 /NVIDIA Corporation/
+
+# 崩溃取证运行产物（工具本身入库，运行数据不入库）
+tools/crashscope/runs/
+tools/crashscope/scenes/
