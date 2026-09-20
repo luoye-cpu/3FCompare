@@ -199,11 +199,14 @@ public partial class MainWindow : Window
         {
             if (!_sidebar.MagnifierOn) Magnifier.HideOverlay();
         };
-        _sidebar.CollapsedChanged += OnSidebarCollapsedChanged;
+        _sidebar.ModeChanged += OnSidebarModeChanged;
         SidebarHost.Content = _sidebar;
 
-        // 恢复上次会话的侧栏几何（展开宽度 + 折叠态），实现见 MainWindow.Sidebar.cs
+        // 恢复上次会话的侧栏几何（展开宽度 + 三态），实现见 MainWindow.Sidebar.cs
         RestoreSidebarGeometry();
+        // 拖拽回写（D2）：不接这个事件，拖完的宽度既不入内存也不落盘，
+        // 自动折叠展开一次就跳回旧宽度。
+        WireSidebarSplitter();
         // 悬浮传输栏的两个定时器必须早于 ApplyBottomBarVisibility 建好：后者会据设置决定是否启动轮询。
         _transportHoverTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(TransportHoverPollMs) };
         _transportHoverTimer.Tick += (_, _) => OnTransportHoverTick();
@@ -1354,6 +1357,16 @@ public partial class MainWindow : Window
             case Key.Escape when _fullscreen: ToggleFullscreen(); break;
             case Key.O when mods == KeyModifiers.None: _ = OpenViaPickerAsync(); break;
             case Key.B when mods == KeyModifiers.None: OnToggleAbSlider(this, e); break;
+            // 侧栏三态循环（展开 → 图标栏 → 完全隐藏）：Ctrl+H。
+            // 选键依据：① 本 switch + XAML 的 InputGesture + TimelineView 的 A/B 已全表核对，
+            // Ctrl+H 未被占用（带修饰键的全局键只有 Ctrl+S 导出与 Ctrl+O 打开）；
+            // ② **刻意不用 Ctrl+B**：它虽与"裸 B"分属不同修饰键，但 TimelineView.OnKeyDown
+            // 对 Key.B 的判断**不带修饰键守卫**（TimelineView.cs:159），而时间轴在点击后
+            // 就会拿到焦点（TimelineView.cs:113）—— 于是"刚拖过进度条再按 Ctrl+B"会被时间轴吞掉，
+            // 实际发生的是"设一个 B 点"，与用户预期完全相反。跨控件改这条守卫不在本次改动范围内，
+            // 故选一个不会被任何控件吞掉的组合；
+            // ③ H 取「隐藏」首字母：三态里"完全隐藏"正是旧版做不到、需要新入口才能到达的一态。
+            case Key.H when mods.HasFlag(KeyModifiers.Control): CycleSidebarMode(); break;
             // 多路对比模式入口：单键循环「进入 → 逐级切换可用模式 → 退出」（见 CycleCompareMode）。
             // 选快捷键而非菜单：菜单要改 MainWindow.axaml 并新增本地化键，而 Localization/ 不在
             // 本次改动范围（docs/26 §四）；快捷键只动本文件这一处 switch，改动最小且零新依赖。
@@ -1720,13 +1733,14 @@ public partial class MainWindow : Window
     /// <summary>父菜单展开时刷新勾选 —— 这是唯一能覆盖"用户用快捷键改了模式"的时机。</summary>
     private void OnCompareModeMenuOpened(object? sender, RoutedEventArgs e) => RefreshCompareModeChecks();
 
-    /// <summary>「视图」菜单展开时刷新其下全部勾选项（对比模式三项 + 底部栏两项）。
-    /// 在父菜单上刷新比只在子菜单上刷新覆盖更早：用户用 T / Shift+T / C / S / V / G
-    /// 改过状态后，即使不展开「对比模式」子菜单也能看到正确的勾选。</summary>
+    /// <summary>「视图」菜单展开时刷新其下全部勾选项（对比模式三项 + 底部栏三项 + 侧栏三项）。
+    /// 在父菜单上刷新比只在子菜单上刷新覆盖更早：用户用 T / Shift+T / C / S / V / G / Ctrl+H
+    /// 改过状态后，即使不展开对应子菜单也能看到正确的勾选。</summary>
     private void OnViewMenuOpened(object? sender, RoutedEventArgs e)
     {
         RefreshCompareModeChecks();
         RefreshBottomBarChecks();
+        RefreshSidebarChecks();
     }
 
     /// <summary>刷新「视图 → 时间轴 / 状态栏」两项的勾选。

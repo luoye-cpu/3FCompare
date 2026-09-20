@@ -1,5 +1,9 @@
 namespace _3FCompare.Core.Settings;
 
+// 别名：本类的属性 SidebarMode 与枚举 SidebarMode 同名，直接写 `SidebarMode.Hidden`
+// 会先命中属性（可空枚举）而不是类型 —— 用别名把两者彻底分开，避免踩 Color-Color 规则的边界。
+using SidebarModeEnum = _3FCompare.Core.Settings.SidebarMode;
+
 /// <summary>应用设置（对应二级设置窗口 F25，序列化到 JSON）。</summary>
 public sealed class AppSettings
 {
@@ -49,6 +53,13 @@ public sealed class AppSettings
         // 侧栏宽度：非正或大得离谱就当作没设置（null = 用默认）
         if (SidebarWidth is <= 0 or > 2000) SidebarWidth = null;
 
+        // 三态侧栏：越界整数收敛成 null（= 未设置 → 由 SidebarCollapsed 兜底推导）。
+        // 与上面 ColorMode 同因：合法 JSON 里的 SidebarMode=99 会一路直传进 UI 状态机，
+        // 而 switch 的 default 分支会把"未知态"静默当成某一态（表现为"手改配置文件后侧栏乱跳"）。
+        // **不要**用 Enum.IsDefined —— 反射在 NativeAOT 下不保证可用（同上）。
+        if (SidebarMode is { } sm && ((int)sm < 0 || (int)sm > (int)SidebarModeEnum.Hidden))
+            SidebarMode = null;
+
         // 窗口状态只恢复 Normal(0) / Maximized(2)：
         // Minimized(1) 无意义，FullScreen(3) 会让用户莫名全屏
         if (WindowState is not (null or 0 or 2)) WindowState = null;
@@ -87,8 +98,27 @@ public sealed class AppSettings
     /// 拖拽分隔条后写入，下次启动恢复（主流工具侧栏均为可拖拽 + 可记忆）。</summary>
     public int? SidebarWidth { get; set; }
 
-    /// <summary>工具侧栏是否处于折叠（图标导航栏）状态。</summary>
+    /// <summary>工具侧栏是否处于折叠（图标导航栏）状态。
+    ///
+    /// <para>⚠ 自引入 <see cref="SidebarMode"/> 后本字段<b>降级为兼容字段</b>：只用于读老配置文件
+    /// （老文件没有 SidebarMode，null 时由它推导三态），写盘时仍与 SidebarMode 同步维护，
+    /// 让用户回退到旧版本时不至于丢掉"折叠"这一半信息。</para></summary>
     public bool SidebarCollapsed { get; set; }
+
+    /// <summary>工具侧栏三态（展开 / 图标栏 / 完全隐藏）。
+    ///
+    /// <para><b>为什么是可空枚举而不是加一个 bool 或非空枚举</b>：</para>
+    /// <list type="bullet">
+    /// <item><description>非空枚举的默认值 Expanded(0) 与"老文件里根本没有这个字段"不可区分 ——
+    /// 老用户明明折叠着侧栏，升级后会被判成"显式展开"，偏好被静默丢掉。
+    /// 可空让 null 专门表示"未设置"，与同文件的 <see cref="SidebarWidth"/> 同一套约定。</description></item>
+    /// <item><description>相比"再加一个 bool 表示是否隐藏"，两个 bool 有四种组合而只有三种合法，
+    /// 必然要额外写一套"哪种组合优先"的消歧规则 —— 状态机被摊平后反而更容易写错。</description></item>
+    /// </list>
+    ///
+    /// <para>消费端（MainWindow.RestoreSidebarGeometry）把 null 解析为
+    /// <c>SidebarCollapsed ? Rail : Expanded</c>；写盘时总是写入已解析出的确定值。</para></summary>
+    public SidebarMode? SidebarMode { get; set; }
 
     /// <summary>底部时间轴是否被用户折叠（docs/31 阶段 4）。默认 false = 展开。
     /// 与 <see cref="SidebarCollapsed"/> 同风格：bool 无越界值，故不必进 <see cref="Normalize"/>，
@@ -150,6 +180,24 @@ public sealed class AppSettings
 
     /// <summary>界面语言（0=中文，1=英文）。</summary>
     public int Language { get; set; } = 0;
+}
+
+/// <summary>工具侧栏三态。
+///
+/// <para>取值顺序刻意与"信息量递减"一致（Expanded 最全 → Rail 只剩图标 → Hidden 什么都不留），
+/// 于是 <see cref="AppSettings.Normalize"/> 只需一个区间检查就能收敛越界值，
+/// 快捷键循环也只是 <c>(mode + 1) % 3</c>。</para>
+///
+/// <para>序列化为 int（System.Text.Json 默认行为，无自定义转换器），
+/// 故**不要**在中间插入新成员 —— 那会改变已有数字的含义。</para></summary>
+public enum SidebarMode
+{
+    /// <summary>完整侧栏：标题 + 导航 + 内容区 + 放大镜。</summary>
+    Expanded = 0,
+    /// <summary>图标导航栏（48px）：仅 5 个面板入口 + 放大镜，内容区整块不可见。</summary>
+    Rail = 1,
+    /// <summary>完全隐藏：列宽 0，侧栏与分割条都不可见。</summary>
+    Hidden = 2,
 }
 
 public enum ColorModeSetting

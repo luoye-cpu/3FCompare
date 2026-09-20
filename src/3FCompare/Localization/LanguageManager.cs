@@ -188,6 +188,11 @@ public static class LanguageManager
         ["Menu_Timeline"] = "时间轴 (T)",
         ["Menu_StatusBar"] = "状态栏 (Shift+T)",
         ["Menu_FloatingTransport"] = "浮动传输栏",
+        // 侧栏三态（展开 / 图标栏 / 完全隐藏）。快捷键 Ctrl+H 的理由见 MainWindow.OnKeyDown。
+        ["Menu_Sidebar"] = "侧栏 (Ctrl+H)",
+        ["Menu_Sidebar_Expanded"] = "展开",
+        ["Menu_Sidebar_Rail"] = "图标栏",
+        ["Menu_Sidebar_Hidden"] = "隐藏",
         ["Menu_Settings"] = "设置(&S)",
         ["Menu_SettingsDialog"] = "设置…",
         ["Menu_Settings_Lang"] = "语言",
@@ -386,6 +391,11 @@ public static class LanguageManager
         ["Menu_Timeline"] = "Timeline (T)",
         ["Menu_StatusBar"] = "Status Bar (Shift+T)",
         ["Menu_FloatingTransport"] = "Floating Transport Bar",
+        // Sidebar tri-state (expanded / icon rail / fully hidden). Ctrl+H rationale: see MainWindow.OnKeyDown.
+        ["Menu_Sidebar"] = "Sidebar (Ctrl+H)",
+        ["Menu_Sidebar_Expanded"] = "Expanded",
+        ["Menu_Sidebar_Rail"] = "Icon rail",
+        ["Menu_Sidebar_Hidden"] = "Hidden",
         ["Menu_Settings"] = "Settings(&S)",
         ["Menu_SettingsDialog"] = "Settings…",
         ["Menu_Settings_Lang"] = "Language",

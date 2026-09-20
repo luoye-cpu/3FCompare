@@ -72,6 +72,19 @@
         <MenuItem x:Name="MenuFloatingTransport" Header="{loc:Loc Menu_FloatingTransport}"
                   ToggleType="CheckBox" Click="OnToggleBottomBar" Tag="floating" />
         <Separator />
+        <!-- 工具侧栏三态：展开 / 图标栏 / 完全隐藏。
+             三态互斥（单选语义），但沿用本菜单既有的 ToggleType=CheckBox + Click+Tag 写法 ——
+             勾选一律由 RefreshSidebarChecks 按真实状态回写（框架会先取反再 RaiseClick）。
+             旧版只有"展开/折叠"两态，完全隐藏只能靠拖分割条，且拖完不记忆（D1/D2）。 -->
+        <MenuItem Header="{loc:Loc Menu_Sidebar}" SubmenuOpened="OnSidebarMenuOpened">
+          <MenuItem x:Name="MenuSidebarExpanded" Header="{loc:Loc Menu_Sidebar_Expanded}"
+                    ToggleType="CheckBox" Click="OnSidebarModePreset" Tag="expanded" />
+          <MenuItem x:Name="MenuSidebarRail" Header="{loc:Loc Menu_Sidebar_Rail}"
+                    ToggleType="CheckBox" Click="OnSidebarModePreset" Tag="rail" />
+          <MenuItem x:Name="MenuSidebarHidden" Header="{loc:Loc Menu_Sidebar_Hidden}"
+                    ToggleType="CheckBox" Click="OnSidebarModePreset" Tag="hidden" />
+        </MenuItem>
+        <Separator />
         <MenuItem Header="{loc:Loc Menu_Fullscreen}" InputGesture="F11" Click="OnToggleFullscreen" />
       </MenuItem>
       <MenuItem Header="{loc:Loc Menu_Settings}">

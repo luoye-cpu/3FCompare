@@ -4,6 +4,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
@@ -405,12 +406,107 @@ public partial class MainWindow : Window
         if (!TimelineHost.IsVisible || !TransportHost.IsVisible || !StatusBarHost.IsVisible)
             throw new InvalidOperationException("底部栏存在不可见项");
 
+        // 三态各有自己的期望宽度：Hidden 是 0，不能再按"折叠/未折叠"两分法取 RailWidth
+        //（否则用户把侧栏持久化成"完全隐藏"后，这条断言会拿 48 去比 0 而误报失败）。
         var col = MainArea.ColumnDefinitions[0].Width;
-        var expect = _sidebar.Collapsed ? Controls.ToolsSidebar.RailWidth : _sidebar.ExpandedWidth;
+        var expect = _sidebar.Mode switch
+        {
+            SidebarMode.Expanded => _sidebar.ExpandedWidth,
+            SidebarMode.Rail => Controls.ToolsSidebar.RailWidth,
+            _ => 0,
+        };
         if (!col.IsAbsolute || Math.Abs(col.Value - expect) > 0.5)
-            throw new InvalidOperationException($"侧栏宽度异常：实际={col.Value:0.#} 期望={expect:0.#}");
+            throw new InvalidOperationException($"侧栏宽度异常：实际={col.Value:0.#} 期望={expect:0.#}（{_sidebar.Mode}）");
 
-        Log($"布局 ✓ 时间轴({timeline:0.#}) → 传输栏({transport:0.#}) → 状态栏({status:0.#})，侧栏 {col.Value:0.#}px{( _sidebar.Collapsed ? "（折叠）" : string.Empty)}");
+        Log($"布局 ✓ 时间轴({timeline:0.#}) → 传输栏({transport:0.#}) → 状态栏({status:0.#})，侧栏 {col.Value:0.#}px（{_sidebar.Mode}）");
+    }
+
+    /// <summary>侧栏三态回归闸门（D1 / D2 / D3 / D4 / D6）。
+    ///
+    /// <para>这些必须是硬断言而不是日志，因为它们各自对应一个"看起来在跑、实际没用"的缺陷：
+    /// 只藏内层控件会留下横线与约 41px 空白（D3，并连带把行高从 206 撑到 248，即 D6）；
+    /// 把 <c>_content.Content</c> 置 null 会让五个共享面板停止参与布局、外部调用失去反馈（D4）；
+    /// 不接拖拽结束事件则宽度永不回写、退出不落盘（D2）。
+    /// 静默通过等于把"折叠后极难看、拖完就忘"这两件事留给用户。</para>
+    ///
+    /// <para><b>前置条件</b>：调用方已复位过底部栏。本方法自身把侧栏复位到 Expanded 再开始，
+    /// 结束前恢复原来的展开宽度 —— 后面的探针映射等断言依赖一个正常宽度的侧栏。</para></summary>
+    private async System.Threading.Tasks.Task AssertSidebarThreeStatesAsync()
+    {
+        var savedWidth = _sidebar.ExpandedWidth;
+        var col = MainArea.ColumnDefinitions[0];
+
+        // ---- Expanded ----
+        _sidebar.SetMode(SidebarMode.Expanded);
+        await System.Threading.Tasks.Task.Delay(150);
+        if (!col.Width.IsAbsolute || Math.Abs(col.Width.Value - _sidebar.ExpandedWidth) > 0.5)
+            throw new InvalidOperationException($"三态[Expanded]列宽异常：{col.Width.Value:0.#} ≠ {_sidebar.ExpandedWidth:0.#}");
+        if (!SidebarSplitter.IsVisible)
+            throw new InvalidOperationException("三态[Expanded]分割条应可见");
+        if (!_sidebar.IsContentHostVisible)
+            throw new InvalidOperationException("三态[Expanded]内容区应可见");
+
+        // ---- Rail：只剩图标栏，内容区整块不可见（D3）----
+        _sidebar.SetMode(SidebarMode.Rail);
+        await System.Threading.Tasks.Task.Delay(150);
+        if (Math.Abs(col.Width.Value - Controls.ToolsSidebar.RailWidth) > 0.5)
+            throw new InvalidOperationException($"三态[Rail]列宽异常：{col.Width.Value:0.#} ≠ {Controls.ToolsSidebar.RailWidth}");
+        if (SidebarSplitter.IsVisible)
+            throw new InvalidOperationException("三态[Rail]分割条应不可见（48px 图标栏没有可拖区间）");
+        if (_sidebar.IsContentHostVisible)
+            throw new InvalidOperationException("三态[Rail]内容区仍可见 —— D3 复发（会留下横线与空白）");
+        if (!_sidebar.IsRailVisible)
+            throw new InvalidOperationException("三态[Rail]图标导航栏应可见");
+
+        // ---- Hidden：列宽 0，侧栏与分割条都不见 ----
+        _sidebar.SetMode(SidebarMode.Hidden);
+        await System.Threading.Tasks.Task.Delay(150);
+        if (Math.Abs(col.Width.Value) > 0.5)
+            throw new InvalidOperationException($"三态[Hidden]列宽应为 0，实际 {col.Width.Value:0.#}");
+        if (SidebarHost.IsVisible)
+            throw new InvalidOperationException("三态[Hidden]侧栏宿主应不可见");
+        if (SidebarSplitter.IsVisible)
+            throw new InvalidOperationException("三态[Hidden]分割条应不可见");
+        // D4：面板实例必须仍然挂载（只改可见性、不摘内容），否则状态与订阅全丢
+        if (!ReferenceEquals(_sidebar.Active, _probe))
+            throw new InvalidOperationException("三态[Hidden]激活面板被摘掉了（面板实例必须保持挂载）");
+
+        // ---- rail 图标点击 ⇒ 恢复 Expanded 且目标面板被激活 ----
+        _sidebar.SetMode(SidebarMode.Rail);
+        await System.Threading.Tasks.Task.Delay(150);
+        _sidebar.Activate(_bookmarks); // 先切到别的面板，确保下面验的是"点击真的激活了目标"
+        var railBtn = _sidebar.RailButtonFor(_probe)
+            ?? throw new InvalidOperationException("取不到探针面板的图标导航按钮");
+        railBtn.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        await System.Threading.Tasks.Task.Delay(150);
+        if (_sidebar.Mode != SidebarMode.Expanded)
+            throw new InvalidOperationException($"rail 图标点击后未恢复 Expanded（实际 {_sidebar.Mode}）");
+        if (!ReferenceEquals(_sidebar.Active, _probe))
+            throw new InvalidOperationException("rail 图标点击后未激活目标面板");
+        if (!SidebarSplitter.IsVisible)
+            throw new InvalidOperationException("rail 图标点击恢复 Expanded 后分割条未恢复可见");
+
+        // ---- 拖拽回写（D2）----
+        col.Width = new GridLength(300, GridUnitType.Pixel);
+        await System.Threading.Tasks.Task.Delay(100);
+        SidebarSplitter.RaiseEvent(new VectorEventArgs { RoutedEvent = Thumb.DragCompletedEvent });
+        if (Math.Abs(_sidebar.ExpandedWidth - 300) > 0.5)
+            throw new InvalidOperationException($"拖拽未回写展开宽度：{_sidebar.ExpandedWidth:0.#} ≠ 300");
+
+        // ---- 拖到小于 PanelMinWidth ⇒ 切 Hidden ----
+        col.Width = new GridLength(100, GridUnitType.Pixel);
+        await System.Threading.Tasks.Task.Delay(100);
+        SidebarSplitter.RaiseEvent(new VectorEventArgs { RoutedEvent = Thumb.DragCompletedEvent });
+        await System.Threading.Tasks.Task.Delay(100);
+        if (_sidebar.Mode != SidebarMode.Hidden)
+            throw new InvalidOperationException(
+                $"拖到 {100}（< PanelMinWidth={Controls.ToolsSidebar.PanelMinWidth:0}）后应切 Hidden，实际 {_sidebar.Mode}");
+
+        // ---- 复原：后续断言依赖一个正常展开的侧栏 ----
+        _sidebar.UpdateExpandedWidth(savedWidth);
+        _sidebar.SetMode(SidebarMode.Expanded);
+        await System.Threading.Tasks.Task.Delay(150);
+        Log($"侧栏三态 ✓ Expanded({_sidebar.ExpandedWidth:0.#}) / Rail({Controls.ToolsSidebar.RailWidth}) / Hidden(0)；拖拽回写与 rail 点击均生效");
     }
 
     /// <summary>悬浮传输栏回归闸门（docs/31 阶段 4.3）。覆盖三件事：
@@ -606,6 +702,10 @@ public partial class MainWindow : Window
             ApplyBottomBarVisibility();
             await System.Threading.Tasks.Task.Delay(200);
             AssertBottomBarOrder();
+
+            // 侧栏三态（D1/D2/D3/D4/D6）：同样必须在窗口完成一次布局之后跑
+            _step = "侧栏三态";
+            await AssertSidebarThreeStatesAsync();
 
             // 自动播放断言（打开完成→统一 Play 契约；须在步进前验证——步进会暂停播放）
             _step = "自动播放断言";
