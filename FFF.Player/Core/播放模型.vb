@@ -39,6 +39,7 @@ Public Enum HDR处理路径 As UInteger
     杜比视界兼容基础层回退 = 4
     杜比视界FEL基础层回退 = 5
     HDRVivid动态映射 = 6
+    外部RPU处理 = 7
 End Enum
 
 Public Enum 杜比视界增强层类型 As UInteger
@@ -449,6 +450,8 @@ Public NotInheritable Class 媒体信息
     Public Property 是静态图片 As Boolean
     <JsonPropertyName("metadata")>
     Public Property 元数据 As Dictionary(Of String, String) = New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+    <JsonPropertyName("chapters")>
+    Public Property 章节 As List(Of 媒体章节信息) = New List(Of 媒体章节信息)()
     <JsonPropertyName("streams")>
     Public Property 流 As List(Of 媒体流信息) = New List(Of 媒体流信息)()
     <JsonIgnore>
@@ -457,6 +460,13 @@ Public NotInheritable Class 媒体信息
             Return TimeSpan.FromTicks(时长100纳秒)
         End Get
     End Property
+End Class
+
+Public NotInheritable Class 媒体章节信息
+    <JsonPropertyName("startTime100ns")>
+    Public Property 开始时间100纳秒 As Long
+    <JsonPropertyName("title")>
+    Public Property 标题 As String = String.Empty
 End Class
 
 Public NotInheritable Class 媒体流信息
@@ -588,6 +598,10 @@ Public NotInheritable Class 媒体流信息
     Public Property HDR回退 As Boolean
     <JsonPropertyName("dynamicHdrMetadata")>
     Public Property 动态HDR元数据 As Boolean
+    <JsonPropertyName("externalColorExtensionAvailable")>
+    Public Property 外部RPU扩展可用 As Boolean
+    <JsonPropertyName("externalColorExtensionActive")>
+    Public Property 外部RPU扩展已启用 As Boolean
     <JsonPropertyName("masteringPrimaries")>
     Public Property 主显示器色域 As String = String.Empty
     <JsonPropertyName("masteringMinLuminance")>

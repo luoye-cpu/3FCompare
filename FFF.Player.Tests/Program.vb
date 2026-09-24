@@ -247,6 +247,13 @@ Friend Module Program
                 Console.WriteLine("GPU 配置下图片打开即显示首帧回归通过。")
                 Return 0
             End If
+            If 参数.Length = 2 AndAlso String.Equals(参数(0), "--chapter-regression", StringComparison.OrdinalIgnoreCase) Then
+                Dim 章节媒体路径 = Path.GetFullPath(参数(1))
+                检查文件(章节媒体路径)
+                测试媒体章节(章节媒体路径)
+                Console.WriteLine("媒体章节标题、时间轴与章节跳转回归通过。")
+                Return 0
+            End If
             If 参数.Length = 2 AndAlso String.Equals(参数(0), "--stream-selector-regression", StringComparison.OrdinalIgnoreCase) Then
                 Dim 流媒体路径 = Path.GetFullPath(参数(1))
                 检查文件(流媒体路径)
@@ -341,6 +348,12 @@ Friend Module Program
             If 参数.Length = 1 AndAlso String.Equals(参数(0), "--information-overlay-regression", StringComparison.OrdinalIgnoreCase) Then
                 测试信息层交互与文本()
                 Console.WriteLine("媒体信息按钮左右键与信息层逐字段精确回归通过。")
+                Return 0
+            End If
+            If 参数.Length = 1 AndAlso String.Equals(参数(0), "--information-overlay-content-regression", StringComparison.OrdinalIgnoreCase) Then
+                测试信息层精确文本()
+                测试媒体信息响度数据源()
+                Console.WriteLine("播放器信息层字幕/弹幕延迟与输入/输出响度数据源回归通过。")
                 Return 0
             End If
             If 参数.Length = 2 AndAlso String.Equals(参数(0), "--empty-layer-regression", StringComparison.OrdinalIgnoreCase) Then
@@ -890,6 +903,21 @@ Friend Module Program
     End Sub
 
     Private Sub 测试HDR规格处理策略()
+        Dim HDR文本方法 = GetType(播放器控制器).GetMethod(
+            "HDR规格文本", BindingFlags.Static Or BindingFlags.NonPublic)
+        Dim DV回退快照 As New 播放器快照(New 原生播放器快照 With {
+            .HDR格式 = CUInt(HDR格式.杜比视界),
+            .HDR处理路径 = CUInt(HDR处理路径.杜比视界兼容基础层回退)})
+        Dim DV处理快照 As New 播放器快照(New 原生播放器快照 With {
+            .HDR格式 = CUInt(HDR格式.杜比视界),
+            .HDR处理路径 = CUInt(HDR处理路径.外部RPU处理)})
+        断言(String.Equals(CStr(HDR文本方法?.Invoke(Nothing, {DV回退快照, True})),
+            "Dolby Vision", StringComparison.Ordinal) AndAlso
+            String.Equals(CStr(HDR文本方法?.Invoke(Nothing, {DV回退快照, False})),
+            "Dolby Vision", StringComparison.Ordinal) AndAlso
+            String.Equals(CStr(HDR文本方法?.Invoke(Nothing, {DV处理快照, True})),
+            "Dolby Vision", StringComparison.Ordinal),
+            "Dolby Vision 操作提示没有使用通用格式名称回退。")
         Using 控制器 As New 播放器控制器(Function() IntPtr.Zero, Nothing)
             控制器.设置HDR峰值亮度(2000.0F)
             断言(控制器.取得HDR输出峰值参数(色彩输出模式.映射到SDR) = 0.0F AndAlso
@@ -1060,6 +1088,24 @@ Friend Module Program
         Next
         Throw New InvalidOperationException("SUP 字幕在限定读取次数内没有产生显示事件。")
     End Function
+
+    Private Sub 测试媒体章节(媒体路径 As String)
+        Using 会话 As New 播放器会话(New 播放器配置 With {
+            .解码器 = 解码模式.CPU,
+            .输出窗口句柄 = IntPtr.Zero
+        })
+            会话.打开Async(媒体路径).GetAwaiter().GetResult()
+            Dim 信息 = 会话.当前媒体信息
+            断言(信息 IsNot Nothing, "没有返回媒体信息。")
+            断言(信息.章节 IsNot Nothing AndAlso 信息.章节.Count > 0, "媒体没有返回章节数据。")
+            Dim 章节 = 信息.章节(0)
+            断言(Not String.IsNullOrWhiteSpace(章节.标题), "首个章节缺少标题。")
+            断言(章节.开始时间100纳秒 >= 0 AndAlso 章节.开始时间100纳秒 < 信息.时长100纳秒,
+               $"首个章节时间不在媒体时长内：{章节.开始时间100纳秒}/{信息.时长100纳秒}。")
+            会话.跳转(TimeSpan.FromTicks(章节.开始时间100纳秒))
+            Console.WriteLine($"共读取 {信息.章节.Count} 个章节；首章 ""{章节.标题}"" 位于 {TimeSpan.FromTicks(章节.开始时间100纳秒)}。")
+        End Using
+    End Sub
 
     Private Sub 测试流选择器后端(媒体路径 As String)
         Using 会话 As New 播放器会话(New 播放器配置 With {
@@ -2651,9 +2697,9 @@ Friend Module Program
                         "渲染：帧率 23.98fps   缓冲池 3帧   实时丢帧 2345   总丢帧 12000",
                         "音频：FLAC - WASAPI 独占",
                         "输入：采样 48000Hz   位深 24bit   声道数 2   实时码率 1.41 Mbps",
-                        "输出：FLOAT PCM   采样 48000Hz   位深 32bit   声道数 2   实时延迟 25ms",
-                        "字幕：SRT   总数量 2   当前正在渲染 1001",
-                        "弹幕：哔哩哔哩 XML   总数量 2   当前正在渲染 2002"}
+                        "输出：FLOAT PCM   采样 48000Hz   位深 32bit   声道数 2   缓冲区 25ms",
+                        "字幕：SRT   总数量 2   正在渲染 1001   延迟 <1ms",
+                        "弹幕：哔哩哔哩 XML   总数量 2   正在渲染 2002   延迟 <1ms"}
                     断言(实际.SequenceEqual(预期),
                         "信息层逐字段文本不符合中文标签、三空格分隔或字段白名单。" & vbCrLf &
                         String.Join(vbCrLf, 实际))
@@ -2694,7 +2740,7 @@ Friend Module Program
                         当前字幕 = 按需字幕
                         当前弹幕 = Nothing
                         当前字幕状态 = Nothing
-                        当前弹幕状态 = Nothing
+                        当前弹幕状态 = 弹幕状态
                         Dim 缺失信息 As New 媒体信息()
                         缺失信息.流.Add(New 媒体流信息 With {.索引 = 0, .类型 = "video"})
                         缺失信息.流.Add(New 媒体流信息 With {.索引 = 1, .类型 = "audio"})
@@ -2703,17 +2749,15 @@ Friend Module Program
                             .实际色彩模式 = CUInt(色彩输出模式.映射到SDR),
                             .当前视频流 = 0, .当前音频流 = 1})
                         Dim 缺失行 = 呈现器.读取调试文本行(缺失信息, 缺失快照, String.Empty)
-                        断言(缺失行.Contains("字幕：ASS   总数量 按需解码"),
-                           "特效字幕总数量没有显示为按需解码。")
-                        断言(缺失行.Contains("弹幕：未加载"),
-                           "未加载弹幕没有收敛为单一状态条目。")
+                        断言(缺失行.Contains("字幕：ASS   总数量 按需解码   延迟 <1ms") AndAlso
+                               缺失行.Contains("弹幕：未加载"),
+                           "已加载字幕的延迟或未加载弹幕的状态显示不正确。")
                         当前字幕 = Nothing
+                        当前字幕状态 = 字幕状态
                         Dim 全未加载行 = 呈现器.读取调试文本行(缺失信息, 缺失快照, String.Empty)
                         断言(全未加载行.Contains("字幕：未加载") AndAlso
-                               Not 全未加载行.Any(Function(x) x.StartsWith("字幕：", StringComparison.Ordinal) AndAlso
-                                   (x.Contains("总数量", StringComparison.Ordinal) OrElse
-                                    x.Contains("当前正在渲染", StringComparison.Ordinal))),
-                           "未加载字幕仍显示了数量或渲染条目。")
+                               全未加载行.Contains("弹幕：未加载"),
+                           "未加载字幕/弹幕应保留状态行且不显示延迟。")
                         断言(Not 缺失行.Any(Function(x) x.Contains("?", StringComparison.Ordinal) OrElse
                                                      x.StartsWith("文件名：", StringComparison.Ordinal) OrElse
                                                      x.StartsWith("输入：", StringComparison.Ordinal) OrElse
@@ -2780,14 +2824,15 @@ Friend Module Program
     End Sub
 
     Private Sub 测试媒体信息响度数据源()
-        Using 窗口 As New Form媒体信息(audioPeakProvider:=
-            Function() New Single() {1.0F, 0.1F, 0.01F})
+            Using 窗口 As New Form媒体信息(audioPeakProvider:=
+            Function() New Single() {1.0F, 0.1F, 0.01F}, inputAudioPeakProvider:=
+            Function() New Single() {0.5F, 0.25F, 0.125F})
             Dim 标志 = BindingFlags.Instance Or BindingFlags.Public Or BindingFlags.NonPublic
             Dim 刷新入口 = GetType(Form媒体信息).GetMethod("刷新响度条", 标志)
             断言(刷新入口 IsNot Nothing, "无法取得媒体信息响度刷新入口。")
             刷新入口.Invoke(窗口, Nothing)
             Dim 期望 = {0, -20, -40, -60}
-            Dim 字段名 = {"EPB_L", "EPB_R", "EPB_C", "EPB_LFE"}
+            Dim 字段名 = {"输出EPB_L", "输出EPB_R", "输出EPB_C", "输出EPB_LFE"}
             For index = 0 To 字段名.Length - 1
                 Dim 进度条 = GetType(Form媒体信息).GetProperty(字段名(index), 标志)?.GetValue(窗口)
                 Dim 数值属性 = 进度条?.GetType().GetProperty("Value", 标志)
@@ -2795,6 +2840,28 @@ Friend Module Program
                     Convert.ToInt32(数值属性.GetValue(进度条)))
                 断言(实际值 = 期望(index),
                    $"媒体信息响度条 {字段名(index)} 没有使用 PCM 峰值数据源：{实际值}，期望 {期望(index)}。")
+            Next
+            Dim 输入字段名 = {"输入EPB_L", "输入EPB_R", "输入EPB_C", "输入EPB_LFE"}
+            Dim 输入期望 = {-6, -12, -18, -60}
+            For index = 0 To 输入字段名.Length - 1
+                Dim 进度条 = GetType(Form媒体信息).GetProperty(输入字段名(index), 标志)?.GetValue(窗口)
+                Dim 数值属性 = 进度条?.GetType().GetProperty("Value", 标志)
+                Dim 实际值 = If(数值属性 Is Nothing, Integer.MinValue,
+                    Convert.ToInt32(数值属性.GetValue(进度条)))
+                断言(实际值 = 输入期望(index),
+                   $"媒体信息输入响度条 {输入字段名(index)} 没有使用解码峰值数据源：{实际值}，期望 {输入期望(index)}。")
+            Next
+            Dim 高度入口 = GetType(Form媒体信息).GetMethod("调整响度计布局", 标志)
+            Dim 输入容器 = GetType(Form媒体信息).GetProperty("输入音频响度计", 标志)?.GetValue(窗口)
+            Dim 输出容器 = GetType(Form媒体信息).GetProperty("输出音频响度计", 标志)?.GetValue(窗口)
+            For Each 尺寸 In {New Size(1100, 900), New Size(900, 760)}
+                窗口.ClientSize = 尺寸
+                窗口.PerformLayout()
+                高度入口?.Invoke(窗口, Nothing)
+                Dim 输入高度 = Convert.ToInt32(输入容器?.GetType().GetProperty("Height", 标志)?.GetValue(输入容器))
+                Dim 输出高度 = Convert.ToInt32(输出容器?.GetType().GetProperty("Height", 标志)?.GetValue(输出容器))
+                断言(输入高度 > 0 AndAlso 输出高度 >= 输入高度 AndAlso 输出高度 - 输入高度 <= 1,
+                    $"窗体调整后输入/输出响度计没有等高填充：{输入高度}/{输出高度}。")
             Next
         End Using
     End Sub

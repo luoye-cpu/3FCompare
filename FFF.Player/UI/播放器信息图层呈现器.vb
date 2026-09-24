@@ -262,10 +262,12 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Dim 字幕文本 = If(字幕 Is Nothing, "未加载", 合并字段(
             字幕.格式.ToString().ToUpperInvariant(),
             $"总数量 {字幕条目数(字幕)}",
-            If(字幕状态 Is Nothing, String.Empty, $"当前正在渲染 {字幕状态.命令数}")))
+            If(字幕状态 Is Nothing, String.Empty, $"正在渲染 {字幕状态.命令数}"),
+            $"延迟 {图层延迟(字幕状态)}"))
         Dim 弹幕文本 = If(弹幕 Is Nothing, "未加载", 合并字段(
             "哔哩哔哩 XML", $"总数量 {弹幕.数量}",
-            If(弹幕状态 Is Nothing, String.Empty, $"当前正在渲染 {弹幕状态.命令数}")))
+            If(弹幕状态 Is Nothing, String.Empty, $"正在渲染 {弹幕状态.命令数}"),
+            $"延迟 {图层延迟(弹幕状态)}"))
         结果.Add(配对行("字幕：", 字幕文本, 青色, 8))
         结果.Add(配对行("弹幕：", 弹幕文本, 橙色))
         Return 结果
@@ -456,11 +458,21 @@ Friend NotInheritable Class 播放器信息图层呈现器
         Dim 规格 = HDR规格文本(快照.HDR规格, 流.HDR格式)
         Dim 杜比 = If(快照.HDR规格 = HDR格式.杜比视界 AndAlso 快照.杜比视界配置档次 > 0,
             $"P{快照.杜比视界配置档次} L{快照.杜比视界级别} {杜比层文本(快照)}", String.Empty)
-        Dim 动态 = If(快照.动态HDR元数据有效, "逐帧动态元数据", String.Empty)
+        Dim 动态 As String
+        If 快照.HDR处理路径 = HDR处理路径.外部RPU处理 OrElse 流.外部RPU扩展已启用 Then
+            动态 = 合并字段("外部 RPU 重塑（测试）",
+                If(快照.动态HDR元数据有效, "逐帧动态元数据", String.Empty))
+        ElseIf 流.外部RPU扩展可用 Then
+            动态 = "外部 RPU 扩展已加载（测试）"
+        Else
+            动态 = If(快照.动态HDR元数据有效, "逐帧动态元数据", String.Empty)
+        End If
         Dim 亮度 = If(快照.实际色彩模式 = 色彩输出模式.峰值映射HDR AndAlso
                        快照.HDR有效目标峰值尼特 > 0,
             $"源峰值 {快照.源峰值尼特:0}尼特   显示目标 {快照.HDR有效目标峰值尼特:0}尼特", String.Empty)
-        Dim 回退 = If(快照.HDR回退有效,
+        Dim 外部扩展 = 流.外部RPU扩展可用 OrElse 流.外部RPU扩展已启用 OrElse
+            快照.HDR处理路径 = HDR处理路径.外部RPU处理
+        Dim 回退 = If(快照.HDR回退有效 AndAlso Not 外部扩展,
             If(快照.杜比视界增强层类型 = 杜比视界增强层类型.FEL,
                "HDR10 兼容输出（FEL 已忽略）", "HDR10 兼容输出"), String.Empty)
         Return 合并字段(规格, 杜比, 动态, 亮度, 回退)
@@ -471,7 +483,7 @@ Friend NotInheritable Class 播放器信息图层呈现器
             Case HDR格式.HDR10 : Return "HDR10"
             Case HDR格式.HDR10Plus : Return "HDR10+"
             Case HDR格式.HLG : Return "HLG"
-            Case HDR格式.杜比视界 : Return "Dolby Vision 源"
+            Case HDR格式.杜比视界 : Return "Dolby Vision"
             Case HDR格式.HDRVivid : Return "HDR Vivid"
             Case Else : Return 媒体文本
         End Select
@@ -519,6 +531,11 @@ Friend NotInheritable Class 播放器信息图层呈现器
             If(位深 > 0, $"位深 {位深}bit", String.Empty),
             If(声道 > 0, $"声道数 {声道}", String.Empty),
             $"缓冲区 {快照.音频缓冲时长.TotalMilliseconds:0}ms")
+    End Function
+
+    Private Shared Function 图层延迟(状态 As 定时文字状态) As String
+        If 状态 Is Nothing OrElse 状态.已提交序号 <= 状态.已绘制序号 Then Return "<1ms"
+        Return $"{(状态.已提交序号 - 状态.已绘制序号) * 1000.0R / 60.0R:F1}ms"
     End Function
 
     Private Shared Function 字幕条目数(字幕 As 外部字幕轨道) As String

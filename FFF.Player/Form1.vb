@@ -4,6 +4,7 @@ Imports System.Threading
 Imports System.Threading.Tasks
 
 Public Class Form1
+    Private ReadOnly DolbyVision授权回调 As 原生授权对话框回调 = AddressOf 显示DolbyVision授权对话框
     Private 光盘控制器 As 播放器光盘控制器
     Private Const WM_ENTERSIZEMOVE As Integer = &H231
     Private Const WM_EXITSIZEMOVE As Integer = &H232
@@ -36,6 +37,7 @@ Public Class Form1
     Private 显示器唤醒 As 显示器唤醒请求
     Private 按钮图标 As 播放器按钮图标资源
     Private 设置窗口 As Form设置
+    Private 媒体信息窗口 As Form媒体信息
     Private ReadOnly 播放列表数据 As New 播放列表 With {.播放模式 = 列表播放模式.顺序播放}
     Private 播放列表窗口 As Form播放列表
     Private 当前弹幕路径 As String = String.Empty
@@ -58,6 +60,16 @@ Public Class Form1
     Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
         当前主窗体 = Me
         LakeUI.GlobalOptions.GlobalTextQuality = LakeUI.GlobalOptions.TextQualityMode.Outline
+        LakeUI.MessageDialogOptions.BackdropEnabled = True
+        LakeUI.MessageDialogOptions.BackdropMode = LakeUI.PopupBackdropMode.Auto
+        LakeUI.MessageDialogOptions.BackdropTintColor = Color.FromArgb(120, 0, 0, 0)
+        LakeUI.MessageDialogOptions.BackdropBlurRadius = 30
+        LakeUI.MessageDialogOptions.BackdropBlurPasses = 2
+        LakeUI.FloatingToolTipForm.BackdropEnabled = True
+        LakeUI.FloatingToolTipForm.BackdropMode = LakeUI.PopupBackdropMode.Auto
+        LakeUI.FloatingToolTipForm.BackdropTintColor = Color.FromArgb(120, 0, 0, 0)
+        LakeUI.FloatingToolTipForm.BackdropBlurRadius = 30
+        LakeUI.FloatingToolTipForm.BackdropBlurPasses = 2
         ThisIsYourWindow1.Attach(Me)
         KeyPreview = True
         MinimumSize = New Size(875, 500)
@@ -304,14 +316,34 @@ Public Class Form1
             Return
         End If
 
+        FFF3FP_SetColorExtensionAuthorizationPrompt(DolbyVision授权回调)
+
         Dim 启动文件 = My.Application.取出待处理启动文件()
         Dim 请求文件 = If(String.IsNullOrEmpty(待打开外部文件), 启动文件, 待打开外部文件)
         待打开外部文件 = String.Empty
         If Not String.IsNullOrEmpty(请求文件) Then BeginInvoke(Sub() 打开外部文件(请求文件))
     End Sub
 
+    Private Function 显示DolbyVision授权对话框(代码UTF8 As IntPtr, 容量 As UInteger) As Integer
+        If Me.IsDisposed OrElse Not Me.IsHandleCreated OrElse 容量 < 9 Then Return 0
+        If Me.InvokeRequired Then
+            Return CInt(Me.Invoke(New Func(Of Integer)(Function() 显示DolbyVision授权对话框(代码UTF8, 容量))))
+        End If
+        Dim 代码 = LakeUI.ExInputBox(Me,
+            $"票据有效期为一个月{vbCrLf}如需刷新票据时间请删除票据文件并重新解锁{vbCrLf}{vbCrLf}此 DLL 仅限开发群内部测试使用！{vbCrLf}任何向外传播、公开使用、任何商业等行为导致违反杜比视界版权许可产生的纠纷均由使用者承担，与开发者没有任何关系！",
+            "Dolby Vision 技术测试防传播验证")
+        If String.IsNullOrWhiteSpace(代码) Then Return 0
+        代码 = 代码.Trim()
+        If 代码.Length <> 8 OrElse Not 代码.All(Function(character) Char.IsDigit(character)) Then Return 0
+        Dim utf8 = System.Text.Encoding.UTF8.GetBytes(代码 & ChrW(0))
+        If utf8.Length > 容量 Then Return 0
+        Marshal.Copy(utf8, 0, 代码UTF8, utf8.Length)
+        Return 1
+    End Function
+
     Private Sub Form1_FormClosed(sender As Object, e As FormClosedEventArgs) Handles Me.FormClosed
         正在关闭 = True
+        FFF3FP_SetColorExtensionAuthorizationPrompt(Nothing)
         设置.退出时保存设置()
         RemoveHandler ThisIsYourWindow1.FullScreenChanged, AddressOf ThisIsYourWindow1_FullScreenChanged
         全屏交互控制器?.Dispose()
@@ -325,6 +357,8 @@ Public Class Form1
         弹幕图层呈现器?.释放()
         字幕图层呈现器?.释放()
         流选择器?.Dispose()
+        媒体信息窗口?.Close()
+        媒体信息窗口 = Nothing
         播放列表窗口?.Dispose()
         显示器唤醒?.释放()
         播放控制器?.释放()
@@ -350,33 +384,17 @@ Public Class Form1
         Using 对话框 As New OpenFileDialog With {
             .CheckFileExists = True,
             .Filter = "所有文件|*.*",
+            .Multiselect = True,
             .RestoreDirectory = True,
             .Title = "打开媒体或替换歌词/字幕/弹幕"
         }
-            If 对话框.ShowDialog(Me) = DialogResult.OK Then 打开或替换文件(对话框.FileName)
+            If 对话框.ShowDialog(Me) = DialogResult.OK Then 打开或替换文件(对话框.FileNames)
         End Using
     End Sub
 
     Private Sub 画面控件_文件拖入(sender As Object, e As 播放器文件拖入事件参数)
-        Dim 存在的文件 = e.文件路径.Where(AddressOf 光盘路径.媒体存在).ToArray()
-        If 存在的文件.Length = 0 Then Return
-        Dim 路径 As String
-        If 播放控制器.是否有媒体 Then
-            路径 = 存在的文件.FirstOrDefault(AddressOf LRC歌词自动加载器.是支持的歌词文件)
-            If String.IsNullOrEmpty(路径) Then
-                路径 = 存在的文件.FirstOrDefault(AddressOf 外部字幕自动加载器.是支持的字幕文件)
-            End If
-            If String.IsNullOrEmpty(路径) Then
-                路径 = 存在的文件.FirstOrDefault(AddressOf 弹幕自动加载器.是支持的弹幕文件)
-            End If
-        Else
-            路径 = 存在的文件.FirstOrDefault(
-                Function(x) Not 外部字幕自动加载器.是支持的字幕文件(x) AndAlso
-                            Not 弹幕自动加载器.是支持的弹幕文件(x) AndAlso
-                            Not LRC歌词自动加载器.是支持的歌词文件(x))
-        End If
-        If String.IsNullOrEmpty(路径) Then 路径 = 存在的文件(0)
-        打开或替换文件(路径)
+        If e Is Nothing OrElse e.文件路径 Is Nothing Then Return
+        打开或替换文件(e.文件路径)
     End Sub
 
     Friend Sub 打开命令行文件(参数 As IEnumerable(Of String))
@@ -408,13 +426,47 @@ Public Class Form1
         打开或替换文件(文件路径)
     End Sub
 
+    Private Sub 打开或替换文件(路径 As IEnumerable(Of String))
+        If 路径 Is Nothing Then Return
+        Dim 存在的文件 = 路径.Where(Function(x) Not String.IsNullOrWhiteSpace(x) AndAlso
+                                             光盘路径.媒体存在(x)).
+            Select(Function(x) Path.GetFullPath(x)).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToArray()
+        If 存在的文件.Length = 0 Then Return
+        If 存在的文件.Length > 1 Then
+            添加并打开多个媒体文件(存在的文件)
+            Return
+        End If
+        打开或替换单个文件(存在的文件(0))
+    End Sub
+
     Private Sub 打开或替换文件(路径 As String)
+        If String.IsNullOrWhiteSpace(路径) Then Return
+        打开或替换单个文件(Path.GetFullPath(路径))
+    End Sub
+
+    Private Sub 添加并打开多个媒体文件(路径 As IEnumerable(Of String))
+        Dim 媒体文件 = 路径.Where(Function(x) File.Exists(x) AndAlso
+                                      播放列表.是支持的媒体文件(x)).ToArray()
+        If 媒体文件.Length = 0 Then Return
+
+        播放列表数据.添加多个(媒体文件)
+        Dim 首个路径 = 媒体文件(0)
+        播放列表数据.选择路径(首个路径)
+        播放控制器.打开媒体(首个路径)
+    End Sub
+
+    Private Sub 打开或替换单个文件(路径 As String)
         If LRC歌词自动加载器.是支持的歌词文件(路径) Then
             播放控制器.替换歌词(路径)
         ElseIf 外部字幕自动加载器.是支持的字幕文件(路径) Then
             播放控制器.替换字幕(路径)
         ElseIf 弹幕自动加载器.是支持的弹幕文件(路径) Then
             播放控制器.替换弹幕(路径)
+        ElseIf 外部音频自动加载器.是支持的音频文件(路径) AndAlso
+            播放控制器.当前媒体是视频 Then
+            播放控制器.加载外部音轨(路径)
         Else
             If Not 光盘路径.是光盘路径(路径) Then 启动后台任务(播放列表数据.从媒体创建并扫描相似文件Async(路径))
             播放控制器.打开媒体(路径)
@@ -526,18 +578,30 @@ Public Class Form1
     End Sub
 
     Private Sub 显示媒体信息窗口()
-        Dim 窗口 As New Form媒体信息(
-            AddressOf 播放控制器.安全读取媒体信息,
-            AddressOf 播放控制器.安全读取快照,
-            AddressOf 播放控制器.读取定时文字状态,
-            AddressOf 播放控制器.读取弹幕状态,
-            Function() 播放控制器.当前字幕,
-            Function() 播放控制器.当前弹幕,
-            Function() 播放控制器.WASAPI模式,
-            Function() 画面控件.ClientSize,
-            AddressOf 播放控制器.读取音频峰值)
-        窗口.Location = 窗口.居中于(Bounds)
-        窗口.Show()
+        If 媒体信息窗口 Is Nothing OrElse 媒体信息窗口.IsDisposed Then
+            媒体信息窗口 = New Form媒体信息(
+                AddressOf 播放控制器.安全读取媒体信息,
+                AddressOf 播放控制器.安全读取快照,
+                AddressOf 播放控制器.读取定时文字状态,
+                AddressOf 播放控制器.读取弹幕状态,
+                Function() 播放控制器.当前字幕,
+                Function() 播放控制器.当前弹幕,
+                Function() 播放控制器.WASAPI模式,
+                Function() 画面控件.ClientSize,
+                AddressOf 播放控制器.读取音频峰值,
+                AddressOf 播放控制器.读取输入音频峰值)
+            AddHandler 媒体信息窗口.FormClosed,
+                Sub(sender, args)
+                    If Object.ReferenceEquals(sender, 媒体信息窗口) Then 媒体信息窗口 = Nothing
+                End Sub
+        End If
+        媒体信息窗口.Location = 媒体信息窗口.居中于(Bounds)
+        If 媒体信息窗口.WindowState = FormWindowState.Minimized Then
+            媒体信息窗口.WindowState = FormWindowState.Normal
+        End If
+        If Not 媒体信息窗口.Visible Then 媒体信息窗口.Show(Me)
+        媒体信息窗口.Activate()
+        媒体信息窗口.BringToFront()
     End Sub
 
     Private Sub 切换媒体信息层()

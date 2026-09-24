@@ -2,6 +2,7 @@
 #include "3FP/Api/FFF.Player.Api.h"
 #include "3FP/Core/PlayerSession.h"
 #include "3FP/Render/VideoRenderer.h"
+#include "3FP/Render/ColorExtension.h"
 
 #include <cmath>
 #include <atomic>
@@ -26,6 +27,35 @@ FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t o
 }
 }
 
+std::uint32_t FFF3FP_GetApiVersion() noexcept {
+    if (const auto* api = GetColorExtension()) api->requestAuthorizationPrompt();
+    return PlayerApiVersion;
+}
+
+std::int32_t FFF3FP_GetColorExtensionStatus() noexcept {
+    const auto* api = GetColorExtension();
+    return api == nullptr ? 0 : api->getAuthorizationStatus();
+}
+
+const char* FFF3FP_GetColorExtensionStatusText(std::uint32_t state, std::uint32_t variant) noexcept {
+    const auto* api = GetColorExtension();
+    return api == nullptr ? nullptr : api->getStatusText(state, variant);
+}
+
+void FFF3FP_SetColorExtensionAuthorizationPrompt(
+    int (__cdecl* callback)(char*, std::uint32_t)) noexcept {
+    if (const auto* api = GetColorExtension()) api->setAuthorizationPrompt(callback);
+}
+
+FFFResult FFF3FP_AuthenticateColorExtension(const char* codeUtf8) noexcept {
+    const auto* api = GetColorExtension();
+    if (api == nullptr || codeUtf8 == nullptr)
+        return FFFResult::InvalidArgument;
+    return api->authenticate(codeUtf8) == 1
+        ? FFFResult::Success : FFFResult::NotSupported;
+}
+
+// ---- 3FCompare extension (F-LOG) — 本地专属，上游无等价，勿在合并中丢弃 ----
 void FFF3FP_SetLogCallback(FFF3FPLogCallback callback, void* context) noexcept {
     g_logContext.store(context, std::memory_order_release);
     g_logSink.store(callback, std::memory_order_release);
@@ -41,8 +71,6 @@ void FFF3FP_KernelLogImpl(const char* utf8Line) noexcept {
     const auto ctx = g_logContext.load(std::memory_order_acquire);
     sink(ctx, utf8Line);
 }
-
-std::uint32_t FFF3FP_GetApiVersion() noexcept { return PlayerApiVersion; }
 
 FFFResult FFF3FP_EvaluateHdrProcessing(FFF3FPHdrProcessingProbe* probe) noexcept {
     return probe == nullptr ? FFFResult::InvalidArgument : HdrProcessor::EvaluateProbe(*probe);

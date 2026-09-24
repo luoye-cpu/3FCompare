@@ -367,17 +367,17 @@ std::int64_t EstimateDuration100ns(const AVFormatContext* format) noexcept {
     return av_rescale(fileSize, 8 * TicksPerSecond, bitRate);
 }
 
-std::int32_t FindTimedVideoStream(AVFormatContext* format) noexcept {
+std::int32_t FindDefaultOrFirstStream(AVFormatContext* format, AVMediaType type) noexcept {
     if (format == nullptr) return -1;
-    const auto best = av_find_best_stream(format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-    if (best >= 0 && (format->streams[best]->disposition & AV_DISPOSITION_ATTACHED_PIC) == 0)
-        return best;
+    std::int32_t first = -1;
     for (unsigned index = 0; index < format->nb_streams; ++index) {
         const auto* stream = format->streams[index];
-        if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
-            (stream->disposition & AV_DISPOSITION_ATTACHED_PIC) == 0) return static_cast<std::int32_t>(index);
+        if (stream->codecpar->codec_type != type ||
+            (type == AVMEDIA_TYPE_VIDEO && (stream->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0)) continue;
+        if (first < 0) first = static_cast<std::int32_t>(index);
+        if ((stream->disposition & AV_DISPOSITION_DEFAULT) != 0) return static_cast<std::int32_t>(index);
     }
-    return -1;
+    return first;
 }
 
 std::int32_t FindCoverArtStream(AVFormatContext* format) noexcept {
@@ -1762,13 +1762,23 @@ FFFResult PlayerSession::ReadVideoPixelRegion(const std::uint32_t x, const std::
 }
 
 FFFResult PlayerSession::GetAudioPeakLevels(FFF3FPAudioPeakLevels& output) const noexcept {
-    if (output.size < sizeof(FFF3FPAudioPeakLevels) || output.version != 1)
+    constexpr auto legacySize = offsetof(FFF3FPAudioPeakLevels, inputValues);
+    if ((output.version == 1 && output.size < legacySize) ||
+        (output.version == 2 && output.size < sizeof(FFF3FPAudioPeakLevels)) ||
+        (output.version != 1 && output.version != 2))
         return FFFResult::InvalidArgument;
     output.channelCount = 0;
-    output.reserved = 0;
+    output.inputChannelCount = 0;
     std::fill(std::begin(output.values), std::end(output.values), 0.0f);
     output.channelCount = audioRuntimeState_.Copy(output.values,
         static_cast<std::uint32_t>(std::size(output.values)));
+    if (output.version >= 2) {
+        output.inputChannelCount = std::min<std::uint32_t>(
+            audioRuntimeState_.inputChannelCount.load(std::memory_order_acquire),
+            static_cast<std::uint32_t>(std::size(output.inputValues)));
+        for (std::size_t index = 0; index < std::size(output.inputValues); ++index)
+            output.inputValues[index] = audioRuntimeState_.inputValues[index].load(std::memory_order_relaxed);
+    }
     return FFFResult::Success;
 }
 std::string PlayerSession::MediaInfo() const { std::lock_guard lock(mutex_); return mediaInfoJson_; }
@@ -2032,10 +2042,10 @@ void PlayerSession::DoOpen(std::string path) noexcept {
         } catch (...) { openResult = FFFResult::NativeFailure; openError = "Could not open the disc."; }
     } else openResult = OpenFormat(path, &format_, formatIo_, openError);
     if (openResult != FFFResult::Success) { Fail(openResult, std::move(openError), "open"); return; }
-    videoStream_ = FindTimedVideoStream(format_);
+    videoStream_ = FindDefaultOrFirstStream(format_, AVMEDIA_TYPE_VIDEO);
     staticImage_ = videoStream_ >= 0 && IsStaticImageDemuxer(format_->iformat);
     coverArtStream_ = FindCoverArtStream(format_);
-    audioStream_ = av_find_best_stream(format_, AVMEDIA_TYPE_AUDIO, -1, videoStream_, nullptr, 0);
+    audioStream_ = FindDefaultOrFirstStream(format_, AVMEDIA_TYPE_AUDIO);
     if (videoStream_ < 0 && audioStream_ < 0) { Fail(FFFResult::NotSupported, "The file contains no playable video or audio stream.", "open"); return; }
     snapshot_.decodeMode = decodeMode_;
     bool hardwareFallback = false;
@@ -2698,6 +2708,7 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
 
 void PlayerSession::QueueAudioFrame(AVFrame* frame, AVFormatContext* owner, const std::int32_t streamIndex) noexcept {
     if (!audioRenderer_ || streamIndex < 0) return;
+    UpdateInputAudioPeakLevels(frame);
     if (ShouldDelayAudioUntilVideoFrame()) return;
     auto* stream = owner->streams[streamIndex];
     const auto pts = frame->best_effort_timestamp == AV_NOPTS_VALUE ? frame->pts : frame->best_effort_timestamp;
@@ -2721,6 +2732,37 @@ void PlayerSession::QueueAudioFrame(AVFrame* frame, AVFormatContext* owner, cons
             Fail(result, audioRenderer_->LastError(), "audio-render");
         }
     }
+}
+
+void PlayerSession::UpdateInputAudioPeakLevels(const AVFrame* frame) noexcept {
+    if (frame == nullptr || frame->ch_layout.nb_channels <= 0 || frame->nb_samples <= 0) return;
+    const auto channels = std::min<std::uint32_t>(
+        static_cast<std::uint32_t>(frame->ch_layout.nb_channels), PlayerAudioRuntimeState::MaximumChannels);
+    audioRuntimeState_.inputChannelCount.store(channels, std::memory_order_release);
+    std::array<float, PlayerAudioRuntimeState::MaximumChannels> peaks{};
+    const auto format = static_cast<AVSampleFormat>(frame->format);
+    const auto planar = av_sample_fmt_is_planar(format) != 0;
+    const auto packedFormat = planar ? av_get_packed_sample_fmt(format) : format;
+    for (std::uint32_t channel = 0; channel < channels; ++channel) {
+        const auto* data = frame->extended_data[planar ? channel : 0];
+        for (int sample = 0; sample < frame->nb_samples; ++sample) {
+            const auto index = planar ? sample : sample * frame->ch_layout.nb_channels + channel;
+            float value = 0.0f;
+            switch (packedFormat) {
+                case AV_SAMPLE_FMT_FLT: value = reinterpret_cast<const float*>(data)[index]; break;
+                case AV_SAMPLE_FMT_DBL: value = static_cast<float>(reinterpret_cast<const double*>(data)[index]); break;
+                case AV_SAMPLE_FMT_U8: value = (static_cast<int>(data[index]) - 128) / 128.0f; break;
+                case AV_SAMPLE_FMT_S16: value = reinterpret_cast<const std::int16_t*>(data)[index] / 32768.0f; break;
+                case AV_SAMPLE_FMT_S32: value = reinterpret_cast<const std::int32_t*>(data)[index] / 2147483648.0f; break;
+                default: break;
+            }
+            if (std::isfinite(value)) peaks[channel] = std::max(peaks[channel], std::abs(value));
+        }
+        audioRuntimeState_.inputValues[channel].store(std::clamp(peaks[channel], 0.0f, 1.0f),
+            std::memory_order_relaxed);
+    }
+    for (auto channel = channels; channel < PlayerAudioRuntimeState::MaximumChannels; ++channel)
+        audioRuntimeState_.inputValues[channel].store(0.0f, std::memory_order_relaxed);
 }
 
 bool PlayerSession::HandleInternalAudioDecodeFailure(const FFFResult result, std::string message) noexcept {
@@ -3173,6 +3215,17 @@ void PlayerSession::RebuildMediaInfo() noexcept {
         << ",\"staticImage\":" << (staticImage_ ? "true" : "false")
         << ",\"metadata\":";
     AppendDictionaryJson(json, format_->metadata);
+    json << ",\"chapters\":[";
+    for (unsigned index = 0; index < format_->nb_chapters; ++index) {
+        if (index) json << ',';
+        const auto* chapter = format_->chapters[index];
+        const auto* title = av_dict_get(chapter->metadata, "title", nullptr, 0);
+        const auto start100ns = av_rescale_q(chapter->start, chapter->time_base,
+            AVRational{1, static_cast<int>(TicksPerSecond)}) - TimelineOrigin100ns(format_);
+        json << "{\"startTime100ns\":" << std::max<std::int64_t>(0, start100ns)
+            << ",\"title\":\"" << EscapeJson(title && title->value ? title->value : "") << "\"}";
+    }
+    json << ']';
     json << ",\"streams\":[";
     for (unsigned index = 0; index < format_->nb_streams; ++index) {
         if (index) json << ',';
@@ -3323,7 +3376,11 @@ void PlayerSession::RebuildMediaInfo() noexcept {
                  << ",\"dolbyVisionEnhancementLayer\":\""
                  << EscapeJson(HdrProcessor::EnhancementLayerName(hdr.enhancementLayer)) << "\""
                  << ",\"hdrFallback\":" << (hdr.fallback ? "true" : "false")
-                 << ",\"dynamicHdrMetadata\":" << (hdr.dynamicMetadata ? "true" : "false");
+                 << ",\"dynamicHdrMetadata\":" << (hdr.dynamicMetadata ? "true" : "false")
+                 << ",\"externalColorExtensionAvailable\":"
+                 << (hdr.externalExtensionAvailable ? "true" : "false")
+                 << ",\"externalColorExtensionActive\":"
+                 << (hdr.externalExtensionActive ? "true" : "false");
             if (masteringData != nullptr && masteringData->size >= sizeof(AVMasteringDisplayMetadata)) {
                 const auto* mastering = reinterpret_cast<const AVMasteringDisplayMetadata*>(masteringData->data);
                 std::string primaries;
