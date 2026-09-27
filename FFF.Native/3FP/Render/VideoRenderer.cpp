@@ -784,7 +784,12 @@ struct ScaleShaderSettings {
 static_assert(sizeof(ScaleShaderSettings) == 32);
 
 struct VideoDestination {
-    std::uint32_t x, y, width, height;
+    // 原点是**有符号**的：放大后要把画盒左/上沿推出后台缓冲，才能露出源画面的右/下半段。
+    // 历史上这里是 uint32 并配 `max(0,·)` 兜负值，代价是"往右下平移"那半段量程整段消失
+    // （3FCompare 实测：pan 从 −1 扫到 +1，上报原点恒为 (0,0) ⇒ 平移看上去"拖不动"）。
+    // 尺寸仍为无符号。
+    std::int32_t x, y;
+    std::uint32_t width, height;
 };
 
 constexpr VideoDestination CalculateVideoDestination(const std::uint32_t sourceWidth,
@@ -793,7 +798,8 @@ constexpr VideoDestination CalculateVideoDestination(const std::uint32_t sourceW
     if (sourceWidth == 0 || sourceHeight == 0 || outputWidth == 0 || outputHeight == 0)
         return {0, 0, 1, 1};
     if (limitToNativeSize && sourceWidth <= outputWidth && sourceHeight <= outputHeight)
-        return {(outputWidth - sourceWidth) / 2, (outputHeight - sourceHeight) / 2,
+        return {static_cast<std::int32_t>((outputWidth - sourceWidth) / 2),
+            static_cast<std::int32_t>((outputHeight - sourceHeight) / 2),
             sourceWidth, sourceHeight};
     std::uint32_t width = outputWidth;
     std::uint32_t height = outputHeight;
@@ -807,7 +813,8 @@ constexpr VideoDestination CalculateVideoDestination(const std::uint32_t sourceW
     }
     width = std::min(width, outputWidth);
     height = std::min(height, outputHeight);
-    return {(outputWidth - width) / 2, (outputHeight - height) / 2, width, height};
+    return {static_cast<std::int32_t>((outputWidth - width) / 2),
+        static_cast<std::int32_t>((outputHeight - height) / 2), width, height};
 }
 
 constexpr VideoDestination CalculateLyricsCoverDestination(const std::uint32_t sourceWidth,
@@ -833,7 +840,8 @@ constexpr VideoDestination CalculateLyricsCoverDestination(const std::uint32_t s
     const auto innerHeight = std::max(1u, outputHeight - verticalPadding * 2);
     const auto inner = CalculateVideoDestination(sourceWidth, sourceHeight,
         innerWidth, innerHeight, true);
-    return {regionWidth - rightPadding - inner.width, verticalPadding + inner.y,
+    return {static_cast<std::int32_t>(regionWidth - rightPadding - inner.width),
+        static_cast<std::int32_t>(verticalPadding) + inner.y,
         inner.width, inner.height};
 }
 
@@ -4810,12 +4818,21 @@ FFFResult PlayerVideoRenderer::DrawCachedVideo(ID3D11RenderTargetView* target) n
         const float maxPanY = (zoomedHeight - destination.height) / (2.0f * destination.height);
         const float offsetX = panX * std::max(maxPanX, 0.0f) * destination.width;
         const float offsetY = panY * std::max(maxPanY, 0.0f) * destination.height;
-        destination.x = static_cast<std::uint32_t>(
-            std::max(0.0f, static_cast<float>(destination.x) +
-                (destination.width - zoomedWidth) / 2.0f - offsetX));
-        destination.y = static_cast<std::uint32_t>(
-            std::max(0.0f, static_cast<float>(destination.y) +
-                (destination.height - zoomedHeight) / 2.0f - offsetY));
+        // 放大后的盒子必须**仍然盖住**未放大时的拟合盒，否则露出黑边。满足这一条的原点区间是
+        //   [拟合原点 −(放大尺寸 − 拟合尺寸), 拟合原点]
+        // —— 左端把右/下半段源画面推进视野，右端把左/上半段推进视野。pan∈[−1,1] 恰好铺满该区间，
+        // 这里的 clamp 只用于挡浮点漂移与越界调用者。旧实现用 max(0,·) 把区间的左半段整个裁掉
+        // （原点是无符号，负值落不进去），于是"往右下平移"恒无效果。
+        const float centeredX = static_cast<float>(destination.x) +
+            (static_cast<float>(destination.width) - zoomedWidth) / 2.0f;
+        const float centeredY = static_cast<float>(destination.y) +
+            (static_cast<float>(destination.height) - zoomedHeight) / 2.0f;
+        const float minX = static_cast<float>(destination.x) - (zoomedWidth - destination.width);
+        const float minY = static_cast<float>(destination.y) - (zoomedHeight - destination.height);
+        destination.x = static_cast<std::int32_t>(std::lround(
+            std::clamp(centeredX - offsetX, minX, static_cast<float>(destination.x))));
+        destination.y = static_cast<std::int32_t>(std::lround(
+            std::clamp(centeredY - offsetY, minY, static_cast<float>(destination.y))));
         destination.width = static_cast<std::uint32_t>(zoomedWidth);
         destination.height = static_cast<std::uint32_t>(zoomedHeight);
     }

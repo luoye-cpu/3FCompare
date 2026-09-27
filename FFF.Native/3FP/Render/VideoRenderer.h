@@ -143,8 +143,9 @@ public:
         std::uint32_t swapHeight = 0;
         std::uint32_t clientWidth = 0;
         std::uint32_t clientHeight = 0;
-        std::uint32_t destX = 0;
-        std::uint32_t destY = 0;
+        // dest 原点有符号：放大后平移会把画盒的左/上沿推到后台缓冲之外（负值合法）。
+        std::int32_t destX = 0;
+        std::int32_t destY = 0;
         std::uint32_t destWidth = 0;
         std::uint32_t destHeight = 0;
         std::uint32_t outputBitDepth = 0;
@@ -405,8 +406,9 @@ private:
     std::atomic<std::uint32_t> swapOutputBits_;
     // Last drawn video destination rect (diagnostics),
     // recorded by DrawCachedVideo after each successful shader draw.
-    std::atomic<std::uint32_t> lastDestX_{ 0 };
-    std::atomic<std::uint32_t> lastDestY_{ 0 };
+    // 原点有符号：放大平移会把画盒左/上沿推到后台缓冲之外（负值）。
+    std::atomic<std::int32_t> lastDestX_{ 0 };
+    std::atomic<std::int32_t> lastDestY_{ 0 };
     std::atomic<std::uint32_t> lastDestWidth_{ 0 };
     std::atomic<std::uint32_t> lastDestHeight_{ 0 };
     std::uint32_t sourceWidth_;

@@ -1671,10 +1671,12 @@ FFFResult PlayerSession::GetLyricsStatus(FFF3FPTimedTextStatus& status) noexcept
 FFFResult PlayerSession::GetRenderTargetInfo(FFF3FPRenderTargetInfo& info) noexcept {
     // Same contract as GetSnapshot: the caller declares the size and version of
     // the struct it passes, so we never write past a smaller caller-side layout.
-    if (info.size < sizeof(FFF3FPRenderTargetInfo) || info.version != 1)
+    // v2 = destX/destY 有符号。收下方 v1 调用方会把负原点读成巨大无符号值（静默错内容），
+    // 而 v1/v2 布局同宽、size 分不出来 ⇒ 只能靠 version 拒绝，让它响亮地 InvalidArgument。
+    if (info.size < sizeof(FFF3FPRenderTargetInfo) || info.version != 2)
         return FFFResult::InvalidArgument;
     info.size = sizeof(info);
-    info.version = 1;
+    info.version = 2;
     PlayerVideoRenderer::RenderTargetInfo rtInfo{};
     const auto result = videoRenderer_.GetRenderTargetInfo(rtInfo);
     if (result != FFFResult::Success) return result;

@@ -553,15 +553,21 @@ FFF3FP_API FFFResult FFF3FP_GetLastError(FFF3FPHandle player, char* outputUtf8,
 // Returns InvalidState when no swapchain exists yet (e.g. before the first
 // frame is presented); the contents of *info are then unspecified and must not
 // be interpreted as a 0x0 target.
+// version 2: destX/destY became **signed**. The zoomed destination box may legally have a
+// negative origin (pushed off the back buffer to reveal the right/bottom part of the source
+// while panning). Version 1 declared them unsigned, which forced the renderer to clamp the
+// origin to >= 0 and silently killed half of the pan range.
+// Layout size is unchanged (4 bytes each); version is therefore the only discriminator, so
+// this kernel rejects version 1 rather than mislabeling signed values as unsigned.
 struct FFF3FPRenderTargetInfo {
     std::uint32_t size;
-    std::uint32_t version; // == 1
+    std::uint32_t version; // == 2
     std::uint32_t swapWidth;
     std::uint32_t swapHeight;
     std::uint32_t clientWidth;
     std::uint32_t clientHeight;
-    std::uint32_t destX;
-    std::uint32_t destY;
+    std::int32_t destX;
+    std::int32_t destY;
     std::uint32_t destWidth;
     std::uint32_t destHeight;
     std::uint32_t outputBitDepth;
