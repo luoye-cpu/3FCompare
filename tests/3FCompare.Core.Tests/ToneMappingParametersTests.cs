@@ -52,8 +52,10 @@ public sealed class ToneMappingParametersTests
         // 未知显示器：保持旧行为（固定 200 nits），确保无回归
         var config = ToneMappingParameters.Calculate(ColorMode.MapToSdr, null, contentIsHdr: false);
 
-        Assert.Equal(ToneMappingParameters.DefaultSdrTargetPeak, config.SdrPeakNits);
-        Assert.Equal(ToneMappingParameters.DefaultSdrTargetPeak, config.PaperWhiteNits);
+        // 写死 200f：不引用 ToneMappingParameters.DefaultSdrTargetPeak
+        //（引用常量 ⇒ 常量被改错时期望值一起错，断言恒绿）
+        Assert.Equal(200f, config.SdrPeakNits);
+        Assert.Equal(200f, config.PaperWhiteNits);
     }
 
     [Fact]
@@ -76,8 +78,15 @@ public sealed class ToneMappingParametersTests
         var config = ToneMappingParameters.Calculate(ColorMode.MapToHdr, Hdr1000Nits(), contentIsHdr: true);
 
         Assert.Equal(100f, config.SdrPeakNits);
-        // 纸白与 HDR 显示器语义一致地固定（203 = HLG 参考纸白语义）
-        Assert.True(config.PaperWhiteNits > 0);
+        // 纸白对 MapToHdr 是**固定值**、与显示器能力无关：200 nits（HLG 参考纸白的保守取值）。
+        // 原断言 `> 0` 过弱：把纸白错写成 1 nits、或错写成 SdrPeakNits（100）都能过。
+        // 这里写死 200f（不引用 ToneMappingParameters.DefaultPaperWhite，
+        // 否则常量被改错时期望值会跟着一起错）。
+        Assert.Equal(200f, config.PaperWhiteNits);
+        // 把"与显示器无关"这条契约本身也钉住：有 HDR 显示器 / 无显示器 必须同值
+        Assert.Equal(
+            ToneMappingParameters.Calculate(ColorMode.MapToHdr, null, contentIsHdr: true).PaperWhiteNits,
+            config.PaperWhiteNits);
         // HDR 输出：峰值永远自动
         Assert.Equal(0f, config.HdrPeakNits);
     }
@@ -87,7 +96,7 @@ public sealed class ToneMappingParametersTests
     {
         var config = ToneMappingParameters.Calculate(ColorMode.MapToHdr, null, contentIsHdr: true);
 
-        Assert.Equal(ToneMappingParameters.DefaultSdrTargetPeak, config.SdrPeakNits);
+        Assert.Equal(200f, config.SdrPeakNits);
     }
 
     // ---- 场景 3：HDR 显示器但用户选 SDR 输出（内容仍按 SDR 降级）----
@@ -108,7 +117,7 @@ public sealed class ToneMappingParametersTests
     {
         var config = ToneMappingParameters.Calculate(ColorMode.RawHdrAsSdr, Hdr1000Nits(), contentIsHdr: true);
 
-        Assert.Equal(ToneMappingParameters.DefaultSdrTargetPeak, config.SdrPeakNits);
-        Assert.Equal(ToneMappingParameters.DefaultPaperWhite, config.PaperWhiteNits);
+        Assert.Equal(200f, config.SdrPeakNits);
+        Assert.Equal(200f, config.PaperWhiteNits);
     }
 }

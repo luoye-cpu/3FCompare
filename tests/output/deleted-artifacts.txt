@@ -1,0 +1,1 @@
+977a3c0ec2d27ddaec7e7beff137996220bc1a305103786d3b69db9f42ce145e *3FCompare-v0.3.0-beta-x64-full.r7-selftested.7z

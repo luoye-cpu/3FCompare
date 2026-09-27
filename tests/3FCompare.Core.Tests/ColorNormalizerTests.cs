@@ -333,4 +333,95 @@ public sealed class ColorNormalizerTests
     [Fact]
     public void DefaultPaperWhite_IsTwoHundredThreeNits()
         => Assert.Equal(203f, ColorNormalizer.DefaultPaperWhiteNits);
+
+    // ── ToDisplay8Bit：8-bit 显示码值（docs/45 P0-4 的接线判据）────────────────
+    //
+    // 期望值一律独立手算（float32 语义），不照抄实现：
+    //   SDR：回读本就是 gamma 编码 ⇒ 直接量化，round(v*255) 后钳到 0..255。
+    //   HDR：v → 线性（× 80/203）→ sRGB OETF → ×255。例 v=1.0：
+    //        1.0*80/203 = 0.39408866；1.055*0.39408866^(1/2.4)-0.055 = 0.6606…
+    //        ×255 = 168.47 → 168。
+
+    [Theory]
+    [InlineData(0.0f, 0)]
+    [InlineData(0.25f, 64)]
+    [InlineData(0.5f, 128)]
+    [InlineData(1.0f, 255)]
+    public void Display8Bit_Sdr_IsDirectQuantize(float v, int expected)
+    {
+        ColorNormalizer.ToDisplay8Bit(v, v, v, 1f, bitDepth: 8, hdr: false,
+            out var r8, out var g8, out var b8, out _);
+        Assert.Equal(expected, r8);
+        Assert.Equal(expected, g8);
+        Assert.Equal(expected, b8);
+    }
+
+    [Theory]
+    // 旧实现 v*255 会给出 64 / 128 / 255 / 255，与这里的期望相差 24 / 5 / 87 / 25
+    // ⇒ 断言对"HDR 真的走了线性光口径"这件事有牙齿，不是恒等式复述。
+    [InlineData(0.25f, 88)]
+    [InlineData(0.5f, 123)]
+    [InlineData(1.0f, 168)]
+    [InlineData(2.0f, 230)]
+    public void Display8Bit_Hdr_MapsViaLinearLight(float v, int expected)
+    {
+        ColorNormalizer.ToDisplay8Bit(v, v, v, 1f, bitDepth: 16, hdr: true,
+            out var r8, out _, out _, out _);
+        Assert.Equal(expected, r8);
+    }
+
+    [Fact]
+    public void Display8Bit_Hdr_HighlightSaturates_ButLinearDomainKeepsIt()
+    {
+        // 8-bit 显示饱和到 255 只是显示上限；线性域必须仍保留 >1 的高光供跨路比较
+        ColorNormalizer.ToDisplay8Bit(2.6641f, 2.6641f, 2.6641f, 1f,
+            bitDepth: 16, hdr: true, out var r8, out _, out _, out _);
+        Assert.Equal(255, r8);
+
+        var lin = ColorNormalizer.ToLinear(2.6641f, 0f, 0f, 1f, bitDepth: 16, hdr: true);
+        Assert.True(lin.R > 1f, "线性域不得截断 HDR 高光");
+    }
+
+    [Fact]
+    public void Display8Bit_ClampsInsteadOfWrapping_AndMapsNaNToZero()
+    {
+        ColorNormalizer.ToDisplay8Bit(1.5f, -0.1f, 0f, 1f, bitDepth: 8, hdr: false,
+            out var r8, out var g8, out var b8, out _);
+        Assert.Equal(255, r8);  // 上溢钳到 255（不环绕成黑）
+        Assert.Equal(0, g8);    // 下溢钳到 0（不环绕成白）
+        Assert.Equal(0, b8);
+
+        ColorNormalizer.ToDisplay8Bit(float.NaN, 0f, 0f, 1f, bitDepth: 8, hdr: false,
+            out var nr, out _, out _, out _);
+        Assert.Equal(0, nr);    // 无 NaN 契约
+    }
+
+    [Fact]
+    public void Display8Bit_SdrPath_IsBitIdenticalToLegacy_V255()
+    {
+        // 回归护栏：SDR 下必须与旧的 v*255 口径逐值一致（实测 0..255 全 256 级零偏差），
+        // 否则就等于把原本正确的 SDR 显示改坏了。
+        for (var i = 0; i <= 255; i++)
+        {
+            var v = i / 255f;
+            ColorNormalizer.ToDisplay8Bit(v, v, v, 1f, bitDepth: 8, hdr: false,
+                out var r8, out _, out _, out _);
+            var raw = (int)Math.Round(v * 255f);
+            var legacy = raw < 0 ? 0 : raw > 255 ? 255 : raw;
+            Assert.Equal(legacy, r8);
+        }
+    }
+
+    [Fact]
+    public void Display8Bit_PaperWhiteAffectsHdrMapping()
+    {
+        // 参考白越高，同一 scRGB 值相对越暗：203 nits → 168；100 nits → 231
+        ColorNormalizer.ToDisplay8Bit(1f, 1f, 1f, 1f, bitDepth: 16, hdr: true,
+            out var at203, out _, out _, out _, 203f);
+        ColorNormalizer.ToDisplay8Bit(1f, 1f, 1f, 1f, bitDepth: 16, hdr: true,
+            out var at100, out _, out _, out _, 100f);
+        Assert.Equal(168, at203);
+        Assert.Equal(231, at100);
+        Assert.True(at100 > at203);
+    }
 }

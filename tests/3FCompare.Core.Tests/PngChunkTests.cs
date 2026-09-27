@@ -27,7 +27,13 @@ public class PngChunkTests
     public void Crc32_已知向量(string input, uint expected)
         => Assert.Equal(expected, PngChunk.Crc32(System.Text.Encoding.ASCII.GetBytes(input)));
 
-    /// <summary>写入的 chunk 必须自带正确 CRC：CRC 覆盖 type+data，不含长度字段。</summary>
+    /// <summary>写入的 chunk 必须自带正确 CRC：CRC 覆盖 type+data，不含长度字段。
+    ///
+    /// <para><b>为什么用完整 16 字节黄金向量，而不是 <c>Crc32(covered)</c></b>：
+    /// 后者是拿被测 <c>Crc32</c> 去验被测 <c>Write</c>——两者同源，CRC 算法整体写错时
+    /// （例如多项式写成 0x04C11DB7 而非反射形式 0xEDB88320）两边一起错，断言恒绿。
+    /// 这里的期望值由 <b>zlib.crc32</b> 独立算出（另一份实现），并连长度/类型/数据
+    /// 一起钉死：任何字节不符即判红。</para></summary>
     [Fact]
     public void Write_生成的CRC可被PNG规范校验()
     {
@@ -38,10 +44,16 @@ public class PngChunkTests
         Assert.Equal(16, buf.Length);                       // 4(len) + 4(type) + 4(data) + 4(crc)
         Assert.Equal(4, PngChunk.ReadBigEndianInt32(buf, 0));
 
-        var covered = buf.Skip(4).Take(8).ToArray();        // type + data
-        var expected = PngChunk.Crc32(covered);
-        var actual = (uint)PngChunk.ReadBigEndianInt32(buf, 12);
-        Assert.Equal(expected, actual);
+        // zlib.crc32(b"IHDR" + bytes([0,0,1,0])) == 0xeb15d821（大端写入）
+        Assert.Equal(
+            new byte[]
+            {
+                0x00, 0x00, 0x00, 0x04,                       // 长度 = 4
+                0x49, 0x48, 0x44, 0x52,                       // "IHDR"
+                0x00, 0x00, 0x01, 0x00,                       // 数据
+                0xEB, 0x15, 0xD8, 0x21,                       // CRC（zlib 独立核对）
+            },
+            buf);
     }
 
     [Fact]

@@ -10,10 +10,17 @@ namespace _3FCompare.Platform.Tests;
 /// 这里钉的是两类最容易翻车的性质：<b>重复释放必须安全</b>、<b>释放后不得再触碰原生资源</b>
 /// （use-after-free 防线）。</para>
 ///
-/// <para><b>为什么只走这些分支</b>：测试环境里没有 <c>3FC.WgcCapture.dll</c>（它是 UI 工程的内嵌资源，
-/// 只在程序启动时解压），真正调用原生库会抛 <see cref="DllNotFoundException"/>，
+/// <para><b>为什么只走这些分支</b>：<c>3FC.WgcCapture.dll</c> 是 UI 工程的<b>内嵌资源</b>
+/// （<c>&lt;EmbeddedResource LogicalName="3FC.WgcCapture.dll"&gt;</c>，见
+/// <c>src/3FCompare/3FCompare.csproj</c>），只在程序启动时解压，<b>从不</b>出现在测试宿主的
+/// 探测路径上——所以真正调用原生库必然抛 <see cref="DllNotFoundException"/>，
 /// 那样测出来的就不是释放逻辑了。故所有用例都停在"P/Invoke 之前就返回"的分支上 ——
 /// 这也恰好是正确性最要紧的地方。</para>
+///
+/// <para><b>这不是"依赖机器环境"</b>（docs/41 §4.3 曾如此归类，已复核为不成立）：
+/// "原生库不可加载"是<b>构建期固定属性</b>，不是某台机器的偶然状态。而且用例的判红
+/// 与环境无关——把 <c>_disposed</c> 判断挪到 <c>EnsureCreated()</c> 之后（本类要守的回归），
+/// 缺库时留下 <c>CREATE_FAILED(2)</c>、有库时留下一次真实抓帧失败，两种环境都会判红。</para>
 /// </summary>
 public class CaptureLaneResourceTests
 {

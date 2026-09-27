@@ -25,21 +25,16 @@ public sealed class PixelFidelityTests
     /// <summary>与实现约定的 1:1 绝对容差（像素）；这里按规格独立取 0.5，不引用被测常量。</summary>
     private const double Tolerance = 0.5;
 
-    /// <summary>把当前线程的区域固定为不变区域。
-    /// <para>生产代码用当前区域格式化倍数（<c>{factor:0.0}</c>）：在 <c>,</c> 作小数分隔符的机器上
-    /// 会产出 <c>"2,0"</c>，硬断言字面量 <c>"2.0"</c> 就会误报失败。这里显式固定区域，
-    /// 让断言与机器设置无关。</para></summary>
-    private static IDisposable InvariantCulture()
-    {
-        var previous = CultureInfo.CurrentCulture;
-        CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
-        return new CultureRestore(previous);
-    }
-
-    private sealed class CultureRestore(CultureInfo previous) : IDisposable
-    {
-        public void Dispose() => CultureInfo.CurrentCulture = previous;
-    }
+    /// <summary>按**当前区域**把倍数渲染成被测文案应当包含的片段。
+    ///
+    /// <para><b>为什么不固定区域再断言字面量 "2.60"</b>：生产文案是插值字符串
+    /// <c>$"{ratio:0.00}×"</c>，走 <see cref="CultureInfo.CurrentCulture"/>；
+    /// 在 <c>de-DE</c> 上会产出 <c>"2,60"</c>，硬断言字面量就会误报失败。
+    /// 旧写法靠临时改写 <c>CultureInfo.CurrentCulture</c>（进程/线程级全局状态）绕开，
+    /// 属 docs/41 §4.3 点名的"全局状态污染"。这里改为<b>不碰全局状态</b>：
+    /// 期望值用同一区域、同一格式规格独立渲染，与被测实现无关。</para></summary>
+    private static string Num(double value, string format)
+        => value.ToString(format, CultureInfo.CurrentCulture);
 
     private static void AssertRatio(double expected, double actual)
         => Assert.True(Math.Abs(expected - actual) <= 1e-9,
@@ -148,12 +143,11 @@ public sealed class PixelFidelityTests
     public void TinySource_NonIntegerUpscale_DescriptionShowsTrueRatio()
     {
         // 回归：文案过去由 Math.Round(2.6) = 3 得来，会写 "3.0×"，与真实 2.6× 不符
-        using var _ = InvariantCulture();
         var r = PixelFidelity.Evaluate(2.6, 2.6, 1, 1);
 
         Assert.Equal(PixelFidelityTier.Interpolated, r.Tier);
-        Assert.Contains("2.60", r.Description);
-        Assert.DoesNotContain("3.0", r.Description);
+        Assert.Contains(Num(2.6, "0.00"), r.Description);
+        Assert.DoesNotContain(Num(3.0, "0.0"), r.Description);
     }
 
     // ------------------------------------------------------------ 整数倍放大 → IntegerScaled
@@ -284,12 +278,11 @@ public sealed class PixelFidelityTests
     [Fact]
     public void IntegerScaled_Description_ShowsFactorAndDeniesPixelLevel()
     {
-        using var _ = InvariantCulture();
         var r = PixelFidelity.Evaluate(1920, 1080, 960, 540);   // 2× 放大
 
         Assert.False(string.IsNullOrWhiteSpace(r.Description));
         Assert.Contains("非像素级", r.Description);
-        Assert.Contains("2.0", r.Description);   // 档位需带上倍数信息
+        Assert.Contains(Num(2.0, "0.0"), r.Description);   // 档位需带上倍数信息
     }
 
     [Theory]
@@ -317,12 +310,11 @@ public sealed class PixelFidelityTests
     [Fact]
     public void Anisotropic_Description_MentionsBothAxes()
     {
-        using var _ = InvariantCulture();
         var r = PixelFidelity.Evaluate(200, 150, 100, 100);   // X=2.0，Y=1.5
 
         Assert.Contains("非等比", r.Description);
-        Assert.Contains("2.00", r.Description);
-        Assert.Contains("1.50", r.Description);
+        Assert.Contains(Num(2.0, "0.00"), r.Description);
+        Assert.Contains(Num(1.5, "0.00"), r.Description);
     }
 
     [Fact]

@@ -1,0 +1,13 @@
+3FCompare 发布门禁  v0.3.0-beta  2026-09-26 19:28:59
+PASS  内核基线  实际 b765a1f8d766 / 基线 b765a1f8d766
+PASS  内核导出面  third_party\fff_project\FFF.Native\x64\Release\FFF.Native.dll: 结论: OK；bin 副本 SHA256 一致（C9E7F215F1CF）
+PASS  Release 编译  错误 0 / 告警 0（白名单外 0）
+PASS  单元测试  已通过! - 失败:     0，通过:   720，已跳过:     0，总计:   720，持续时间: 3 s - 3FCompare.Core.Tests.dll (net11.0)
+PASS  Platform 测试  已通过! - 失败:     0，通过:   369，已跳过:     0，总计:   369，持续时间: 63 ms - 3FCompare.Platform.Tests.dll (net11.0)
+PASS  控制台 E3 冒烟  E3 冒烟通过 ✅ (exit=0)
+FAIL  单路全量  命令未能启动（exit=-1）：本会话无法启动原生进程，请在真实终端运行门禁
+FAIL  会话往返  命令未能启动（exit=-1）：本会话无法启动原生进程，请在真实终端运行门禁
+FAIL  帧导出  命令未能启动（exit=-1）：本会话无法启动原生进程，请在真实终端运行门禁
+FAIL  打包与产物自检  pack.ps1 exit=1
+FAIL  AOT 包内自测  命令未能启动（exit=-1）：本会话无法启动原生进程，请在真实终端运行门禁
+发布门禁未通过：5 项失败

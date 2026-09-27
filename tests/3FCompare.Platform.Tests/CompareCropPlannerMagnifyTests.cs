@@ -126,7 +126,9 @@ public class CompareCropPlannerMagnifyTests
 
         Assert.Equal(new Rect(0, 75, 800, 450), geom.FitDip);
         Assert.Equal(new Rect(200, 75, 400, 225), geom.RegionDip);
-        Assert.Equal(new Rect(-200, -75, 800, 600), geom.WindowDip);
+        // 窗口 Y = 格.Y + 居中偏移(300-225)/2 - 区域.Y(75) = 0 + 37.5 - 75
+        // 无黑边的那两例里 (cell.W == rW 且 cell.H == rH) 居中偏移恒为 0 ⇒ 居中不改变它们。
+        Assert.Equal(new Rect(-200, -37.5, 800, 600), geom.WindowDip);
         AssertRegionFitsWindow(geom);
     }
 
@@ -138,7 +140,7 @@ public class CompareCropPlannerMagnifyTests
         var cells = new[]
         {
             new Rect(0, 0, 400, 300),
-            new Rect(100, 50, 400, 300), // 非零原点：验证"窗口位置 = 格左上 − 区域左上"
+            new Rect(100, 50, 400, 300), // 非零原点：验证"窗口位置 = 格左上 + 居中偏移 − 区域左上"
             new Rect(0, 0, 500, 600),    // ABC 的通高格
             new Rect(500, 0, 500, 300),  // ABC 的半高格
             new Rect(0, 0, 800, 300),    // 极扁：letterbox 由高度受限
@@ -166,9 +168,18 @@ public class CompareCropPlannerMagnifyTests
         Assert.Equal(cell.Width * zoom, geom.WindowDip.Width, 1e-6);
         Assert.Equal(cell.Height * zoom, geom.WindowDip.Height, 1e-6);
 
-        // 2) 区域在容器坐标下恒等于格 ⇒ 格被完整覆盖，不打洞
-        Assert.Equal(cell.X, geom.WindowDip.X + geom.RegionDip.X, 1e-6);
-        Assert.Equal(cell.Y, geom.WindowDip.Y + geom.RegionDip.Y, 1e-6);
+        // 2) 区域在容器坐标下**居中**落在格里。原先钉左上角 ⇒ 有黑边时格内的空白全堆在
+        //    右/下单侧，读起来像画面被推歪；居中后两侧对称，与 z=1 的 letterbox 语法一致。
+        //    ⚠ 这里只断言"位置居中"：区域尺寸在有黑边时**可以**小于格（fit/z < 格），
+        //    格内那一圈由 CompareGridView.Render 补成黑底 —— 旧注释写的"格被完整覆盖、
+        //    不打洞"在有黑边的场合本来就不成立，别把它当已保证的性质。
+        Assert.Equal(cell.X + (cell.Width - geom.RegionDip.Width) / 2,
+                     geom.WindowDip.X + geom.RegionDip.X, 1e-6);
+        Assert.Equal(cell.Y + (cell.Height - geom.RegionDip.Height) / 2,
+                     geom.WindowDip.Y + geom.RegionDip.Y, 1e-6);
+        Assert.True(geom.RegionDip.Width <= cell.Width + 1e-6 &&
+                    geom.RegionDip.Height <= cell.Height + 1e-6,
+                    $"区域大于格：区域 {geom.RegionDip} 格 {cell} ⇒ 居中偏移会变负");
 
         // 3) 区域恒在窗口内 ⇒ SetWindowRgn 不会静默裁掉越界部分
         AssertRegionFitsWindow(geom);

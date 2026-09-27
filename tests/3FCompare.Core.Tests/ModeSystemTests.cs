@@ -13,16 +13,17 @@ public class ModeSystemTests
 {
     // ══════════ 1. AvailableModes：全路数收敛 ══════════
 
-    /// <summary>规则：n&lt;2 → 空；n=2 → {AB}；n=3 → {AB,ABC}；n≥4 → {AB,ABC,ABCD}（全集）。</summary>
+    /// <summary>规则：n&lt;2 → 空；n=2 → {AB, AB 竖}；n=3 → 再加 {ABC, ABC 三列}；
+    /// n≥4 → 再加 ABCD（全集）。变体紧跟其主形态。</summary>
     [Theory]
     [InlineData(0, new CompareMode[0])]                       // 0 路：对比功能未启动
     [InlineData(1, new CompareMode[0])]                       // 1 路：仍不启动
-    [InlineData(2, new[] { CompareMode.Ab })]
-    [InlineData(3, new[] { CompareMode.Ab, CompareMode.Abc })]
-    [InlineData(4, new[] { CompareMode.Ab, CompareMode.Abc, CompareMode.Abcd })]
-    [InlineData(5, new[] { CompareMode.Ab, CompareMode.Abc, CompareMode.Abcd })]
-    [InlineData(7, new[] { CompareMode.Ab, CompareMode.Abc, CompareMode.Abcd })]
-    [InlineData(9, new[] { CompareMode.Ab, CompareMode.Abc, CompareMode.Abcd })]
+    [InlineData(2, new[] { CompareMode.Ab, CompareMode.AbVertical })]
+    [InlineData(3, new[] { CompareMode.Ab, CompareMode.AbVertical, CompareMode.Abc, CompareMode.AbcColumns })]
+    [InlineData(4, new[] { CompareMode.Ab, CompareMode.AbVertical, CompareMode.Abc, CompareMode.AbcColumns, CompareMode.Abcd })]
+    [InlineData(5, new[] { CompareMode.Ab, CompareMode.AbVertical, CompareMode.Abc, CompareMode.AbcColumns, CompareMode.Abcd })]
+    [InlineData(7, new[] { CompareMode.Ab, CompareMode.AbVertical, CompareMode.Abc, CompareMode.AbcColumns, CompareMode.Abcd })]
+    [InlineData(9, new[] { CompareMode.Ab, CompareMode.AbVertical, CompareMode.Abc, CompareMode.AbcColumns, CompareMode.Abcd })]
     public void AvailableModes_按路数返回规定集合(int count, CompareMode[] expected)
     {
         // 顺序即 UI 按钮顺序，逐元素比较同时钉住顺序与内容
@@ -33,12 +34,34 @@ public class ModeSystemTests
     [Fact]
     public void AvailableModes_四路及以上一律返回全集()
     {
-        var full = new[] { CompareMode.Ab, CompareMode.Abc, CompareMode.Abcd };
+        var full = new[]
+        {
+            CompareMode.Ab, CompareMode.AbVertical, CompareMode.Abc,
+            CompareMode.AbcColumns, CompareMode.Abcd,
+        };
 
         for (var count = 4; count <= 20; count++)
         {
             Assert.Equal(full, CompareLayout.AvailableModes(count).ToArray());
         }
+    }
+
+    /// <summary>变体必须与其主形态同进同出：2 路有 AB 竖（同 2 格）、3 路起才有 ABC 三列（同 3 格）。
+    /// 这条把"变体的路数门槛"钉死 —— 若哪天有人把 AbcColumns 误加进 2 路集合，
+    /// <see cref="CompareLayout.CellCount"/> 会给出 3 格而只有 2 路可显示。</summary>
+    [Theory]
+    [InlineData(2, CompareMode.AbVertical, true)]
+    [InlineData(2, CompareMode.AbcColumns, false)]
+    [InlineData(3, CompareMode.AbVertical, true)]
+    [InlineData(3, CompareMode.AbcColumns, true)]
+    [InlineData(9, CompareMode.AbVertical, true)]
+    [InlineData(9, CompareMode.AbcColumns, true)]
+    [InlineData(1, CompareMode.AbVertical, false)]
+    [InlineData(1, CompareMode.AbcColumns, false)]
+    public void IsAvailable_变体与同格数主形态同步(int count, CompareMode variant, bool expected)
+    {
+        Assert.Equal(expected, CompareLayout.IsAvailable(variant, count));
+        Assert.Equal(expected, CompareLayout.AvailableModes(count).Contains(variant));
     }
 
     // ══════════ 2. CoerceMode：收敛到当前路数可用的最大模式 ══════════
@@ -69,7 +92,11 @@ public class ModeSystemTests
     }
 
     /// <summary>5~9 路的上限就是 ABCD：超出枚举范围的取值（脏反序列化 / 非法强转）一律收敛到 ABCD，
-    /// 且收敛结果必然可用（不会漏出 -1 或 7）。</summary>
+    /// 且收敛结果必然可用（不会漏出 -1 或 7）。
+    ///
+    /// <para><b>为什么脏值样例从 3 改成 99</b>：3 现在是合法的 <see cref="CompareMode.AbVertical"/>，
+    /// 它在 5 路下<b>可用</b>，按语义应当原样返回 —— 再拿它当"脏值"会得到错误的期望。
+    /// 99 远在枚举之外，与 -1 / 7 / int.MinValue 同为"任何集合都不含"的取值。</para></summary>
     [Theory]
     [InlineData(5)]
     [InlineData(6)]
@@ -78,7 +105,7 @@ public class ModeSystemTests
     [InlineData(9)]
     public void CoerceMode_五路及以上_超上限取值收敛到Abcd(int count)
     {
-        foreach (var dirty in new[] { (CompareMode)(-1), (CompareMode)int.MinValue, (CompareMode)3, (CompareMode)7 })
+        foreach (var dirty in new[] { (CompareMode)(-1), (CompareMode)int.MinValue, (CompareMode)99, (CompareMode)7 })
         {
             var coerced = CompareLayout.CoerceMode(dirty, count);
 
@@ -103,12 +130,35 @@ public class ModeSystemTests
         Assert.False(CompareLayout.IsAvailable(CompareMode.Ab, count));
     }
 
+    /// <summary>变体在路数变少时的收敛目标：3 路的 ABC 三列掉到 2 路 → <b>AB（左右）</b>，
+    /// 而不是 AB 竖。
+    ///
+    /// <para><b>期望值必须独立</b>：回退若取"可用集合末项"，2 路的末项是 AbVertical，
+    /// 于是"路数变少"会顺带把排布从左右改成上下 —— 用户拖好的分割位置与视觉预期一起丢失。
+    /// 回退因此只在标准形态（Ab/Abc/Abcd）里挑，这里把该语义钉住。</para></summary>
+    [Theory]
+    [InlineData(3, CompareMode.AbcColumns, 2, CompareMode.Ab)]
+    [InlineData(3, CompareMode.Abc, 2, CompareMode.Ab)]
+    [InlineData(4, CompareMode.Abcd, 2, CompareMode.Ab)]
+    [InlineData(4, CompareMode.Abcd, 3, CompareMode.Abc)]
+    // 变体自身可用时原样保留，不被"收敛"成主形态
+    [InlineData(2, CompareMode.AbVertical, 2, CompareMode.AbVertical)]
+    [InlineData(3, CompareMode.AbcColumns, 3, CompareMode.AbcColumns)]
+    [InlineData(9, CompareMode.AbVertical, 9, CompareMode.AbVertical)]
+    public void CoerceMode_变体回退到标准形态而非另一变体(int from, CompareMode mode, int to, CompareMode expected)
+    {
+        Assert.True(CompareLayout.IsAvailable(mode, from), $"前置条件：{mode} 应在 {from} 路可用");
+        Assert.Equal(expected, CompareLayout.CoerceMode(mode, to));
+    }
+
     // ══════════ 3. CellCount 与 ComputeCells 长度一致 ══════════
 
-    /// <summary>格数语义：AB=2（左右）、ABC=3（左大 + 右上/右下）、ABCD=4（四宫格）。</summary>
+    /// <summary>格数语义：AB / AB 竖 = 2；ABC / ABC 三列 = 3；ABCD = 4（四宫格）。</summary>
     [Theory]
     [InlineData(CompareMode.Ab, 2)]
+    [InlineData(CompareMode.AbVertical, 2)]
     [InlineData(CompareMode.Abc, 3)]
+    [InlineData(CompareMode.AbcColumns, 3)]
     [InlineData(CompareMode.Abcd, 4)]
     public void CellCount_与ComputeCells长度一致(CompareMode mode, int expected)
     {
@@ -119,10 +169,23 @@ public class ModeSystemTests
         Assert.Equal(expected, CompareLayout.ComputeCells(mode, new SplitParams(0.3, 0.6)).Length);
     }
 
-    /// <summary>把两个方法绑在一起：对 2~9 路下<b>每一个可用模式</b>，格数 == 实际算出的单元格数。</summary>
+    /// <summary>把两个方法绑在一起：对 2~9 路下<b>每一个可用模式</b>，格数 == 实际算出的单元格数。
+    ///
+    /// <para><b>期望值必须独立</b>：写成 <c>Assert.Equal(CellCount(mode), cells.Length)</c> 是
+    /// 同源互证——两个方法同时算错（例如把 ABC 都当成 2 格）时断言恒绿。这里改用
+    /// <b>手算常量表</b>（AB=2 / ABC=3 / ABCD=4），两个方法各自与它比对。</para></summary>
     [Fact]
     public void CellCount_与ComputeCells长度一致_覆盖2至9路的全部可用模式()
     {
+        var expectedCells = new Dictionary<CompareMode, int>
+        {
+            [CompareMode.Ab] = 2,           // 左右
+            [CompareMode.AbVertical] = 2,   // 上下
+            [CompareMode.Abc] = 3,          // 左大 + 右上/右下
+            [CompareMode.AbcColumns] = 3,   // 三列
+            [CompareMode.Abcd] = 4,         // 四宫格
+        };
+
         for (var count = 2; count <= 9; count++)
         {
             var modes = CompareLayout.AvailableModes(count);
@@ -130,8 +193,12 @@ public class ModeSystemTests
 
             foreach (var mode in modes)
             {
+                Assert.True(expectedCells.ContainsKey(mode),
+                    $"{count} 路给出了手算表里没有的模式 {mode}（表需同步更新）");
+
                 var cells = CompareLayout.ComputeCells(mode, new SplitParams(0.5, 0.5));
-                Assert.Equal(CompareLayout.CellCount(mode), cells.Length);
+                Assert.Equal(expectedCells[mode], cells.Length);
+                Assert.Equal(expectedCells[mode], CompareLayout.CellCount(mode));
             }
         }
     }
@@ -210,7 +277,11 @@ public class ModeSystemTests
         Assert.Equal((expectedCols, expectedRows), GridLayout.OverrideOf(preset));
     }
 
-    /// <summary>覆盖值为 (0,0) 时必须真的回落到自动布局（不覆盖），而不是产出 0x0 网格。</summary>
+    /// <summary>覆盖值为 (0,0) 时必须真的回落到自动布局（不覆盖），而不是产出 0x0 网格。
+    ///
+    /// <para><b>期望值必须独立</b>：原先写 <c>Assert.Equal(ComputeGrid(5), ResolveGrid(5, 0, 0))</c>
+    /// 是同源互证——ComputeGrid 自己算错（例如 5 路给 2×2）时两边一起错、断言恒绿。
+    /// 5 路的手算结果是 <b>3×2</b>（容量 6 ≥ 5，见上面 <c>ComputeGrid_全路数行列</c> 的表）。</para></summary>
     [Theory]
     [InlineData("auto")]
     [InlineData(null)]
@@ -219,7 +290,6 @@ public class ModeSystemTests
         var (cols, rows) = GridLayout.OverrideOf(preset);
 
         Assert.Equal((0, 0), (cols, rows));
-        Assert.Equal(GridLayout.ComputeGrid(5, singleView: false),
-                     GridLayout.ResolveGrid(5, singleView: false, cols, rows));
+        Assert.Equal((3, 2), GridLayout.ResolveGrid(5, singleView: false, cols, rows));
     }
 }

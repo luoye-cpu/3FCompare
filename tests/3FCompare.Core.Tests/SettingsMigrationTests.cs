@@ -116,16 +116,28 @@ public class SettingsMigrationTests
         Assert.Equal(0, s.WindowState);
     }
 
+    /// <summary>坏 JSON：只有"从原始文本读 WindowMaximized"这一步该被跳过，
+    /// 其余迁移（-1 哨兵、尺寸、版本号盖章）必须照常完成，且不得抛出。
+    ///
+    /// <para><b>改造前为什么过弱</b>：原断言只看了 <c>WindowX=10 / WindowY=20</c>——
+    /// 这两个值落在<b>任何</b>实现都不会改的分支上（既不是 -1，也不是尺寸字段），
+    /// 于是"整段迁移被 try/catch 吞掉"这类真回归照样能过。现在改为断言真正会变的量：
+    /// 哨兵清空 + 版本号盖章。</para></summary>
     [Fact]
-    public void MigrateLegacy_MalformedJson_DoesNotThrow()
+    public void MigrateLegacy_坏Json时_只有最大化迁移被跳过()
     {
-        var s = new AppSettings { WindowX = 10, WindowY = 20 };
+        var s = new AppSettings { WindowX = -1, WindowY = -1, WindowWidth = 0 };
 
-        SettingsStore.MigrateLegacy(s, "not-json-at-all");
+        SettingsStore.MigrateLegacy(s, "not-json-at-all");   // 不得抛出
 
-        // 迁移失败时其余字段保持原样，不影响启动
-        Assert.Equal(10, s.WindowX);
-        Assert.Equal(20, s.WindowY);
+        // ① 哨兵/尺寸迁移不依赖 JSON 文本，坏 JSON 下必须照常生效
+        Assert.Null(s.WindowX);
+        Assert.Null(s.WindowY);
+        Assert.Null(s.WindowWidth);
+        // ② 版本号必须盖章，否则下次启动会重复迁移
+        Assert.Equal(AppSettings.CurrentVersion, s.Version);
+        // ③ 唯一该降级的部分：读不到 WindowMaximized ⇒ 保持"未设置"
+        Assert.Null(s.WindowState);
     }
 
     [Fact]

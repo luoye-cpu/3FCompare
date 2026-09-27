@@ -1,20 +1,42 @@
 using _3FCompare.Core.Backend;
 using _3FCompare.Core.Settings;
 using _3FCompare.Core.Sync;
+using _3FCompare.Core.Tests.Infrastructure;
 using Xunit;
 
 namespace _3FCompare.Core.Tests;
 
-/// <summary>SyncController 多会话同步（演示引擎）测试：偏移/重排/循环/双步进。</summary>
+/// <summary>SyncController 多会话同步测试：偏移/重排/循环/双步进/漂移校正。
+///
+/// <para><b>为什么用 <see cref="FakeEngine"/> 而不是 <see cref="SimulatedEngine"/></b>
+/// （docs/41 §4.3「依赖真实挂钟」）：<c>SimulatedEngine</c> 在 Playing 态按**真实挂钟**
+/// 推进位置，于是"两次读快照之间位置差了多少"取决于机器负载——断言只能写成宽泛上界
+/// （如"残差 &lt; 60ms"），机器卡顿时判红。替身把位置变成**用例可脚本化的静态量**，
+/// 于是断言可以是精确等式。</para>
+///
+/// <para>替身的两处参数与 <c>SimulatedEngine</c> 对齐（10s 素材 / 24fps），
+/// 使半帧阈值仍是 ≈20.83ms，既有断言的量级不变。</para></summary>
 public class SyncControllerIntegrationTests
 {
-    private static (SyncController sync, IPlayerEngine engine) CreateSync(int count)
+    /// <summary>素材时长：与 <c>SimulatedEngine</c> 的 10s 一致。</summary>
+    private const long Duration = 10 * TimeSpan.TicksPerSecond;
+
+    /// <summary>帧率：与 <c>SimulatedEngine</c> 的 24fps 一致 ⇒ 半帧阈值 ≈ 20.83ms。</summary>
+    private const double Fps = 24.0;
+
+    /// <param name="clock">注入时钟（可确定性推进"1s 漂移冷却"）；null = 真实单调时钟。</param>
+    /// <param name="clampSeek">替身的 Seek 是否自己钳制到时长。
+    /// false 用于坐实<b>托管侧</b>的 clamp 真的生效（替身不兜底）。</param>
+    private static (SyncController sync, IPlayerEngine engine) CreateSync(
+        int count, IClock? clock = null, bool clampSeek = true)
     {
-        var engine = new SimulatedEngine();
-        var sync = new SyncController();
+        var engine = new FakeEngine { DefaultDuration100ns = Duration, DefaultFrameRate = Fps };
+        var sync = new SyncController(clock);
         for (var i = 0; i < count; i++)
         {
-            var session = engine.CreateSession(new EngineSessionOptions { OutputWindow = 0, HardwareDecode = false });
+            var session = (FakeSession)engine.CreateSession(
+                new EngineSessionOptions { OutputWindow = 0, HardwareDecode = false });
+            session.ClampSeek = clampSeek;
             session.OpenAsync($"test{i}.mp4").GetAwaiter().GetResult();
             sync.AddSlot(session, $"test{i}.mp4");
         }
@@ -193,12 +215,18 @@ public class SyncControllerIntegrationTests
     }
 
     /// <summary>docs/15 §3.4：Seek 不得把任何一路推到超出它自己时长的位置。
-    /// 说明：SimulatedEngine 的 Seek 内部本身就会 clamp，所以这条在本替身下恒绿；
-    /// 它守的是"若将来替身或内核不再 clamp，托管侧仍要兜住"这层防御。</summary>
+    ///
+    /// <para><b>改造前为什么不会红</b>：<c>SimulatedEngine</c> 的 Seek 内部本身就
+    /// <c>Clamp(0, _duration100ns)</c>，所以无论托管侧的 <c>ClampToDuration</c> 在不在，
+    /// 位置都恰好落在时长上——这条断言测的是替身的行为，不是被测代码的行为。</para>
+    ///
+    /// <para><b>现在怎么才可信</b>：替身关掉自己的钳制（<c>ClampSeek=false</c>），
+    /// 于是"位置 ≤ 时长"只能由托管侧的 <c>ClampToDuration</c> 提供。删掉它 ⇒ 位置停在
+    /// 10 分钟处 ⇒ 判红。同时覆盖 <c>t &lt; 0 ⇒ 0</c> 的下界分支。</para></summary>
     [Fact]
-    public void SeekTo_不得超出各路自身时长()
+    public void SeekTo_不得超出各路自身时长_且负目标钳到零()
     {
-        var (sync, _) = CreateSync(3);
+        var (sync, _) = CreateSync(3, clampSeek: false);
         try
         {
             sync.SeekTo(10 * 60 * TimeSpan.TicksPerSecond);   // 远超 10s 素材时长
@@ -210,12 +238,25 @@ public class SyncControllerIntegrationTests
                 Assert.True(snap!.Position100ns <= snap.Duration100ns,
                     $"位置 {snap.Position100ns} 超出时长 {snap.Duration100ns}");
             }
+
+            // 负目标：下界同样必须由托管侧兜住（替身此刻不会替我们钳）
+            sync.SeekTo(-5 * TimeSpan.TicksPerSecond);
+
+            foreach (var s in sync.Slots)
+                Assert.Equal(0, s.Session.ReadSnapshot()!.Position100ns);
         }
         finally { sync.Clear(); }
     }
 
     /// <summary>
     /// docs/15 §3.3：播放中若某路漂出阈值（半帧），应被 Seek 拉回 master 基准。
+    ///
+    /// <para><b>改造前的问题</b>：替身按真实挂钟推进位置，校正后两路的残差
+    /// ＝"两次读快照之间过了多少真实时间"，只能写成 <c>&lt; 60ms</c> 的宽泛上界——
+    /// 机器卡顿（GC / 抢占）时残差可能超过上界而<b>假红</b>。</para>
+    ///
+    /// <para><b>现在</b>：替身位置是静态量，校正后残差必须**恰好为 0**；
+    /// 若校正被删除/改坏，残差就是注入的 500ms ⇒ 判红。</para>
     /// </summary>
     [Fact]
     public void TickDrift_播放中偏差超阈值_把从路拉回()
@@ -225,7 +266,7 @@ public class SyncControllerIntegrationTests
         {
             sync.Play();
             sync.SeekTo(2 * TimeSpan.TicksPerSecond);
-            // 人为让第 1 路漂走 500ms，远超半帧阈值
+            // 人为让第 1 路漂走 500ms，远超半帧阈值（24fps ⇒ ≈20.83ms）
             sync.Slots.ElementAt(1).Session.Seek(
                 2 * TimeSpan.TicksPerSecond + 500 * TimeSpan.TicksPerMillisecond);
 
@@ -233,9 +274,8 @@ public class SyncControllerIntegrationTests
 
             var m = sync.Slots.ElementAt(0).Session.ReadSnapshot()!.Position100ns;
             var s = sync.Slots.ElementAt(1).Session.ReadSnapshot()!.Position100ns;
-            // 残留只应来自两次读快照之间的真实时间推进，远小于 500ms
-            Assert.True(Math.Abs(s - m) < 60 * TimeSpan.TicksPerMillisecond,
-                $"漂移未被校正：master={m} 路1={s} Δ={s - m}");
+            Assert.Equal(m, s);
+            Assert.Equal(2 * TimeSpan.TicksPerSecond, s);   // 被拉回的是 master 基准，不是"随便对齐"
         }
         finally { sync.Clear(); }
     }
@@ -281,17 +321,15 @@ public class SyncControllerIntegrationTests
             sync.Play();
             sync.SeekTo(2 * TimeSpan.TicksPerSecond);
 
-            // 第一次：推走 500ms，应被拉回
+            // 第一次：推走 500ms，应被拉回（替身位置是静态量 ⇒ 收敛即精确相等）
             sync.Slots.ElementAt(1).Session.Seek(Pos(sync, 0) + 500 * TimeSpan.TicksPerMillisecond);
             sync.TickDrift();
-            Assert.True(Math.Abs(Pos(sync, 1) - Pos(sync, 0)) < 60 * TimeSpan.TicksPerMillisecond,
-                "首次漂移未被校正");
+            Assert.Equal(Pos(sync, 0), Pos(sync, 1));
 
-            // 冷却期内再次推走：不应被拉回
+            // 冷却期内再次推走：不应被拉回（位置必须原样停在注入值上）
             sync.Slots.ElementAt(1).Session.Seek(Pos(sync, 0) + 500 * TimeSpan.TicksPerMillisecond);
             sync.TickDrift();
-            var d = Math.Abs(Pos(sync, 1) - Pos(sync, 0));
-            Assert.True(d > 400 * TimeSpan.TicksPerMillisecond, $"1s 冷却被绕过：Δ={d}");
+            Assert.Equal(Pos(sync, 0) + 500 * TimeSpan.TicksPerMillisecond, Pos(sync, 1));
         }
         finally { sync.Clear(); }
     }
@@ -309,9 +347,8 @@ public class SyncControllerIntegrationTests
             // 10ms < 20.83ms
             sync.Slots.ElementAt(1).Session.Seek(Pos(sync, 0) + 10 * TimeSpan.TicksPerMillisecond);
             sync.TickDrift();
-            var d = Math.Abs(Pos(sync, 1) - Pos(sync, 0));
-            Assert.True(d > 5 * TimeSpan.TicksPerMillisecond,
-                $"半帧内的正常抖动被误校正（每 1s 一次无谓 Seek）：Δ={d}");
+            // 位置必须原样停在注入值上（多校 1 tick 都是"无谓 Seek"）
+            Assert.Equal(Pos(sync, 0) + 10 * TimeSpan.TicksPerMillisecond, Pos(sync, 1));
         }
         finally { sync.Clear(); }
     }
@@ -332,10 +369,8 @@ public class SyncControllerIntegrationTests
             var before = Pos(sync, 0);
             sync.TickDrift();
             var after = Pos(sync, 0);
-            // 只允许真实时间推进，绝不允许被"拉回"
-            Assert.True(after >= before, "master 被回退了：基准路不允许被校正");
-            Assert.True(after - before < 100 * TimeSpan.TicksPerMillisecond,
-                $"master 位置被异常改动 Δ={after - before}");
+            // master 是基准：一个 tick 都不许动（替身不推进时间 ⇒ 必须是精确相等）
+            Assert.Equal(before, after);
         }
         finally { sync.Clear(); }
     }
@@ -352,19 +387,23 @@ public class SyncControllerIntegrationTests
             sync.SeekTo(2 * TimeSpan.TicksPerSecond);   // 路1 落在 2.5s
             sync.TickDrift();
             var d = Pos(sync, 1) - Pos(sync, 0) - 500 * TimeSpan.TicksPerMillisecond;
-            Assert.True(Math.Abs(d) < 60 * TimeSpan.TicksPerMillisecond,
-                $"偏移被漂移校正抹掉：残差={d}");
+            Assert.Equal(0, d);   // 偏移必须原样保留（替身不推进时间 ⇒ 精确相等）
         }
         finally { sync.Clear(); }
     }
 
     /// <summary>交接 §2.4 参数实测的可确定性替代：跨过 1s 冷却反复注入漂移，
     /// 每次都必须收敛到半帧内。这里验证的是"1s + 半帧"这组参数**确实能收敛**，
-    /// 至于真实长片下的漂移速率是否会超过校正能力，仍需实机（被上游崩溃阻塞）。</summary>
+    /// 至于真实长片下的漂移速率是否会超过校正能力，仍需实机（被上游崩溃阻塞）。
+    ///
+    /// <para><b>改造前的问题</b>：靠 <c>Thread.Sleep(1050)</c> 等真实挂钟跨冷却，
+    /// 既慢（3 轮 ≈2.1s）又 flaky（机器卡顿/时钟粒度不足时冷却没跨过去 ⇒ 假红）。
+    /// 现在把 <c>ManualClock</c> 注入 <see cref="SyncController"/>，"等 1 秒"变成"跳 1 秒"。</para></summary>
     [Fact]
     public void TickDrift_反复漂移_每次都收敛到半帧内()
     {
-        var (sync, _) = CreateSync(3);
+        var clock = new ManualClock();
+        var (sync, _) = CreateSync(3, clock);
         try
         {
             sync.Play();
@@ -374,10 +413,8 @@ public class SyncControllerIntegrationTests
                 sync.Slots.ElementAt(1).Session.Seek(
                     Pos(sync, 0) + (round + 1) * 300 * TimeSpan.TicksPerMillisecond);
                 sync.TickDrift();
-                var d = Math.Abs(Pos(sync, 1) - Pos(sync, 0));
-                Assert.True(d < 60 * TimeSpan.TicksPerMillisecond,
-                    $"第 {round} 轮未收敛：Δ={d}");
-                if (round < 2) System.Threading.Thread.Sleep(1050); // 跨过 1s 冷却
+                Assert.Equal(Pos(sync, 0), Pos(sync, 1));   // 收敛即精确对齐，不留残差
+                if (round < 2) clock.Advance(TimeSpan.FromMilliseconds(1050)); // 跨过 1s 冷却
             }
         }
         finally { sync.Clear(); }

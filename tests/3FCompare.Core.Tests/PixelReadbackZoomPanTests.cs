@@ -54,6 +54,31 @@ public sealed class PixelReadbackZoomPanTests
 
     // ───────────────────────── zoom=1（fit 框即绘制矩形） ─────────────────────────
 
+    // ─────────────── 负原点（v2 起才有：往右下平移会把画盒推出屏幕左/上侧） ───────────────
+
+    /// <summary>swap 4000、绘制盒 <c>(-500,-500,2000,2000)</c>、片源 1000×1000
+    /// ⇒ 1 源像素 = 2 缓冲像素，且屏幕左边缘对应源画面<b>第 250 列</b>（前 250 列已被推出屏幕）。
+    ///
+    /// <para><b>期望值手算</b>：逆算 <c>(0 −(−500))·1000/2000 = 250</c>；
+    /// 逆算 <c>(500 −(−500))·1000/2000 = 500</c>（即缓冲 500 处看到源第 500 列，与"盒子往左移了 500"自洽）。
+    /// 正算 <c>src(500) → −500 + 500.5·2 = 501</c>。
+    /// 被推出屏幕那一段（<c>src(0) → −499</c>）按<b>既有</b>的"钳到缓冲边界"契约落回 0 ——
+    /// 与右/下越界的处理对称，本条不新造语义，只把"负值确实进了算术"钉住。</para></summary>
+    [Fact]
+    public void 负原点_逆算扣得有符号偏移()
+    {
+        var rt = new RenderTargetInfo(
+            SwapWidth: 4000, SwapHeight: 4000,
+            ClientWidth: 4000, ClientHeight: 4000,
+            DestX: -500, DestY: -500, DestWidth: 2000, DestHeight: 2000,
+            OutputBitDepth: 8, Hdr: false);
+
+        Assert.Equal((250, 250), Inv(0, 0, rt));
+        Assert.Equal((500, 500), Inv(500, 500, rt));
+        Assert.Equal((501, 501), Fwd(500, 500, rt));
+        Assert.Equal((0, 0), Fwd(0, 0, rt));
+    }
+
     [Fact]
     public void ZoomOne_Forward_HandDerived()
     {

@@ -22,9 +22,12 @@ public class FrameTimelineTests
     [Fact]
     public void StepByFrames_Forward_AddsFrameDuration()
     {
-        // 当前位置 0，24fps，前进 1 帧
+        // 当前位置 0，24fps，前进 1 帧 ⇒ 恰好前进一帧的时长。
+        // 期望值写死 416_667（与上面 FrameDuration_24fps_IsCorrect 同一个手算结果），
+        // **不调用** FrameTimeline.FrameDuration100ns —— 否则被测函数算错时，
+        // 期望值会跟着一起错，断言恒绿。
         var result = FrameTimeline.StepByFrames(0, TimeSpan.FromMinutes(1).Ticks, 1, 24.0);
-        Assert.Equal(FrameTimeline.FrameDuration100ns(24.0), result);
+        Assert.Equal(416_667, result);
     }
 
     [Fact]

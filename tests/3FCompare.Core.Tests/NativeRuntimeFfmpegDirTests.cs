@@ -1,4 +1,5 @@
 using _3FCompare.Core.Backend;
+using _3FCompare.Core.Tests.Infrastructure;
 using Xunit;
 
 namespace _3FCompare.Core.Tests;
@@ -12,7 +13,14 @@ namespace _3FCompare.Core.Tests;
 ///
 /// 注意：这里**没有**把配置迁到 %APPDATA% —— 便携部署正是依赖"配置与 exe 同目录"，
 /// 迁移会破坏这个设计。加固方式是校验内容而不是搬家。
+///
+/// <para>⚠ 本类改的是进程级静态量 <c>NativeRuntime.FfmpegDirectory</c>，
+/// 故与 <c>EngineFactoryTests</c>（读同一静态量 + 有自己的探测缓存）
+/// 同属 <see cref="GlobalStateCollection"/>（禁止并行）。docs/41 §4.3 曾把本类
+/// 列为"全局状态污染"的反面样例——那时它只靠 <c>Dispose</c> 还原，
+/// 与并行运行的其它类之间没有任何互斥。</para>
 /// </summary>
+[Collection(GlobalStateCollection.Name)]
 public class NativeRuntimeFfmpegDirTests : IDisposable
 {
     private readonly string _root;
@@ -35,6 +43,9 @@ public class NativeRuntimeFfmpegDirTests : IDisposable
     [Theory]
     // UNC：Windows 访问时会发起 NTLM 认证，外泄本机凭据
     [InlineData(@"\\evil-server\share")]
+    // ⚠ 同一路径的斜杠写法：Path.IsPathRooted 为 true 却不以 \\ 开头，
+    //   旧判据 StartsWith(@"\\") 会被它整体绕过（docs/41 #18）
+    [InlineData("//evil-server/share")]
     [InlineData(@"\\?\C:\anything")]
     // 相对路径：按当前工作目录解析，等于让配置决定加载哪个目录的 DLL
     [InlineData("relative\\path")]
