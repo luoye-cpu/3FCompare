@@ -49,6 +49,18 @@ logs/
 # 历史补丁留档于 tools/patches/*.patch（入库跟踪，但不自动重放，详见该目录 README）。
 third_party/fff_project/
 
+# ── 3FP「图片模式」独立工作区（见 3fp/README.md）──
+# 与 third_party/fff_project/ 同源同基线（b765a1f），但用于图片模式的试验性改动，
+# 互不干扰：3FC 的日常构建只认 third_party/fff_project/，图片模式改动只落在 3fp/kernel/。
+# 不入库原因与 third_party/fff_project/ 相同：第三方源码 + 构建产物 + 嵌套 git 仓。
+3fp/kernel/
+3fp/build/
+# LakeUI 是**目录联接**（指向 third_party/LakeUI），宿主构建才需要它。
+# 不加这条的话 git add -A 会顺着联接把第三方 UI 库纳入主仓（实测会带入 4 条路径）。
+3fp/LakeUI/
+# 样张本体体积大不入库（生成脚本 3fp/samples/tools/ 入库），规则同 testmedia/media/
+3fp/samples/media/
+
 # 测试媒体目录规范（testmedia/）：
 #   media/  测试视频素材（*.mp4 等实际媒体文件，体积大不入库）
 #   tmp/    临时产物（截图/pid/selftest 输出等，可随时删除）
@@ -84,8 +96,8 @@ _corrupt_pack_backup/
 .3fc_kernel_sha
 
 # 注意：.3fc_kernel_baseline.bundle 是**有意入库**的（约 2MB），不要加到这里。
-# 它是内核基线归档（当前：分支 3fc/integrate-issue7 @ 0d5856e +
-# tag 3fcompare-kernel-2026.9.18.2，回滚点 3fcompare-kernel-2026.9.18.1），
+# 它是内核基线归档（当前：分支 3fc/integrate-issue7 @ b765a1f +
+# tag 3fcompare-kernel-2026.9.18.3，回滚点 3fcompare-kernel-2026.9.18.2 / 0d5856e），
 # 上游 Lake1059/FFF_Project 不含 3FCompare 扩展，没有它换机器就无法复现构建。
 # 恢复方式：git clone .3fc_kernel_baseline.bundle third_party/fff_project
 #
@@ -93,7 +105,9 @@ _corrupt_pack_backup/
 #   nonexistent ref"，工作区不会 checkout（得到空目录）。旧 bundle 就缺 HEAD。
 #   git -C third_party/fff_project bundle create <输出路径> \
 #     HEAD 3fc/integrate-issue7 3fcompare/zoom-viewport-cover \
-#     3fcompare-kernel-2026.9.18.2 3fcompare-kernel-2026.9.18.1
+#     3fcompare-kernel-2026.9.18.3 3fcompare-kernel-2026.9.18.2
+#   （2026-09-20 起基线推进到 .18.3 = 单 presenter 管线修复三连；
+#    漏掉新 tag 会让"照此命令重建"的 bundle 不含当前基线。）
 
 # ── 调试残留（历次实机自测/崩溃排查产生，勿入库；2026-09-15 第二轮审查补）──
 /_*.log
@@ -124,3 +138,6 @@ tools/crashscope/scenes/
 
 # 清理隔离区（一次性验证工程与历史产物，可确认后删除）
 _quarantine_*/
+
+# 内核构建清单（tools/构建全部.ps1 成功路径写出，发布门禁 [1/11] 的输入；每次构建都变，不入库）
+.3fc_kernel_build.json
