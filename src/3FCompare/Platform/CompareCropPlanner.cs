@@ -175,6 +175,112 @@ public static class CompareCropPlanner
         return new Rect(Math.Floor((outputWidth - w) / 2), Math.Floor((outputHeight - h) / 2), w, h);
     }
 
+    /// <summary>各路源尺寸的<b>最小宽高</b> —— 像素级对齐的基准尺寸。
+    /// 未知路（(0,0)：演示模式 / 纯音频 / 会话已释放）不参与；全部未知时返回 (0,0)。
+    ///
+    /// <para><b>为什么取最小值而不是某一路</b>：基准若取高分辨率的那一路，
+    /// 低分辨率路要露出的像素数会<b>超过它自己的整幅画面</b> ⇒ 无法表达（只能退回整幅，
+    /// 对齐失效）。取最小值则每一路都容得下，对齐对所有路同时成立。</para></summary>
+    public static PixelSize MinSourceSize(IReadOnlyList<PixelSize> sources)
+    {
+        var minW = 0;
+        var minH = 0;
+        for (var i = 0; i < sources.Count; i++)
+        {
+            var s = sources[i];
+            if (s.Width <= 0 || s.Height <= 0) continue;
+            if (minW == 0 || s.Width < minW) minW = s.Width;
+            if (minH == 0 || s.Height < minH) minH = s.Height;
+        }
+        return new PixelSize(minW, minH);
+    }
+
+    /// <summary>像素级对齐下某一路的<b>有效放大倍数</b>。
+    ///
+    /// <para><b>推导（关键：只改裁剪位置做不到像素级对齐）</b>：<see cref="Magnify"/> 的构造决定
+    /// "格恒好露出源画面的 1/z"，即露出的源像素尺寸恒为 <c>(W/z, H/z)</c> —— 只挪 crop
+    /// 只能改变位置，改变不了尺寸。要让各路露出<b>相同像素尺寸</b>，必须让各路的<b>有效 z 不同</b>：
+    /// <c>z_i = z·W_i/baseW</c> ⇒ 露出 <c>(W_i/z_i) = baseW/z</c>，与路号无关。</para>
+    ///
+    /// <para><b>以宽度为基准</b>：宽高比不同的两路无法同时对齐宽与高（只能对齐一个维度），
+    /// 取横向分辨率作基准（它是"分辨率"通常所指的维度）。宽高比一致时纵向自动也对齐。</para>
+    ///
+    /// <para><b>副作用必须知晓</b>：<c>z_i ≥ z</c>，高分辨率路的窗口会<b>比共用倍率大得多</b>
+    /// （4K 与 1080p 同场、z=2 ⇒ 4K 路的有效倍率为 8）。像素预算闸门必须按 <c>z_i</c> 估算，
+    /// 否则会低估到 1/16 —— 见 <c>EstimateCompareMagnifyPixels</c>。</para></summary>
+    /// <param name="zoom">共用倍率（≤1 按 1）。</param>
+    /// <param name="sourceWidth">该路源宽（像素）。</param>
+    /// <param name="baseWidth">基准源宽（各路最小值）。</param>
+    /// <returns>该路的有效倍率；源尺寸或基准非法时返回 <paramref name="zoom"/>（退化）。</returns>
+    public static double AlignedZoom(double zoom, int sourceWidth, int baseWidth)
+    {
+        if (sourceWidth <= 0 || baseWidth <= 0) return zoom > 1.0 ? zoom : 1.0;
+        var z = zoom > 1.0 ? zoom : 1.0;
+        // 基准取最小值 ⇒ 比值 ≥ 1 ⇒ z_i ≥ z，不会出现"比共用倍率还小"的窗口
+        return z * ((double)sourceWidth / baseWidth);
+    }
+
+    /// <summary>像素级对齐下某一路的裁剪分量（源画面归一化坐标）。
+    ///
+    /// <para><b>推导</b>：共用参数 <paramref name="viewFraction"/>（0~1，0=贴左/上、1=贴右/下）
+    /// 表示"视口在可平移范围内的位置"。可平移的<b>源像素</b>范围为
+    /// <c>baseSize·(1-1/z)</c>（基准路整个可平移区间），故露出区间的<b>像素起点</b>
+    /// <c>p = view·baseSize·(1-1/z)</c>；各路起点必须相同 ⇒ 归一化分量
+    /// <c>crop = p / sourceSize</c>。</para>
+    ///
+    /// <para><b>恒在画面内</b>：<c>crop + 1/z_i = (baseSize/sourceSize)·(view·(1-1/z) + 1/z) ≤ 1</c>
+    /// （<c>baseSize ≤ sourceSize</c>、<c>view ≤ 1</c>）⇒ 区域不会越出画面、也不会打洞。</para>
+    ///
+    /// <para><b>与相对对齐的分界</b>：相对对齐下 crop 直接就是归一化位置、各路相同；
+    /// 这里 crop 逐路不同、且 <paramref name="viewFraction"/> 的含义从"归一化位置"变成了
+    /// "可平移范围内的相对位置" —— 语义变了，故调用方必须经本方法取值。</para></summary>
+    public static double AlignedCrop(double viewFraction, double zoom, int sourceSize, int baseSize)
+    {
+        if (sourceSize <= 0 || baseSize <= 0) return ClampUnit(viewFraction);
+
+        var z = zoom > 1.0 ? zoom : 1.0;
+        var p = ClampUnit(viewFraction) * baseSize * (1.0 - 1.0 / z);
+        var crop = p / sourceSize;
+
+        // 防御：钳到 [0, 1-1/z_i]，保证区域右边界不出画面（正常路径本就满足）
+        var zi = AlignedZoom(zoom, sourceSize, baseSize);
+        var maxCrop = MaxCropFraction(zi);
+        return crop < 0 ? 0 : crop > maxCrop ? maxCrop : crop;
+    }
+
+    /// <summary>把视口位置钳到 [0,1]；NaN → 0（NaN 矩形会让 <c>SetWindowRgn</c> 收到翻转矩形）。</summary>
+    private static double ClampUnit(double v)
+    {
+        if (double.IsNaN(v)) return 0;
+        if (v < 0) return 0;
+        return v > 1 ? 1 : v;
+    }
+
+    /// <summary>以画面上的某点为锚点缩放：求新倍率下应当露出的区间左上角（源画面归一化坐标）。
+    ///
+    /// <para><b>推导</b>：设当前倍率 <c>z0</c>、露出区间左上角 <c>u0</c>、锚点的源坐标 <c>u</c>
+    /// （通常是光标下的那一点）。缩放前后锚点在屏幕上的相对位置必须不变：
+    /// <c>(u-u0)·z0 == (u-u1)·z1</c> ⇒ <c>u1 = u - (u-u0)·z0/z1</c>。</para>
+    ///
+    /// <para><b>为什么抽成纯函数</b>：它是"滚轮锚点缩放"的唯一算术，留在 UI 侧就只能靠
+    /// 真机目视验证（光标位置无法在自测里精确控制）。抽出来后 <c>CompareCropPlannerAnchorTests</c>
+    /// 能直接钉住"锚点不动"这条性质 —— 摘掉 <c>z0/z1</c> 这个比例因子（写成 <c>1/z1</c>）
+    /// 时用例会判红，而那正是"从 2× 继续放大时画面会跳"的成因。</para>
+    ///
+    /// <para>返回值<b>未</b>钳到 <c>[0, MaxCropFraction(z1)]</c>：钳位是调用方的责任
+    /// （它需要同时对 X / Y 做，并在此后还可能因超预算整体放弃）。</para></summary>
+    /// <param name="anchorFraction">锚点的源画面归一化坐标（0~1）。</param>
+    /// <param name="currentCrop">当前露出区间左上角的源画面归一化坐标。</param>
+    /// <param name="zoomFrom">当前倍率（≤1 视为 1）。</param>
+    /// <param name="zoomTo">目标倍率（≤1 时原样返回 <paramref name="currentCrop"/>）。</param>
+    public static double AnchorCrop(double anchorFraction, double currentCrop, double zoomFrom, double zoomTo)
+    {
+        if (!(zoomTo > 0)) return currentCrop;
+        var z0 = zoomFrom > 1.0 ? zoomFrom : 1.0;
+        if (double.IsNaN(anchorFraction) || double.IsNaN(currentCrop)) return 0;
+        return anchorFraction - (anchorFraction - currentCrop) * (z0 / zoomTo);
+    }
+
     /// <summary>裁剪参数的合法上界：露出 1/z 的画面 ⇒ 左上角最多到 <c>1 - 1/z</c>。
     /// 超过它区域就会越出窗口，而 <c>SetWindowRgn</c> 会静默裁掉越界部分 ⇒ 格内出现空洞。</summary>
     public static double MaxCropFraction(double zoom)
@@ -235,8 +341,16 @@ public static class CompareCropPlanner
         var rW = fit.Width / zoom;
         var rH = fit.Height / zoom;
 
+        // 内容框**居中**到格里（原先钉在格的左上角）。居中不改变区域尺寸、也不改变区域在
+        // 窗口内的位置 ⇒ 回推到源画面的区间一动不动，"各路恒露出整幅的 1/zoom"这条构造性质
+        // （见 Magnify_WithLetterbox_RegionSizeIsFitDividedByZoom 与自测判据⑤）原样保持。
+        // 改的只是窗口偏移，而 Arrange 与裁剪下发同源于本函数 ⇒ 两侧自动一致。
+        // rW ≤ cell.Width 恒成立（fit.Width ≤ wW = cell.Width·zoom），故偏移非负、无需钳。
+        var offX = (cellDip.Width - rW) / 2;
+        var offY = (cellDip.Height - rH) / 2;
+
         return new MagnifyGeometry(
-            new Rect(cellDip.X - rX, cellDip.Y - rY, wW, wH),
+            new Rect(cellDip.X + offX - rX, cellDip.Y + offY - rY, wW, wH),
             new Rect(rX, rY, rW, rH),
             fit);
     }

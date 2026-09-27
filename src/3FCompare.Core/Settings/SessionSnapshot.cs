@@ -5,6 +5,20 @@ namespace _3FCompare.Core.Settings;
 /// <summary>会话快照：保存各路文件、偏移、布局、当前帧、循环区间（F23），JSON 序列化。</summary>
 public sealed class SessionSnapshot
 {
+    /// <summary>单路偏移的合理上限（±24 小时，100ns 单位 = 8.64e11）。
+    /// 外部 .3fcs 里的 <see cref="SessionItem.Offset100ns"/> 是**未校验的 long**，
+    /// 极端值（如 long.MinValue）会让"位置 − 期望"溢出抛 OverflowException，
+    /// 把整个位置轮询打断（位置/时间码停更、界面形似卡死，docs/45 P1-9）。
+    /// 加载侧负责钳制、比较侧负责过滤，两边都以此为准。</summary>
+    public const long MaxOffset100ns = 24L * 3600 * 10_000_000;
+
+    /// <summary>快照格式版本号。**默认必须给 0**：System.Text.Json 会先跑属性初始化器
+    /// 再用 JSON 覆盖，没有该字段的旧 .3fcs 反序列化后就落在初始值上 ⇒
+    /// 只有初始值是 0 时才能区分"旧格式（0）"与"新格式"。</summary>
+    public const int CurrentVersion = 1;
+
+    public int Version { get; set; }
+
     public List<SessionItem> Items { get; set; } = new();
 
     public int GridLayout { get; set; } = 1; // 0=自动, 1=单屏, 2=2x2, 3=3x3
@@ -26,7 +40,10 @@ public sealed class SessionSnapshot
     }
 
     public string ToJson()
-        => JsonSerializer.Serialize(this, JsonAotContext.Default.SessionSnapshot);
+    {
+        Version = CurrentVersion; // 仅在落盘时定版：反序列化侧靠"0"识别旧格式
+        return JsonSerializer.Serialize(this, JsonAotContext.Default.SessionSnapshot);
+    }
 
     public static SessionSnapshot? FromJson(string json)
     {

@@ -13,7 +13,9 @@ public sealed class Fff3FpEngine : IPlayerEngine
     // 且要求 `size >= sizeof(FFF3FPConfiguration)` ⇒ 内核与托管侧必须同步递增，否则全部会话创建失败。
     //   14 = 内核 2026.9.11 合并（f25c28f）起
     //   15 = 3FCompare A11 扩展：新增 FFF3FPConfiguration.preferredAdapterIndex（2026-09-16）
-    private const uint ConfigVersion = 15;
+    // internal：EngineFactory 的版本门必须与这里同源（内核对 version 严格相等），
+    // 两处各写一个字面量迟早会漂移（docs/45 P1-1）。
+    internal const uint ConfigVersion = 15;
 
     public IReadOnlyList<AdapterInfo> EnumerateAdapters()
     {
@@ -78,7 +80,10 @@ public sealed class Fff3FpEngine : IPlayerEngine
         return session;
     }
 
-    private sealed class Fff3FpSession : IPlayerSession
+    // internal 而非 private：docs/41 §4.5 #2 要把本类里的 ParseMediaInfoJson 纳入单测，
+    // 而 private 的宿主类型会把它的 internal 成员一起挡在程序集之外
+    //（IVT 只放开 internal，放开不了 private 嵌套类型）—— 只改方法可见性是够不到的。
+    internal sealed class Fff3FpSession : IPlayerSession
     {
         private readonly EngineSessionOptions _options;
         private nint _handle;
@@ -163,6 +168,7 @@ public sealed class Fff3FpEngine : IPlayerEngine
         // ------------------------------------------------------------------
         // 过去每个方法都是"先 ThrowIfDisposed() 再裸调 P/Invoke"，而 Dispose 的顺序是
         //   ① Interlocked.Exchange(_disposedFlag,1) → ② lock(_nativeGate) → ③ Destroy
+        // （②③ 现已合并为"写锁内先置位再 Destroy"，见 Dispose 的 #9 注释）
         // 于是存在这样的窗口：线程 A 通过 ① 之后的标志位检查（此时还没到 ②），
         // 线程 B 走完 ③ 把句柄销毁，A 随后拿着已释放的句柄进原生 ⇒ 0xC0000005，
         // 托管侧不可 catch。必须把"取句柄"和"用句柄"放进同一个临界区，
@@ -458,7 +464,10 @@ public sealed class Fff3FpEngine : IPlayerEngine
         }
 
         /// <summary>解析 3FP GetMediaInfo 的嵌套 JSON（英文驼峰字段，见诊断 dump）。</summary>
-        private static EngineMediaInfo? ParseMediaInfoJson(string json)
+        // internal 而非 private：媒体信息面板的**唯一**数据来源，必须可单测（docs/41 §4.5 #2）。
+        // 配合 Testability.cs 的 InternalsVisibleTo("3FCompare.Core.Tests")，
+        // 不必把它提升成 public（那会让内部解析契约变成公共 API）。
+        internal static EngineMediaInfo? ParseMediaInfoJson(string json)
         {
             if (string.IsNullOrWhiteSpace(json)) return null;
             try
@@ -675,7 +684,9 @@ public sealed class Fff3FpEngine : IPlayerEngine
             var rtInfo = new Fff3FpRenderTargetInfo
             {
                 Size = (uint)RenderTargetInfoSize,
-                Version = 1,
+                // v2 = destX/destY 有符号。内核只接受 2（v1 与 v2 布局同宽，无法靠 size 区分，
+                // 收下方负原点会让 v1 调用方读成一个巨大无符号值 ⇒ 宁可 InvalidArgument）。
+                Version = 2,
             };
             var result = WithNative<FffResult>(h => Fff3FpNative.FFF3FP_GetRenderTargetInfo(h, ref rtInfo));
             if (result != FffResult.Success)
@@ -693,15 +704,40 @@ public sealed class Fff3FpEngine : IPlayerEngine
 
         public void Dispose()
         {
-            // 原子守卫：并发 Dispose 只有一个线程能进入销毁路径，杜绝 double-free
-            if (Interlocked.Exchange(ref _disposedFlag, 1) != 0) return;
-
             EngineEvent = null; // 脱离回调，防止释放后仍在触发
+
+            // docs/41 #9：标志位必须移到**成功取得写锁之后**置位，否则会永久泄漏句柄。
+            // 旧顺序是「先 Interlocked.Exchange(_disposedFlag,1)，再 EnterWriteLock」：
+            // 若本线程此刻已持读锁（持读锁执行的原生调用同步反向 P/Invoke 进托管回调、
+            // 回调链上又 Dispose 了本会话），EnterWriteLock 会抛 LockRecursionException
+            // —— ReaderWriterLockSlim 即使用 SupportsRecursion 也**禁止读锁内升级到写锁**
+            // （读锁持有者去等写锁，可能与其它读锁持有者互等而死锁，故直接抛）。
+            // 异常一抛，Destroy 永不执行，而标志已是 1、本类又没有终结器 ⇒ 原生句柄 +
+            // 整个会话图永久泄漏且无法重试。
+            // 现在标志与 Destroy 同在写锁内、且先于 Destroy 置位：EnterWriteLock 失败时
+            // 对象保持"未销毁"的一致状态（句柄有效、标志仍为 0），调用方可在别的线程重试；
+            // 成功时仍由 Interlocked 保证**恰好一个**线程执行 Destroy —— 防 double-free /
+            // use-after-free 的原意不变，只是把"静默永久泄漏"换成"一次响亮的异常"。
+            //
             // 写锁：等待所有在飞的读锁（含耗时最长的 Open）退出后才销毁句柄 ——
             // 这正是 use-after-free 的修复点；同时读锁之间仍可并发，不会冻住 UI 线程。
+            //
+            // docs/41 #8（**刻意不修**，仅记录权衡）：这把写锁与在飞的读锁互斥，而读锁里
+            // 有耗时的 FFF3FP_Open（数百 ms～数秒）。调用点 MainWindow.axaml.cs:2522 的
+            // OnClosing → DestroyAllSessions() 跑在 UI 线程上，于是关窗/换片时 UI 会卡在
+            // EnterWriteLock（若内核 Open 需要 UI 泵消息，还会升级成挂起）。
+            // 评估过的 TryEnterWriteLock(超时) + 后台线程销毁方案被否决：那会让 Dispose
+            // 返回时句柄仍活着，而调用方紧接着就销毁窗口/设备，原生会话仍持有该窗口与
+            // presenter ⇒ 把"UI 冻结"换成原生侧 use-after-free；把 _callbackContext.Free()
+            // 一并推迟，又会在"原生还活着"的窗口里放大回调路径的悬空 GCHandle 风险。
+            // 依"宁可不改也不引入 UAF / 死锁 / 双重释放"，正确性优先于卡顿；正确解在调用方
+            // （UI 线程不直接同步销毁会话），不在本文件范围内。
             _nativeGate.EnterWriteLock();
             try
             {
+                // 原子守卫：并发 Dispose 只有一个线程能进入销毁路径，杜绝 double-free
+                if (Interlocked.Exchange(ref _disposedFlag, 1) != 0) return;
+
                 if (_handle != 0)
                 {
                     var handle = _handle;

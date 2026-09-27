@@ -41,6 +41,16 @@ public static class AppLog
     private static volatile bool _flushRequested;
     private static Thread? _worker;
 
+    /// <summary>worker 世代号。每次 <see cref="ResetForTests"/> 递增一次；后台线程每轮循环
+    /// 自检自己出生时的世代号，一旦过期就自行退出。
+    ///
+    /// <para><b>为什么必须有它</b>：<see cref="ResetForTests"/> 等旧 worker 停止时最多等 5 秒，
+    /// 超时后原先<b>无条件</b>把它置空并新建一个 —— 但卡住的旧线程并没有真的停掉，
+    /// 它成了孤儿，且与新 worker 共用同一个静态 <c>Queue</c> / <c>_writer</c>：
+    /// 两个消费者抢同一条队列，表现为测试里偶发的重复日志行（flaky）。
+    /// 有了世代号，旧线程即使卡住后苏醒，也会在下一轮自检时自行退出。</para></summary>
+    private static int _generation;
+
     /// <summary>保留时长（小时）。超过即自动清理。</summary>
     public const double RetentionHours = 24;
 
@@ -96,7 +106,68 @@ public static class AppLog
 
     /// <summary>logs 目录完整路径。</summary>
     public static string LogsDirectory =>
-        Path.Combine(AppContext.BaseDirectory, "logs");
+        _logsDirectoryOverride ?? Path.Combine(AppContext.BaseDirectory, "logs");
+
+    /// <summary>测试专用：日志目录覆盖（null = 生产行为，即 exe 同目录下的 logs/）。
+    /// 只由 <see cref="ResetForTests"/> 设置，生产代码从不碰它。</summary>
+    private static string? _logsDirectoryOverride;
+
+    /// <summary>测试专用：把 <see cref="AppLog"/> 复位成"未初始化"并（可选）把日志目录改写到指定位置。
+    ///
+    /// <para><b>为什么这个 seam 是必需的（而不是"为了好测"）</b>：<see cref="AppLog"/> 是
+    /// 进程级单例，且 <see cref="Shutdown"/> 之后 <c>_worker</c> 仍非 null ⇒
+    /// <see cref="Initialize"/> 的幂等判断会让它<b>永久</b>变成 no-op。
+    /// 于是"溢出提示只发一次 / 超期清理 / 超上限分片 / Shutdown 后不写"这四条
+    /// （docs/41 §4.5 第 13 项）在同一个进程里既无法各自从干净状态开始，也无法重跑
+    /// —— 没有复位入口时，一个测试进程只能初始化一次日志系统。</para>
+    ///
+    /// <para>另外 <see cref="LogsDirectory"/> 由 <c>AppContext.BaseDirectory</c> 决定，
+    /// 不改写就只能往测试输出目录里写日志（与 docs/41 §4.5 要求的 <c>TempDir</c> 相悖）。</para>
+    ///
+    /// <para><b>调用方责任</b>：会停掉后台写线程，必须串行化（放进
+    /// <c>DisableParallelization</c> 的测试集合）。</para>
+    ///
+    /// <para><b>等待超时怎么办</b>：只等 5 秒。超时不代表旧 worker 已经死了，
+    /// 所以这里<b>递增世代号</b>把旧线程作废——它下一轮自检即自行退出，
+    /// 不会成为与新 worker 抢队列 / writer 的孤儿线程。</para>
+    /// </summary>
+    internal static void ResetForTests(string? logsDirectoryOverride = null)
+    {
+        lock (InitLock)
+        {
+            // 先让旧 worker 退出：置 flush 请求 + 递增世代号。
+            // 世代号是关键——下面最多只等 5 秒，超时就只能放弃等待；
+            // 若旧线程卡住后苏醒，它会在下一轮自检时发现世代已过期而自行退出，
+            // 不会再碰（新世代的）队列和 writer。
+            _flushRequested = true;
+            Interlocked.Increment(ref _generation);
+
+            var worker = _worker;
+            if (worker is not null && worker.IsAlive)
+            {
+                var deadline = Environment.TickCount64 + 5000;
+                while (worker.IsAlive && Environment.TickCount64 < deadline)
+                    Thread.Sleep(10);
+            }
+
+            lock (WriterLock)
+            {
+                try { _writer?.Flush(); _writer?.Dispose(); } catch { }
+            }
+
+            _writer = null;
+            _worker = null;
+            _flushRequested = false;
+            while (Queue.TryDequeue(out _)) { }
+
+            _bytesWritten = 0;
+            _rolloverIndex = 0;
+            _logDate = string.Empty;
+            _logFilePath = null;
+            Interlocked.Exchange(ref _overflowReported, 0);
+            _logsDirectoryOverride = logsDirectoryOverride;
+        }
+    }
 
     /// <summary>
     /// 初始化（幂等且线程安全）。必须在 Main 最先调用——早于任何引擎/UI 初始化。
@@ -132,10 +203,32 @@ public static class AppLog
                 WriteRaw($"══════════ 会话开始 {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} " +
                          $"PID={Environment.ProcessId} ══════════");
                 WriteRaw($"版本={typeof(AppLog).Assembly.GetName().Version} " +
-                         $"OS={Environment.OSVersion.VersionString} " +
-                         $"64bit={Environment.Is64BitProcess}");
+                         $"64bit={Environment.Is64BitProcess} " +
+                         $"OS={Environment.OSVersion.VersionString}");
+                // 构建身份必须进日志：今天三次踩到"读数做完了，说不出它跑的是哪份二进制"
+                // （其中一个原因是回退改动的那次构建被文件占用挡住了，盘上留着的是上一份）。
+                // 只打路径/写入时间/大小 + 内嵌的 git SHA（InformationalVersion 带 +<sha>），
+                // 不算哈希：33 MB 的单文件包每次启动都哈希一遍不划算。
+                try
+                {
+                    var exePath = Environment.ProcessPath ?? "(未知)";
+                    var fi = new System.IO.FileInfo(exePath);
+                    var iv = typeof(AppLog).Assembly
+                        .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+                        is { Length: > 0 } aiv
+                            ? ((System.Reflection.AssemblyInformationalVersionAttribute)aiv[0]).InformationalVersion
+                            : "(无)";
+                    WriteRaw($"构建身份 exe={exePath} mtime={fi.LastWriteTimeUtc:yyyy-MM-dd HH:mm:ss}Z " +
+                             $"size={fi.Length} informational={iv}");
+                }
+                catch (Exception ex)
+                {
+                    WriteRaw($"构建身份: 读取失败 {ex.GetType().Name}");
+                }
 
-                _worker = new Thread(WorkerLoop)
+                // 把"出生时的世代号"钉进线程闭包：worker 靠它判断自己是否已被 ResetForTests 作废
+                var generation = Volatile.Read(ref _generation);
+                _worker = new Thread(() => WorkerLoop(generation))
                 {
                     IsBackground = true,
                     Name = "AppLog.Writer",
@@ -239,10 +332,29 @@ public static class AppLog
 
     private static void Enqueue(string level, string module, string message)
     {
-        if (_writer is null) return; // 未初始化（极早期崩溃）：丢弃但不抛
         var line = $"{DateTime.Now:HH:mm:ss.fff} [{level,-5}] [{module}] {message}";
+        if (_writer is null)
+        {
+            // 未初始化（极早期崩溃）或已 Shutdown：丢弃是既定取舍——写日志绝不能把进程卡住
+            // （见 Shutdown 里 TryEnter(2s) 那段）。但"丢"必须留下痕迹：否则事后看日志只看到
+            // 戛然而止，分不清"事情没发生"还是"发生了没记上"，而这正是查崩溃时最需要的区分。
+            // 只报一次，避免在退出路径上刷出一条循环。
+            var n = System.Threading.Interlocked.Increment(ref _droppedAfterStop);
+            if (System.Threading.Interlocked.CompareExchange(ref _dropNoticePrinted, 1, 0) == 0)
+            {
+                try { Console.Error.WriteLine($"[AppLog] 日志器已停止，本行起 {level}/{module} 不再落盘；首条被丢：{line}"); }
+                catch { /* Console 也被重定向/关闭过：没有别的出口了 */ }
+            }
+            return;
+        }
         TryEnqueue(line);
     }
+
+    private static int _droppedAfterStop;
+    private static int _dropNoticePrinted;
+
+    /// <summary>已停止后累计丢弃了多少行（供测试与收尾诊断读取；0 = 从未在停止后写过日志）。</summary>
+    public static int DroppedAfterStop => System.Threading.Volatile.Read(ref _droppedAfterStop);
 
     /// <summary>内核/原生侧直通入口（绕过格式化，原生已带时间戳时可用）。</summary>
     public static void Raw(string line)
@@ -278,21 +390,32 @@ public static class AppLog
 
     private static void WriteRaw(string line) => _writer?.WriteLine(line);
 
-    private static void WorkerLoop()
+    /// <summary>后台落盘线程。<paramref name="generation"/> 是它出生时的世代号。</summary>
+    private static void WorkerLoop(int generation)
     {
+        // 本世代专属的 writer 引用：写盘**不**通过静态字段取用。
+        // 世代切换后新 worker 拿到新 writer，而本线程只可能写自己这一份
+        //（已被 ResetForTests Dispose）⇒ 即使卡住后苏醒，也绝不会污染新世代的日志。
+        var writer = Volatile.Read(ref _writer);
         var consecutiveFailures = 0;
         while (true)
         {
+            // 世代自检：ResetForTests 已经换过新 worker ⇒ 本线程属于旧世代，立即退出。
+            if (IsStaleGeneration(generation)) return;
+
             var wrote = false;
             while (Queue.TryDequeue(out var line))
             {
+                // 每写一条都再自检一次：旧线程最多多走一条就到点，不会长期与新 worker 抢队列
+                if (IsStaleGeneration(generation)) return;
                 lock (WriterLock)
                 {
+                    if (IsStaleGeneration(generation)) return;
                     try
                     {
                         // 滚动判据只是个 long 比较，超限才碰文件系统，可以逐条调用
-                        RollOverIfNeededLocked();
-                        _writer?.WriteLine(line);
+                        writer = RollOverIfNeededLocked(writer);
+                        writer?.WriteLine(line);
                         consecutiveFailures = 0;
                     }
                     catch
@@ -307,12 +430,14 @@ public static class AppLog
             }
             if (wrote)
             {
-                lock (WriterLock) { try { _writer?.Flush(); } catch { } }
+                lock (WriterLock) { try { writer?.Flush(); } catch { } }
             }
+
+            if (IsStaleGeneration(generation)) return;
 
             if (_flushRequested && Queue.IsEmpty)
             {
-                lock (WriterLock) { try { _writer?.Flush(); } catch { } }
+                lock (WriterLock) { try { writer?.Flush(); } catch { } }
                 return;
             }
             // 无内容时低频休眠；有积压时立即继续
@@ -320,11 +445,16 @@ public static class AppLog
         }
     }
 
-    /// <summary>按大小滚动到下一个分片（B6）。必须在 <see cref="WriterLock"/> 内调用。</summary>
-    private static void RollOverIfNeededLocked()
+    /// <summary>本线程的世代号是否已作废（<see cref="ResetForTests"/> 已换过新 worker）。</summary>
+    private static bool IsStaleGeneration(int generation)
+        => Volatile.Read(ref _generation) != generation;
+
+    /// <summary>按大小滚动到下一个分片（B6）。必须在 <see cref="WriterLock"/> 内调用。
+    /// 返回滚动后应继续使用的 writer（未滚动时原样返回 <paramref name="writer"/>）。</summary>
+    private static StreamWriter? RollOverIfNeededLocked(StreamWriter? writer)
     {
-        if (_writer is null) return;                       // 已 Shutdown：不要复活日志
-        if (Volatile.Read(ref _bytesWritten) < MaxLogFileBytes) return;
+        if (writer is null) return null;                    // 已 Shutdown：不要复活日志
+        if (Volatile.Read(ref _bytesWritten) < MaxLogFileBytes) return writer;
 
         try
         {
@@ -335,23 +465,26 @@ public static class AppLog
                 var existing = SafeFileLength(candidate);
                 if (existing >= MaxLogFileBytes) continue;  // 这一片也已写满，继续往后找
 
-                try { _writer.Flush(); } catch { }
-                _writer.Dispose();
+                try { writer.Flush(); } catch { }
+                writer.Dispose();
                 _logFilePath = candidate;
                 _bytesWritten = existing;
-                _writer = new StreamWriter(candidate, append: true, Encoding.UTF8)
+                var next = new StreamWriter(candidate, append: true, Encoding.UTF8)
                 {
                     AutoFlush = false,
                 };
-                WriteRaw($"────────── 日志分片续写 #{_rolloverIndex}" +
-                         $"（上一片已达 {MaxLogFileBytes / (1024 * 1024)}MB）──────────");
-                return;
+                // 静态字段同步指向新分片：Enqueue/Raw 的 null 判据与 Shutdown 的释放都看它
+                _writer = next;
+                next.WriteLine($"────────── 日志分片续写 #{_rolloverIndex}" +
+                               $"（上一片已达 {MaxLogFileBytes / (1024 * 1024)}MB）──────────");
+                return next;
             }
         }
         catch
         {
             // 滚动失败就继续往当前文件写，总比丢日志好
         }
+        return writer;
     }
 
     /// <summary>日志文件名：index 0 = app-yyyy-MM-dd.log，其余 = app-yyyy-MM-dd_N.log。

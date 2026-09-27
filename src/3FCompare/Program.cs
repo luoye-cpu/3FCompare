@@ -103,6 +103,45 @@ internal static class Program
         }
         catch { /* 忽略失败 */ }
 
+        // ── 崩溃自愈（docs/43）：子进程标记 ──
+        // 由守护进程拉起的这一代带 { --child, 父进程 PID }。必须先于其它分发处理：
+        // ① 剥掉这两个参数，后面的模式分发看到的才是用户真正的命令行；
+        // ② 装上"父进程存活"看门狗，避免守护被强杀后本进程变成孤儿。
+        var isGuardChild = false;
+        if (args.Length >= 2 && args[0] == _3FCompare.Diagnostics.CrashGuard.ChildArg)
+        {
+            isGuardChild = true;
+            var ppid = int.TryParse(args[1], out var parsedPid) ? parsedPid : 0;
+            _3FCompare.Diagnostics.CrashGuard.StartParentWatcher(ppid);
+            var rest = args[2..];
+            // 自检子进程体：前 N 次以访问违规退出，用来端到端验证守护循环
+            if (rest.Length >= 2 && rest[0] == _3FCompare.Diagnostics.CrashGuard.SelfTestArg)
+            {
+                var counter = rest[1];
+                var times = rest.Length >= 3 && int.TryParse(rest[2], out var ct)
+                    ? ct : _3FCompare.Diagnostics.CrashGuard.MaxConsecutiveRestarts - 1;
+                Environment.Exit(_3FCompare.Diagnostics.CrashGuard.RunSelfTestChild(counter, times));
+            }
+            args = rest;
+        }
+
+        // ── 崩溃自愈：守护自检（父侧）── 不需要真的制造原生崩溃，见 CrashGuard.RunSelfTest
+        if (args.Length >= 2 && args[0] == _3FCompare.Diagnostics.CrashGuard.SelfTestArg)
+        {
+            var counter = args[1];
+            var times = args.Length >= 3 && int.TryParse(args[2], out var ct)
+                ? ct : _3FCompare.Diagnostics.CrashGuard.MaxConsecutiveRestarts - 1;
+            Environment.Exit(_3FCompare.Diagnostics.CrashGuard.RunSelfTest(counter, times));
+        }
+
+        // ── 崩溃自愈：守护模式 ──
+        // 只在"裸 GUI 启动"（命令行里没有任何 -- 前缀参数）时生效。所有自动化门禁
+        // 都带模式位，因此不受影响；子进程带 --child，天然不递归。
+        if (!isGuardChild && _3FCompare.Diagnostics.CrashGuard.ShouldGuard(args))
+        {
+            Environment.Exit(_3FCompare.Diagnostics.CrashGuard.RunGuard(args));
+        }
+
         // --selftest <video> [video2]：video2 用于嵌入式 UI 消息注入拖入测试（可选）
         if (args.Length >= 2 && args[0] == "--selftest")
         {
@@ -122,9 +161,14 @@ internal static class Program
             return;
         }
         // --autodemo <files...>：自动打开并播放（演示/巡检模式）
-        if (args.Length >= 3 && args[0] == "--autodemo")
+        if (args.Length >= 3 && args[0] == _3FCompare.Diagnostics.CrashGuard.AutodemoArg)
         {
-            AutodemoFiles = args[1..];
+            // 过滤掉 `--` 前缀项：崩溃自愈重启时 CrashGuard 会把 `--crash-restore` 追加到
+            // 命令行末尾（`--child` + PID 已在上面剥离），它不是素材路径。
+            // 原实现直接 `args[1..]` ⇒ 重启后的这一代会把恢复标记当成一路素材去打开
+            //（docs/45 P1-2），表现为路数虚增、failed+1。
+            AutodemoFiles = Array.FindAll(args[1..],
+                a => !a.StartsWith("--", StringComparison.Ordinal));
             var exitCode = 1;
             try
             {

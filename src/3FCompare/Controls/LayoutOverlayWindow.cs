@@ -5,6 +5,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Media;
+using _3FCompare.Core.Diagnostics;
 using _3FCompare.Core.Display;
 
 namespace _3FCompare.Controls;
@@ -21,10 +22,16 @@ namespace _3FCompare.Controls;
 /// <para><b>Z 序：靠 Owner，<u>不</u>用 Topmost</b>。真正的需求是「高于主窗口（及其视频子
 /// HWND），但<b>不</b>高于其他应用」。<c>Topmost</c> 做不到后半句 —— 它的语义是"高于<b>所有</b>
 /// 非 topmost 窗口"，Win32 置顶带与 owner 关系无关，于是切到别的程序时分割线/手柄仍浮在最上面
-/// （真机体验缺陷，本类曾如此）。改用 <see cref="Window.Owner"/> 后：owned 窗口恒定在 owner
-/// 之上（视频子 HWND 属于 owner，被一并盖住 ⇒ airspace 不退化）、不占任务栏、随 owner 最小化
-/// 隐藏，且与其他应用同处普通 Z 序带 —— 被别的程序盖住、被 owner 带回，都是"引用 owner"的自然
-/// 结果，无需自己管 Z 序。</para>
+/// （真机体验缺陷，本类曾如此）。改用 <see cref="Window.Owner"/> 换来的是：不占任务栏、随 owner
+/// 最小化隐藏、且与其他应用同处普通 Z 序带（不在置顶带，判据见 <see cref="HasTopmostStyle"/>）。</para>
+///
+/// <para>⚠ <b>但 owner 只是"盖得住画面"的必要条件，<u>不保证</u>次序</b>："owned 窗口恒定在
+/// owner 之上"这条说法已被真机读数否证 —— 同一个 owner 方案、同一条走链判据，放大镜覆盖窗上线前
+/// 可确证的 22 次读数里 <b>3 次（14%）排在主窗之下</b>，其中留了重试链的 2 例在 180ms×6 次采样里
+/// 恒为 Below（未观测到自愈），定案见 <c>docs/48 §3.7</c>。本站点是它的同构站点，所以
+/// <see cref="IsAboveHostInZOrder"/> 读的是<b>真机现状</b>而不是"结构上必然"；本窗口目前只做
+/// 持续观测（<see cref="ZOrderSamples"/> / <see cref="ZOrderBelowCount"/>），<b>未</b>装
+/// <c>HWND_TOP</c> 补插 —— 要不要装由这轮量出来的 rate 决定。</para>
 ///
 /// <para><b>Owner 必须显式设</b>（见 <see cref="ShowOverlay"/>）：不能只依赖 <c>Show(host)</c> ——
 /// 模式循环会在窗口<b>已可见</b>时再次调用 <see cref="ShowOverlay"/>，那条路径不会走
@@ -38,7 +45,8 @@ namespace _3FCompare.Controls;
 ///
 /// <para><b>鼠标穿透（关键）</b>：覆盖窗口铺满整个对比区，若不处理会吞掉全部鼠标消息，
 /// 使视频表面的选中 / 滚轮缩放 / 拖动平移统统失效。因此本窗口子类化自身 HWND，
-/// 在 <c>WM_NCHITTEST</c> 中<b>只在手柄命中半径内</b>返回 <c>HTCLIENT</c>，
+/// 在 <c>WM_NCHITTEST</c> 中<b>只在分割线 / 手柄的命中区内</b>返回 <c>HTCLIENT</c>
+/// （单轴手柄沿轴放开到整条线，交叉点型只放一个圆点，见 <see cref="HandleIndexAt(double,double,double,double,double)"/>），
 /// 其余位置一律 <c>HTTRANSPARENT</c>，把消息让给下层的视频子 HWND
 /// （视频 HWND 与本窗口同属 UI 线程，<c>HTTRANSPARENT</c> 的同线程转发语义成立）。
 /// 钩子是否安装成功见 <see cref="HitTestHookInstalled"/>。</para>
@@ -62,6 +70,20 @@ public sealed class LayoutOverlayWindow : Window
 
     /// <summary>手柄是否正在被拖动。</summary>
     public bool IsDragging => _dragging;
+
+    /// <summary>当前各手柄的归一化位置 —— <b>就是绘制与命中测试所用的那一份</b>。
+    ///
+    /// <para>自测据此断言"多手柄模式真的画了 / 判了 N 个手柄"，而不是只查 Core 的
+    /// <see cref="CompareLayout.HandleCount"/>：后者只能证明规则正确，证明不了覆盖层
+    /// 真的按它去画与判命中（漏改覆盖层的表现是"第二条线看不见、也抓不住"）。</para></summary>
+    public (double X, double Y)[] HandlePositions()
+    {
+        var count = CompareLayout.HandleCount(_mode);
+        var result = new (double X, double Y)[count];
+        for (var i = 0; i < count; i++)
+            result[i] = CompareLayout.HandlePositionAt(_mode, _split, i);
+        return result;
+    }
 
     /// <summary><c>WM_NCHITTEST</c> 钩子是否安装成功。
     /// <b>为 false 时本窗口会吞掉对比区内的全部鼠标消息</b>，宿主应据此禁用对比模式或降级。</summary>
@@ -87,33 +109,145 @@ public sealed class LayoutOverlayWindow : Window
         }
     }
 
-    /// <summary>诊断：覆盖层是否真的排在主窗口<b>之上</b>（顶层 Z 序里更靠前）。
+    /// <summary>诊断：走一次顶层链，报本覆盖层<b>此刻</b>是否排在主窗口之上（顶层 Z 序里更靠前）。
     /// <para>这是 airspace 不退化（分割线/手柄不被视频画面盖住）的可自动判定形式：视频子 HWND
-    /// 属于主窗口，只要本窗口高于 owner 就必然高于它们。Win32 保证 owned 窗口恒定在 owner 之上、
-    /// 且不会有第三个窗口插在两者之间，故该判据是确定的，不是"碰巧"。</para></summary>
-    public bool IsAboveHostInZOrder
-    {
-        get
-        {
-            if (_hwnd == nint.Zero) return false;
-            var hostHwnd = _host?.TryGetPlatformHandle()?.Handle ?? nint.Zero;
-            if (hostHwnd == nint.Zero) return false;
-
-            // 自顶向下走顶层窗口链：先遇到自己 ⇒ 在宿主之上。
-            for (var h = GetTopWindow(nint.Zero); h != nint.Zero; h = GetWindow(h, GW_HWNDNEXT))
-            {
-                if (h == _hwnd) return true;
-                if (h == hostHwnd) return false;
-            }
-            return false;
-        }
-    }
+    /// 属于主窗口，只要本窗口高于 owner 就必然高于它们。</para>
+    ///
+    /// <para>⚠ <b>它读的是真机现状，不是"结构上必然成立"的事</b>：owner 只是必要条件 —— Win32
+    /// <b>不保证</b> owned 窗口恒定在 owner 之上，也<b>不保证</b>两者之间不会插进第三个窗口。
+    /// 同一套 owner 方案 + 同一条走链判据在放大镜覆盖窗上实测：上线前可确证的 22 次读数里
+    /// <b>3 次（14%）为 Below</b>，其中 2 例在 180ms×6 次采样里恒为 Below（未观测到自愈），
+    /// 定案见 <c>docs/48 §3.7</c>。⇒ 本属性为 <c>true</c> 只代表"这一拍在上面"，为 <c>false</c>
+    /// 则是真出事了（用户看不见分割线）；长期发生率见 <see cref="ZOrderSamples"/> /
+    /// <see cref="ZOrderBelowCount"/>。</para>
+    ///
+    /// <para>⚠ 取证<b>不能</b>换成 <c>WindowFromPoint</c> 一类命中探针：本窗口对
+    /// <c>WM_NCHITTEST</c> 在手柄命中圈之外一律返回 <c>HTTRANSPARENT</c>（见
+    /// <see cref="HitTestWndProc"/>），命中测试按设计落到下层窗口 ⇒ 该探针对"在不在上面"
+    /// 没有分辨力，反而会在覆盖层正常工作时报"被遮挡"。</para></summary>
+    public bool IsAboveHostInZOrder => QueryChainPosition() == ChainPos.Above;
 
     /// <summary>诊断：是否仍带 <c>WS_EX_TOPMOST</c>。
     /// <para>这是自动化唯一能拿到的 Z 序证据 —— 真机 Z 序（"有没有盖住别的应用"）无法在进程内
     /// 断言，但"还在不在置顶带"可以。修掉"浮在所有窗口之上"后此值必须为 <c>false</c>。</para></summary>
     public bool HasTopmostStyle =>
         _hwnd != nint.Zero && (GetWindowLongPtr(_hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+
+    // ═══════════════ Z 序持续观测（只读数，不动手） ═══════════════
+    //
+    // 为什么要这一段：上面的判据原先只在自测进入某一步时被读一次，而放大镜站点实测到的翻转出现在
+    // **后续的呈现 / 位置回调**上 ⇒ 一次性采样在统计上等于没测。下面这几个计数只走链、只累加，
+    // 不调 SetWindowPos、不写样式、不动位置与焦点（纯观测）；是否给本站点装 HWND_TOP 补插，
+    // 由这一轮量出来的 rate 决定。
+
+    /// <summary>顶层走链的累计次数（rate 的分母）。只在窗口<b>已显示</b>且自身与宿主 HWND 都拿得到
+    /// 时才增加 —— 隐藏窗口仍在顶层链里，那时读到的 Below 与"用户看不见分割线"无关，是假样本。</summary>
+    public int ZOrderSamples { get; private set; }
+
+    /// <summary>其中判为 <b>Below</b>（本窗口排在主窗之下 ⇒ 分割线/手柄被视频画面盖住）的次数。</summary>
+    public int ZOrderBelowCount { get; private set; }
+
+    /// <summary>其中走完全链都没见到本窗口的次数。它与 Below 是<b>两种病</b>（Z 序 vs show/hide
+    /// 竞态或句柄取错），必须分开数，否则会把后者读成 Z 序缺陷。</summary>
+    public int ZOrderNotInChainCount { get; private set; }
+
+    /// <summary>其中<b>进入 Below 的边缘</b>次数（上一次读数不是 Below、这次是）。与
+    /// <see cref="ZOrderBelowCount"/> 一比就能把"被压下去一次后长期待着（不自愈 —— 放大镜实测
+    /// 正是这种）"和"反复抖动"分开：前者 below 很大而 flips=1，后者两者相近。</summary>
+    public int ZOrderFlipsToBelow { get; private set; }
+
+    /// <summary>诊断：<b>宿主</b>是否带 <c>WS_EX_TOPMOST</c>（参照
+    /// <see cref="MagnifierOverlayWindow.HostHasTopmostStyle"/> 的同名读数）。置顶带整体高于普通带：
+    /// 若主窗在置顶带而本窗口不在，那 <c>HWND_TOP</c> 也补不动 —— 这条读数用来区分"补插无效"与
+    /// "补插没被执行"，故一并写进翻转日志。</summary>
+    public bool HostHasTopmostStyle
+    {
+        get
+        {
+            var hostHwnd = _host?.TryGetPlatformHandle()?.Handle ?? nint.Zero;
+            return hostHwnd != nint.Zero
+                   && (GetWindowLongPtr(hostHwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+        }
+    }
+
+    /// <summary>走链的三态（内部判据）。分开"被压到主窗之下"与"压根不在链里"，理由见
+    /// <see cref="ZOrderNotInChainCount"/>。</summary>
+    private enum ChainPos { Above, Below, NotInChain }
+
+    /// <summary>上一次观测到的状态，<c>null</c> = 还没采过。只用来把日志压到翻转那一拍。</summary>
+    private ChainPos? _lastZOrder;
+
+    /// <summary>自顶向下走一次顶层链。<b>纯查询</b>：不计数、不写日志、不改任何窗口状态。
+    /// <para>链首必须用 <c>GetTopWindow(nint.Zero)</c>：<c>GetWindow(0, GW_HWNDFIRST)</c> 返回 0
+    /// ⇒ 整条走链一次都不执行 ⇒ 恒判 NotInChain（放大镜站点实测踩过，<c>docs/48 §3.7 ①</c>）。</para></summary>
+    private ChainPos QueryChainPosition()
+    {
+        if (_hwnd == nint.Zero) return ChainPos.NotInChain;
+        var hostHwnd = _host?.TryGetPlatformHandle()?.Handle ?? nint.Zero;
+        if (hostHwnd == nint.Zero) return ChainPos.NotInChain;
+
+        for (var h = GetTopWindow(nint.Zero); h != nint.Zero; h = GetWindow(h, GW_HWNDNEXT))
+        {
+            if (h == _hwnd) return ChainPos.Above;
+            if (h == hostHwnd) return ChainPos.Below;
+        }
+        return ChainPos.NotInChain;   // 走完全链都没见到本窗口
+    }
+
+    /// <summary>累计一次走链读数，并<b>只在"进入 Below"的那一拍</b>落一条日志
+    /// （上一次读数不是 Below 而这次是 —— 连续 Below 不重复写；首个读数即 Below 时没有前置状态，
+    /// 也写一条并标 <c>无前置→Below</c>：放大镜实测的失效形态正是"一进去就一直 Below"，
+    /// 若只认 Above→Below 这一条边，那种情况反而一条证据都不留）。
+    ///
+    /// <para><b>为什么日志不能无条件写</b>：采样点挂在产品热路径上（拖动分割线、主窗移动/缩放都会
+    /// 走到），日志条数必须与"异常回合数"同阶而不能与"调用次数"同阶 —— 本项目有过"组件日志节流是
+    /// 全局共享"把判据读成假红的前车之鉴，无条件写日志只会制造噪声、甚至灌满落盘队列。</para>
+    ///
+    /// <para><b>副作用清单：无</b>。只有 Win32 只读查询（GetTopWindow / GetWindow /
+    /// GetWindowLongPtr）与自身计数，不触碰位置、尺寸、Z 序、焦点、激活状态。</para></summary>
+    private void ObserveZOrder()
+    {
+        if (_closed || !IsVisible || _hwnd == nint.Zero) return;
+        if ((_host?.TryGetPlatformHandle()?.Handle ?? nint.Zero) == nint.Zero) return;
+
+        var previous = _lastZOrder;
+        var pos = QueryChainPosition();
+        _lastZOrder = pos;
+        ZOrderSamples++;
+
+        if (pos == ChainPos.Below)
+        {
+            ZOrderBelowCount++;
+            if (previous == ChainPos.Below) return;   // 连续 Below：只在进入的那一拍写
+            ZOrderFlipsToBelow++;
+            var from = previous?.ToString() ?? "无前置";
+            AppLog.Warn("ZOrder",
+                $"[LayoutOverlayWindow] {from}→Below" +
+                $" owner={OwnerHwndAttached} topmost={HasTopmostStyle}" +
+                $" hostTopmost={HostHasTopmostStyle}" +
+                $" samples={ZOrderSamples} below={ZOrderBelowCount}");
+        }
+        else if (pos == ChainPos.NotInChain)
+        {
+            ZOrderNotInChainCount++;
+        }
+    }
+
+    /// <summary>落一条累计汇总（只在"这一轮观测到此结束"的位置调用，与热路径无关）。
+    /// 一次都没采到就不写 —— 那说明这轮压根没进过对比模式，写出来只是噪声。
+    ///
+    /// <para><b>为什么要 <c>where</c>：本站点的"窗口关闭"那条多半落不了盘</b> —— 宿主的
+    /// <c>OnClosing</c> 先调 <c>AppLog.Shutdown()</c>（MainWindow.axaml.cs:3034），之后才在
+    /// <c>OnClosed</c> 里 <c>CloseAndDispose()</c>（同文件 3114），writer 已关 ⇒ 那一条被丢弃。
+    /// 故 <see cref="HideOverlay"/>（退出对比模式，writer 仍在）是本站点唯一稳定能落盘的汇总点，
+    /// 两处都打、用 <c>where</c> 区分。</para></summary>
+    private void LogZOrderSummary(string where)
+    {
+        if (ZOrderSamples <= 0) return;
+        AppLog.Info("ZOrder",
+            $"[LayoutOverlayWindow] 汇总({where}) samples={ZOrderSamples} below={ZOrderBelowCount}" +
+            $" notInChain={ZOrderNotInChainCount} flips={ZOrderFlipsToBelow} last={_lastZOrder}");
+    }
 
     // ═══════════════════════ 状态 ═══════════════════════
 
@@ -124,6 +258,12 @@ public sealed class LayoutOverlayWindow : Window
     private SplitParams _split = SplitParams.Default(CompareMode.Ab);
 
     private bool _dragging;
+    /// <summary>正在被拖的是第几个手柄（<see cref="CompareLayout.HandleCount"/> 之内的索引）。
+    /// 单手柄模式恒为 0；<see cref="CompareMode.AbcColumns"/> 有两条竖线 ⇒ 0 / 1 各管一条。
+    /// 拖动结束时<b>不</b>复位到 0：模式切换的那一拍若还拿着旧索引，取轴只会拿到"最后一个手柄"，
+    /// 而复位成 0 会让"拖动中切模式"把第一条线拽走 —— 留着旧索引是更保守的选择
+    /// （<see cref="CompareLayout.HandleAxisAt"/> 对越界索引按最后一个手柄处理）。</summary>
+    private int _dragHandle;
     private bool _syncing;
     private bool _closed;
 
@@ -201,14 +341,20 @@ public sealed class LayoutOverlayWindow : Window
         if (!IsVisible) Show(host);
         SyncGeometry();
         InvalidateVisual();
+        // 尾部观测一次：本方法是"进入 / 切换对比模式"的呈现入口（宿主每次 EnterCompareMode 都调，
+        // 含 C 键模式循环），语义对齐 MagnifierOverlayWindow 挂在 ShowOverlay 尾部的同款读数。
+        ObserveZOrder();
     }
 
     /// <summary>更新模式 / 分割参数并重绘（宿主在自身布局变化后调用）。
-    /// 拖动中宿主回灌同一值时是幂等的。</summary>
+    /// 拖动中宿主回灌同一值时是幂等的。顺带做一次 Z 序走链观测（只累加计数，见
+    /// <see cref="ZOrderSamples"/>；日志只在"进入 Below"的那一拍写）。</summary>
     public void Update(CompareMode mode, SplitParams split)
     {
         ApplyState(mode, split);
         InvalidateVisual();
+        // 热路径观测点：宿主每次回灌分割参数都走这里（拖动中每个 pointer move 一次）。
+        ObserveZOrder();
     }
 
     /// <summary>隐藏覆盖层并解除对宿主的跟随订阅（可再次 <see cref="ShowOverlay"/> 复用实例）。
@@ -219,12 +365,17 @@ public sealed class LayoutOverlayWindow : Window
     /// <see cref="DetachHost"/> —— 本窗口会继续强订阅主窗口的
     /// Position/Size/Scaling 与 anchor 的 PropertyChanged ⇒ 覆盖层被隐藏却仍被主窗口
     /// 强引用，且每次宿主布局变化都白跑一次 <see cref="SyncGeometry"/>。
-    /// 改名让"必须解除订阅"这件事在调用点就显式可见，不再依赖调用者的静态类型。</para></summary>
+    /// 改名让"必须解除订阅"这件事在调用点就显式可见，不再依赖调用者的静态类型。</para>
+    ///
+    /// <para>末尾落一条 Z 序观测汇总（累计快照）：这是本站点稳定能落盘的汇总点 —— 本窗口的
+    /// <c>OnClosed</c> 只发生在应用退出链上，那时宿主的 <c>AppLog.Shutdown()</c> 已经跑过，
+    /// 理由见 <see cref="LogZOrderSummary"/>。</para></summary>
     public void HideOverlay()
     {
         DetachHost();
         _dragging = false;
         base.Hide();
+        LogZOrderSummary("HideOverlay");
     }
 
     /// <summary>彻底关闭并释放。宿主窗口关闭时必须调用，否则进程里会残留一个顶层窗口，
@@ -245,8 +396,19 @@ public sealed class LayoutOverlayWindow : Window
     {
         _mode = mode;
         _split = split.Clamp();
-        _cursor = CursorFor(CompareLayout.HandleAxis(mode));
-        Cursor = _cursor;
+        SetCursorForHandle(_dragging ? _dragHandle : 0);
+    }
+
+    /// <summary>把光标设成第 <paramref name="handleIndex"/> 个手柄的轴向光标。
+    /// 拖动中必须用<b>当前手柄</b>的轴 —— 三列模式下两个手柄都是竖线（光标相同），
+    /// 但将来若出现"一条竖线 + 一条横线"的模式，静止时按第一个手柄给光标会给出错误提示。
+    /// 只在轴真的变化时换引用（U3：拖拽热路径不得 new Cursor）。</summary>
+    private void SetCursorForHandle(int handleIndex)
+    {
+        var next = CursorFor(CompareLayout.HandleAxisAt(_mode, handleIndex));
+        if (ReferenceEquals(next, _cursor)) return;
+        _cursor = next;
+        Cursor = next;
     }
 
     private void AttachHost()
@@ -337,6 +499,11 @@ public sealed class LayoutOverlayWindow : Window
         {
             _syncing = false;
         }
+
+        // 落位之后再观测一次（前面那些守卫 return 都不计数，采的是"真的重摆了一遍"）：
+        // 主窗移动 / 缩放 / DPI 变化 / 侧栏拖动都走这条位置同步路径 ⇒ 覆盖层每次被重新摆一遍都会
+        // 留下一个读数 —— 放大镜那次翻转正是出现在这类后续位置/呈现回调上。
+        ObserveZOrder();
     }
 
     /// <summary>对比区所在显示器的缩放（物理像素 / DIP），保证为正。
@@ -361,9 +528,13 @@ public sealed class LayoutOverlayWindow : Window
     {
         base.OnPointerPressed(e);
         if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
-        if (!IsOnHandle(e.GetPosition(this))) return;
+
+        var handle = HandleIndexAt(e.GetPosition(this));
+        if (handle < 0) return;
 
         _dragging = true;
+        _dragHandle = handle; // 记住抓的是哪一个：三列模式下两条线的拖动目标不同
+        SetCursorForHandle(handle);
         e.Pointer.Capture(this); // 拖出窗口仍要收到 Move/Released
         e.Handled = true;
     }
@@ -391,8 +562,13 @@ public sealed class LayoutOverlayWindow : Window
         _dragging = false;
     }
 
-    /// <summary>把指针位置（窗口内 DIP）换算成归一化坐标，按模式决定更新 X / Y / 两者，
-    /// Clamp 后本地更新并抛出事件。</summary>
+    /// <summary>把指针位置（窗口内 DIP）换算成归一化坐标，按<b>当前手柄</b>的轴决定更新 X / Y / 两者，
+    /// Clamp 后本地更新并抛出事件。
+    ///
+    /// <para><b>多手柄模式下"轴"不足以决定改哪个分量</b>：<see cref="CompareMode.AbcColumns"/> 的
+    /// 两个手柄轴都是 <see cref="SplitAxis.X"/>，但它们分别管<b>第一条</b>与<b>第二条</b>竖线
+    /// （X 与 Y 两个分量）。故轴为 X / Y 时还要按手柄索引挑分量：索引 0 改 X、索引 1 改 Y。
+    /// 单手柄模式索引恒为 0，落到"改 X"/"改 Y"，与改动前<b>逐字一致</b>。</para></summary>
     private void ApplyDrag(Point p)
     {
         var w = Bounds.Width;
@@ -402,11 +578,15 @@ public sealed class LayoutOverlayWindow : Window
         var nx = p.X / w;
         var ny = p.Y / h;
 
-        var next = CompareLayout.HandleAxis(_mode) switch
+        // 分量身份必须问 Core：多手柄模式（ABC 三列）的两条线存在 X / Y 两个分量里，
+        // 而手柄画在**排序后**的位置上 —— 两条线交叉后"手柄 0 ↔ X"的固定映射就反了，
+        // 表现为"拖动左边那条却改变了右边的分界"。见 CompareLayout.HandleComponentAt。
+        var component = CompareLayout.HandleComponentAt(_mode, _split, _dragHandle);
+        var next = CompareLayout.HandleAxisAt(_mode, _dragHandle) switch
         {
-            SplitAxis.X => new SplitParams(nx, _split.Y),
-            SplitAxis.Y => new SplitParams(_split.X, ny),
-            _ => new SplitParams(nx, ny),
+            SplitAxis.X => component == 0 ? new SplitParams(nx, _split.Y) : new SplitParams(_split.X, nx),
+            SplitAxis.Y => component == 0 ? new SplitParams(_split.X, ny) : new SplitParams(ny, _split.Y),
+            _ => new SplitParams(nx, ny), // Both：交叉点
         };
         next = next.Clamp();
         if (next == _split) return; // record struct 值相等：原地抖动不产生事件风暴
@@ -416,17 +596,49 @@ public sealed class LayoutOverlayWindow : Window
         SplitChanged?.Invoke(next);
     }
 
-    /// <summary>指针（窗口内 DIP）是否落在手柄命中圈内。</summary>
-    private bool IsOnHandle(Point p)
+    /// <summary>指针（窗口内 DIP）落在第几个手柄的命中区内；未命中返回 -1。
+    /// 手柄数量由 <see cref="CompareLayout.HandleCount"/> 给出，位置由
+    /// <see cref="HandleIndexAt(double,double,double,double,double)"/> 的共用判据给出 —— 本窗口不自己推导几何（见类注释）。</summary>
+    private int HandleIndexAt(Point p) => HandleIndexAt(p.X, p.Y, Bounds.Width, Bounds.Height, HitRadius);
+
+    /// <summary>自测探针口：把一次 DIP 坐标按<b>与真实点击完全同一条</b>判据换算成手柄序号。
+    /// <para>为什么要暴露它：命中区从"线中间的圆点"改成"整条线"之后，肉眼看不出差别，
+    /// 而判据错了的表现是"抓线拖不动"或"哪儿都能抓、误触吞掉画面上的滚轮"。
+    /// 这里只读不写状态，与 <see cref="HandlePositions"/> 同性质。</para></summary>
+    internal int HitHandleIndexAt(Point dip) => HandleIndexAt(dip);
+
+    /// <summary>命中判据的<b>唯一实现</b>：DIP 路径（Avalonia 事件）与物理路径
+    /// （<c>WM_NCHITTEST</c>）都换调到它，只是传入各自的坐标与半径 —— 同一条规则出现两份实现，
+    /// 就是本项目反复踩到的"其中一份是错的"（真机表现：光标显示能拖、点下去却让给视频层）。
+    ///
+    /// <para><b>单轴手柄沿轴放开到整条线</b>：<see cref="SplitAxis.X"/> 的竖线不论高低都能抓，
+    /// <see cref="SplitAxis.Y"/> 的横线不论左右都能抓。"左右拉动对比"就建立在这条线上，
+    /// 用户的说法是"中间的线可以拉动"，而不是"线中间那个圆点可以拉动"。
+    /// <b>交叉点手柄（<see cref="SplitAxis.Both"/>，ABC / ABCD）刻意不放开</b>：那种手柄一次改两个分量，
+    /// 沿整条线抓会把另一轴一起拽到指针高度，用户看到的是"没抓的那条线跳了"。</para></summary>
+    private int HandleIndexAt(double px, double py, double w, double h, double radius)
     {
-        var w = Bounds.Width;
-        var h = Bounds.Height;
-        if (w <= 0 || h <= 0) return false;
-        var (hx, hy) = CompareLayout.HandlePosition(_mode, _split);
-        var dx = p.X - hx * w;
-        var dy = p.Y - hy * h;
-        return dx * dx + dy * dy <= HitRadius * HitRadius;
+        if (w <= 0 || h <= 0) return -1;
+
+        var count = CompareLayout.HandleCount(_mode);
+        for (var i = 0; i < count; i++)
+        {
+            var (hx, hy) = CompareLayout.HandlePositionAt(_mode, _split, i);
+            var dx = px - hx * w;
+            var dy = py - hy * h;
+            var hit = CompareLayout.HandleAxisAt(_mode, i) switch
+            {
+                SplitAxis.X => System.Math.Abs(dx) <= radius,
+                SplitAxis.Y => System.Math.Abs(dy) <= radius,
+                _ => dx * dx + dy * dy <= radius * radius, // 交叉点型：只放一个圆点
+            };
+            if (hit) return i;
+        }
+        return -1;
     }
+
+    /// <summary>指针（窗口内 DIP）是否落在任一手柄的命中区内。</summary>
+    private bool IsOnHandle(Point p) => HandleIndexAt(p) >= 0;
 
     /// <summary>轴向 → 光标。返回**静态缓存**实例（U3：不得在拖拽热路径上 new，见字段注释）。</summary>
     private static Cursor CursorFor(SplitAxis axis) => axis switch
@@ -492,9 +704,15 @@ public sealed class LayoutOverlayWindow : Window
         foreach (var (a, b) in _segments) context.DrawLine(_haloPen, a, b);
         foreach (var (a, b) in _segments) context.DrawLine(_linePen, a, b);
 
-        // 手柄：位置由 Core 统一给出（AB 的 Y 固定 0.5，竖线中点）。
-        var (hx, hy) = CompareLayout.HandlePosition(_mode, _split);
-        context.DrawEllipse(_handleFill, _handleRingPen, new Point(hx * w, hy * h), HandleRadius, HandleRadius);
+        // 手柄：位置与数量都由 Core 统一给出（AB 的 Y 固定 0.5，竖线中点；
+        // ABC 三列有两条竖线 ⇒ 两个手柄）。逐个画，不能只画第一个 —— 否则三列模式下
+        // 第二条线可拖但看不见抓手，用户无从下手。
+        var handles = CompareLayout.HandleCount(_mode);
+        for (var i = 0; i < handles; i++)
+        {
+            var (hx, hy) = CompareLayout.HandlePositionAt(_mode, _split, i);
+            context.DrawEllipse(_handleFill, _handleRingPen, new Point(hx * w, hy * h), HandleRadius, HandleRadius);
+        }
     }
 
     // ═══════════════════════ Win32：命中测试钩子 ═══════════════════════
@@ -533,6 +751,9 @@ public sealed class LayoutOverlayWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        // 关闭链最上游落一条汇总（此时计数已定）。⚠ 应用退出路径上宿主已在 OnClosing 里
+        // AppLog.Shutdown()，这一条多半被丢弃 ⇒ 稳定的汇总见 HideOverlay（见该方法注释）。
+        LogZOrderSummary("OnClosed");
         _closed = true;
         UninstallHitTestHook();
         base.OnClosed(e);
@@ -596,8 +817,11 @@ public sealed class LayoutOverlayWindow : Window
         return CallWindowProcW(_origWndProc, hwnd, msg, wParam, lParam);
     }
 
-    /// <summary>与 <see cref="IsOnHandle"/> 同一判据，但输入是**物理客户区像素**
-    /// （WM_NCHITTEST 拿到的是物理坐标，不能直接与 DIP 比较）。</summary>
+    /// <summary>与 <see cref="HandleIndexAt(Point)"/> <b>同一条</b>判据，只是输入是**物理客户区像素**
+    /// （<c>WM_NCHITTEST</c> 拿到的是物理坐标，不能直接与 DIP 比较）：半径按 <see cref="RenderScaling"/>
+    /// 放大后交给共用实现，两条路径不再各写一份几何。
+    /// 必须逐个手柄判：<see cref="CompareMode.AbcColumns"/> 的第二条竖线不命中也会
+    /// 吞掉该处的鼠标消息（表现为"第二条线附近无法拖动画面"）。</summary>
     private bool IsOnHandlePhysical(int px, int py)
     {
         if (!GetClientRect(_hwnd, out var rc)) return false;
@@ -605,14 +829,9 @@ public sealed class LayoutOverlayWindow : Window
         var ch = rc.Bottom - rc.Top;
         if (cw <= 0 || ch <= 0) return false;
 
-        var (hx, hy) = CompareLayout.HandlePosition(_mode, _split);
-        var dx = px - hx * cw;
-        var dy = py - hy * ch;
-
         var scaling = RenderScaling;
         if (!(scaling > 0)) scaling = 1.0;
-        var r = HitRadius * scaling;
-        return dx * dx + dy * dy <= r * r;
+        return HandleIndexAt(px, py, cw, ch, HitRadius * scaling) >= 0;
     }
 
     [StructLayout(LayoutKind.Sequential)]

@@ -37,6 +37,12 @@ internal static partial class WgcNative
     internal const int ErrInvalidArg = 6;
     internal const int ErrInternal = 7;
 
+    /// <summary>该 handle 的内部工作线程此前已超时被放弃 ⇒ <b>handle 已永久失效</b>，
+    /// 此后每一次抓帧都会立即返回本码。调用方<b>必须</b>先 <see cref="Wgc_Destroy"/> 再重新
+    /// <see cref="Wgc_Create"/>。与 <see cref="ErrInternal"/> 的区别：7 是"本次失败、handle 仍可用"，
+    /// 8 是"handle 报废、必须重建"。契约见 <c>native/wgc_capture/wgc_capture.h</c>。</summary>
+    internal const int ErrHandleDead = 8;
+
     /// <summary>把错误码翻译成可读文本（仅用于日志）。</summary>
     internal static string Describe(int code) => code switch
     {
@@ -48,6 +54,7 @@ internal static partial class WgcNative
         ErrTextureRead => "TEXTURE_READ(取 D3D11 纹理或 CPU 读回失败)",
         ErrInvalidArg => "INVALID_ARG(空指针等非法参数)",
         ErrInternal => "INTERNAL(其它内部错误，细节见 Wgc_LastError)",
+        ErrHandleDead => "HANDLE_DEAD(工作线程已超时被放弃，handle 永久失效，须重建)",
         _ => $"UNKNOWN({code})",
     };
 
@@ -101,6 +108,25 @@ internal sealed class WgcFrameCapture : IFrameCapture
     private nint _handle;
     private bool _disposed;
 
+    /// <summary>被**有意跳过**的 <see cref="WgcNative.Wgc_FreeFrame"/> 次数。
+    ///
+    /// <para>来源见 <see cref="Capture"/> 的 <c>finally</c>：handle 一旦被 <see cref="ResetHandleLocked"/>
+    /// 复位，手上这一帧的原生缓冲就<b>不再释放</b> —— 这是**有界**的：只影响"handle 复位那一刻
+    /// 仍在手上"的那几帧（正常路径下该分支不可达，计数恒为 0），下次 <see cref="Capture"/> 会重建
+    /// handle，之后的帧照常释放。</para>
+    ///
+    /// <para><b>用途</b>：排查"显存 / 原生缓冲持续增长"时先看这个数字。它在涨 ⇒ 是 handle 复位路径
+    /// 被频繁走到（WGC 反复中毒重建），而不是普通抓帧漏放；它恒为 0 ⇒ 与本路径无关，去别处找。</para>
+    ///
+    /// <para>只在 <see cref="_gate"/> 内读写，无需原子操作。</para></summary>
+    private long _skippedFreeFrameCount;
+
+    /// <summary>诊断用只读快照：见 <see cref="_skippedFreeFrameCount"/>（挂调试器/watch 即可看到）。</summary>
+    public long SkippedFreeFrameCount
+    {
+        get { lock (_gate) return _skippedFreeFrameCount; }
+    }
+
     /// <summary>路径标识固定为 WGC。</summary>
     public CaptureRoute Route => CaptureRoute.Wgc;
 
@@ -130,7 +156,22 @@ internal sealed class WgcFrameCapture : IFrameCapture
 
                 if (rc != WgcNative.Ok)
                 {
+                    // 必须在 RecordFailure **之后**再复位：RecordFailure 要用当前 handle
+                    // 去读 Wgc_LastError，handle 一置 0 就读不到诊断文本了。
                     RecordFailure(rc);
+
+                    // docs/41（W2 复核）：handle 因工作线程超时被放弃后**永久失效**，
+                    // 此后每次抓帧都立刻返回 ErrHandleDead。若不重建，WGC 会在**本进程内永久
+                    // 降级到 GDI**——即便用户重开媒体（ResetRouting 只清计数）也回不来，
+                    // 只能重启应用。也就是说 W2 的"不再冻死"会退化成"静默永久降级"。
+                    // 对失效 handle 调 Wgc_Destroy 是安全且有界的（原生侧不 join 已卡死的线程），
+                    // 所以这里可以无条件先销毁、下次调用自然重建（Wgc_Create 很便宜）。
+                    if (rc == WgcNative.ErrHandleDead)
+                    {
+                        AppLog.Warn("Capture",
+                            $"WGC handle 已失效（{LastErrorMessage}），销毁并重建捕获器");
+                        ResetHandleLocked();
+                    }
                     return null;
                 }
 
@@ -164,10 +205,29 @@ internal sealed class WgcFrameCapture : IFrameCapture
             finally
             {
                 // 单一释放点：成功与失败都不会漏掉原生缓冲（失败时 bits 按契约为 NULL，此处为安全空操作）。
+                //
+                // ⚠ handle 已复位（_handle == 0）时**刻意跳过**释放，不要"顺手修成"无条件 Wgc_FreeFrame：
+                // handle 是这一帧缓冲的归属凭证 —— 原生头文件明确把它保留给"将来按 handle 做缓冲池化"
+                // （现实现恰好不读它）。_handle 为 0 意味着该 handle 已经走过 Wgc_Destroy，
+                // 再把一个已销毁的 handle 递回原生侧就是 use-after-free。两害相权：
+                // **有意漏掉这一次释放**（有界，见下）远好过 UAF。
+                //   有界性：本分支只可能命中"handle 复位那一刻仍在手上"的极少数帧，正常路径下不可达
+                //   （复位点都在 bits 尚未持有或已按契约返回 NULL 的路径上）；下次 Capture 会重建 handle，
+                //   之后所有帧照常释放。因此**不修**，只计数（_skippedFreeFrameCount / SkippedFreeFrameCount）：
+                //   排查显存增长时，这个数字在不在涨，直接区分"复位路径被频繁走到"与"普通抓帧漏放"。
                 if (bits != 0)
                 {
-                    try { WgcNative.Wgc_FreeFrame(_handle, bits); }
-                    catch (Exception ex) { AppLog.Debug("Capture", $"Wgc_FreeFrame 失败：{ex.Message}"); }
+                    if (_handle == 0)
+                    {
+                        _skippedFreeFrameCount++;
+                        AppLog.Debug("Capture",
+                            $"handle 已复位但仍收到帧缓冲，跳过 Wgc_FreeFrame（累计 {_skippedFreeFrameCount} 次，有界泄漏）");
+                    }
+                    else
+                    {
+                        try { WgcNative.Wgc_FreeFrame(_handle, bits); }
+                        catch (Exception ex) { AppLog.Debug("Capture", $"Wgc_FreeFrame 失败：{ex.Message}"); }
+                    }
                 }
             }
         }
@@ -218,6 +278,25 @@ internal sealed class WgcFrameCapture : IFrameCapture
         LastErrorCode = WgcNative.Ok;
         LastErrorMessage = string.Empty;
         return true;
+    }
+
+    /// <summary>
+    /// 丢弃当前 handle 并把状态复位到"未创建"（下次 <see cref="Capture"/> 会重新
+    /// <see cref="WgcNative.Wgc_Create"/>）。
+    /// </summary>
+    /// <para>与 <see cref="Dispose"/> 的区别：**不**置 <c>_disposed</c>，因此本对象仍可继续使用
+    /// —— 这正是"handle 中毒后自愈"需要的语义；若走 Dispose，WGC 会被永久关闭。
+    /// 调用方须已持有 <see cref="_gate"/>。</para>
+    private void ResetHandleLocked()
+    {
+        var handle = _handle;
+        _handle = 0;
+        if (handle == 0) return;
+        try { WgcNative.Wgc_Destroy(handle); }
+        catch (Exception ex)
+        {
+            AppLog.Debug("Capture", $"重置 handle 时 Wgc_Destroy 失败：{ex.Message}");
+        }
     }
 
     private void RecordFailure(int rc)

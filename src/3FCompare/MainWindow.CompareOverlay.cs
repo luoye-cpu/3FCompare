@@ -95,7 +95,7 @@ public partial class MainWindow
     {
         if (_sync.Count < 2)
         {
-            StatusInfo.Text = Loc("叠加模式需要至少 2 路视频。", "Overlay mode requires at least 2 routes.");
+            StatusInfo.Text = Loc("左右拉动对比需要至少 2 路视频。", "Left-right wipe needs at least 2 routes.");
             return false;
         }
         if (_compareOverlayActive) return true;
@@ -155,13 +155,10 @@ public partial class MainWindow
         var axis = _compareOverlayAxis == OverlayAxis.Horizontal
             ? Loc("水平揭示", "horizontal reveal")
             : Loc("垂直揭示", "vertical reveal");
-        var cells = CompareLayout.CellCount(CompareMode.Ab);
-        var scope = _sync.Count > cells
-            ? Loc($"，显示前 {cells} / 共 {_sync.Count} 路", $" (showing first {cells} of {_sync.Count} routes)")
-            : "";
+        var scope = DescribeDeactivatedRoutes();   // 读实测启用集合，见该方法注释
         StatusInfo.Text = Loc(
-            $"叠加模式（{axis}）：两路铺满，拖动分割线揭示 B{scope}（按 S 退出 / 按 C 切换模式）",
-            $"Overlay mode ({axis}): both routes full-area, drag the split line to reveal B{scope} (press S to exit / C to cycle)");
+            $"左右拉动对比（{axis}）：两路铺满，拖动分割线揭示 B{scope}（按 S 退出 / 按 C 切换模式）",
+            $"Left-right wipe ({axis}): both routes full-area, drag the split line to reveal B{scope} (press S to exit / C to cycle)");
     }
 
     /// <summary>叠加模式下两路的可见区域（<b>互补且互不重叠</b>，并集恒等于整窗）。

@@ -53,6 +53,28 @@ public static class Comp
 /// 进程死掉后依然在磁盘上（下一次 <c>Read</c>/<c>copy</c> 就能看到），这才是"硬崩不丢"的保证。
 /// 代价是每条一次写系统调用——组件事件不是逐帧量（见下方"轻量"约定），完全可以承受。</para>
 ///
+/// <para><b>⚠ 唯一的例外：<see cref="LogThrottled"/></b>（#24）。<c>WM_SIZE</c> 这类埋点会被
+/// 用户"拖动窗口边框"连续触发（每次鼠标移动一次），若每条都同步落盘，磁盘卡顿/杀软扫描时
+/// 就在 UI 线程上冻结界面——这与本文件"移除 WndProc 高频 WriteLine"的既有结论自相矛盾
+/// （等于把同步 I/O 又请回 UI 线程）。故这类埋点走 <see cref="LogThrottled"/>：
+/// 仍<b>立即写进缓冲</b>（内容不丢、顺序不变、ring buffer 照记），只是把"推进 OS 页缓存"
+/// 合并到 <see cref="FlushThrottleMs"/> 一次。<b>权衡与保证边界</b>：</para>
+/// <list type="bullet">
+/// <item><description>正常埋点（<see cref="Log(string,string)"/> 及全部既有调用点）<b>语义完全不变</b>，
+/// 仍逐条 flush ⇒ "硬崩不丢"的保证对它们依旧成立；</description></item>
+/// <item><description>被节流的只有 resize 突发的两条埋点，最坏情况是"硬崩且崩前
+/// &lt; <see cref="FlushThrottleMs"/> 内除 resize 外再无其它埋点"时丢掉这几行。
+/// 该窗口比心跳周期（<see cref="HeartbeatIntervalMs"/> = 1s）<b>更短</b>，
+/// 而心跳本身每条都 flush ⇒ 日志对"崩前各组件在做什么"的<b>时间分辨率（1s）不受影响</b>，
+/// 只是把"最后 1 秒"的分辨率从"逐条"放宽到"200ms 粒度"；</description></item>
+/// <item><description>进程被<b>托管</b>异常/ExitProcess 终止时不受影响：崩溃钩子与
+/// <see cref="Shutdown"/> 仍会显式 <see cref="Flush"/>，连缓冲里的节流行一起带走。
+/// 只有"原生硬崩且撞在节流窗口内"这一条路径会丢 ≤<see cref="FlushThrottleMs"/> 的行。</description></item>
+/// <item><description>不采用"后台线程 + 队列"的理由：那会把"硬崩不丢"从"已推进页缓存"
+/// 退化成"已入队"，丢的窗口从 200ms 变成"队列未及时消费的任意时长"，而且新增了
+/// 线程/队列/停机次序三个失败面。节流是"改动面最小、丢的窗口有硬上界"的那个选择。</description></item>
+/// </list>
+///
 /// <para><b>崩溃钩子只是兜底</b>：<see cref="AppDomain.CurrentDomain"/> 的未处理异常、
 /// Avalonia UI 线程未处理异常、未观察任务异常都会再 dump 一次内存 ring buffer。
 /// 但原生侧硬崩（dxgi Present 访问违例）时这些钩子<b>根本不会被执行</b>——
@@ -80,6 +102,36 @@ public static class ComponentLog
     private static string? _path;
     private static DateTime _dateStamp;
     private static bool _initialized;
+
+    /// <summary>上次把数据推进 OS 页缓存（<c>StreamWriter.Flush</c>）的时刻，
+    /// <see cref="Environment.TickCount64"/> 口径；-1 = 尚未落盘过。
+    /// <para>只在 <see cref="WriteLock"/> 内写，<see cref="LogThrottled"/> 无锁读
+    /// （<see cref="Volatile"/>）——读到稍旧的值只会让本拍多落一次盘，不影响正确性。</para></summary>
+    private static long _lastFlushTicks = -1;
+
+    /// <summary>实际落盘次数（自测/单测钩子，见 <see cref="FlushCount"/>）。</summary>
+    private static int _flushCount;
+    /// <summary>高频埋点因节流跳过落盘的次数（自测/单测钩子，见 <see cref="ThrottledSkipCount"/>）。</summary>
+    private static int _throttledSkipCount;
+
+    /// <summary>高频埋点的最小落盘间隔（毫秒）。
+    /// <para>取 200ms 的依据：① 远小于心跳周期 <see cref="HeartbeatIntervalMs"/>（1s），
+    /// 故不会降低日志的取证时间分辨率；② 远大于窗口拖动时的 WM_SIZE 间隔（~16ms@60Hz），
+    /// 故一次连续拖动只会落盘一次而不是每帧一次——UI 线程上的同步 I/O 次数降一个数量级。</para></summary>
+    public const int FlushThrottleMs = 200;
+
+    /// <summary>实际落盘次数（自测/单测用；生产代码不读）。</summary>
+    internal static int FlushCount => Volatile.Read(ref _flushCount);
+
+    /// <summary>因节流而跳过落盘的次数（自测/单测用；生产代码不读）。
+    /// 判据：<c>&gt; 0</c> 说明"高频埋点确实不再逐条同步落盘"（#24 回归）。</summary>
+    internal static int ThrottledSkipCount => Volatile.Read(ref _throttledSkipCount);
+
+    /// <summary>节流判定（纯函数，便于单测逐条验算边界）。
+    /// <paramref name="lastFlushTicks"/> &lt; 0（从未落盘）时必须放行 —— 否则进程刚起来
+    /// 若第一条埋点就是高频埋点，它会一直等到下一次非节流埋点才落盘。</summary>
+    internal static bool ShouldFlushNow(long nowTicks, long lastFlushTicks, int throttleMs)
+        => lastFlushTicks < 0 || nowTicks - lastFlushTicks >= throttleMs;
 
     /// <summary>日志是否可用。<c>volatile</c>：写侧（Initialize/Shutdown）与读侧（各组件线程的
     /// <see cref="IsEnabled"/> 短路）无锁并发；布尔读的可见性延迟只会让一两条日志晚一拍，
@@ -165,16 +217,22 @@ public static class ComponentLog
                 _stream = new FileStream(_path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
                 _writer = new StreamWriter(_stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false))
                 {
-                    // AutoFlush 与下方显式 Flush 双保险，理由见类注释"为什么必须逐条 flush"。
-                    AutoFlush = true,
+                    // ⚠ AutoFlush 必须为 false（#24）。它原先为 true，作用是"逐条 flush 的第二重保险"，
+                    // 但它对**每一次 Write 调用**都强制冲刷底层流 —— 那会让 LogThrottled 的节流
+                    // 完全失效（写缓冲后立刻被 AutoFlush 推下去），等于把同步 I/O 又请回 UI 线程。
+                    // 安全性没有降低：本类所有写路径都在写完后**显式** Flush（WriteLineLocked /
+                    // DumpRing / RollFileLocked / Shutdown / 公开的 Flush），
+                    // 唯一的例外是 LogThrottled 刻意不落盘的那部分，这正是节流的目的。
+                    AutoFlush = false,
                 };
                 _ready = true;
 
                 WriteLineLocked($"══════════ 组件日志 会话开始 {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} " +
-                                $"PID={Environment.ProcessId} ══════════");
+                                $"PID={Environment.ProcessId} ══════════", flush: true);
                 WriteLineLocked($"文件={Path.GetFileName(_path)} 组件词表=" +
                                 $"{Comp.Engine}/{Comp.Surface}/{Comp.Render}/{Comp.Sync}/" +
-                                $"{Comp.Overlay}/{Comp.Capture}/{Comp.Theme}/{Comp.Settings}/{Comp.Env}");
+                                $"{Comp.Overlay}/{Comp.Capture}/{Comp.Theme}/{Comp.Settings}/{Comp.Env}",
+                                flush: true);
             }
             catch
             {
@@ -193,7 +251,7 @@ public static class ComponentLog
     {
         lock (WriteLock)
         {
-            try { _writer?.Flush(); } catch { }
+            FlushWriterLocked();   // 把节流窗口里还没落盘的行一起带走
             try { _writer?.Dispose(); } catch { }
             try { _stream?.Dispose(); } catch { }
             _writer = null;
@@ -202,13 +260,21 @@ public static class ComponentLog
         }
     }
 
-    /// <summary>显式冲刷（崩溃钩子用；正常路径每条已自行 flush）。</summary>
+    /// <summary>显式冲刷（崩溃钩子用；正常路径每条已自行 flush，高频埋点按 <see cref="FlushThrottleMs"/> 节流）。</summary>
     public static void Flush()
     {
         lock (WriteLock)
         {
-            try { _writer?.Flush(); } catch { }
+            FlushWriterLocked();
         }
+    }
+
+    /// <summary>落盘并记录时刻/计数。必须在 <see cref="WriteLock"/> 内调用。</summary>
+    private static void FlushWriterLocked()
+    {
+        try { _writer?.Flush(); } catch { /* 磁盘满 / 杀软独占：丢日志但绝不抛 */ }
+        _lastFlushTicks = Environment.TickCount64;
+        _flushCount++;
     }
 
     // ══════════ 写入 API ══════════
@@ -232,7 +298,27 @@ public static class ComponentLog
     public static void Log(string component, string evt, int route, string? detail)
     {
         if (!IsEnabled) return;
-        WriteLineLocked(Format(component, evt, route, detail));
+        WriteLineLocked(Format(component, evt, route, detail), flush: true);
+    }
+
+    /// <summary>
+    /// 高频埋点：内容与 <see cref="Log(string,string,int,string?)"/> 完全相同（同样立即写进缓冲、
+    /// 同样进 ring buffer），但**落盘受 <see cref="FlushThrottleMs"/> 节流**。
+    ///
+    /// <para><b>只给"会被用户连续拖动触发"的埋点用</b>（当前唯一调用点：<c>PlayerSurface</c> 的
+    /// WM_SIZE <c>Resize</c> 与紧随其后的 <c>RedrawRequest</c>）。别处一律用 <see cref="Log(string,string,int,string?)"/>：
+    /// 逐条 flush 才是本类"硬崩不丢最后一条"的保证，放宽它必须有"这条埋点本身会被高频触发"的理由。</para>
+    ///
+    /// <para><b>为什么不是"不写盘"</b>：本方法<b>一定会写</b>（进 <see cref="StreamWriter"/> 缓冲），
+    /// 只是把"推进 OS 页缓存"合并到下一次落盘。而下一次落盘一定会到来：任何一次普通
+    /// <see cref="Log(string,string,int,string?)"/>（心跳 1s 一条）、<see cref="Flush"/>、
+    /// <see cref="Shutdown"/> 都会把它一起带走。故丢失窗口有硬上界 = <see cref="FlushThrottleMs"/>。</para>
+    /// </summary>
+    public static void LogThrottled(string component, string evt, int route, string? detail)
+    {
+        if (!IsEnabled) return;
+        var flush = ShouldFlushNow(Environment.TickCount64, Volatile.Read(ref _lastFlushTicks), FlushThrottleMs);
+        WriteLineLocked(Format(component, evt, route, detail), flush);
     }
 
     /// <summary>
@@ -272,8 +358,11 @@ public static class ComponentLog
         return sb.ToString();
     }
 
-    /// <summary>写入一行：先入 ring buffer，再<b>同步落盘并 flush</b>（见类注释）。</summary>
-    private static void WriteLineLocked(string line)
+    /// <summary>写入一行：先入 ring buffer，再按 <paramref name="flush"/> 决定是否<b>同步落盘并 flush</b>。
+    ///
+    /// <para><paramref name="flush"/> = false 只由 <see cref="LogThrottled"/> 传（见该方法的权衡说明）：
+    /// 内容已写进缓冲，但留在 <see cref="StreamWriter"/> 里等下一次落盘。</para></summary>
+    private static void WriteLineLocked(string line, bool flush)
     {
         lock (WriteLock)
         {
@@ -291,8 +380,9 @@ public static class ComponentLog
 
                 _writer.WriteLine(line);
                 // ⚠ 显式 Flush 是主保障，不是冗余：把缓冲推进 OS 页缓存，
-                // 进程随后被硬崩也不会丢这一行（AutoFlush 是第二重保险）。
-                _writer.Flush();
+                // 进程随后被硬崩也不会丢这一行（AutoFlush 已关闭，这里是唯一保障）。
+                if (flush) FlushWriterLocked();
+                else _throttledSkipCount++;
             }
             catch
             {
@@ -307,7 +397,7 @@ public static class ComponentLog
     {
         try
         {
-            _writer?.Flush();
+            FlushWriterLocked();
             _writer?.Dispose();
             _stream?.Dispose();
         }
@@ -320,11 +410,11 @@ public static class ComponentLog
             _stream = new FileStream(_path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
             _writer = new StreamWriter(_stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false))
             {
-                AutoFlush = true,
+                AutoFlush = false,   // 同 Initialize：显式 Flush 才是唯一保障（见那里的注释）
             };
             _writer.WriteLine($"{DateTime.Now:HH:mm:ss.fff} [{Comp.Crash}] FileRolled 跨天滚动到 " +
                               $"{Path.GetFileName(_path)}");
-            _writer.Flush();
+            FlushWriterLocked();
         }
         catch
         {
@@ -356,7 +446,7 @@ public static class ComponentLog
                     if (entry is not null) _writer.WriteLine("  | " + entry);
                 }
                 _writer.WriteLine($"{DateTime.Now:HH:mm:ss.fff} [{Comp.Crash}] RingDumpEnd reason={reason}");
-                _writer.Flush();
+                FlushWriterLocked();
             }
             catch { }
         }

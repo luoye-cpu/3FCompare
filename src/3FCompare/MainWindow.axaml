@@ -24,11 +24,33 @@
         <MenuItem Header="{loc:Loc Menu_Exit}" Click="OnExit" />
       </MenuItem>
       <MenuItem Header="{loc:Loc Menu_View}" SubmenuOpened="OnViewMenuOpened">
-        <!-- 视图模式（互斥/切换类） -->
-        <MenuItem Header="{loc:Loc Menu_ToggleSingle}" Click="OnToggleSingleMulti" />
-        <MenuItem Header="{loc:Loc Menu_AbSlider}" Click="OnToggleAbSlider" />
-        <MenuItem Header="{loc:Loc Menu_ShowGrid}" Click="OnShowGridOnly" />
+        <!-- ══════ 视图模式：三态互斥，整列摆在菜单最上方 ══════
+             这三项一直在，但埋在「对比模式」子菜单里、名字是"叠加 / 分屏 / 网格"，
+             既看不出"它们是一组、可以互相切换"，也看不出切换后各自是什么 ——
+             现在做成一列单选（ToggleType=Radio + GroupName 才画成圆点而非方勾，且同组自动互斥），
+             并在右侧标出快捷键。勾选一律由 RefreshCompareModeChecks 按真实状态回写
+             （框架会先改 IsChecked 再 RaiseClick，且菜单只是入口之一：G/V/S 与 C 循环都改状态）。
+             同时撤下两个重复概念入口：「A-B 滑块视图」只画渐变占位、真机模式下会整块遮住真实画面，
+             「显示 对比网格」实际动作是折叠侧栏（侧栏三态就在本菜单下方）。 -->
+        <MenuItem Header="{loc:Loc Menu_ViewMode}" IsEnabled="False" />
+        <MenuItem x:Name="MenuViewStandard" Header="{loc:Loc Menu_Mode_Standard}"
+                  InputGesture="G" ToggleType="Radio" GroupName="ViewMode"
+                  Click="OnCompareModePreset" Tag="grid" />
+        <MenuItem x:Name="MenuViewAbSplit" Header="{loc:Loc Menu_Mode_AbDrag}"
+                  InputGesture="V" ToggleType="Radio" GroupName="ViewMode"
+                  Click="OnCompareModePreset" Tag="split" />
+        <MenuItem x:Name="MenuViewWipe" Header="{loc:Loc Menu_Mode_Wipe}"
+                  InputGesture="S" ToggleType="Radio" GroupName="ViewMode"
+                  Click="OnCompareModePreset" Tag="overlay" />
         <Separator />
+        <!-- 以下两项都只作用于「标准模式」那一格：单屏=只看选中路，网格布局=均匀格数预设。 -->
+        <MenuItem Header="{loc:Loc Menu_ToggleSingle}" Click="OnToggleSingleMulti" />
+        <MenuItem Header="{loc:Loc Menu_GridLayout}">
+          <MenuItem Header="{loc:Loc Menu_Grid_2x1}" Click="OnGridPreset" Tag="2x1" />
+          <MenuItem Header="{loc:Loc Menu_Grid_2x2}" Click="OnGridPreset" Tag="2x2" />
+          <MenuItem Header="{loc:Loc Menu_Grid_3x3}" Click="OnGridPreset" Tag="3x3" />
+          <MenuItem Header="{loc:Loc Menu_Grid_Auto}" Click="OnGridPreset" Tag="auto" />
+        </MenuItem>
         <!-- 面板：聚合成子菜单，避免 8 个平铺项淹没主菜单（对齐 Premiere「窗口」/ VS Code「视图」分组） -->
         <MenuItem Header="{loc:Loc Menu_Panels}">
           <MenuItem Header="{loc:Loc Menu_Probe}" Click="OnToggleProbe" />
@@ -39,29 +61,23 @@
           <MenuItem Header="{loc:Loc Menu_Audio}" Click="OnToggleAudio" />
         </MenuItem>
         <Separator />
-        <MenuItem Header="{loc:Loc Menu_GridLayout}">
-          <MenuItem Header="{loc:Loc Menu_Grid_2x1}" Click="OnGridPreset" Tag="2x1" />
-          <MenuItem Header="{loc:Loc Menu_Grid_2x2}" Click="OnGridPreset" Tag="2x2" />
-          <MenuItem Header="{loc:Loc Menu_Grid_3x3}" Click="OnGridPreset" Tag="3x3" />
-          <MenuItem Header="{loc:Loc Menu_Grid_Auto}" Click="OnGridPreset" Tag="auto" />
-        </MenuItem>
-        <!-- 模式家族（docs/31 阶段 3）：叠加 / 分屏 / 网格 三选一。
-             与上面「网格布局」的分工：那组调的是**均匀网格的预设**（2x1/2x2/3x3），
-             这组调的是**模式家族**（叠加=两路铺满揭示，分屏=按路数收敛的非均匀分格，
-             网格=退出前两者、回到均匀网格）。
-             三项用 Click+Tag（与本菜单既有写法一致）；勾选状态在父菜单 SubmenuOpened 时刷新，
-             避免用 C/S 键改了模式后菜单里留下陈旧勾选。ToggleType=CheckBox 才能画出勾（见 Fluent 主题 ^:checked:toggle）。 -->
-        <MenuItem Header="{loc:Loc Menu_CompareMode}" SubmenuOpened="OnCompareModeMenuOpened">
-          <MenuItem x:Name="MenuModeOverlay" Header="{loc:Loc Menu_Mode_Overlay}"
-                    ToggleType="CheckBox" Click="OnCompareModePreset" Tag="overlay" />
-          <MenuItem x:Name="MenuModeSplit" Header="{loc:Loc Menu_Mode_Split}"
-                    ToggleType="CheckBox" Click="OnCompareModePreset" Tag="split" />
-          <MenuItem x:Name="MenuModeGrid" Header="{loc:Loc Menu_Mode_Grid}"
-                    ToggleType="CheckBox" Click="OnCompareModePreset" Tag="grid" />
+        <!-- 对比模式下的辅助开关（docs/31 阶段 3）。三项"模式"本身已上移到菜单顶部的「视图模式」列，
+             这里留下的都不是模式：互换/轮换只换"格 ↔ 路"的映射、不改变格数；
+             自动进入对比是可勾选的偏好。故父项改名「对比选项」。
+             AB 左右互换之所以不跟"左右拉动"共用一套判据：拉动靠窗口区域表达"露出哪一路"，互换会与揭示区打架。
+             勾选刷新与"框架先取反再 RaiseClick"的坑见 RefreshCompareModeChecks。 -->
+        <MenuItem x:Name="MenuCompareOptions" Header="{loc:Loc Menu_CompareOptions}"
+                  SubmenuOpened="OnCompareModeMenuOpened">
+          <MenuItem x:Name="MenuModeSwap" Header="{loc:Loc Menu_Mode_Swap}"
+                    Click="OnSwapCompareCells" />
+          <MenuItem x:Name="MenuModeRotate" Header="{loc:Loc Menu_Mode_Rotate}"
+                    Click="OnRotateCompareCells" />
+          <MenuItem x:Name="MenuAutoCompare" Header="{loc:Loc Menu_AutoCompare}"
+                    ToggleType="CheckBox" Click="OnToggleAutoCompare" />
         </MenuItem>
         <Separator />
         <!-- 底部栏折叠（docs/31 阶段 4）：时间轴 / 状态栏，两项互相独立。
-             与「对比模式」三项同为可勾选项（Click+Tag、ToggleType=CheckBox），
+             两项都是"开/关"而非互斥选择，故用 ToggleType=CheckBox（上面「视图模式」那三项才是 Radio）。
              勾选刷新时机与"框架先取反再 RaiseClick"的坑见 RefreshBottomBarChecks 的注释。 -->
         <MenuItem x:Name="MenuTimeline" Header="{loc:Loc Menu_Timeline}"
                   ToggleType="CheckBox" Click="OnToggleBottomBar" Tag="timeline" />
@@ -121,14 +137,13 @@
             Background="{DynamicResource CanvasDarkBrush}"
             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" />
 
-    <!-- 主区：侧栏 | 分隔条 | 中央网格/AB滑块/放大镜 -->
+    <!-- 主区：侧栏 | 分隔条 | 中央网格/放大镜 -->
     <Grid ColumnDefinitions="264,Auto,*" x:Name="MainArea">
       <ContentControl x:Name="SidebarHost" Grid.Column="0" />
       <GridSplitter x:Name="SidebarSplitter" Grid.Column="1" Width="4"
                     ResizeDirection="Columns" Background="{DynamicResource BorderBrush}" MinWidth="4" />
       <Panel Grid.Column="2" x:Name="CenterPanel">
         <ctrl:CompareGridView x:Name="Grid" DragDrop.AllowDrop="True" ClipToBounds="True" />
-        <ctrl:AbSliderView x:Name="AbSlider" IsVisible="False" />
         <ctrl:MagnifierOverlay x:Name="Magnifier" />
       </Panel>
     </Grid>

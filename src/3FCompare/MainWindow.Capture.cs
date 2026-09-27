@@ -133,23 +133,14 @@ public partial class MainWindow : Window
             var media = session.ReadMediaInfo();
             if (media is null || media.VideoWidth <= 0 || media.VideoHeight <= 0) return null;
 
-            // 无 RTInfo（演示模式 / 旧内核）时退回"整面即视频"的假定
-            if (!session.ReadRenderTargetInfo(out var rt) || rt.DestWidth == 0 || rt.DestHeight == 0)
-            {
-                rt = new RenderTargetInfo((uint)media.VideoWidth, (uint)media.VideoHeight,
-                    (uint)media.VideoWidth, (uint)media.VideoHeight,
-                    0, 0, (uint)media.VideoWidth, (uint)media.VideoHeight, 8, false);
-            }
-
-            // 交换链尺寸是回读的硬性上界：放大/平移时 Dest 矩形可能超出，必须裁剪，
-            // 否则会请求越界区域（内核返回失败或垃圾数据）。
-            var swapW = rt.SwapWidth > 0 ? (int)rt.SwapWidth : int.MaxValue;
-            var swapH = rt.SwapHeight > 0 ? (int)rt.SwapHeight : int.MaxValue;
-            var x0 = Math.Clamp((int)rt.DestX, 0, Math.Max(0, swapW - 1));
-            var y0 = Math.Clamp((int)rt.DestY, 0, Math.Max(0, swapH - 1));
-            var w = Math.Min((int)rt.DestWidth, Math.Max(0, swapW - x0));
-            var h = Math.Min((int)rt.DestHeight, Math.Max(0, swapH - y0));
-            if (w <= 0 || h <= 0) return null;
+            // "无 RTInfo 退回整面 / Dest 超 swap 按 swap 裁剪"的算术已下沉到
+            // Core.Backend.NativeFrameReadback（纯函数，可单测，docs/41 §4.5 第 12 项）：
+            // 原先是内联在这里的 8 行，而本方法挂在 Window 子类上，单测够不着。
+            var rtAvailable = session.ReadRenderTargetInfo(out var rt);
+            var rect = _3FCompare.Core.Backend.NativeFrameReadback.ResolveRect(
+                rtAvailable, rt, media.VideoWidth, media.VideoHeight);
+            if (rect is not { } readRect) return null;
+            var (x0, y0, w, h) = (readRect.X, readRect.Y, readRect.Width, readRect.Height);
 
             var bmp = new System.Drawing.Bitmap(w, h, PixelFormat.Format32bppArgb);
             var tileRows = Math.Clamp(TilePixelBudget / Math.Max(1, w), 1, h);

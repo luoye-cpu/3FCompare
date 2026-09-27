@@ -6,6 +6,7 @@ using Avalonia.Media;
 using _3FCompare.App;
 using _3FCompare.Controls;
 using _3FCompare.Core.Backend;
+using _3FCompare.Core.Imaging;
 
 namespace _3FCompare.Panels;
 
@@ -110,17 +111,20 @@ public sealed class ProbePanel : StackPanel
                 _lastX = x; _lastY = y;
                 _hasSample = true;
                 RefreshCoord();
+                // 8-bit 读数必须走跨域统一口径：SDR 回读是 gamma 编码、HDR 回读是线性 scRGB，
+                // 直接 v*255 会让两者不可比（docs/45 P0-4；口径定义见 ColorNormalizer）。
+                var hdr = _session.ReadRenderTargetInfo(out var rt) && rt.Hdr;
+                ColorNormalizer.ToDisplay8Bit(s.R, s.G, s.B, s.A, s.BitDepth, hdr,
+                    out var r8, out var g8, out var b8, out _);
                 _value.Text =
                     $"R {s.R:0.000000}  G {s.G:0.000000}\nB {s.B:0.000000}  A {s.A:0.000000}\n" +
-                    $"{LanguageManager.T("Probe_Bits")}: {To8Bit(s.R)},{To8Bit(s.G)},{To8Bit(s.B)}";
+                    $"{LanguageManager.T("Probe_Bits")}: {r8},{g8},{b8}";
                 return;
             }
         }
         catch { /* 会话未就绪 */ }
         _value.Text = LanguageManager.T("Probe_ReadFail");
     }
-
-    private static int To8Bit(float v) => Math.Clamp((int)Math.Round(v * 255f), 0, 255);
 
     public void CopyToClipboard()
     {

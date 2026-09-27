@@ -47,6 +47,17 @@ public partial class MainWindow : Window
     /// 见 ScheduleTransformFlush 的注释：16ms 节流会**直接丢弃**更新，滚轮事件停止后
     /// 不会再有调用 ⇒ 最后一次缩放永久丢失且不自愈。</summary>
     private readonly DispatcherTimer _transformFlushTimer;
+
+    /// <summary>崩溃自愈用的会话自动保存定时器（docs/43）。
+    ///
+    /// <para><b>为什么只能"边看边写"</b>：要防的崩溃是原生访问违规 / 非法指令，
+    /// 它是<b>即时终止</b>——不跑 finally、不跑 ProcessExit、不跑 OnClosed，
+    /// 任何"退出时保存"的钩子在它面前都等于不存在。所以必须在崩溃<b>之前</b>落盘。</para>
+    ///
+    /// <para><b>为什么是 5 秒</b>：更密会与 8 路 4K 的顺序读盘抢 I/O（每次写都 fsync）；
+    /// 更疏则恢复出来的位置偏差过大。5 秒的代价是崩溃时最多丢 5 秒进度，
+    /// 而保住的是"不用重新打开 8 路 4K"——后者才是真正昂贵的东西。</para></summary>
+    private readonly DispatcherTimer _autosaveTimer;
     /// <summary>最近一次真正下发到内核的变换值（自测断言用）。
     /// 只由 SendViewTransform 写入，用于校验"UI 状态与内核实际状态一致"。</summary>
     internal float LastSentZoom = 1f;
@@ -90,6 +101,11 @@ public partial class MainWindow : Window
     // ── 悬浮传输栏（docs/31 阶段 4.3）──
     /// <summary>承载传输栏的 owned 顶层窗。开启悬浮模式时创建，关闭时销毁并交还控件。</summary>
     private FloatingTransportWindow? _floatingTransport;
+    /// <summary>承载放大镜的 owned 顶层窗（P1-4）：视频子 HWND 恒盖在主窗自绘内容之上
+    /// （airspace），放大镜挂回 CenterPanel 只会被整块遮住，必须用独立窗口呈现。
+    /// 随主窗构造创建、OnClosed 销毁；Show/Hide 由 <see cref="OnMagnifierPresentationChanged"/> 驱动。</summary>
+    private readonly MagnifierOverlayWindow _magnifierWindow;
+
     /// <summary>光标热区轮询。视频由子 HWND 渲染，Avalonia 收不到它上面的指针事件（airspace），
     /// 故用光标位置轮询统一覆盖「视频 / Avalonia 控件」两类区域，避免漏判。</summary>
     private readonly DispatcherTimer _transportHoverTimer;
@@ -115,9 +131,16 @@ public partial class MainWindow : Window
         // 新增自测模式时**必须同步加到这里**：漏一个就会出现"测试进程用测试窗口的状态
         // 覆盖用户配置"（--sessiontest 曾漏过，退出时把 800×600 的测试窗口几何写进
         // settings.json，用户下次启动窗口就变小了）。
-        if (cmdArgs.Length >= 3 &&
+        // docs/41 P0-2 复核：阈值由 3 降到 2。argc==2 意味着"只给了模式名、一个参数都没有"，
+        // 所有自测模式都至少需要 1 个素材路径 ⇒ 这也是参数不足，必须置位以便
+        // 分派链末尾的守卫拦住（否则照样启动完整 GUI 且不退出）。
+        if (cmdArgs.Length >= 2 &&
             cmdArgs[1] is "--selftest" or "--screentest" or "--multitest" or "--sessiontest"
-                       or "--comparemodetest" or "--magnifybench")
+                       or "--comparemodetest" or "--magnifybench"
+                       // --autodemo 同样是"测试态"：无人值守演示会把自己的窗口几何写进
+                       // 用户 settings.json（SaveWindowGeometry 只以 _selfTestMode 把关），
+                       // 与 --sessiontest 的历史坑完全同类（docs/45 P1-3）。
+                       or _3FCompare.Diagnostics.CrashGuard.AutodemoArg)
             _selfTestMode = true;
 
         // 可用性 P0-2：窗口位置/尺寸/状态的恢复统一在 RestoreWindowGeometry() 完成
@@ -147,6 +170,7 @@ public partial class MainWindow : Window
         // 应用缩放小地图设置
         PlayerSurface.SharedMinimapEnabled = _settings.MinimapEnabled;
         _sync.StepProfile = new StepProfile { FrameStep = _settings.FrameStep, SecondsStep = _settings.SecondsStep };
+        RebuildKeyMap();   // 键位表：只在构造与设置被采纳两处重建
         _coordinator = new PlaybackCoordinator(_engine, _sync, _settings, Grid.GetSurface);
         _coordinator.StateChanged += (_, _) => { UpdateStatus(); UpdatePanelsForSelection(); };
 
@@ -189,19 +213,27 @@ public partial class MainWindow : Window
         _mediaPanel = new MediaInfoPanel();
         _audioPanel = new AudioPanel();
 
-        _bookmarks.JumpRequested += pos => _sync.SeekTo(pos);
+        _bookmarks.JumpRequested += pos => SafeSeek(pos);
         _offsetPanel.AlignRequested += (_, _) => OnOffsetAlign();
         _offsetPanel.OffsetNudge += delta => OnOffsetNudge(delta);
         _offsetPanel.OffsetReset += (_, _) => OnOffsetReset();
 
         _sidebar = new ToolsSidebar(_probe, _bookmarks, _offsetPanel, _mediaPanel, _audioPanel);
+        // 悬浮传输栏（docs/31 阶段 4.3）由 _floatingTransport 承载；
+        // 放大镜（P1-4）同理用独立 owned 顶层窗承载：视频子 HWND 恒盖在主窗自绘内容之上
+        // （airspace），挂回 CenterPanel 只会被整块遮住 —— 见 MagnifierOverlayWindow 类注释。
+        // XAML 仍声明命名控件（保留生成字段供 SelfTest 引用），但构造时立刻摘出主窗视觉树。
+        CenterPanel.Children.Remove(Magnifier);
+        _magnifierWindow = new MagnifierOverlayWindow(Magnifier);
+        Magnifier.WindowHosted = true;
+        Magnifier.HostContainer = CenterPanel;
+        Magnifier.PresentationChanged += OnMagnifierPresentationChanged;
         _sidebar.MagnifierToggled += (_, _) =>
         {
             if (!_sidebar.MagnifierOn) Magnifier.HideOverlay();
         };
         _sidebar.ModeChanged += OnSidebarModeChanged;
         SidebarHost.Content = _sidebar;
-
         // 恢复上次会话的侧栏几何（展开宽度 + 三态），实现见 MainWindow.Sidebar.cs
         RestoreSidebarGeometry();
         // 拖拽回写（D2）：不接这个事件，拖完的宽度既不入内存也不落盘，
@@ -213,18 +245,18 @@ public partial class MainWindow : Window
         _transportHideTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(TransportHideDelayMs) };
         _transportHideTimer.Tick += (_, _) => { _transportHideTimer.Stop(); HideFloatingTransport(); };
         // 失焦即收（含最小化）：浮条是"光标在附近才出现"的东西，不该在切走程序后仍留在屏幕上。
-        // 例外是光标正停在浮条上 —— ComboBox 下拉是独立 Popup，展开时主窗可能被判为失焦，
-        // 此时若收掉浮条会把下拉一起弄没（判定见 IsCursorOverFloatingBar）。
-        Deactivated += (_, _) => { if (!IsCursorOverFloatingBar()) HideFloatingTransport(); };
+        // 旧版这里有一条"光标停在浮条上则不收"的例外，专为 ComboBox 下拉兜底（下拉是独立
+        // Popup 窗口，展开时主窗会被判失焦）；底栏换成无 Popup 的 chip/栏内候选行后例外已无必要。
+        Deactivated += (_, _) => HideFloatingTransport();
         // 恢复底部栏（时间轴 / 状态栏 / 悬浮传输栏）的偏好（docs/31 阶段 4），实现见 ApplyBottomBarVisibility
         ApplyBottomBarVisibility();
         Grid.SelectionChanged += (_, _) => UpdatePanelsForSelection();
+        // 占格路数变了 → 延后一拍把"没占格"的那几路停用（不是只隐藏：实测未占格路仍以满速解码+Present）
+        Grid.VisibleRoutesChanged += OnVisibleRoutesChanged;
         UpdatePanelsForSelection();
 
         // 探针/放大镜：隧道指针移动定位命中表面
         CenterPanel.AddHandler(InputElement.PointerMovedEvent, OnGridPointerMoved, RoutingStrategies.Tunnel);
-
-        AbSlider.SliderChanged += _ => { /* 视觉滑块（WinForms 同语义） */ };
 
         // 轮询：16ms 播放中 / 250ms 空闲（WinForms PollSnapshots 移植）
         _pollTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
@@ -235,9 +267,20 @@ public partial class MainWindow : Window
         _transformFlushTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
         _transformFlushTimer.Tick += (_, _) => FlushPendingViewTransform();
 
+        // 崩溃自愈：会话快照周期落盘（间隔的取舍见字段注释）
+        _autosaveTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+        _autosaveTimer.Tick += (_, _) => TryAutosave();
+        _autosaveTimer.Start();
+
         RestoreWindowGeometry();
 
         AddHandler(DragDrop.DragOverEvent, OnDragOver);
+        // 传输动作的可绑定快捷键必须在**隧道层**截：焦点落在按钮上时，Avalonia 的 Button 会把
+        // Space 当成"按下该按钮"并置 Handled ⇒ 窗口级 OnKeyDown（冒泡）根本收不到，
+        // 用户看到的正是"空格暂停后再按空格不播了"。文本输入框由 IsTextInputFocused 放行，
+        // 否则侧栏搜索框里打不出空格——那是更严重的倒退。
+        AddHandler(KeyDownEvent, OnTransportKeyDownTunnel, global::Avalonia.Interactivity.RoutingStrategies.Tunnel);
+
         AddHandler(DragDrop.DropEvent, OnDrop);
         DragDrop.SetAllowDrop(this, true); // 启用窗口拖放
 
@@ -275,6 +318,16 @@ public partial class MainWindow : Window
                 double.TryParse(args[4], out var bz) ? bz : 2.0,
                 args.Length >= 6 && int.TryParse(args[5], out var bs) ? bs : 8,
                 args.Length >= 7 && double.TryParse(args[6], out var bb) ? bb : 0);
+        // ⚠ 参数个数不足的兜底（docs/41 P0-2）：白名单在 cmdArgs.Length >= 3 时就置
+        //    _selfTestMode，而各模式的分派要求 4~5 个参数（--screentest>=4、--magnifybench>=5）。
+        //    漏了这里 ⇒ 不进入任何自测分支 ⇒ 启动完整 GUI 且永不退出，
+        //    而这条路径没有看门狗 ⇒ 门禁看似在跑、实际挂到超时。
+        else if (_selfTestMode)
+        {
+            Console.Error.WriteLine(
+                $"自测参数不足：{args[1]} 需要更多参数（argc={args.Length}），未进入任何自测分支");
+            ExitSelfTest(2);
+        }
     }
 
     /// <summary>async void 事件处理器的统一异常边界。
@@ -367,6 +420,12 @@ public partial class MainWindow : Window
             NotifyRouteLimit(room, paths.Count); // 只开前 room 个，其余静默丢弃 ⇒ 也要说清楚
 
         ResetRecoveryState();
+        // 全新一批素材（当前没有任何路）⇒ 清掉上一次的"格→路"映射。
+        // 不清的话：上次 4 路 ABCD 轮换到 [1,2,3,0] 后关掉全部文件，再打开 2 个文件时
+        // NormalizeRoute(2) 会由旧值拼出 [1,0] ⇒ 全新素材一进来就是左右互换，
+        // 而菜单里没有任何勾选反映它（RefreshCompareModeChecks 不刷这一项）。
+        if (_sync.Count == 0) _compareRoute = null;
+
         // 3FCompare 修复：先把网格扩到能容纳"现有路数 + 新拖入文件"的数量。
         // PlaybackCoordinator.OpenFiles 用 _surfaceAt(_sync.Count) 取 surface，
         // 若网格没预建足够 surface（拖入第 3 路/多个文件）会静默跳过打开。
@@ -387,8 +446,51 @@ public partial class MainWindow : Window
         // "打开进行中"与"呈现线程停滞"若在时间上相邻，这条就是关键锚点。
         ComponentLog.Log(Comp.Engine, "SessionOpen", -1,
             $"src=paths files={paths.Count} existing={_sync.Count} autoPlay=False");
-        _coordinator.OpenFiles(paths, autoPlay: false);
+        // 崩溃自愈：全部打开完成的瞬间记一次快照——此刻最容易崩（8 路 4K 解码同时起飞），
+        // 而 5 秒的定时轮询还没轮到。理由见 TryAutosave 的注释。
+        //
+        // 「自动进入对比模式」也挂在这个回调上：OpenFiles 是 async void，OpenPaths 末尾的
+        // _sync.Count 还是打开前的旧值，在那里调会按错的路数收敛模式。onAllOpened 是唯一
+        // "路数已确定"的时机。
+        _coordinator.OpenFiles(paths, autoPlay: false, onAllOpened: OnAllFilesOpened);
         UpdateStatus();
+    }
+
+    /// <summary>全部文件打开完成后的收尾（快照 + 可选的自动进对比模式）。</summary>
+    private void OnAllFilesOpened()
+    {
+        TryAutosave();
+
+        // 批次打开期间的暂停只为"各路对齐"（见 OpenPaths 里 _sync.Pause() 的注释）。
+        // 但全部就绪后**原先没有人恢复播放** ⇒ 拖放/菜单打开的结局是停在暂停态，
+        // 用户报的"拖进去完全没反应"就是这个（四次真拖放都走到了 SessionReady routes=2 failed=0）。
+        // 2026-09-26 由用户实机确认为已修。
+        if (_sync.Count > 0)
+        {
+            try { _sync.Play(); } catch { }
+            try { _sync.RedrawAll(); } catch { }   // 幂等；契约见 SyncController.RedrawAll
+            SetPlaying(true);
+            ComponentLog.Log(Comp.Engine, "AutoResumeAfterOpen", -1, $"routes={_sync.Count} src=allFilesOpened");
+        }
+        if (!_settings.AutoEnterCompare) return;
+
+        // 已在对比模式里就别再进一次：EnterSplitMode 对"已是目标模式"有保护，但追加文件使
+        // 路数从 2 变 3 时目标模式真的会从 AB 变 ABC ⇒ 命中 EnterCompareMode 的
+        // `SplitParams.Default(...)`，把用户已拖好的分割位置重置掉。这里先保住分割参数，
+        // 再让模式按新路数收敛 —— 用户拖过的位置比"模式必须严格匹配路数"更重要。
+        // 只在"进入前就已经在对比模式里"时才保住分割参数：否则 keepSplit 是上一次会话的
+        // 残留值，会用它覆盖掉 EnterSplitMode 刚设好的居中初值（表现为"第一次自动进模式，
+        // 分割线却停在上次拖过的位置"）。
+        var wasActive = _compareActive;
+        var keepSplit = _compareSplit;
+        EnterSplitMode();
+        if (wasActive && _compareActive && _compareSplit != keepSplit)
+        {
+            _compareSplit = keepSplit.Clamp();
+            _layoutOverlay?.Update(_compareMode, _compareSplit);
+            ApplyCompareLayout();
+            ScheduleCompareCrop();
+        }
     }
 
     /// <summary>路数超上限的可见提示（D12）。
@@ -425,17 +527,91 @@ public partial class MainWindow : Window
         _stallWatch.Reset();
     }
 
-    private void OnDragOver(object? sender, DragEventArgs e) =>
-        e.DragEffects = e.DataTransfer.Contains(global::Avalonia.Input.DataFormat.File) ? DragDropEffects.Copy : DragDropEffects.None;
+    /// <summary>可自定义播放快捷键的分派表：由 <c>AppSettings.KeyBindings</c> 经
+    /// <see cref="TransportKeys.BuildMap"/> 解析而来，只在「构造」与「设置被采纳」两处重建。</summary>
+    private System.Collections.Generic.Dictionary<(global::Avalonia.Input.Key, global::Avalonia.Input.KeyModifiers), TransportKeys.Slot> _keyMap = new();
 
+    /// <summary>按当前设置重建键位表。只在构造与"设置被采纳"两处调用。</summary>
+    private void RebuildKeyMap() => _keyMap = TransportKeys.BuildMap(_settings.KeyBindings);
+
+    /// <summary>命中一个可绑定的传输动作。修饰键位先做掩码，与 <see cref="TransportKeys.BuildMap"/> 同口径
+    /// —— 不掩码会出现"存的是 Ctrl+Left、按下算成 Ctrl+Left+附加位"⇒ 用户看到设了却没反应。</summary>
+    private bool TryHandleTransportKey(global::Avalonia.Input.Key key, global::Avalonia.Input.KeyModifiers mods)
+    {
+        if (!_keyMap.TryGetValue((key, TransportKeys.Normalize(mods)), out var slot)) return false;
+        switch (slot)
+        {
+            case TransportKeys.Slot.StepSecondBackward: StepSecondsAsync(-_sync.StepProfile.SecondsStep); break;
+            case TransportKeys.Slot.StepSecondForward: StepSecondsAsync(_sync.StepProfile.SecondsStep); break;
+            case TransportKeys.Slot.StepFrameBackward: StepFramesAsync(-_sync.StepProfile.FrameStep); break;
+            case TransportKeys.Slot.StepFrameForward: StepFramesAsync(_sync.StepProfile.FrameStep); break;
+            case TransportKeys.Slot.PlayPause: TogglePlay(); break;
+            case TransportKeys.Slot.Stop: StopPlayback(); break;   // 底栏按钮已删 ⇒ 只能由用户自己绑
+        }
+        return true;
+    }
+
+    /// <summary>隧道层的可绑定快捷键分派（挂接处见构造函数注释）。</summary>
+    private void OnTransportKeyDownTunnel(object? sender, KeyEventArgs e)
+    {
+        if (e.Handled) return;
+        if (IsTextInputFocused(e.Source as Visual) || IsTextInputFocused(FocusManager?.GetFocusedElement() as Visual))
+        {
+            global::_3FCompare.Diagnostics.DropTrace.Line(
+                $"[key] {e.Key}+{e.KeyModifiers} 命中键位表但焦点在文本框 ⇒ 放行给输入框");
+            return;
+        }
+        if (!TryHandleTransportKey(e.Key, e.KeyModifiers)) return;
+        e.Handled = true;      // 已执行动作 ⇒ 不再让它落到焦点按钮（否则一次空格＝暂停＋点按钮两件事）
+    }
+
+    /// <summary>从 <paramref name="start"/> 往上走可视树，看是否落在文本输入控件里。</summary>
+    private static bool IsTextInputFocused(Visual? start)
+    {
+        for (var v = start; v is not null; v = v.Parent as Visual)
+            if (v is global::Avalonia.Controls.TextBox) return true;
+        return false;
+    }
+
+    /// <summary>上一次 DragOver 算出的效果，用来把连续事件压成"只在变化那一拍写日志"。</summary>
+    private DragDropEffects? _lastDragOverEffect;
+
+    /// <summary>拖放进入/悬停：只有带文件格式才给 Copy，否则系统光标显示"禁止投放"。
+    /// <para>诊断只在**效果发生变化**那一拍写一条 —— DragOver 是连续事件，无条件写日志会把
+    /// AppLog 的有界队列刷爆（本仓有组件日志全局节流被刷满导致判据假红的历史）。</para></summary>
+    private void OnDragOver(object? sender, DragEventArgs e)
+    {
+        var hasFile = e.DataTransfer.Contains(global::Avalonia.Input.DataFormat.File);
+        e.DragEffects = hasFile ? DragDropEffects.Copy : DragDropEffects.None;
+        if (_lastDragOverEffect != e.DragEffects)
+        {
+            _lastDragOverEffect = e.DragEffects;
+            _3FCompare.Core.Diagnostics.AppLog.Info("Drop", $"DragOver 效果={e.DragEffects} 含File格式={hasFile}");
+        }
+    }
+
+    /// <summary>Avalonia/OLE 这一路的拖放落点（另一路是子 HWND 的 <c>WM_DROPFILES</c>，
+    /// 见 <see cref="Controls.PlayerSurface"/>）。
+    /// <para><b>为什么这里每条早退都要落日志</b>：拖放有两条入口，而 Explorer 优先走 OLE
+    /// —— <c>Avalonia.Win32.dll</c> 里实测有 <c>RegisterDragDrop</c> ⇒ 主窗是注册过的 OLE 目标，
+    /// 于是"拖了没反应"可能是①这一路静默早退、②那一路根本没收到消息，**两种在改之前无法区分**
+    /// （原先 <c>Contains(File)</c> 为假就直接 return，什么也不留）。现在三条出口各有一条读数。</para></summary>
     private void OnDrop(object? sender, DragEventArgs e)
     {
-        if (!e.DataTransfer.Contains(global::Avalonia.Input.DataFormat.File)) return;
-        var paths = e.DataTransfer.TryGetFiles()?
+        if (!e.DataTransfer.Contains(global::Avalonia.Input.DataFormat.File))
+        {
+            _3FCompare.Core.Diagnostics.AppLog.Warn("Drop", "OnDrop 到达但不含 File 格式 ⇒ 直接返回（不打开任何文件）");
+            return;
+        }
+        var items = e.DataTransfer.TryGetFiles()?.ToList();
+        var paths = items?
             .Select(f => f.TryGetLocalPath())
             .Where(p => p is not null)
             .Cast<string>()
             .ToList();
+        _3FCompare.Core.Diagnostics.AppLog.Info("Drop",
+            $"OnDrop：TryGetFiles={items?.Count.ToString() ?? "<null>"} 解析出本地路径={paths?.Count.ToString() ?? "<null>"}" +
+            (paths is { Count: > 0 } ? $" 首个={paths[0]}" : ""));
         if (paths is { Count: > 0 })
             OpenPaths(paths);
     }
@@ -445,12 +621,15 @@ public partial class MainWindow : Window
     private void WireTransport()
     {
         _transport.StepProfileSecondsProvider = () => _sync.StepProfile.SecondsStep;
+        _transport.FrameStepProvider = () => _sync.StepProfile.FrameStep;
+        // tooltip 里的键位必须跟着用户设置走（写死在文案里就会变成假话）
+        _transport.KeyHintProvider = slot => global::_3FCompare.Services.TransportKeys.Display(
+            global::_3FCompare.Services.TransportKeys.Get(slot, _settings.KeyBindings));
+        _transport.RefreshTips();
         _transport.PlayPauseClicked += (_, _) => TogglePlay();
-        _transport.StopClicked += (_, _) => { _sync.Stop(); SetPlaying(false); };
         // StepFrames 内含 50ms 复测等待（Thread.Sleep）——移到线程池执行，避免阻塞 UI
         _transport.FrameStepClicked += (_, d) => StepFramesAsync(d * _sync.StepProfile.FrameStep);
-        _transport.SecondsStepClicked += (_, d) => _sync.StepSeconds(d);
-        _transport.LoopToggled += (_, on) => ToggleLoop(on);
+        _transport.SecondsStepClicked += (_, d) => StepSecondsAsync(d);
         _transport.AddClicked += (_, _) => AddSlotPlaceholder();
         _transport.RemoveClicked += (_, _) => RemoveLastSlot();
         _transport.SpeedChanged += (_, s) =>
@@ -516,27 +695,102 @@ public partial class MainWindow : Window
     }
 
 
+    /// <summary>网格路数上限。一条 lane 无论有没有素材都算一路，与
+    /// <see cref="CompareGridView.SetCount"/> 内部的钳制同值。</summary>
+    internal const int MaxLaneCount = 9;
+
+    /// <summary>「加路」要设成的网格路数；返回原值即表示已在 <see cref="MaxLaneCount"/> 上限，
+    /// 调用方必须给可见反馈（不静默）。</summary>
+    /// <remarks><b>锚点取的是网格路数，不是会话数</b>：素材只占前 <c>_sync.Count</c> 条 lane，
+    /// 尾部允许存在空 lane（冷启动的默认形态就是 2 条空 lane）。按会话数算时，只要已经有空 lane，
+    /// 「加路」就会把 <c>SetCount</c> 调小 ⇒ 加路键变成减路键，还会连带撤掉空 lane。</remarks>
+    internal static int LaneCountAfterAdd(int laneCount) => Math.Min(MaxLaneCount, laneCount + 1);
+
+    /// <summary>「减路」该撤什么：尾部是空 lane 时只撤 lane（素材一路都不动），
+    /// 没有空 lane 才撤最后一路素材，两者皆零则不动作。
+    /// <para><c>public</c> 而非 <c>internal</c>：单测要把它当 <c>[Theory]</c> 的参数类型，
+    /// 而公开方法的签名不允许暴露 internal 类型（CS0051）。</para></summary>
+    public enum LaneRemoveAction { None, DropEmptyLane, DropLastRoute }
+
+    /// <summary>减路的决策。<see cref="LaneRemoveAction.DropEmptyLane"/> 与
+    /// <see cref="LaneRemoveAction.DropLastRoute"/> 的区分见 <see cref="LaneCountAfterAdd"/>。</summary>
+    /// <remarks>不变量：<b>素材始终占前 <c>routeCount</c> 条 lane</b> —— 会话只在下标
+    /// <c>_sync.Count</c> 上追加（见 <c>PlaybackCoordinator</c> 的 <c>_surfaceAt(_sync.Count)</c>），
+    /// 减路只从尾部摘（<see cref="SyncController.RemoveSlotAt"/> 的唯一调用点），
+    /// <c>SwapSlots</c> 换的是槽位次序、不改变"前 routeCount 条 lane 有素材"这一点。
+    /// 于是"尾部是否空 lane"等价于 <c>laneCount &gt; routeCount</c>，而
+    /// <see cref="CompareGridView.SetCount"/> 撤的恰是最后一条 lane ⇒ 两个方向对齐，
+    /// 「加路 / 减路」才互为逆运算。旧实现按会话数锚定时，撤一条空 lane 会把最后一路素材
+    /// 连同它的解码位置与偏移一起销毁（真机复现见 <c>AssertLaneAddRemoveContractAsync</c>）。</remarks>
+    internal static LaneRemoveAction PlanLaneRemove(int laneCount, int routeCount)
+    {
+        if (laneCount > routeCount) return LaneRemoveAction.DropEmptyLane;
+        if (routeCount > 0) return LaneRemoveAction.DropLastRoute;
+        return LaneRemoveAction.None;
+    }
+
+    /// <summary>加路撞上限的反馈。走 <see cref="NotifyRouteLimit"/> 同一套"必须看得见"的口径：
+    /// 旧实现这里连状态栏都不写，而且因为锚点取错，还会反过来把网格缩小。</summary>
+    private void NotifyLaneLimit()
+    {
+        var msg = Loc($"已达 {MaxLaneCount} 路上限，无法再加路。",
+                      $"Limit of {MaxLaneCount} lanes reached; cannot add more.");
+        StatusInfo.Text = msg;
+        _3FCompare.Core.Diagnostics.AppLog.Warn("Lane", msg);
+    }
+
     private void AddSlotPlaceholder()
     {
-        if (_sync.Count >= 9) return;
-        Grid.SetCount(_sync.Count + 1, _realMode);
+        var target = LaneCountAfterAdd(Grid.Count);
+        if (target == Grid.Count)
+        {
+            NotifyLaneLimit();
+            return;
+        }
+        Grid.SetCount(target, _realMode);
         UpdateStatus();
+
+        // 对比模式下格表可能短于 lane 数（AB 只有 2 格），新加的那条 lane 会被 Grid 直接隐藏
+        // （CompareGridView.ArrangeOverride）——画面看不到，就必须让状态栏说清楚，否则这个键
+        // 读起来是"点了没反应"。写在 UpdateStatus 之后：它会整体重算状态栏。
+        if (_compareActive)
+        {
+            var cells = CompareLayout.CellCount(_compareMode);
+            if (target > cells)
+            {
+                var name = CompareModeName(_compareMode);
+                StatusInfo.Text = Loc(
+                    $"已加到第 {target} 条 lane，但 {name} 只显示前 {cells} 路，新加的一条看不到（按 C 切换模式）。",
+                    $"Lane {target} added, but {name} shows only the first {cells} lane(s) — the new one is hidden (press C to change mode).");
+            }
+        }
     }
 
     private void RemoveLastSlot()
     {
-        if (_sync.Count <= 0) return;
-        Grid.GetSurface(_sync.Count - 1)?.DetachSession();
-        _sync.RemoveSlotAt(_sync.Count - 1);
-        Grid.SetCount(_sync.Count, _realMode);
-        UpdateStatus();
+        switch (PlanLaneRemove(Grid.Count, _sync.Count))
+        {
+            case LaneRemoveAction.DropEmptyLane:
+                // 撤的是尾部的空 lane：素材、偏移、播放位置一律不动。
+                Grid.SetCount(Grid.Count - 1, _realMode);
+                UpdateStatus();
+                return;
+            case LaneRemoveAction.DropLastRoute:
+                Grid.GetSurface(_sync.Count - 1)?.DetachSession();
+                _sync.RemoveSlotAt(_sync.Count - 1);
+                // 此分支下 laneCount == routeCount，故 _sync.Count 恰为撤一路后的网格路数；
+                // 万一不变量被破坏（网格少于路数），这里会把网格补回与会话数一致。
+                Grid.SetCount(_sync.Count, _realMode);
+                UpdateStatus();
+                return;
+        }
     }
 
     // ══════════ 多路对比：布局覆盖层（阶段 3.1 接线） ══════════
     //
     // anchor 取 Grid（CompareGridView）：它就是承载 1~9 路 PlayerSurface 的对比区容器，
     // 也是 LayoutOverlayWindow 文档里点名的默认 anchor。CenterPanel 虽包住它，但还叠放了
-    // AbSlider / Magnifier，覆盖矩形会包含这些非对比区，故不选。
+    // Magnifier 覆盖层，覆盖矩形会包含这些非对比区，故不选。
 
     /// <summary>进入对比模式：按当前路数收敛模式后在对比区之上显示分割线覆盖层。
     /// <para>最小入口，暂未接菜单/快捷键；将来从"视图"菜单调用即可。</para></summary>
@@ -598,6 +852,12 @@ public partial class MainWindow : Window
                 ? CompareOverlayLayout()
                 : CompareLayout.ComputeCells(_compareMode, _compareSplit);
 
+        // 格→路映射。叠加模式下不生效：它的"露出哪一路"由窗口区域（互补半区）表达，
+        // 再叠一层格映射会让两个机制互相打架（见 OnSwapCompareCells 的守卫）。
+        Grid.CellRoute = !_compareActive || overlay
+            ? null
+            : NormalizeRoute(CompareLayout.CellCount(_compareMode));
+
         // 组件日志：格表重排是"结构变化"（不是逐帧），值得逐次留痕。
         // 叠加开/关单独记一条跃迁事件——它把窗口区域的语义从"裁出格"换成"互补半区"，
         // 是裁剪/呈现相关崩溃的高嫌疑前置事件，混在通用 LayoutApplied 里不易检索。
@@ -606,11 +866,130 @@ public partial class MainWindow : Window
             if (overlay != _lastOverlayActive)
                 ComponentLog.Log(Comp.Overlay, overlay ? "OverlayOn" : "OverlayOff", -1,
                     $"mode={_compareMode}");
+
             _lastOverlayActive = overlay;
             ComponentLog.Log(Comp.Overlay, "LayoutApplied", -1,
                 $"active={_compareActive} overlay={overlay} mode={_compareMode} " +
                 $"split={_compareSplit.X:0.###},{_compareSplit.Y:0.###}");
         }
+    }
+
+    /// <summary>格 → 路的映射（<c>route[格号] = 路号</c>）；<c>null</c> = 恒等（第 i 格显示第 i 路）。
+    ///
+    /// <para><b>为什么是"格 → 路"而不是"路 → 格"</b>：格数可以小于路数（4 路用 AB 只有 2 格），
+    /// 于是"每一路对应哪一格"对多出来的路没有答案，而"每一格对应哪一路"恒有答案。
+    /// 反向查询由 <c>CompareGridView.CellIndexOfRoute</c> 提供。</para>
+    ///
+    /// <para><b>不随退出对比模式清除</b>：互换是一种呈现偏好，退出再进入应当保持，
+    /// 否则用户每次按 V 都要再点一次互换。</para></summary>
+    private int[]? _compareRoute;
+
+    /// <summary>把 <see cref="_compareRoute"/> 归一到"格数 == <paramref name="cellCount"/>"的形态；
+    /// 结果为恒等时返回 <c>null</c>（让 Grid 走与改动前逐字一致的路径）。
+    ///
+    /// <para><b>为什么需要归一化</b>：模式切换会改变格数（AB 2 格 → ABC 3 格），旧映射的长度
+    /// 与值域都可能不再合法 —— 长度不符会让 <c>cells[route]</c> 越界、值域超出路数会让某一格
+    /// 空白、重复路号会让一路占两格而另一路彻底消失。三者都必须在这里挡住，不能指望调用方。</para>
+    ///
+    /// <para>缺失的格按恒等补齐（第 cell 格显示第 cell 路），冲突时取"第一个尚未被占用的路号"
+    /// —— 结果恒为 <c>[0, 路数)</c> 内的一个排列（格数 ≤ 路数时）。</para></summary>
+    private int[]? NormalizeRoute(int cellCount)
+    {
+        if (_compareRoute is null || cellCount <= 0) return null;
+
+        var routeCount = Math.Max(1, Grid.Count); // 合法路号集合 = [0, 路数)
+        var result = new int[cellCount];
+        var used = new bool[Math.Max(routeCount, cellCount)];
+        var identity = true;
+
+        for (var cell = 0; cell < cellCount; cell++)
+        {
+            var r = cell < _compareRoute.Length ? _compareRoute[cell] : cell;
+            if (r < 0 || r >= routeCount || used[r])
+                r = FirstUnusedRoute(used, routeCount, cell);
+
+            result[cell] = r;
+            if (r >= 0 && r < used.Length) used[r] = true;
+            if (r != cell) identity = false;
+        }
+
+        return identity ? null : result;
+    }
+
+    /// <summary>从 <paramref name="preferred"/> 开始找第一个尚未被占用的路号；找不到（路数 &lt; 格数，
+    /// 正常路径不会发生）就退回 <paramref name="preferred"/>，保证返回值始终在 [0, 路数) 内。</summary>
+    private static int FirstUnusedRoute(bool[] used, int routeCount, int preferred)
+    {
+        for (var i = preferred; i < routeCount; i++) if (!used[i]) return i;
+        for (var i = 0; i < routeCount && i < preferred; i++) if (!used[i]) return i;
+        return preferred < routeCount ? preferred : 0;
+    }
+
+    /// <summary>「左右互换」入口（菜单「视图 → 对比选项 → 左右互换（AB）」）。
+    ///
+    /// <para><b>语义</b>：交换<b>前两格</b>所显示的路。AB 下就是左右互换、ABC 下是 A 与 B 互换、
+    /// ABCD 下是左上与右上互换 —— 一律是"视觉上相邻的前两格"，与模式无关。
+    /// 它<b>不改格数、不改分割位置、不换模式</b>，只是把两路画面调个位置。</para>
+    ///
+    /// <para><b>为什么不动 <c>surface↔slot</c> 映射</b>：路号还牵着同步、偏移、选中、媒体信息面板，
+    /// 换它会连带把"第 1 路"的偏移一起搬走，那是"改了数据"而不是"改了呈现"。
+    /// 只换格→路的映射，则路号语义全部保持不变，撤销也只是再点一次。</para></summary>
+    private void OnSwapCompareCells(object? sender, RoutedEventArgs e)
+    {
+        if (!_compareActive || CompareOverlayActive) return; // 叠加下互换会与揭示区打架
+
+        var cellCount = CompareLayout.CellCount(_compareMode);
+        if (cellCount < 2) return;
+
+        var route = NormalizeRoute(cellCount) ?? IdentityRoute(cellCount);
+        (route[0], route[1]) = (route[1], route[0]);
+        _compareRoute = route;
+
+        ApplyCompareLayout();
+        // 格换了 ⇒ 各路窗口要挪到新格 ⇒ 裁剪矩形必须重算（等布局落地后下发）
+        ScheduleCompareCrop();
+        RefreshCompareModeChecks();
+        StatusInfo.Text = Loc("已互换前两格的画面（再点一次还原）。",
+                              "Swapped the first two cells (click again to restore).");
+    }
+
+    /// <summary>「轮换画面」入口：每一格改显示<b>下一路</b>（在 [0, 路数) 上循环）。
+    ///
+    /// <para><b>为什么用它而不是"每格下拉框选源"</b>：下拉框要放在覆盖窗口上，而"覆盖窗口上的
+    /// ComboBox 能否正常交互"在本项目<b>从未实测</b>（docs/30:108/135、docs/31:361-363、docs/42:63
+    /// 三项均列为待做）。轮换用同一个按键就能遍历全部组合 —— 2 路时它就是互换，
+    /// 4 路用 AB 时连点可依次看到 (1,2) (2,3) (3,0) —— 既覆盖了"任意路 → 任意格"的实际需求，
+    /// 又不引入那块未验证的风险面。等真机验过覆盖窗口的下拉交互，再升级成完整下拉框。</para>
+    ///
+    /// <para><b>为什么是"路号 +1"而不是"格左移"</b>：路号在 [0, 路数) 上循环，于是格数少于路数时
+    /// （4 路用 AB）也能轮换到<b>当前没在显示的</b>那些路；按格左移只能在已显示的路之间转圈，
+    /// 永远看不到第 3、4 路。而 <c>(a+1) % n</c> 对不同 a 仍互不相同 ⇒ 结果恒为合法排列。</para></summary>
+    private void OnRotateCompareCells(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (!_compareActive || CompareOverlayActive) return; // 叠加下不动（同互换）
+
+        var cellCount = CompareLayout.CellCount(_compareMode);
+        var routeCount = Math.Max(1, Grid.Count);
+        if (cellCount < 2 || routeCount < 2) return;
+
+        var route = NormalizeRoute(cellCount) ?? IdentityRoute(cellCount);
+        for (var c = 0; c < route.Length; c++)
+            route[c] = (route[c] + 1) % routeCount;
+
+        _compareRoute = route;
+        ApplyCompareLayout();
+        ScheduleCompareCrop();
+        RefreshCompareModeChecks();
+        StatusInfo.Text = Loc($"已轮换各格显示的画面（当前 [{(string.Join(", ", route))}]）。",
+                              $"Rotated the source shown in each cell (now [{string.Join(", ", route)}]).");
+    }
+
+    /// <summary>恒等映射（第 i 格显示第 i 路）。</summary>
+    private static int[] IdentityRoute(int cellCount)
+    {
+        var r = new int[cellCount];
+        for (var i = 0; i < cellCount; i++) r[i] = i;
+        return r;
     }
 
     /// <summary>B3：覆盖层的两个诊断量必须有人消费，否则"接线"等于埋雷 ——
@@ -769,8 +1148,54 @@ public partial class MainWindow : Window
         NotifyCompareMode();
     }
 
+    /// <summary>模式显示名（中英双份，供状态栏 / 提示复用）。
+    ///
+    /// <para><b>为什么必须是带 <c>_ =&gt;</c> 兜底之外的显式分支</b>：<see cref="CompareMode"/> 现有
+    /// 五个取值，其中两个是变体（AB 竖 / ABC 三列）。若沿用原来的三分支 switch，
+    /// 变体会落进 default 显示成 "AB" —— 用户切到竖分却看到"对比模式：AB"，
+    /// 且 <b>不会报错</b>（C# 对带兜底的 switch 不报 CS8509）。显式列出每个取值，
+    /// 新增模式时这里必须跟着改；<c>ModeVariantTests</c> 只覆盖 Core，UI 侧的这份表
+    /// 由 <c>--comparemodetest</c> 的模式循环断言间接覆盖（每个可用模式都会被切到并显示）。</para></summary>
+    private static string CompareModeName(CompareMode mode) => Loc(
+        mode switch
+        {
+            CompareMode.Abc => "ABC",
+            CompareMode.AbcColumns => "ABC 三列",
+            CompareMode.Abcd => "ABCD",
+            CompareMode.AbVertical => "AB 竖",
+            _ => "AB",
+        },
+        mode switch
+        {
+            CompareMode.Abc => "ABC",
+            CompareMode.AbcColumns => "ABC (3 columns)",
+            CompareMode.Abcd => "ABCD",
+            CompareMode.AbVertical => "AB (vertical)",
+            _ => "AB",
+        });
+
     /// <summary>在状态栏提示当前对比模式（或已退出）。文案走 <see cref="Loc"/>：
     /// 语言表不在本次改动范围，与既有硬编码双语文案同一风格。</summary>
+    /// <summary>"哪几路当前不干活"的状态栏后缀，读<b>实测</b>启用集合
+    /// （<see cref="SyncController.InactiveRoutes"/>），不是拿格数去推"后几路"。
+    ///
+    /// <para><b>为什么必须读实测</b>：① 做过左右互换 / 轮换之后，没占格的未必是编号靠后的那几路；
+    /// ② <c>Failed</c> 的路被 <c>SetActiveRoutes</c> 跳过、永远保持启用，按格数推会把它们也说成
+    /// "已停用"，那是句假话。文案与判据同源，才不会各说各的。</para>
+    ///
+    /// <para><b>已知的一拍延迟</b>：模式变化时本函数被同步调用，而启用态是延后一拍才下发的
+    /// （见 <see cref="ApplyRouteActivity"/>），所以切模式的那一瞬间可能还是旧集合；
+    /// <c>ApplyRouteActivity</c> 落地后会再通知一次，最终说的就是实测值。</para></summary>
+    private string DescribeDeactivatedRoutes()
+    {
+        var inactive = _sync.InactiveRoutes();
+        if (inactive.Count == 0) return "";
+        var names = string.Join("、", inactive.Select(i => (i + 1).ToString()));
+        var showing = _sync.Count - inactive.Count;
+        return Loc($"，第 {names} 路未启用（当前模式只显示 {showing} 路，未启用的那几路不再解码/呈现）",
+                   $" (route {names} deactivated — this view shows {showing}; deactivated routes don't decode/present)");
+    }
+
     private void NotifyCompareMode()
     {
         if (!_compareActive)
@@ -779,28 +1204,21 @@ public partial class MainWindow : Window
             return;
         }
 
-        var name = _compareMode switch
-        {
-            CompareMode.Abc => "ABC",
-            CompareMode.Abcd => "ABCD",
-            _ => "AB",
-        };
-        // 格数 < 路数时（如 4 路用 AB 只看 2 路）显式告知"只显示前 N 路"，
-        // 否则用户会以为剩下几路"消失了"。这是选择"只显示前 N 路"策略的必要配套提示。
-        var cells = CompareLayout.CellCount(_compareMode);
-        var scope = _sync.Count > cells
-            ? Loc($"，显示前 {cells} / 共 {_sync.Count} 路", $" (showing first {cells} of {_sync.Count} routes)")
-            : "";
+        var name = CompareModeName(_compareMode);
+        // 格数 < 路数时（如 4 路用 AB 只看 2 路）显式告知哪几路没在干活，
+        // 否则用户会以为剩下几路"消失了"。读实测集合，理由见 DescribeDeactivatedRoutes。
+        var scope = DescribeDeactivatedRoutes();
         StatusInfo.Text = Loc($"对比模式：{name}{scope}（按 C 切换 / 退出）",
                               $"Compare mode: {name}{scope} (press C to cycle / exit)");
     }
 
-    // ══════════ 模式家族入口（docs/31 阶段 3）：叠加 / 分屏 / 网格 ══════════
+    // ══════════ 视图模式三态入口（docs/31 阶段 3）：左右拉动 / A-B 可拖动 / 标准 ══════════
     //
     // 三个入口共用同一套"以真实状态为准"的勾选刷新（RefreshCompareModeChecks），
-    // 菜单（视图 → 对比模式）与快捷键（S / V / G）走的是同一条路径，不会出现两套语义。
+    // 菜单（视图 → 视图模式，菜单顶部那一列）与快捷键（S / V / G）走的是同一条路径，不会出现两套语义。
 
-    /// <summary>分屏模式入口（菜单「对比模式 → 分屏」/ 快捷键 <c>V</c>）。
+    /// <summary>A/B 可拖动对比入口（菜单「视图 → 视图模式 → A/B 可拖动对比」/ 快捷键 <c>V</c>，
+    /// 内部名沿用"分屏"）。
     ///
     /// <para><b>按路数收敛</b>：目标模式一律取 <see cref="CompareLayout.CoerceMode"/> 对
     /// <see cref="CompareMode.Abcd"/> 的收敛结果 —— 2 路→AB、3 路→ABC、≥4 路→ABCD。
@@ -835,7 +1253,7 @@ public partial class MainWindow : Window
         if (_compareActive) NotifyCompareMode();
     }
 
-    /// <summary>网格模式入口（菜单「对比模式 → 网格」/ 快捷键 <c>G</c>）：退出叠加 + 退出对比模式
+    /// <summary>标准模式入口（菜单「视图 → 视图模式 → 标准模式」/ 快捷键 <c>G</c>，内部名沿用"网格"）：
     /// ⇒ <c>Grid.CellOverride</c> 置 null，Grid 回到既有的均匀 N×M 逻辑，被对比模式隐藏的路全部恢复
     ///（2~9 路全部显示；排布由 <see cref="GridLayout.ComputeGrid"/> 决定）。
     ///
@@ -847,26 +1265,45 @@ public partial class MainWindow : Window
         NotifyCompareMode();
     }
 
-    /// <summary>刷新「对比模式」子菜单三项的勾选 / 可用状态。
+    /// <summary>刷新「视图 → 视图模式」三项的勾选与「对比选项」各项的可用状态。
     ///
     /// <para><b>刷新时机</b>：父菜单 <c>SubmenuOpened</c> 时 + 三项被点击之后。
     /// 前者保证"用 C / S / V / G 键或路数变化改了模式后，菜单里不会留下陈旧勾选"；
-    /// 后者是因为 Avalonia 的 <c>DefaultMenuInteractionHandler.Click</c> 会<b>先</b>把
-    /// <c>ToggleType=CheckBox</c> 的 <c>IsChecked</c> 取反、<b>再</b>触发 <c>Click</c>
-    /// ——不纠正的话勾选会与实际状态相反（直到下次打开菜单才被刷新）。</para>
+    /// 后者是因为 Avalonia 的菜单交互处理器会<b>先</b>改 <c>IsChecked</c>（CheckBox 取反、
+    /// Radio 选中自己并取消同组其余项）、<b>再</b>触发 <c>Click</c> ——
+    /// 而"点一下"未必真的改得了状态（不足 2 路时进不了对比模式），不纠正就会与真实状态相反。</para>
     ///
-    /// <para>三项互斥：叠加 ⊂ 分屏（叠加是 AB 的呈现变体），两者都未激活即网格。
-    /// 路数 &lt; 2 时叠加 / 分屏不可用（<see cref="CompareLayout.AvailableModes"/> 为空集合）。</para></summary>
+    /// <para>三项互斥，且判据只有一份真实状态：<c>_compareOverlayActive</c> = 左右拉动、
+    /// <c>_compareActive</c> 且非叠加 = A/B 可拖动（叠加是它的呈现变体，故必须先看叠加）、
+    /// 其余即标准模式。路数 &lt; 2 时后两项不可用（<see cref="CompareLayout.AvailableModes"/> 为空集合）。</para></summary>
     private void RefreshCompareModeChecks()
     {
         var canCompare = CompareLayout.AvailableModes(_sync.Count).Count > 0;
-        MenuModeOverlay.IsEnabled = canCompare;
-        MenuModeSplit.IsEnabled = canCompare;
-        MenuModeGrid.IsEnabled = true;
+        MenuViewAbSplit.IsEnabled = canCompare;
+        MenuViewWipe.IsEnabled = canCompare;
+        MenuViewStandard.IsEnabled = true;
 
-        MenuModeOverlay.IsChecked = _compareOverlayActive;
-        MenuModeSplit.IsChecked = _compareActive && !_compareOverlayActive;
-        MenuModeGrid.IsChecked = !_compareActive;
+        MenuViewWipe.IsChecked = _compareOverlayActive;
+        MenuViewAbSplit.IsChecked = _compareActive && !_compareOverlayActive;
+        MenuViewStandard.IsChecked = !_compareActive;
+
+        // 互换：只在"对比模式 + 非叠加 + 至少两格"时可用。叠加是"两路铺满 + 区域裁半区"，
+        // 互换会与它的揭示区打架（两者都靠窗口区域表达"露出哪一路"）。
+        MenuModeSwap.IsEnabled = _compareActive && !_compareOverlayActive
+            && CompareLayout.CellCount(_compareMode) >= 2;
+        // 轮换需要"至少两路可换"，否则点它是空转（恒等轮换回自己）
+        MenuModeRotate.IsEnabled = MenuModeSwap.IsEnabled && Grid.Count >= 2;
+        MenuAutoCompare.IsChecked = _settings.AutoEnterCompare;
+    }
+
+    /// <summary>「打开后自动进入对比模式」开关（可勾选偏好，不是模式）。
+    /// 与 <see cref="ToggleBottomBar"/> 同结构：翻转 → 落盘 → 以真实状态刷勾。</summary>
+    private void OnToggleAutoCompare(object? sender, RoutedEventArgs e)
+    {
+        _settings.AutoEnterCompare = !_settings.AutoEnterCompare;
+        // 自测模式不写用户配置（与 SaveWindowGeometry / 侧栏几何同规）
+        if (!_selfTestMode) SettingsStore.Save(_settings);
+        RefreshCompareModeChecks();
     }
 
     // ══════════ 时间轴 ══════════
@@ -945,6 +1382,36 @@ public partial class MainWindow : Window
         UpdateStatusInfo();
     }
 
+    /// <summary>状态栏主信息条：模式 / 路数 / 步进（帧·秒）/ 失败路数（#19）。
+    ///
+    /// <para><b>为什么抽成纯静态函数</b>：这条文案原先在 <see cref="UpdateStatusInfo"/> 里
+    /// 硬编码中文（<c>"{mode}模式 | 路数 {n}/9 | …帧/…秒"</c>、<c>"{n} 路失败"</c>），
+    /// 英文模式下这条信息量最大的状态栏仍是中文。内联写法只能靠"活窗口 + 切英文"人眼验证，
+    /// 抽出来后单测可以直接钉住 <b>en 下不含中文、zh 下与旧文案逐字一致</b>
+    /// —— 否则"改回硬编码"不会有任何断言判红（同 <see cref="ResolveFidelity"/> 的做法）。</para>
+    ///
+    /// <para><b>为什么必须用格式串而不是拼接</b>：模式名/路数/步长单位/失败路数在 zh 与 en 里
+    /// 语序与量词都不同（"4 路失败" vs "4 route(s) failed"），拼接等于把中文语序钉死在英文界面上。
+    /// 分隔符也放进格式串，由各语言自行决定分段写法。</para>
+    ///
+    /// <para>本方法只负责"主信息条"这三段；其后的帧率告警 / 运行时错误 / RT 诊断
+    /// 仍由调用方按原有写法追加（它们本就是"⚠ + 语言表键"或纯技术 token）。</para></summary>
+    /// <param name="mode">已本地化的模式名（<c>Status_SingleMode</c> / <c>Status_GridMode</c>）。</param>
+    /// <param name="routeCount">当前路数。</param>
+    /// <param name="frameStep">按帧步进步长。</param>
+    /// <param name="secondsStep">按秒步进步长。</param>
+    /// <param name="failedRoutes">失败路数（0 = 不显示该段）。</param>
+    internal static string BuildStatusInfoLine(string mode, int routeCount,
+        int frameStep, double secondsStep, int failedRoutes)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append(LanguageManager.Tf("Status_ModeRoutesFmt", mode, routeCount));
+        sb.Append(LanguageManager.Tf("Status_StepsFmt", LanguageManager.T("Status_Steps"),
+            frameStep, secondsStep));
+        if (failedRoutes > 0) sb.Append(LanguageManager.Tf("Status_FailedRoutesFmt", failedRoutes));
+        return sb.ToString();
+    }
+
     private void UpdateStatusInfo()
     {
         if (_sync.Count == 0)
@@ -957,9 +1424,10 @@ public partial class MainWindow : Window
         var runtimeError = _sync.LastRuntimeError;
 
         // 3FCompare M6: 选中路渲染目标诊断
+        // #19：状态栏主信息条整段走语言表（见 BuildStatusInfoLine 的注释）。
         var sb = new System.Text.StringBuilder();
-        sb.Append($"{mode}模式 | 路数 {_sync.Count}/9 | {LanguageManager.T("Status_Steps")}: {_sync.StepProfile.FrameStep}帧/{_sync.StepProfile.SecondsStep:0.#}秒");
-        if (failed > 0) sb.Append($" | {failed} 路失败");
+        sb.Append(BuildStatusInfoLine(mode, _sync.Count,
+            _sync.StepProfile.FrameStep, _sync.StepProfile.SecondsStep, failed));
         // 帧率不一致时"第 N 帧"在各路指向的是不同时刻的内容，
         // 逐帧对比的语义随之改变，必须让用户看到（docs/15 §3.6）
         if (_sync.Count > 1 && _sync.HasFpsMismatch)
@@ -1124,11 +1592,15 @@ public partial class MainWindow : Window
         if (w <= 0 || h <= 0) return null;
 
         var cells = CompareLayout.ComputeCells(_compareMode, _compareSplit);
-        for (var i = 0; i < cells.Length && i < Grid.Count; i++)
+        // 按格循环，再经"格→路"映射取对应的 PlayerSurface：
+        // 互换 / 自选源之后"第 i 格"不一定还是"第 i 路"，按路循环会命中错的那一路。
+        for (var cell = 0; cell < cells.Length; cell++)
         {
-            var s = Grid.GetSurface(i);
+            var routeIndex = Grid.RouteIndexOfCell(cell);
+            if (routeIndex < 0) continue;
+            var s = Grid.GetSurface(routeIndex);
             if (s is null || !s.IsVisible) continue;
-            if (CompareCropPlanner.CellToContainerDip(cells[i], w, h).Contains(p)) return s;
+            if (CompareCropPlanner.CellToContainerDip(cells[cell], w, h).Contains(p)) return s;
         }
         return null;
     }
@@ -1139,6 +1611,10 @@ public partial class MainWindow : Window
         // WM_MOUSEWHEEL 发给焦点窗口，经 Avalonia 视觉树路由。唯一滚轮处理器。
         if (HitSurfaceAt(e.GetPosition(this)) is not null)
         {
+            // 对比模式下滚轮改的是"多路同步的无缝放大"（子窗口放大 + 裁剪），
+            // 不是单路 _viewZoom —— 后者是内核插值放大，各路也不会同步。
+            if (TryHandleCompareWheel((short)(Math.Sign(e.Delta.Y) * 120))) { e.Handled = true; return; }
+
             var factor = e.Delta.Y > 0 ? 1.15f : 1f / 1.15f;
             _viewZoom = Math.Clamp(_viewZoom * factor, 1f, 32f);
             ApplyViewTransform();
@@ -1170,6 +1646,10 @@ public partial class MainWindow : Window
 /// 收不到；改为子类化 WndProc 处理 WM_MOUSEWHEEL 后通过 SurfaceWheel 事件回传。</summary>
     private void OnSurfaceWheel(short delta)
     {
+        // 对比模式：滚轮驱动"多路同步无缝放大"（以光标为锚点）。已处理则不再动 _viewZoom ——
+        // 两条路径都改"看起来像缩放"的量，同时生效会互相打架（窗口尺寸 vs 内核视口）。
+        if (TryHandleCompareWheel(delta)) return;
+
         var factor = delta > 0 ? 1.15f : 1f / 1.15f;
         _viewZoom = Math.Clamp(_viewZoom * factor, 1f, 32f);
         ApplyViewTransform();
@@ -1188,10 +1668,14 @@ public partial class MainWindow : Window
     /// 降低轮询频率（不停止，保持 Failed 检测和位置同步）。</summary>
     private void OnSurfacePress(double x, double y)
     {
-        Console.Error.WriteLine($"[Pan] OnSurfacePress zoom={_viewZoom:F3} willDrag={_viewZoom > 1.001f}");
-        if (_viewZoom > 1.001f)
+        // 对比模式的无缝放大同样可拖动平移（改的是 crop，不是 _viewPan）。
+        // 两条路径都用 _panDragging 表达"正在拖"，但提交的目标不同（见 OnSurfaceRelease）。
+        var magnifyPan = CompareMagnifyActive;
+        Console.Error.WriteLine($"[Pan] OnSurfacePress zoom={_viewZoom:F3} magnify={magnifyPan} willDrag={_viewZoom > 1.001f || magnifyPan}");
+        if (_viewZoom > 1.001f || magnifyPan)
         {
             _panDragging = true;
+            if (magnifyPan) BeginComparePan();
             // 降低但不停止：保持 Failed 状态检测和多路同步
             _pollTimer.Interval = TimeSpan.FromMilliseconds(250);
             GetCursorPos(out var pt);
@@ -1210,12 +1694,19 @@ public partial class MainWindow : Window
         var dy = pt.Y - _panLastY;
         _panLastX = pt.X;
         _panLastY = pt.Y;
-        // 归一化到 [-1,1]：以窗口短边为基准。旧实现用长边导致宽屏下横向
-        // 灵敏度减半，叠加节流后"左右拖不动"。（3FCompare patch 0006 配套）
-        var scale = 2.0f / (float)Math.Min(Bounds.Width, Bounds.Height);
-        // 跟手语义：鼠标右/下移 → 画面跟手右/下移（内核视口同向平移）
-        _viewPanX = Math.Clamp(_viewPanX + dx * scale, -1f, 1f);
-        _viewPanY = Math.Clamp(_viewPanY + dy * scale, -1f, 1f);
+
+        // 放大态：只累积位移，**不**逐帧提交（逐帧改 crop ⇒ 逐帧 SetWindowRgn，
+        // 那是 docs/26 明确反对的高频路径）。松手时一次性提交，见 OnSurfaceRelease。
+        if (CompareMagnifyActive)
+        {
+            AccumulateComparePan(dx, dy);
+            return;
+        }
+
+        // 方向、DPI 量纲与短边归一化的理由都写在 ViewPan 里（那三条各错过一次，且离线才可验）。
+        var scaling = TopLevel.GetTopLevel(Grid)?.RenderScaling ?? RenderScaling;
+        (_viewPanX, _viewPanY) = ViewPan.Accumulate(_viewPanX, _viewPanY, dx, dy,
+            scaling, Math.Min(Bounds.Width, Bounds.Height));
         ApplyViewTransform();
     }
 
@@ -1226,6 +1717,17 @@ public partial class MainWindow : Window
         if (_panDragging)
         {
             _panDragging = false;
+
+            // 放大态：提交累积的平移（一次 SetCompareMagnify ⇒ 一次 SetWindowRgn）。
+            // 走的是"提交即返回"的分支，但轮询频率是按下时降下来的，必须在这里恢复，
+            // 否则松手后位置同步会一直停在 250ms（表现为"拖动过一次后播放位置更新变卡"）。
+            if (CompareMagnifyActive)
+            {
+                CommitComparePan();
+                RestorePollInterval();
+                return;
+            }
+
             // 立即发送最终位置（UI 线程同步调用：原生 SetViewTransform 只写
             // 三个 atomic，毫秒级；不要用 Task.Run 后台调用——会话重建/关闭时
             // UI 线程已释放原生句柄，后台 P/Invoke 访问会 0xC0000005 闪退）。
@@ -1235,11 +1737,7 @@ public partial class MainWindow : Window
             _transformFlushTimer.Stop();
             try { SendViewTransform(); }
             catch (Exception ex) { Console.Error.WriteLine($"[Transform] Release FAIL: {ex.Message}"); }
-            // 恢复轮询频率
-            if (_isPlaying && _sync.Count > 0)
-                _pollTimer.Interval = TimeSpan.FromMilliseconds(83);
-            else if (_sync.Count > 0)
-                _pollTimer.Interval = TimeSpan.FromMilliseconds(250);
+            RestorePollInterval();
             return;
         }
         // 未放大时的点击 → 选中表面
@@ -1255,6 +1753,17 @@ public partial class MainWindow : Window
             Grid.SelectedIndex = clicked.Index;
             UpdatePanelsForSelection();
         }
+    }
+
+    /// <summary>把轮询间隔恢复成"拖动前"的常态（拖动期间被降到 250ms 以让出 UI 线程）。
+    /// 抽成方法是因为松手有两条出口（内核视口平移 / 放大态 crop 平移），
+    /// 两处各写一遍会漂移成"一条忘了恢复"。</summary>
+    private void RestorePollInterval()
+    {
+        if (_isPlaying && _sync.Count > 0)
+            _pollTimer.Interval = TimeSpan.FromMilliseconds(83);
+        else if (_sync.Count > 0)
+            _pollTimer.Interval = TimeSpan.FromMilliseconds(250);
     }
 
     private void ApplyViewTransform()
@@ -1343,20 +1852,16 @@ public partial class MainWindow : Window
         var mods = e.KeyModifiers;
         switch (e.Key)
         {
-            case Key.Space when mods == KeyModifiers.None: TogglePlay(); break;
             case Key.S when mods.HasFlag(KeyModifiers.Control): OnExportFrame(this, e); break;
             // P1-4：键盘步进同样必须走线程池（内含 50ms 复测等待），
             // 否则每按一次 ←/→ 都会冻结 UI 50ms，连按时手感明显卡顿。
-            case Key.Left when mods == KeyModifiers.None: StepFramesAsync(-_sync.StepProfile.FrameStep); break;
-            case Key.Right when mods == KeyModifiers.None: StepFramesAsync(_sync.StepProfile.FrameStep); break;
-            case Key.Left when mods.HasFlag(KeyModifiers.Shift): _sync.StepSeconds(-_sync.StepProfile.SecondsStep); break;
-            case Key.Right when mods.HasFlag(KeyModifiers.Shift): _sync.StepSeconds(_sync.StepProfile.SecondsStep); break;
-            case Key.Up: _sync.StepSeconds(10); break;
-            case Key.Down: _sync.StepSeconds(-10); break;
+            case Key.Up: StepSecondsAsync(10); break;
+            case Key.Down: StepSecondsAsync(-10); break;
             case Key.F11: ToggleFullscreen(); break;
             case Key.Escape when _fullscreen: ToggleFullscreen(); break;
             case Key.O when mods == KeyModifiers.None: _ = OpenViaPickerAsync(); break;
-            case Key.B when mods == KeyModifiers.None: OnToggleAbSlider(this, e); break;
+            // 裸 B 已随「A-B 滑块视图」一并撤除（该视图只画渐变占位，真机模式下会整块盖住真实画面，
+            // 与「视图模式」列里的 A/B 可拖动对比是重复概念）；B 点仍归 TimelineView 自己处理。
             // 侧栏三态循环（展开 → 图标栏 → 完全隐藏）：Ctrl+H。
             // 选键依据：① 本 switch + XAML 的 InputGesture + TimelineView 的 A/B 已全表核对，
             // Ctrl+H 未被占用（带修饰键的全局键只有 Ctrl+S 导出与 Ctrl+O 打开）；
@@ -1433,9 +1938,11 @@ public partial class MainWindow : Window
 
     private void GrowLanes(int upTo)
     {
-        // D1..D9 只加不减（WinForms 语义）
-        if (_sync.Count >= upTo) return;
-        Grid.SetCount(upTo, _realMode);
+        // D1..D9 只加不减（WinForms 语义）。锚点同「加路」取网格路数：按会话数判"已达目标"时，
+        // 尾部带空 lane 的窗口会被 SetCount(upTo) 静默撤掉几条 lane，恰好与"只加不减"相反。
+        var target = Math.Max(Grid.Count, Math.Min(MaxLaneCount, upTo));
+        if (target == Grid.Count) return;
+        Grid.SetCount(target, _realMode);
         UpdateStatus();
     }
 
@@ -1528,13 +2035,90 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>会话文件路径过滤（安全闸门）：把外部 <c>.3fcs</c> 里的路径分成"可打开"与"已拒绝"。
+    ///
+    /// <para><b>为什么必须校验</b>：会话文件可能是别人给的，路径即外部输入。真正的判据只有一条
+    /// （见 <see cref="_3FCompare.Core.PathSafety.IsUncPath"/>）：**UNC（<c>\\server\share\…</c>）
+    /// 与设备命名空间（<c>\\?\…</c>，<c>//?/…</c> 归一后同形）** —— Windows 访问网络路径时会自动
+    /// 发起 NTLM 认证、把本机凭据送到该服务器 ⇒ 凭据外泄。确有需要可手动拖放/选择文件打开，
+    /// 那是用户的主动意图，与本路径性质不同。</para>
+    ///
+    /// <para><b>另两类"拒绝"不是 UNC，文案必须分开给</b>（与 Core 侧 doc 的约定一致，
+    /// 见 <c>PathSafety.IsUncPath</c> 的"三类互不相同的原因"）：
+    /// ① <b>空 / 空白串</b>：本方法**先行**判掉并给独立文案 <c>(空路径)</c> —— 它是非法输入、
+    /// 没有网络语义，说成"不接受 UNC 路径"会把排查方向带偏（IsUncPath 对空白同样返回 <c>true</c>，
+    /// 但那只是与 UNC 共用同一个 fail-closed 返回值）；
+    /// ② <b>归一化失败的串</b>（非法字符如 <c>\0</c> / 超长 / 无效盘符）：同样按不可信拒绝，
+    /// 原因与网络无关。</para>
+    ///
+    /// <para><b>相对路径刻意放行</b>：IsUncPath 把相对路径归一化成本地绝对路径 ⇒ 返回 <c>false</c>。
+    /// "一律拒绝相对路径"**不在**本闸门的判据里（代价论证见下方循环内的注释），
+    /// 也刻意不在这里补一条 <c>Path.IsPathRooted</c> 检查 —— 本闸门只管网络/设备这一条线。</para>
+    ///
+    /// <para><b>为什么不能再用 <c>p.StartsWith(@"\\")</c></b>：<c>//server/share/x</c> 同样被
+    /// <see cref="Path.IsPathRooted"/> 视为 rooted，却<b>不</b>以 <c>\\</c> 开头 ⇒ 只查前缀会被
+    /// 整体绕过（判据放行 ⇒ 直传 ⇒ 触发 SMB 出网）。判据统一走
+    /// <see cref="_3FCompare.Core.PathSafety.IsUncPath"/>：先 <c>GetFullPath</c> 归一化
+    /// （<c>//</c> 与 <c>\\</c> 归一后形式唯一），并把归一化失败按不可信拒绝（fail-closed）。</para>
+    ///
+    /// <para><b>为什么抽成纯静态函数</b>：本方法只做值运算、不碰窗口/内核，单测可直接调用
+    /// （UI 工程已对 <c>3FCompare.Platform.Tests</c> 开 InternalsVisibleTo）。
+    /// 会话文件是本缺陷真正的攻击面，只有把它变成可断言的生产代码入口，
+    /// "改回旧判据"才会判红 —— 否则改坏了也没有任何测试会响。</para>
+    ///
+    /// <para>返回的 <c>Rejected</c> 带可操作的中文原因（UNC 凭据外泄 / 空路径 / 无法解析），
+    /// 而不是笼统一句"未通过校验"：用户要能看懂为什么该路没被打开、以及怎么改。</para></summary>
+    /// <param name="paths">按会话原始顺序排列的路径（可能含 null/空白）。</param>
+    internal static (System.Collections.Generic.List<string> Accepted,
+        System.Collections.Generic.List<int> AcceptedIndex,
+        System.Collections.Generic.List<string> Rejected) FilterSessionPaths(
+        System.Collections.Generic.IReadOnlyList<string?> paths)
+    {
+        var accepted = new System.Collections.Generic.List<string>(paths.Count);
+        var acceptedIndex = new System.Collections.Generic.List<int>(paths.Count);
+        var rejected = new System.Collections.Generic.List<string>();
+        for (var i = 0; i < paths.Count; i++)
+        {
+            var p = paths[i];
+            if (string.IsNullOrWhiteSpace(p))
+            {
+                rejected.Add("(空路径)");
+                continue;
+            }
+            // ⚠ 刻意**不**一律拒绝相对路径（docs/41 #18 复核修正）：
+            // #18 要堵的是 UNC 绕过导致 NTLM 凭据外泄，**不是**相对路径。一律拒绝相对路径
+            // 会静默丢掉用户会话里的整条路（老会话 / 手工编辑过的 .3fcs 里很常见），
+            // 用户只会看到"少了一路"而没有可操作的解释——代价远大于收益。
+            // 改为**先判定、再归一化**：IsUncPath 内部已经按 GetFullPath 归一后再判，
+            // 所以"当前工作目录本身在网络共享上"这种情形展开后仍是 UNC ⇒ 照样被拦下。
+            if (_3FCompare.Core.PathSafety.IsUncPath(p))
+            {
+                rejected.Add($"{p}（UNC/设备路径：访问会触发 NTLM 认证并外泄本机凭据，已拒绝）");
+                continue;
+            }
+            // 判定的串与下游实际使用的串必须是**同一个**：上面判的是归一化后的形式，
+            // 这里也交出归一化后的绝对路径，否则"相对路径在别处被按另一个 CWD 解析"仍然存在。
+            string full;
+            try { full = Path.GetFullPath(p!.Trim()); }
+            catch { rejected.Add($"{p}（路径无法解析，已拒绝）"); continue; }
+            accepted.Add(full);
+            acceptedIndex.Add(i);
+        }
+        return (accepted, acceptedIndex, rejected);
+    }
+
     /// <summary>按会话快照重开全部路（菜单加载与自测 --sessiontest 共用同一条路径）。
     /// <para><b>P0-1 关键点</b>：顺序必须是 SetCount(0) → SetCount(会话路数) → OpenFiles。
     /// OpenFilesCore 用 _surfaceAt(_sync.Count) 取播放面板，SetCount(0) 之后该处必为 null，
     /// 会直接命中"第 1 路没有可用的播放面板"分支并 return，
     /// 导致 onAllOpened 回调不执行——不 Seek、不恢复循环区间、不播放（表现为加载会话后一片空白）。
     /// 因此重建网格必须发生在打开之前，且要在清空之后。</para></summary>
-    internal void LoadSessionSnapshot(SessionSnapshot snapshot)
+    /// <summary>按快照重建会话（手动加载与崩溃自愈共用同一条路径，避免两套重建逻辑漂移）。</summary>
+    /// <param name="snapshot">会话快照。</param>
+    /// <param name="autoPlay">打开后是否自动播放。<b>崩溃自愈传 false</b>：
+    /// 崩溃成因是外部钩子的偶发竞态（docs/43），恢复后立刻播放可能立刻再撞上；
+    /// 停在原位让用户看清"已恢复"再自行继续，比多闪一次要好。</param>
+    internal void LoadSessionSnapshot(SessionSnapshot snapshot, bool autoPlay = true)
     {
         // 清空后按会话文件重开；全部打开后 Seek 到保存位置并恢复循环区间
         ResetRecoveryState(); // 会话重载等同打开新媒体：重置重建抑制，避免沿用旧会话的累计计数
@@ -1549,29 +2133,13 @@ public partial class MainWindow : Window
         // SetGridLayout 只改预设覆盖、单屏与否由 SingleView 控制，两者必须一起设。
         Grid.SingleView = _3FCompare.Core.Display.GridLayout.IsSingleView(snapshot.GridLayout);
         Grid.SetGridLayout(_3FCompare.Core.Display.GridLayout.PresetOf(snapshot.GridLayout));
-        // 会话文件里的路径来自外部（.3fcs 可能是别人给的），必须先校验再打开：
-        // ① null / 空白 / **相对路径**：直接拒。相对路径会按当前工作目录解析，
-        //    可能意外命中一个同名文件——等于让外部文件决定打开哪个视频。
-        // ② UNC（\\server\share）：Windows 访问时会自动发起 NTLM 认证，把本机凭据
-        //    送到路径里指定的服务器 ⇒ 凭据外泄。确有需要可手动拖放/选择文件打开，
-        //    那是用户的主动意图，与本路径性质不同。
-        // 原实现用 i.Path! 强转后一律直传，异常还在 PlaybackCoordinator 里被吞掉
-        // ⇒ 静默标记该路失败，用户完全不知道少了路（docs/15 §5.1）。
-        var acceptedPaths = new System.Collections.Generic.List<string>(snapshot.Items.Count);
-        var acceptedIndex = new System.Collections.Generic.List<int>(snapshot.Items.Count);
-        var rejected = new System.Collections.Generic.List<string>();
-        for (var i = 0; i < snapshot.Items.Count; i++)
-        {
-            var p = snapshot.Items[i].Path;
-            if (string.IsNullOrWhiteSpace(p) || !Path.IsPathRooted(p)
-                || p.StartsWith(@"\\", StringComparison.Ordinal))
-            {
-                rejected.Add(string.IsNullOrWhiteSpace(p) ? "(空路径)" : p);
-                continue;
-            }
-            acceptedPaths.Add(p);
-            acceptedIndex.Add(i);
-        }
+        // 会话文件里的路径来自外部（.3fcs 可能是别人给的）⇒ 先过安全闸门再打开；
+        // 判据与原因见 FilterSessionPaths（含"为什么不能只查 \\ 前缀"）。
+        var filtered = FilterSessionPaths(
+            snapshot.Items.Select(it => it.Path).ToList());
+        var acceptedPaths = filtered.Accepted;
+        var acceptedIndex = filtered.AcceptedIndex;
+        var rejected = filtered.Rejected;
         if (rejected.Count > 0)
         {
             var msg = $"会话中有 {rejected.Count} 条路径未通过校验已跳过：{string.Join(", ", rejected)}";
@@ -1579,7 +2147,14 @@ public partial class MainWindow : Window
             Console.Error.WriteLine($"[Session] {msg}");
         }
 
-        _coordinator.OpenFiles(acceptedPaths, autoPlay: true, onAllOpened: () =>
+        // 不自动播放时先统一暂停：OpenFiles 与 SeekTo 都不会改播放状态，
+        // 不显式 Pause 的话"恢复出来就在跑"，与 autoPlay=false 的语义不符。
+        if (!autoPlay)
+        {
+            _sync.Pause();
+            SetPlaying(false);
+        }
+        _coordinator.OpenFiles(acceptedPaths, autoPlay: autoPlay, onAllOpened: () =>
         {
             // 先恢复偏移，再 SeekTo（SeekTo 内部会叠加偏移）。
             // 注意用 acceptedIndex 对位：跳过若干路径后，槽位索引已不等于原始 Items 索引，
@@ -1587,17 +2162,108 @@ public partial class MainWindow : Window
             for (var k = 0; k < acceptedIndex.Count && k < _sync.Count; k++)
                 // master 偏移恒 0：老会话可能存了非 0 的 off0，加载时归零，
                 // 否则一加载就带着"基准被挪走"的状态（docs/15 §3.1）
-                _sync.Slots[k].Offset100ns = k == 0 ? 0 : snapshot.Items[acceptedIndex[k]].Offset100ns;
-            _sync.SeekTo(snapshot.Position100ns);
+                //
+                // ⚠ 偏移必须钳制：外部 .3fcs 的 Offset100ns 是**未校验的 long**，
+                // 极端值（如 long.MinValue）会让 SyncController 的"位置 − 期望"溢出抛
+                // OverflowException，而该异常落在轮询里被顶层 catch 吞掉 ⇒ 位置/时间码停更、
+                // 每拍重抛、界面形似卡死且看不出原因（docs/45 P1-9）。
+                // 钳制到 ±24h，远超任何真实调帧需求。
+                _sync.Slots[k].Offset100ns = k == 0
+                    ? 0
+                    : Math.Clamp(snapshot.Items[acceptedIndex[k]].Offset100ns,
+                        -_3FCompare.Core.Settings.SessionSnapshot.MaxOffset100ns,
+                        _3FCompare.Core.Settings.SessionSnapshot.MaxOffset100ns);
+            // ⚠ 必须用**同步** SeekNow，不能用 SafeSeek（fire-and-forget）：
+            // 本回调一返回，批次结算紧接着就执行 _sync.Play()（autoPlay 时）。
+            // 异步 Seek 与 Play 之间没有 happens-before ⇒ 实测出现"先播后跳"，
+            // 恢复出来从 0 开始跑（docs/45 P2：--sessiontest 偶发假红的成因）。
+            SeekNow(snapshot.Position100ns);
             if (snapshot.LoopEnabled && snapshot.LoopEnd100ns > snapshot.LoopStart100ns)
             {
                 _sync.LoopStart100ns = snapshot.LoopStart100ns;
                 _sync.LoopEnd100ns = snapshot.LoopEnd100ns;
                 _sync.LoopEnabled = true;
-                _transport.SetLoop(true);
                 _timeline.SetLoopRange(snapshot.LoopStart100ns, snapshot.LoopEnd100ns, true);
             }
         });
+    }
+
+    /// <summary>崩溃自愈：把当前会话写进快照文件，供崩溃后重启恢复。
+    ///
+    /// <para><b>两个调用点，缺一不可</b>：① 5 秒定时轮询——覆盖播放中的位置推进；
+    /// ② 「一批文件全部打开完成」回调——覆盖"刚打开就崩"。只留定时轮询的话，
+    /// 打开 8 路 4K 的十几秒里若崩溃，快照还是上一批甚至根本不存在，
+    /// 而那恰恰是最贵的一次丢失。</para>
+    ///
+    /// <para><b>自测模式一律不写</b>：自测进程不能往用户的配置目录里留东西，
+    /// 否则下一次真实启动会恢复出一屏测试素材。<c>--sessiontest</c> 曾把 800×600 的
+    /// 测试窗口几何写进 settings.json，是同一类问题，故这里同样以 <c>_selfTestMode</c> 把门。</para></summary>
+    private void TryAutosave()
+    {
+        if (_selfTestMode) return;
+        if (_sync.Count == 0) return;   // 没打开任何素材 ⇒ 没有需要恢复的状态
+        // 快照 DTO 的构造要读 UI 状态（播放位置、布局、各路偏移），必须留在 UI 线程。
+        // 真正慢的是随后的「临时文件 + fsync」落盘（#6）：磁盘卡顿 / 杀软扫描时会让
+        // 5s 定时器在 UI 线程上同步冻结界面——与 #24（Resize 埋点同步落盘）同类，
+        // 故只把**写盘**挪进后台线程。SessionAutosave.Write 内部按目标路径串行化
+        // （AtomicFile.PathLocks），即便与下一拍重叠也不会互相踩踏。
+        SessionSnapshot snapshot;
+        try
+        {
+            snapshot = BuildSessionSnapshot();
+        }
+        catch (Exception ex)
+        {
+            _3FCompare.Core.Diagnostics.AppLog.Warn("Autosave", $"会话快照构造失败：{ex.Message}");
+            return;
+        }
+        _ = System.Threading.Tasks.Task.Run(() =>
+        {
+            try
+            {
+                _3FCompare.Core.Settings.SessionAutosave.Write(snapshot);
+            }
+            catch (Exception ex)
+            {
+                // 写不进去（只读目录 / 磁盘满）绝不能打断播放：自愈是尽力而为的增强，
+                // 它的失败只应表现为"没能恢复"，不应表现为"程序报错"。
+                _3FCompare.Core.Diagnostics.AppLog.Warn("Autosave", $"会话快照写入失败：{ex.Message}");
+            }
+        });
+    }
+
+    /// <summary>崩溃自愈：若本次是被守护进程拉起来的，就恢复上次会话（暂停态）。
+    ///
+    /// <para><b>为什么只在带恢复标记时才做</b>：正常启动必须保持干净的空白界面。
+    /// 无条件恢复会让每次启动都弹出上次的素材——那不是自愈，是骚扰。</para>
+    ///
+    /// <para><b>失败一律静默降级为普通启动</b>：快照不存在 / 已过期 / 路径未通过安全校验，
+    /// 都属于"没能恢复"而不是"出错"。此时不该弹框，只落一条日志即可。</para></summary>
+    private void MaybeRecoverCrashedSession()
+    {
+        if (_selfTestMode) return;
+
+        var restoreRequested = false;
+        foreach (var a in Environment.GetCommandLineArgs())
+        {
+            if (a == _3FCompare.Diagnostics.CrashGuard.RestoreArg) { restoreRequested = true; break; }
+        }
+        if (!restoreRequested) return;
+
+        var snapshot = _3FCompare.Core.Settings.SessionAutosave.Read();
+        if (snapshot is null)
+        {
+            _3FCompare.Core.Diagnostics.AppLog.Warn("Recover",
+                $"收到恢复标记但快照不可用（{_3FCompare.Core.Settings.SessionAutosave.Describe()}），按普通启动处理");
+            return;
+        }
+
+        ComponentLog.Log(Comp.Engine, "CrashRecover", -1,
+            $"routes={snapshot.Items.Count} pos={snapshot.Position100ns}");
+        LoadSessionSnapshot(snapshot, autoPlay: false);
+        StatusInfo.Text = Loc(
+            $"已恢复上次会话（{snapshot.Items.Count} 路，已暂停）：按空格继续播放。",
+            $"Last session restored ({snapshot.Items.Count} lanes, paused): press Space to resume.");
     }
 
     /// <summary>探针坐标：表面 DIP → 物理后台缓冲像素 → destination 矩形内 → 源视频像素。
@@ -1642,21 +2308,6 @@ public partial class MainWindow : Window
     }
 
     // ══════════ 菜单：视图（M3 面板切换） ══════════
-
-    private void OnToggleAbSlider(object? sender, RoutedEventArgs e)
-    {
-        if (AbSlider.IsVisible)
-        {
-            AbSlider.IsVisible = false;
-            Grid.IsVisible = true;
-            return;
-        }
-        if (_sync.Count < 2) return;
-        var sel = Math.Max(0, Grid.SelectedIndex);
-        AbSlider.SetPair(sel, (sel + 1) % Math.Max(2, _sync.Count));
-        AbSlider.IsVisible = true;
-        Grid.IsVisible = false;
-    }
 
     private void OnToggleProbe(object? sender, RoutedEventArgs e) { ShowSidebar(); _sidebar.ActivateProbe(); }
     private void OnToggleBookmarks(object? sender, RoutedEventArgs e) { ShowSidebar(); _sidebar.ActivateBookmarks(); }
@@ -1711,7 +2362,7 @@ public partial class MainWindow : Window
             Grid.SetGridLayout(preset);
     }
 
-    /// <summary>「视图 → 对比模式」三项的统一入口。写法与 <see cref="OnGridPreset"/> 一致
+    /// <summary>「视图 → 视图模式」三项的统一入口。写法与 <see cref="OnGridPreset"/> 一致
     ///（<c>Click</c> 事件 + <c>Tag</c> 字符串，不用 Command），保持本菜单风格统一。</summary>
     private void OnCompareModePreset(object? sender, RoutedEventArgs e)
     {
@@ -1893,21 +2544,12 @@ public partial class MainWindow : Window
         if (WindowState == WindowState.Minimized) return false;
         if (!GetCursorPos(out var pt)) return false;
 
-        // 指针停在浮条自身矩形内 ⇒ 保持（点按钮 / 拉 ComboBox 时不该消失）。
-        // 这一条必须排在 IsActive 判定之前：ComboBox 下拉是独立 Popup，展开时主窗可能被判失焦。
-        if (IsCursorOverFloatingBar()) return true;
-
         // 失焦（切走别的程序）：不因指针恰好停在底边而让浮条常驻。
+        // （旧版在此前先判"光标停在浮条上"为真，用来兜底 ComboBox 下拉的独立 Popup 抢走激活；
+        //  底栏已无会产生 Popup 的控件，浮条自身矩形本就落在热区内，无需单独兜底。）
         if (!IsActive) return false;
 
         return IsCursorInTransportHotZone(pt.X, pt.Y);
-    }
-
-    private bool IsCursorOverFloatingBar()
-    {
-        if (_floatingTransport is not { IsVisible: true }) return false;
-        if (!GetCursorPos(out var pt)) return false;
-        return _floatingTransport.ContainsScreenPoint(new PixelPoint(pt.X, pt.Y));
     }
 
     /// <summary>光标（物理屏幕像素）是否落在「主窗口底部若干像素」的热区里。
@@ -1933,13 +2575,8 @@ public partial class MainWindow : Window
         return screenY >= zoneTop;
     }
 
-    private void OnShowGridOnly(object? sender, RoutedEventArgs e)
-    {
-        if (_sidebar.Collapsed)
-            _sidebar.Expand();
-        else
-            _sidebar.ToggleCollapse();
-    }
+    // 「显示 对比网格」一项已撤：它的实际动作是折叠/展开侧栏，与串名无关，
+    // 且与「视图 → 侧栏」三态（含"图标栏"）重复。
 
     private void OnToggleFullscreen(object? sender, RoutedEventArgs e) => ToggleFullscreen();
 
@@ -1974,6 +2611,9 @@ public partial class MainWindow : Window
 
             // 立即可应用的项
             _sync.StepProfile = new StepProfile { FrameStep = result.FrameStep, SecondsStep = result.SecondsStep };
+            TransportKeys.CopyInto(result.KeyBindings, _settings.KeyBindings);   // 逐槽拷贝，不共享实例
+            RebuildKeyMap();
+            _transport.RefreshTips();   // 改了绑定 ⇒ 底栏 tooltip 立刻跟着变
             UpdateStatus();
 
             // FFmpeg 路径变化 → 需重启（探测链在启动时装配）
@@ -2029,6 +2669,7 @@ public partial class MainWindow : Window
         _transformFlushTimer.Stop();
         _transportHoverTimer.Stop();
         _transportHideTimer.Stop();
+        _autosaveTimer.Stop();
         try { _3FCompare.Core.Diagnostics.AppLog.Shutdown(); } catch { }
     }
 
@@ -2050,10 +2691,25 @@ public partial class MainWindow : Window
         _settings.Language = s.Language;
     }
 
-    private void Pending(string what, string milestone) =>
-        StatusInfo.Text = $"{what} —— {milestone} 实装";
-
     // ══════════ M3：面板联动 ══════════
+
+    /// <summary>放大镜呈现驱动（P1-4）：放大镜本体已搬进独立顶层窗 <see cref="_magnifierWindow"/>，
+    /// 本方法把它摆到 <see cref="MagnifierOverlay.DesiredPosition"/>（CenterPanel DIP 坐标）
+    /// 对应的屏幕位置并显隐。必须在 UI 线程同步执行（UpdateAt 的调用点都在 UI 线程）。</summary>
+    private void OnMagnifierPresentationChanged(object? sender, EventArgs e)
+    {
+        if (!Magnifier.IsVisible)
+        {
+            _magnifierWindow.HideOverlay();
+            return;
+        }
+        var topLeft = CenterPanel.PointToScreen(new Point(0, 0));
+        var scaling = TopLevel.GetTopLevel(CenterPanel)?.RenderScaling ?? 1.0;
+        _magnifierWindow.Position = new PixelPoint(
+            topLeft.X + (int)Math.Round(Magnifier.DesiredPosition.X * scaling),
+            topLeft.Y + (int)Math.Round(Magnifier.DesiredPosition.Y * scaling));
+        _magnifierWindow.ShowOverlay(this);
+    }
 
     private void UpdatePanelsForSelection()
     {
@@ -2107,10 +2763,12 @@ public partial class MainWindow : Window
             // e.GetPosition(CenterPanel)（面板全局坐标）且不乘 RenderScaling，
             // 于是多格布局 / DPI 非 100% 时显示的完全不是光标下的内容（docs/15 §2.2）。
             // session 也要绑定到**指针命中的那一路**，而不是当前选中路。
+            // 浮窗位置由 UpdateAt 内部用 TranslatePoint 从 surface 局部坐标换算
+            // （#22：此前漏了这一步，多格布局下浮窗整体平移一个格原点）。
             var scaling = TopLevel.GetTopLevel(this)?.RenderScaling ?? 1.0;
             if (_sync.Slots.ElementAtOrDefault(surface.Index)?.Session is { } ms)
                 Magnifier.AttachSession(ms);
-            Magnifier.UpdateAt(local, scaling);
+            Magnifier.UpdateAt(surface, local, scaling);
         }
         if (ReferenceEquals(_sidebar.Active, _probe) && surface.Selected)
         {
@@ -2145,7 +2803,7 @@ public partial class MainWindow : Window
         var target = slot?.Session?.ReadSnapshot();
         if (slot is null || master is null || target is null) return;
         slot.Offset100ns = master.Position100ns - target.Position100ns;
-        _sync.RefreshAllPositions();
+        RefreshAllPositionsAsync();
         UpdatePanelsForSelection();
     }
 
@@ -2155,7 +2813,7 @@ public partial class MainWindow : Window
         var slot = _sync.Slots.ElementAtOrDefault(Grid.SelectedIndex);
         if (slot is null) return;
         slot.Offset100ns += delta100ns;
-        _sync.RefreshAllPositions();
+        RefreshAllPositionsAsync();
         UpdatePanelsForSelection();
     }
 
@@ -2164,7 +2822,7 @@ public partial class MainWindow : Window
         var slot = _sync.Slots.ElementAtOrDefault(Grid.SelectedIndex);
         if (slot is null) return;
         slot.Offset100ns = 0;
-        _sync.RefreshAllPositions();
+        RefreshAllPositionsAsync();
         UpdatePanelsForSelection();
     }
 
@@ -2251,10 +2909,33 @@ public partial class MainWindow : Window
         // 导致视频画面被 UI 渲染覆盖而"卡死"（引擎仍在呈现帧但用户看不到）。
         TryEnableClipChildren();
 
+        // 自测模式先钉位再记录 _lastNormal，否则记进去的是系统随手摆的位置。
+        PinWindowPositionForSelfTest();
+
         if (WindowState == WindowState.Normal)
             _lastNormal = (Position, new Size(Width, Height));
         MaybeExitDemoMode();
+        // 崩溃自愈：守护进程拉起来的这一代在这里读回上次会话（普通启动不做任何事）
+        MaybeRecoverCrashedSession();
         base.OnOpened(e);
+    }
+
+    /// <summary>自测模式把主窗钉到主屏工作区原点。</summary>
+    /// <remarks>
+    /// 便携设置里没有 WindowX/WindowY 时 <see cref="RestoreWindowGeometry"/> 会在第一行整段返回，
+    /// 主窗位置就交给系统每次摆放 ⇒ 偶发崩溃的 A/B 两臂不在同一几何起点上，读数不可比。
+    /// 尺寸不需要钉：16 轮自测的布局读数（时间轴/传输栏/状态栏）本来就完全一致，只有位置漂。
+    /// 落位后回读写日志，不假定 Avalonia 一定生效（本仓有"写尺寸会异步夹走位置"的前科）。
+    /// 普通启动路径不受影响。
+    /// </remarks>
+    private void PinWindowPositionForSelfTest()
+    {
+        if (!_selfTestMode || Screens.Primary is not { } screen) return;
+
+        var wa = screen.WorkingArea;
+        Position = new PixelPoint(wa.X, wa.Y);
+        _3FCompare.Core.Diagnostics.AppLog.Info("SelfTest",
+            $"主窗钉位 目标=({wa.X},{wa.Y}) 回读=({Position.X},{Position.Y}) 工作区={wa.Width}x{wa.Height}");
     }
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -2475,7 +3156,7 @@ public partial class MainWindow : Window
                 _sync.LoopEnabled = true;
                 _timeline.SetLoopRange(loopStart, loopEnd, true);
             }
-            _sync.SeekTo(pos);
+            SafeSeek(pos);
             _sync.Play();
             // 组件日志：重建路径的就绪点（与 SessionReady 分开标记来源，便于区分
             // "首次打开"与"崩溃后重建"两类时序）
@@ -2591,6 +3272,7 @@ public partial class MainWindow : Window
         _pollTimer.Stop();
         _scrubTimer.Stop();
         _transformFlushTimer.Stop();
+        _autosaveTimer.Stop();
         // P0-5 修复：缩略图预览是独立的顶层 Window，Hide() 只隐藏不销毁。
         // 不显式 Close 会在关窗后残留一个永不回收的顶层窗口
         // （并让 Avalonia 因仍有存活 Window 而不退出消息循环）。
@@ -2601,6 +3283,8 @@ public partial class MainWindow : Window
         // 注：该窗口已由 Topmost 改为 Owner=主窗口（Z 序只高于本应用，不再压住其它程序）。
         _layoutOverlay?.CloseAndDispose();
         _layoutOverlay = null;
+        // 放大镜覆盖窗同理：Hide() 只隐藏不销毁，必须显式 Close（同上）。
+        _magnifierWindow.CloseAndDispose();
         base.OnClosed(e);
     }
 

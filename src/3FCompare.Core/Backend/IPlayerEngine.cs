@@ -50,9 +50,9 @@ public interface IPlayerSession : IDisposable
     /// false 保持 VSync 锁定。显示器/驱动不支持时静默保持 VSync（返回值仅提示）。</summary>
     bool SetPresentConfig(bool tearing);
 
-    /// <summary>媒体率呈现节奏（内核扩展 A9）：
-    /// pacing=true 抑制叠加层固定周期的重翻转，使呈现节奏跟随源视频帧率而非叠加层帧率。
-    /// 对 VRR 显示器消除 3:2 抖动；对 VSync 锁定显示器无害。需配合 SetPresentConfig(true) 发挥完整效果。</summary>
+    // ⚠ 这里曾有一段"媒体率呈现节奏（pacing）"的 /// 注释，但内核**没有** SetPacingConfig
+    // （已导出 82 个 API 中不存在）。悬空 /// 会被挂到下一个成员上 ⇒ 它实际成了
+    // SetViewTransform 的文档，是错的。已删除。要实现需先在内核侧加导出。
 
     /// <summary>设置视口变换（缩放 + 平移）。zoom=1.0 表示适应窗口；
     /// panX/panY 为相对未缩放视频框的归一化偏移 [-1,1]。</summary>
@@ -84,11 +84,15 @@ public interface IPlayerSession : IDisposable
     event EventHandler<EngineEvent>? EngineEvent;
 }
 
-/// <summary>渲染目标尺寸诊断（3FCompare K4）。</summary>
+/// <summary>渲染目标尺寸诊断（3FCompare K4）。
+/// <para><paramref name="DestX"/>/<paramref name="DestY"/> 是<b>有符号</b>的绘制盒原点：
+/// 放大后平移会把盒子的左/上沿推到后台缓冲之外（露出源画面的右/下半段），负值合法。
+/// 内核 <c>FFF3FPRenderTargetInfo</c> v1 曾把它声明成无符号并配 <c>max(0,·)</c>，
+/// 结果是"往右下平移"整半段量程被裁掉（实测 pan 扫全程、上报原点恒 (0,0)）。</para></summary>
 public readonly record struct RenderTargetInfo(
     uint SwapWidth, uint SwapHeight,
     uint ClientWidth, uint ClientHeight,
-    uint DestX, uint DestY, uint DestWidth, uint DestHeight,
+    int DestX, int DestY, uint DestWidth, uint DestHeight,
     uint OutputBitDepth, bool Hdr);
 
 /// <summary>会话创建选项。</summary>

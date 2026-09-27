@@ -12,21 +12,35 @@
       <Button x:Name="BtnRemove" Width="36" Height="36" Click="OnRemove" />
     </StackPanel>
 
+    <!-- 中簇固定 5 个等宽按钮，播放/暂停严格居中（2026-09-26 改版：去掉【停止】与【循环】）。
+         等宽不是为了好看——原来 40/38/46/38/38/40/40 且播放键排在第 3 个（7 个里），
+         播放键不在簇的几何中心，用户看到的就是"整簇偏心"。现在 3 个 40 宽、居中位是第 3 个。 -->
     <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" Spacing="6">
       <Button x:Name="BtnSecPrev" Width="40" Height="36" Click="OnSecPrev" />
-      <Button x:Name="BtnFramePrev" Width="38" Height="36" Click="OnFramePrev" />
-      <Button x:Name="BtnPlayPause" Width="46" Height="36" Click="OnPlayPause" />
-      <Button x:Name="BtnStop" Width="38" Height="36" Click="OnStop" />
-      <Button x:Name="BtnFrameNext" Width="38" Height="36" Click="OnFrameNext" />
+      <Button x:Name="BtnFramePrev" Width="40" Height="36" Click="OnFramePrev" />
+      <Button x:Name="BtnPlayPause" Width="40" Height="36" Click="OnPlayPause" />
+      <Button x:Name="BtnFrameNext" Width="40" Height="36" Click="OnFrameNext" />
       <Button x:Name="BtnSecNext" Width="40" Height="36" Click="OnSecNext" />
-      <Button x:Name="BtnLoop" Width="40" Height="36" Click="OnLoop" />
     </StackPanel>
 
     <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
-      <ComboBox x:Name="ComboSpeed" Width="82" Height="36" FontSize="13"
-                SelectionChanged="OnSpeedChanged" />
-      <ComboBox x:Name="ComboColorMode" Width="172" Height="36" FontSize="13"
-                SelectionChanged="OnColorModeChanged" />
+      <!-- 倍速：点击循环的数值 chip（步进处理器在 TransportBar 代码里接线）。
+           刻意不用任何会产生独立 Popup 的控件 —— 实测 Avalonia 12.1.1 的 ComboBox 下拉 / MenuFlyout /
+           Popup 默认各自新建一个独立顶层 HWND；且悬浮栏整窗只有 66px（浮层会被裁掉、栏体外命中穿透），
+           常驻栏上方又是视频子 HWND（airspace 遮挡），下拉浮层在两个宿主里都活不下来。 -->
+      <Button x:Name="ChipSpeed" Width="82" Height="36" FontSize="13" Click="OnSpeedChipClick" />
+      <!-- 色彩/SDR：三值（自动/SDR/HDR）无自然顺序的选择器 → 点击后在<u>同一栏位内</u>展开候选行，
+           选一项即收起；点当前项 = 收起。Panel 叠放让 chip 与候选行共用同一个矩形，底栏几何不变。 -->
+      <Panel x:Name="ColorSlot" Width="172" Height="36">
+        <Button x:Name="ChipColor" Height="36" FontSize="13" Click="OnColorChipClick" />
+        <Grid x:Name="ColorChoices" ColumnDefinitions="*,4,*,4,*" IsVisible="False">
+          <!-- 窄档（104px）时每格只有 ~32px：默认 Button 内边距会把 "Auto/自动" 挤裁剪，
+               候选行统一收紧 Padding/FontSize，宽窄两档都放得下。 -->
+          <Button Grid.Column="0" x:Name="BtnColorAuto" Height="36" FontSize="12" Padding="3,0" Click="OnColorAutoClick" />
+          <Button Grid.Column="2" x:Name="BtnColorSdr" Height="36" FontSize="12" Padding="3,0" Click="OnColorSdrClick" />
+          <Button Grid.Column="4" x:Name="BtnColorHdr" Height="36" FontSize="12" Padding="3,0" Click="OnColorHdrClick" />
+        </Grid>
+      </Panel>
       <TextBlock x:Name="TextTime" Width="168" Margin="10,0,0,0" VerticalAlignment="Center"
                  HorizontalAlignment="Right" TextAlignment="Right" FontFamily="Consolas" FontSize="13"
                  Foreground="{DynamicResource TextSecondaryBrush}" Text="00:00:00:00 / 00:00:00" />

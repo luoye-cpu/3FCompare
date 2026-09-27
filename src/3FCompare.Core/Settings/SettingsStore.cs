@@ -14,6 +14,16 @@ public static class SettingsStore
     private static readonly object PathLock = new();
     private static string? _resolvedConfigPath;
 
+    /// <summary>配置文件所在目录（首次访问时解析并缓存）。
+    ///
+    /// <para><b>为什么要把它公开出来</b>：崩溃自愈要在同一目录里放一份"上次会话"快照
+    /// （<see cref="SessionAutosave"/>）。若那里再写一遍"exe 目录可写吗 / 不可写回退
+    /// %LOCALAPPDATA% 吗"，就出现了两份路径解析——两份实现里只要有一份是错的，
+    /// 表现就是"配置存了但快照没存"或反之，且极难复现（本项目已多次栽在这个模式上）。
+    /// 所以目录解析保持<b>单一实现</b>，这里只把它暴露出去。</para></summary>
+    public static string ConfigDirectory =>
+        Path.GetDirectoryName(GetConfigPath()) ?? AppContext.BaseDirectory;
+
     /// <summary>最近一次 <see cref="Save"/> 失败的原因（null = 还没失败过 / 最后一次成功）。
     ///
     /// 保存失败原先被 <c>catch { Console.Error.WriteLine(...) }</c> 静默吞掉：

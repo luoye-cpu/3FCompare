@@ -44,6 +44,32 @@ public static class HookDetector
     private static readonly object Gate = new();
     private static string[]? _detected;
 
+    /// <summary>已知注入钩子的候选名单（只读视图）。测试用它断言"三类名都会被认出"。</summary>
+    internal static IReadOnlyList<string> KnownCandidates => CandidateModules;
+
+    /// <summary>真实探测函数：模块已在<b>本进程</b>加载则为 true。
+    /// 单独暴露（而非内联在 <see cref="EnsureProbed"/> 里）是为了让测试能验证这条探测
+    /// 依赖的两条真实语义 —— <b>大小写不敏感</b>、<b>不做子串匹配</b>
+    /// （见 docs/41 §4.5 第 14 项的"子串/大小写"）。</summary>
+    internal static Func<string, bool> NativeProbe =>
+        name => GetModuleHandleW(name) != IntPtr.Zero;
+
+    /// <summary>按候选名单顺序筛出"在场"的模块名（纯函数，无原生调用）。
+    ///
+    /// <para>抽出来的唯一理由是可测性：候选模块（RTSSHooks64.dll 等）在本机并不加载，
+    /// 无法用真实 API 覆盖"命中 / 不命中"两条分支；而本类此前连"名单里有几个名字"
+    /// 都不可见（docs/41 §4.5 第 14 项）。返回的是<b>候选名单里的原始拼写</b>
+    /// （即规范化结果），而不是探测时用的那个名字。</para>
+    /// </summary>
+    internal static IReadOnlyList<string> FilterPresent(
+        IReadOnlyList<string> candidates, Func<string, bool> isPresent)
+    {
+        var found = new List<string>(candidates.Count);
+        foreach (var name in candidates)
+            if (isPresent(name)) found.Add(name);
+        return found;
+    }
+
     /// <summary>在场钩子的模块名列表（空数组 = 一个都不在）。首次访问时探测一次并缓存。</summary>
     public static IReadOnlyList<string> DetectedHooks
     {
@@ -85,14 +111,10 @@ public static class HookDetector
         {
             if (_detected is not null) return;
 
-            var found = new List<string>(CandidateModules.Length);
-            foreach (var name in CandidateModules)
-            {
-                // GetModuleHandleW：模块已在**本进程**中加载则返回句柄，否则 NULL（并置 last error）。
-                // 只查询、不加载 —— 绝不能改用 LoadLibrary，那会把钩子"请进来"。
-                if (GetModuleHandleW(name) != IntPtr.Zero) found.Add(name);
-            }
-            Volatile.Write(ref _detected, found.ToArray());
+            // GetModuleHandleW：模块已在**本进程**中加载则返回句柄，否则 NULL（并置 last error）。
+            // 只查询、不加载 —— 绝不能改用 LoadLibrary，那会把钩子"请进来"。
+            var probe = NativeProbe;
+            Volatile.Write(ref _detected, FilterPresent(CandidateModules, probe).ToArray());
         }
     }
 

@@ -41,14 +41,32 @@ public partial class MainWindow
     private void StepFramesAsync(int frames)
         => System.Threading.Tasks.Task.Run(() => _sync.StepFrames(frames));
 
-    private void ToggleLoop(bool on)
-    {
-        _sync.LoopEnabled = on;
-        _transport.SetLoop(on);
-        // 关闭时同步清除时间轴视觉区间（否则绿色 A-B 区间残留）
-        if (!on)
-            _timeline.SetLoopRange(0, 0, false);
-    }
+    /// <summary>秒步进（异步入口）：<see cref="SyncController.StepSeconds"/> 持
+    /// <c>_stepGate</c> 并逐路原生 Seek，在 UI 线程同步调用会冻结界面（与帧步进同源）。
+    /// 键盘（Shift+方向键 / 上下键）与传输栏两个入口统一走这里，避免任一处遗漏。
+    /// 异常记日志，不静默吞。</summary>
+    private void StepSecondsAsync(double seconds)
+        => _ = System.Threading.Tasks.Task.Run(() =>
+        {
+            try { _sync.StepSeconds(seconds); }
+            catch (Exception ex)
+            {
+                _3FCompare.Core.Diagnostics.AppLog.Warn("Sync", $"秒步进失败 step={seconds}：{ex.Message}");
+            }
+        });
+
+    /// <summary>偏移重对齐（异步入口）：<see cref="SyncController.RefreshAllPositions"/> 持
+    /// <c>_stepGate</c> 并逐路原生 Seek，在 UI 线程同步调用会冻结界面。偏移量在 UI 线程
+    /// 已改好，本方法只负责把"重排"挪出 UI 线程。异常记日志，不静默吞。</summary>
+    private void RefreshAllPositionsAsync()
+        => _ = System.Threading.Tasks.Task.Run(() =>
+        {
+            try { _sync.RefreshAllPositions(); }
+            catch (Exception ex)
+            {
+                _3FCompare.Core.Diagnostics.AppLog.Warn("Sync", $"偏移重对齐失败：{ex.Message}");
+            }
+        });
 
     private void TogglePlay()
     {
@@ -56,7 +74,16 @@ public partial class MainWindow
         var snap = _sync.ReadMasterSnapshot();
         var playing = snap is { State: PlayerState.Playing };
         if (playing) _sync.Pause();
-        else _sync.Play();
+        else
+        {
+            _sync.Play();
+            // 2026-09-26 变异实测：把下面这行 `RedrawAll()` 摘掉，自测步骤
+            // 【空格暂停-继续必须恢复出帧】依旧判绿（presented 照常增长）
+            // ⇒ **"暂停后不播"这个用户报告的缺陷并不是缺这一行造成的**，我先前那句
+            //   "根因=缺 Redraw"是错的，已订正。这行保留只因为它符合 RedrawAll 的既有契约
+            //   （恢复后强制出一次帧，幂等、成本低），但**不要把它当成交付了这个修复**。
+            _sync.RedrawAll();
+        }
         SetPlaying(!playing);
     }
 
@@ -66,11 +93,86 @@ public partial class MainWindow
         _transport.SetPlaying(playing);
     }
 
-    /// <summary>安全的 Seek：捕获异常避免反复拖动导致崩溃。</summary>
+    /// <summary>停止（可绑定的播放动作，见 <c>TransportKeys.Slot.Stop</c>）。
+    ///
+    /// <para>停止的两个动作与已删除的底栏【停止】按钮保持一致（<c>_sync.Stop(); SetPlaying(false);</c>），
+    /// 删按钮时没有改掉"停止"的语义，只是把它唯一的界面入口删了 —— 于是这个动作现在
+    /// 只能靠设置页「快捷键」节里显式绑一个键来触发（默认未绑定，不替用户占键）。
+    /// 空会话直接返回，与 <see cref="TogglePlay"/> 同一道前置守卫。</para>
+    ///
+    /// <para>与 <see cref="TogglePlay"/> 的区别：暂停保留解码器状态与当前位置，停止会把各路会话
+    /// 打到 Stopped（<see cref="SyncController.Stop"/> 逐路原生 Stop）。刻意**不**走线程池：
+    /// 保持与被删除的按钮入口一致的行为，要改步进/停止的线程模型应当单独评估，
+    /// 不在"把快捷键做成可配置"这次改动里顺手改。</para></summary>
+    private void StopPlayback()
+    {
+        if (_sync.Count == 0) return;
+        _sync.Stop();
+        SetPlaying(false);
+    }
+
+    /// <summary>安全的 Seek（异步入口）：<see cref="SyncController.SeekTo"/> 持
+    /// <c>_stepGate</c> 并逐路原生 Seek（9 路最坏可达数百 ms），在 UI 线程同步调用会冻结
+    /// 界面（与 StepFrames 同源）。这里移入线程池，并捕获异常避免反复拖动导致崩溃；
+    /// 异常记日志，不静默吞。</summary>
     private void SafeSeek(long pos)
+        => _ = System.Threading.Tasks.Task.Run(() =>
+        {
+            try { _sync.SeekTo(pos); }
+            catch (Exception ex)
+            {
+                _3FCompare.Core.Diagnostics.AppLog.Warn("Seek", $"SeekTo 失败 pos={pos}：{ex.Message}");
+            }
+        });
+
+    // ══════════ 未占格的路：停用，而不是只隐藏 ══════════
+
+    /// <summary>布局这一拍"真正占格的路号"变了。
+    /// <para><b>必须延后一拍</b>：事件从 <c>ArrangeOverride</c> 里发出，在布局过程中直接
+    /// Pause/Seek 会话等于把内核调用塞进布局（Seek 会改快照、快照又触发重排）。</para></summary>
+    private void OnVisibleRoutesChanged() =>
+        global::Avalonia.Threading.Dispatcher.UIThread.Post(ApplyRouteActivity);
+
+    /// <summary>把占格集合下发给会话层：没占格的路 Pause 且不再参与播放/步进/漂移校正，
+    /// 重新占格的路先 Seek 回规范时间再按"要播放"意图恢复。
+    ///
+    /// <para><b>耗时读数</b>：本方法在 UI 线程跑（重新启用要逐路 Seek，与 <see cref="SafeSeek"/>
+    /// 同源的成本）。日志里的 elapsed 就是这条决策的依据 —— 实测够小就保持同步（简单、
+    /// 且"后一次覆盖前一次"天然无乱序），明显卡顿才挪到线程池并加乱序保护。</para></summary>
+    private void ApplyRouteActivity()
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var changed = _sync.SetActiveRoutes(Grid.VisibleRouteIndices);
+        if (changed == 0) return;
+        sw.Stop();
+        var activeCount = 0;
+        for (var i = 0; i < _sync.Count; i++)
+            if (_sync.IsRouteActive(i)) activeCount++;
+        ComponentLog.Log(Comp.Sync, "RouteActivity", -1,
+            $"启用 {activeCount}/{_sync.Count} 路，本次变更 {changed} 路，耗时 {sw.ElapsedMilliseconds} ms");
+        // 状态栏那句"显示前 N / 共 M 路"要跟着改口径（它此前只说可见性，现在说的是启用态）
+        if (_compareActive) NotifyCompareOverlay();
+    }
+
+
+    /// <summary>同步 Seek（<b>仅在"Seek 必须先于下一步落地"的场景用</b>）。
+    ///
+    /// <para><b>为什么需要两个版本</b>：<see cref="SafeSeek"/> 是 fire-and-forget，
+    /// 它不保证 Seek 在调用返回前完成。会话恢复的 <c>onAllOpened</c> 回调里紧接着就是
+    /// <c>_sync.Play()</c>（PlaybackCoordinator 结算批次时），两者没有 happens-before 关系
+    /// ⇒ 实测出现"Play 先落地、Seek 后到"，恢复出来从 0 开始跑，<c>--sessiontest</c> 偶发假红。
+    /// 这种"顺序即语义"的地方必须同步执行，不能靠线程池调度的运气。</para>
+    ///
+    /// <para><b>只能在非 UI 线程调用</b>：<c>SeekTo</c> 持 <c>_stepGate</c> 且逐路原生 Seek，
+    /// 9 路最坏数百 ms，在 UI 线程同步调用会冻结界面。恢复回调跑在打开任务的续体上（线程池），
+    /// 不在 UI 线程 —— 这是它能用同步版的前提。</para></summary>
+    private void SeekNow(long pos)
     {
         try { _sync.SeekTo(pos); }
-        catch (Exception ex) { Console.Error.WriteLine($"Seek 异常: {ex.Message}"); }
+        catch (Exception ex)
+        {
+            _3FCompare.Core.Diagnostics.AppLog.Warn("Seek", $"SeekNow 失败 pos={pos}：{ex.Message}");
+        }
     }
 
     // ---- 时间轴拖动缩略图预览 ----
@@ -79,6 +181,10 @@ public partial class MainWindow
     private readonly DispatcherTimer _scrubTimer = new() { Interval = TimeSpan.FromMilliseconds(150) };
     private long _scrubTarget, _preScrubPos;
     private bool _scrubbing;
+    // 刮擦 Seek 的 in-flight 标志（0=空闲 1=占用）：150ms 一拍，若上一拍的 Task.Run
+    // 还没跑完（SeekTo 持 _stepGate，最坏数百 ms），新一拍必须「忙则跳过」而不是排队堆积，
+    // 否则线程池任务越积越多、拖动释放后仍继续 Seek 一串已过期的位置。
+    private int _scrubSeekInFlight;
 
     private void OnScrubPreview(long pos)
     {
@@ -86,7 +192,8 @@ public partial class MainWindow
         {
             _scrubbing = true;
             _preScrubPos = _sync.GetMasterPosition100ns();
-            _thumbnail ??= new ThumbnailPopup();
+            // Owner 必须**显式**设：它是本窗口 Z 序的唯一来源（Topmost 已关），不能只靠 Show()
+            if (_thumbnail is null) { _thumbnail = new ThumbnailPopup(); _thumbnail.SetOwner(this); }
         }
         _scrubTarget = pos;
         if (!_scrubTimer.IsEnabled) _scrubTimer.Start();
@@ -97,7 +204,19 @@ public partial class MainWindow
         private void OnScrubTimerTick(object? sender, EventArgs e)
         {
             if (!_scrubbing) { _scrubTimer.Stop(); return; }
-            SafeSeek(_scrubTarget);
+            // 防重入（忙则跳过）：见 _scrubSeekInFlight 的说明。丢本拍不会丢最终位置——
+            // 拖动结束时的最终 Seek 由 TimelineView 的 SeekRequested（→ SafeSeek）保证。
+            if (System.Threading.Interlocked.CompareExchange(ref _scrubSeekInFlight, 1, 0) != 0) return;
+            var seekTarget = _scrubTarget;   // UI 线程取值，避免与 OnScrubPreview 的写并发
+            _ = System.Threading.Tasks.Task.Run(() =>
+            {
+                try { _sync.SeekTo(seekTarget); }
+                catch (Exception ex)
+                {
+                    _3FCompare.Core.Diagnostics.AppLog.Warn("Scrub", $"刮擦 Seek 失败 pos={seekTarget}：{ex.Message}");
+                }
+                finally { System.Threading.Interlocked.Exchange(ref _scrubSeekInFlight, 0); }
+            });
             // 缩略图预览可关闭（低配设备）：关闭时仅 Seek，不触发 BitBlt 屏幕抓取
             if (!_settings.ScrubPreviewEnabled) return;
             try
@@ -168,7 +287,6 @@ public partial class MainWindow
             if (_sync.LoopStart100ns >= pos) _sync.LoopStart100ns = 0;
         }
         _sync.LoopEnabled = true;
-        _transport.SetLoop(true);
         _timeline.SetLoopRange(_sync.LoopStart100ns, _sync.LoopEnd100ns, true);
     }
 
@@ -530,9 +648,22 @@ public partial class MainWindow
         for (var i = 1; i < snaps.Count && i < slots.Count; i++)
         {
             var s = snaps[i];
-            if (s is null || s.State != PlayerState.Playing || slots[i].Failed) continue;
-            var dev = s.Position100ns - (master.Position100ns + slots[i].Offset100ns);
-            if (Math.Abs(dev) <= threshold) continue;
+            if (s is null || slots[i].Failed) continue;
+            // ⚠ 判据必须与 SyncController 的**实际校正判据**保持一致（含 Ended、含"超出自身时长则跳过"）：
+            // 本方法只记日志、不做校正，一旦两边分叉，日志就会漏报真实发生的校正，
+            // 而这正是它存在的全部意义（硬崩后要能回溯）（docs/45 P1-10）。
+            if (s.State is not (PlayerState.Playing or PlayerState.Ended)) continue;
+
+            var expected = master.Position100ns + slots[i].Offset100ns;
+            // 极端偏移保护（同 P1-9）：期望值离谱时放弃本路，避免下面的减法溢出。
+            if (expected < -_3FCompare.Core.Settings.SessionSnapshot.MaxOffset100ns ||
+                expected > _3FCompare.Core.Settings.SessionSnapshot.MaxOffset100ns)
+                continue;
+            if (s.Duration100ns > 0 && expected > s.Duration100ns) continue; // 已到自身片尾，停在末帧是正确行为
+
+            var dev = s.Position100ns - expected;
+            // 用区间比较而不是 Math.Abs(dev)：后者在 dev == long.MinValue 时会抛 OverflowException
+            if (dev <= threshold && dev >= -threshold) continue;
             ComponentLog.Log(Comp.Sync, "DriftCorrectSeek", i,
                 $"devMs={dev / 10000.0:0.#} thresholdMs={threshold / 10000.0:0.#}");
         }

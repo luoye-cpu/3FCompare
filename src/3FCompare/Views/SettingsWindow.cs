@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Avalonia.Controls;
+using Avalonia.Input;
+using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using _3FCompare.App;
@@ -10,11 +12,12 @@ using _3FCompare.Core.Backend;
 using _3FCompare.Core.Display;
 using _3FCompare.Core.Settings;
 using _3FCompare.Diagnostics;
+using _3FCompare.Services;
 
 namespace _3FCompare.Views;
 
-/// <summary>设置窗口（WinForms SettingsDialog 对应，7 节）：
-/// 语言/硬件加速+GPU/步进/窗口全屏/解码色彩/布局/FFmpeg 路径+检测。
+/// <summary>设置窗口（WinForms SettingsDialog 对应，8 节）：
+/// 语言/硬件加速+GPU/步进/快捷键/窗口全屏/解码色彩/布局/FFmpeg 路径+检测。
 /// OK 时差异检测构建新 AppSettings（Changed=true，Result）。</summary>
 public sealed class SettingsWindow : Window
 {
@@ -35,6 +38,20 @@ public sealed class SettingsWindow : Window
     private readonly TextBox _ffmpegDir = new();
     private readonly TextBlock _ffmpegStatus = new() { FontSize = 11, TextWrapping = TextWrapping.Wrap };
     private readonly ComboBox _theme = new();
+    private readonly ComboBox _align = new();
+
+    // ---- 「快捷键」节 ----
+
+    /// <summary>本节的 6 行（顺序 = <see cref="TransportKeys.Slots"/> = 冲突优先级 = 底栏从左到右）。</summary>
+    private readonly List<KeyRow> _keyRows = new();
+
+    /// <summary>本节的状态行：改键结果与拒绝原因都写在这里（沿用 _ffmpegStatus 那一套
+    /// "文字 + ErrorBrush/SuccessBrush"的可见提示模式，不做静默失败）。</summary>
+    private readonly TextBlock _keyStatus = new() { FontSize = 11, TextWrapping = TextWrapping.Wrap };
+
+    /// <summary>当前处于"等待按键"状态的那一行。同一时刻只允许一行在捕获，
+    /// 否则两个按钮都会吃掉自己的按键、用户分不清在改哪一个。</summary>
+    private KeyRow? _capturing;
 
     /// <summary>打开设置窗口时的主题偏好：取消/关闭时据此还原（本窗口的主题是实时预览的）。</summary>
     private readonly ThemePreference _origTheme = ThemeManager.Preference;
@@ -92,7 +109,11 @@ public sealed class SettingsWindow : Window
             TimelineCollapsed = current.TimelineCollapsed,
             StatusBarCollapsed = current.StatusBarCollapsed,
             FloatingTransport = current.FloatingTransport,
+            AutoEnterCompare = current.AutoEnterCompare,
+            CompareAlign = current.CompareAlign,
             Language = current.Language,
+            // ⚠ 深拷贝而不是引用直传：见 CopyBindings 的注释
+            KeyBindings = CopyBindings(current.KeyBindings),
         };
         Title = LanguageManager.T("Settings_DialogTitle");
         Width = 720; Height = 760;
@@ -135,13 +156,18 @@ public sealed class SettingsWindow : Window
         ToolTip.SetTip(_scrubPreview, LanguageManager.T("Scrub_PreviewHint"));
         _minimap.Content = LanguageManager.T("Zoom_Minimap");
         _minimap.IsChecked = current.MinimapEnabled;
-        _colorMode.Items.Add(LanguageManager.T("Color_Auto"));
+        _colorMode.Items.Add(LanguageManager.T("Color_Auto_Long"));
         _colorMode.Items.Add(LanguageManager.T("Color_SDR"));
         _colorMode.Items.Add(LanguageManager.T("Color_HDRAuto"));
         _colorMode.SelectedIndex = current.ColorMode == ColorModeSetting.Auto ? 0
             : current.ColorMode == ColorModeSetting.MapToHdr ? 2 : 1;
         _cols.Value = current.DefaultGridCols;
         _rows.Value = current.DefaultGridRows;
+        // 分辨率对齐模式：两项与 CompareAlign 的取值一一对应（0=相对 / 1=像素级）。
+        // 顺序即枚举序，故 SelectedIndex 可直接当枚举值用（读取处已钳位）。
+        _align.Items.Add(LanguageManager.T("Align_Relative"));
+        _align.Items.Add(LanguageManager.T("Align_Pixel"));
+        _align.SelectedIndex = Math.Clamp(current.CompareAlign, 0, 1);
         _ffmpegDir.Text = current.FfmpegDirectory ?? string.Empty;
         UpdateFfmpegStatus();
 
@@ -169,6 +195,8 @@ public sealed class SettingsWindow : Window
         stack.Children.Add(Section(LanguageManager.T("Status_Steps"),
             Row(Label(LanguageManager.T("Stepping_StepByFrame")), _frameStep,
                 Label(LanguageManager.T("Stepping_StepBySecond")), _secStep)));
+        // 紧跟「步进」节：步进量和触发它的键位是同一件事的两半，拆开放会让人找不到。
+        stack.Children.Add(BuildKeysSection());
         stack.Children.Add(Section(LanguageManager.T("Window_StartFullscreen"),
             Row(_startFullscreen, _hideChrome)));
         stack.Children.Add(Section(LanguageManager.T("Vrr_SectionTitle"),
@@ -178,6 +206,9 @@ public sealed class SettingsWindow : Window
             _scrubPreview, _minimap, Hint(LanguageManager.T("Scrub_PreviewHint"))));
         stack.Children.Add(Section(LanguageManager.T("Status_Color"),
             Row(_colorMode)));
+        stack.Children.Add(Section(LanguageManager.T("Align_SectionTitle"),
+            Row(Label(LanguageManager.T("Align_Mode")), _align),
+            Hint(LanguageManager.T("Align_Hint"))));
         stack.Children.Add(Section(LanguageManager.T("Layout_DefaultCols"),
             Row(Label(LanguageManager.T("Layout_DefaultCols")), _cols,
                 Label(LanguageManager.T("Layout_DefaultRows")), _rows)));
@@ -215,6 +246,251 @@ public sealed class SettingsWindow : Window
 
         scroll.Content = stack;
         Content = scroll;
+    }
+
+    // ══════════ 「快捷键」节 ══════════
+
+    /// <summary>整节一次性构造成一个 Section 面板（标题 + 6 行 + 提示 + 恢复默认 + 状态行）。
+    /// <para>刻意做成"一个方法交出一整节"：与本文件其它节（外观 / 分辨率对齐 / FFmpeg）同形态，
+    /// 不往别的面板上零散插行。</para></summary>
+    private Control BuildKeysSection()
+    {
+        var children = new List<Control>();
+        foreach (var slot in TransportKeys.Slots)
+        {
+            // 初值走一次 Canonical：行里的字符串与"按一次键写出来的字符串"必须同形，
+            // 否则光打开设置又点确定就会被判成"改动过"（白写一次盘，还让人怀疑自己改坏了）
+            var row = new KeyRow(this, slot,
+                TransportKeys.Canonical(TransportKeys.Get(slot, _orig.KeyBindings)));
+            _keyRows.Add(row);
+            children.Add(Row(row.Title, row.Capture, row.Clear));
+        }
+        children.Add(Hint(LanguageManager.T("Keys_Hint")));
+
+        var reset = new Button { Content = LanguageManager.T("Keys_Reset"), Height = 26 };
+        reset.Click += (_, _) => ResetKeyRows();
+        children.Add(reset);
+        children.Add(_keyStatus);
+        return Section(LanguageManager.T("Keys_SectionTitle"), children.ToArray());
+    }
+
+    /// <summary>「恢复默认」：只改界面上的 6 行，点「确定」才落盘 ——
+    /// 本窗口没有"立刻生效"的第二套语义（主题那处例外是刻意设计，见 _origTheme）。</summary>
+    private void ResetKeyRows()
+    {
+        foreach (var row in _keyRows)
+        {
+            EndCapture(row);
+            row.Value = TransportKeys.Canonical(TransportKeys.DefaultOf(row.Slot));
+            row.Refresh();
+        }
+        ShowKeyStatus(LanguageManager.T("Keys_ResetDone"), error: false);
+    }
+
+    /// <summary>把结果/拒绝原因写到本节的状态行（可见提示；沿用 FFmpeg 状态行的配色约定）。</summary>
+    private void ShowKeyStatus(string text, bool error)
+    {
+        _keyStatus.Text = text;
+        ThemePalette.SetBrush(_keyStatus, TextBlock.ForegroundProperty,
+            error ? "ErrorBrush" : "SuccessBrush");
+    }
+
+    /// <summary>某一行进入"等待按键"。同一时刻只允许一行在捕获，否则两个按钮都会吃键，
+    /// 用户分不清现在按下去改的是哪一个。</summary>
+    private void BeginCapture(KeyRow row)
+    {
+        if (_capturing is not null && !ReferenceEquals(_capturing, row)) EndCapture(_capturing);
+        _capturing = row;
+        row.BeginCaptureVisual();
+        row.Capture.Focus();
+        ShowKeyStatus(LanguageManager.T("Keys_CapturingHint"), error: false);
+    }
+
+    private void EndCapture(KeyRow? row)
+    {
+        if (row is null) return;
+        if (ReferenceEquals(_capturing, row)) _capturing = null;
+        row.EndCaptureVisual();
+    }
+
+    /// <summary>清除绑定：写入空串 = 未绑定，分派侧的规则是"无绑定的动作不参与分派"
+    /// （见 <c>TransportKeys.BuildMap</c> 规则 ①）。</summary>
+    private void ClearBinding(KeyRow row)
+    {
+        EndCapture(row);
+        row.Value = string.Empty;
+        row.Refresh();
+        ShowKeyStatus(LanguageManager.Tf("Keys_ClearedFmt",
+            LanguageManager.T(TransportKeys.LabelKey(row.Slot))), error: false);
+    }
+
+    /// <summary>捕获态下按下一个键：要么接受（写进该行的 Value），要么**拒绝并说明理由**。
+    /// 两条出口都会退出捕获态并把状态行填满 —— 静默失败是本仓库不接受的行为
+    /// （用户下一次只会看到"还是旧键"，不知道刚才那次为什么不算）。</summary>
+    private void OnCaptureKeyDown(KeyRow row, Key key, KeyModifiers mods)
+    {
+        if (!ReferenceEquals(_capturing, row)) return;   // 已不在捕获态：不受理
+        var display = TransportKeys.Display(key, mods);
+
+        // ① 固定键位：MainWindow.OnKeyDown 里那些不来自设置的分支（O/B/C/S/V/G/T/P/R/H/
+        //    F11/Escape/上下键/F6/Delete/D1..D9）。硬编码优先是结构性的（只在 default 臂查表），
+        //    所以这里绑了也不会生效 ⇒ 当场拒绝，而不是让用户去猜。
+        if (TransportKeys.IsReserved(key, mods))
+        {
+            EndCapture(row);
+            ShowKeyStatus(LanguageManager.Tf("Keys_ErrReserved", display), error: true);
+            return;
+        }
+
+        // ② 与本节另一行重复：Core 的 Normalize 也会消解冲突（按槽序先声明者赢），
+        //    但那是"加载时兜底"，不该拿来当界面规则 —— 到这里就拒绝，冲突进不了配置文件。
+        var spec = TransportKeys.ToSpec(key, mods);
+        var clash = _keyRows.FirstOrDefault(r => !ReferenceEquals(r, row) &&
+            string.Equals(r.Value, spec, StringComparison.OrdinalIgnoreCase));
+        if (clash is not null)
+        {
+            EndCapture(row);
+            ShowKeyStatus(LanguageManager.Tf("Keys_ErrDuplicate", display,
+                LanguageManager.T(TransportKeys.LabelKey(clash.Slot))), error: true);
+            return;
+        }
+
+        row.Value = spec;
+        row.MarkCommitted();
+        EndCapture(row);
+        row.Refresh();
+        ShowKeyStatus(LanguageManager.Tf("Keys_BoundFmt", display), error: false);
+    }
+
+    /// <summary>把界面上 6 行的值收集成一份新的键位表（供 Result 使用）。
+    /// 末尾走一遍 <see cref="KeyBindingsSettings.Normalize"/>：与配置文件同一道校验，
+    /// 不另造第二条路径（界面侧已经拒绝过冲突与固定键位，这里正常是空操作）。</summary>
+    private KeyBindingsSettings ReadKeyBindings()
+    {
+        var bindings = new KeyBindingsSettings();
+        foreach (var row in _keyRows) TransportKeys.Set(row.Slot, bindings, row.Value);
+        bindings.Normalize();
+        return bindings;
+    }
+
+    /// <summary>键位表深拷贝。<see cref="AppSettings.KeyBindings"/> 是引用类型，
+    /// 把 current 的实例直接存进 _orig / Result 会让三方共享同一个对象 ——
+    /// 用户在对话框里改一半又点「取消」，主窗口的 _settings 却已经被改掉并当场生效。</summary>
+    private static KeyBindingsSettings CopyBindings(KeyBindingsSettings? from)
+    {
+        var to = new KeyBindingsSettings();
+        if (from is not null) TransportKeys.CopyInto(from, to);
+        return to;
+    }
+
+    /// <summary>「快捷键」节的一行：动作标签 + 显示当前键的按钮（点击进入等待按键）+ 清除绑定。
+    ///
+    /// <para><b>为什么用 tunnel 处理器读键，而不是覆写 OnKeyDown</b>：获焦的 Button 会把
+    /// 空格/回车转成恰好一次原生 Click（本仓库为此踩过"点过按钮后空格不再切播放/暂停"），
+    /// 捕获态必须在那之前把键截走 —— tunnel 里置 Handled 后按钮的按压状态机不会启动，
+    /// 同一手法见 <c>Controls/TransportBar.axaml.cs</c> 的倍速 chip。</para></summary>
+    private sealed class KeyRow
+    {
+        public readonly TransportKeys.Slot Slot;
+        public readonly TextBlock Title;
+        public readonly Button Capture;
+        public readonly Button Clear;
+
+        /// <summary>当前绑定值（键名字符串，"" = 未绑定）。落盘时由 ReadKeyBindings 统一收集。</summary>
+        public string Value { get; set; }
+
+        private readonly SettingsWindow _owner;
+        private bool _capturing;
+
+        /// <summary>上一次"按键提交成功"的时刻。用于吞掉框架可能在 KeyUp 补发的那一次 Click
+        /// （否则表现为"刚设好键，按钮又回到等待按键状态"）。300ms 远短于人有意识的再点一次。</summary>
+        private long _committedAtTicks;
+
+        public KeyRow(SettingsWindow owner, TransportKeys.Slot slot, string value)
+        {
+            _owner = owner;
+            Slot = slot;
+            Value = value;
+
+            Title = new TextBlock
+            {
+                Text = LanguageManager.T(TransportKeys.LabelKey(slot)),
+                FontSize = 12,
+                Width = 168,
+                TextWrapping = TextWrapping.Wrap,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            ThemePalette.SetBrush(Title, TextBlock.ForegroundProperty, "TextSecondaryBrush");
+
+            Capture = new Button
+            {
+                Width = 112,   // 固定宽度：文案在「←」与「按下新按键…」之间切换时整行不能跳
+                Height = 26,
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+            };
+            Capture.Click += (_, _) =>
+            {
+                if (_capturing) { _owner.EndCapture(this); return; }  // 再点一次 = 取消
+                if (Environment.TickCount64 - _committedAtTicks < 300) return;
+                _owner.BeginCapture(this);
+            };
+            // 捕获态的按键在 Button 自己处理之前截走（见类型注释）
+            Capture.AddHandler(InputElement.KeyDownEvent, OnCaptureKeyDown, RoutingStrategies.Tunnel);
+            // 焦点跑掉就等于不想改了：继续挂着"等待按键"只会让人以为界面卡住
+            Capture.LostFocus += (_, _) => _owner.EndCapture(this);
+
+            Clear = new Button { Content = LanguageManager.T("Keys_Clear"), Height = 26 };
+            Clear.Click += (_, _) => _owner.ClearBinding(this);
+
+            Refresh();
+        }
+
+        private void OnCaptureKeyDown(object? sender, KeyEventArgs e)
+        {
+            if (!_capturing) return;
+            // 捕获期间这颗键整个归这里：既不给 Button 转 Click，也不给别的焦点控件（方向键会动滑块）
+            e.Handled = true;
+            if (e.Key == Key.Escape)
+            {
+                _owner.EndCapture(this);      // Esc = 取消捕获（它同时是"退出全屏"的固定键，不可绑）
+                _owner.ShowKeyStatus(LanguageManager.T("Keys_Cancelled"), error: false);
+                return;
+            }
+            if (IsModifierOnly(e.Key)) return;   // 只按下了修饰键：继续等真正那颗键（组合键按 Ctrl+X 一次成）
+            _owner.OnCaptureKeyDown(this, e.Key, e.KeyModifiers);
+        }
+
+        /// <summary>这颗键本身就是修饰键 ⇒ 不能单独作为绑定（它总是和别的键一起出现）。</summary>
+        private static bool IsModifierOnly(Key key) => key is
+            Key.LeftCtrl or Key.RightCtrl or Key.LeftShift or Key.RightShift
+            or Key.LeftAlt or Key.RightAlt or Key.LWin or Key.RWin;
+
+        /// <summary>按当前状态刷新：按钮文字（等待按键 / 当前键位）、清除按钮的可见性。</summary>
+        public void Refresh()
+        {
+            Capture.Content = _capturing
+                ? LanguageManager.T("Keys_Capturing")
+                : TransportKeys.Display(Value);
+            // 未绑定时没有"清除"可点（少一个按了没反应的按钮）
+            Clear.IsVisible = Value.Length > 0;
+        }
+
+        public void BeginCaptureVisual()
+        {
+            if (_capturing) return;
+            _capturing = true;
+            Refresh();
+        }
+
+        public void EndCaptureVisual()
+        {
+            if (!_capturing) return;
+            _capturing = false;
+            Refresh();
+        }
+
+        /// <summary>提交成功（区别于 Esc/失焦退出）：只有这条路会给"补发的 Click"上闸门。</summary>
+        public void MarkCommitted() => _committedAtTicks = Environment.TickCount64;
     }
 
     private void UpdateFfmpegStatus(bool forceValidate = false)
@@ -283,6 +559,9 @@ public sealed class SettingsWindow : Window
         var vrrTearing = _vrrTearing.IsChecked == true;
         var scrubPreview = _scrubPreview.IsChecked == true;
         var miniMap = _minimap.IsChecked == true;
+        // 对齐模式：越界下标（列表项数变化 / 脏初值）会被静默当成某一档，故显式钳一次，
+        // 与 AppSettings.Normalize 的 [0,1] 保持一致。
+        var align = Math.Clamp(_align.SelectedIndex, 0, 1);
         var ffmpeg = string.IsNullOrWhiteSpace(_ffmpegDir.Text) ? null : _ffmpegDir.Text.Trim();
 
         // 目录非空但校验失败 ⇒ 阻止保存。旧实现允许带着无效目录"确定"并弹重启询问，
@@ -302,12 +581,20 @@ public sealed class SettingsWindow : Window
             }
         }
 
+        // 快捷键：先收集再比较，只走一次（ReadKeyBindings 里的 Normalize 可能写日志，
+        // 调用两次等于同一件事报两遍，且两次的值理论上还可能被第二遍的清洗改掉）
+        var bindings = ReadKeyBindings();
         var changed = lang != _orig.Language || hw != _orig.HardwareDecode || adapter != _orig.PreferredAdapterIndex
             || frame != _orig.FrameStep || Math.Abs(sec - _orig.SecondsStep) > 0.001
             || startFs != _orig.StartFullscreen || hideChrome != _orig.HideChromeInFullscreen
             || color != _orig.ColorMode || cols != _orig.DefaultGridCols || rows != _orig.DefaultGridRows
             || vrrTearing != _orig.VrrTearingPresent
             || scrubPreview != _orig.ScrubPreviewEnabled || miniMap != _orig.MinimapEnabled
+            // ⚠ 新设置项必须加进这条链：漏了它 Changed 恒为 false ⇒ 改了设置"确定"后
+            // MainWindow 直接 return（Result 不落地），表现为"设置存不住"且无任何报错。
+            || align != _orig.CompareAlign
+            // 快捷键：键位表是引用类型，必须逐槽比而不是比引用（Same 见 TransportKeys）
+            || !TransportKeys.Same(_orig.KeyBindings, bindings)
             || ffmpeg != _orig.FfmpegDirectory;
         FfmpegChanged = ffmpeg != _orig.FfmpegDirectory;
 
@@ -338,7 +625,11 @@ public sealed class SettingsWindow : Window
                 TimelineCollapsed = _orig.TimelineCollapsed,
                 StatusBarCollapsed = _orig.StatusBarCollapsed,
                 FloatingTransport = _orig.FloatingTransport,
+                AutoEnterCompare = _orig.AutoEnterCompare,
+                CompareAlign = align,
                 Language = lang,
+                // 局部实例，与 _orig / 调用方的 _settings 都不共享（见 CopyBindings）
+                KeyBindings = bindings,
             };
         }
 

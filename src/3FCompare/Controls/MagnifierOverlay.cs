@@ -1,10 +1,12 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Media.Immutable;
 using Avalonia.Styling;
 using _3FCompare.Core.Backend;
+using _3FCompare.Core.Imaging;
 
 namespace _3FCompare.Controls;
 
@@ -17,6 +19,10 @@ public sealed class MagnifierOverlay : Control
     private bool _visible;
     private IPlayerSession? _session;
     private float[]? _pixelGrid = new float[ZoomGrid * ZoomGrid * 4]; // CPU 邻域像素 (backbuffer space)
+    // _pixelGrid 的色彩域信息必须与它**同时**更新：回读数据与域标志错配会让 HDR 帧
+    // 被按 SDR 解释（或反之）—— 与"v*255 截断"是同一类成因，只是错在域而不是位深。
+    private uint _gridBitDepth;
+    private bool _gridHdr;
 
     private const int Zoom = 4;
     private const int ZoomGrid = 12; // 12×12 采样网格 → 放大到 16px 块 = 192px
@@ -36,6 +42,16 @@ public sealed class MagnifierOverlay : Control
     {
         IsHitTestVisible = false;
         Width = WidthPx; Height = HeightPx;
+        // ⚠ 必须把对齐钉成"左上"（#22）。
+        // 默认 HorizontalAlignment/VerticalAlignment 是 Stretch，而本控件又显式设了 Width/Height ——
+        // Avalonia 这时会把它**居中**排布：实测 1332×750 的 CenterPanel 下，本控件 Bounds 原点
+        // 是 (570, 303)。于是"本控件局部坐标"与"父容器坐标"相差一个常量偏移，
+        // 而 Render 的 DrawingContext 原点在本控件左上角 ⇒ 把容器坐标直接当局部坐标画会整体偏移半个面板。
+        // 钉成左上后两者原点恒重合（Bounds 原点是 (0,0)，尺寸恒为 192×144），换算有稳定参照；
+        // 顺带消除另一个隐患：IsVisible 刚置 true 时布局还没跑到，Bounds 仍是 (0,0,0,0)，
+        // 靠 Bounds 反推原点会拿到"过期值"（隐藏态下原点同样是 (0,0)，故钉死后两种情况都正确）。
+        HorizontalAlignment = HorizontalAlignment.Left;
+        VerticalAlignment = VerticalAlignment.Top;
         IsVisible = false;
         // 自绘控件不会因主题变化自动失效，必须显式重绘（否则放大镜停在旧配色）
         ActualThemeVariantChanged += (_, _) => InvalidateVisual();
@@ -43,6 +59,30 @@ public sealed class MagnifierOverlay : Control
 
     /// <summary>自测钩子：采样缓冲是否已就绪（C3 回归断言用。</summary>
     internal bool HasPixelGrid => _pixelGrid is not null;
+
+    /// <summary>呈现状态变化（IsVisible 或 OverlayPosition 变了）。
+    /// 放大镜本体是 Control，呈现由独立顶层窗口（<see cref="MagnifierOverlayWindow"/>，
+    /// 宿主 MainWindow 持有）承担；本控件只发通知，窗口的显示/隐藏/定位由宿主订阅本事件完成。
+    /// 事件在属性变更后同步触发，宿主据此把窗口摆到屏幕坐标。</summary>
+    public event EventHandler? PresentationChanged;
+
+    /// <summary>窗口托管模式（P1-4）：本控件作为 <see cref="MagnifierOverlayWindow"/> 的内容独占整窗，
+    /// 浮窗的摆放由宿主把整个窗口定位到屏幕完成，本控件恒铺满窗口（局部原点 = 窗口原点）。
+    /// <see cref="UpdateAt"/> 在此模式下跳过"本控件局部坐标"换算（Parent 已不是 CenterPanel），
+    /// 改在 <see cref="HostContainer"/> 坐标系里做偏移/翻转/钳制，结果记入 <see cref="DesiredPosition"/>。</summary>
+    internal bool WindowHosted { get; set; }
+
+    /// <summary>窗口托管模式下做坐标换算/钳制的宿主容器（MainWindow 构造时设为 CenterPanel）。
+    /// 本控件被搬进独立窗口后 <c>Parent</c> 不再是 CenterPanel，必须由宿主显式指定。</summary>
+    internal Visual? HostContainer { get; set; }
+
+    /// <summary>窗口托管模式下浮窗左上角在 <see cref="HostContainer"/> 坐标系（DIP）里的期望位置
+    /// （<see cref="PlaceOverlay"/> 的输出）。宿主订阅 <see cref="PresentationChanged"/> 后读它定位窗口。</summary>
+    internal Point DesiredPosition { get; private set; }
+
+    /// <summary>自测钩子：浮窗左上角在本控件**局部坐标系**里的位置（Render 直接用它的那个值）。
+    /// 只读暴露给 <c>--selftest</c> 的坐标换算断言；生产代码不读它。</summary>
+    internal Point OverlayPosition => _position;
 
     /// <summary>自测钩子：把采样缓冲置回"读回失败"状态。
     /// 用于复现"换路前读回失败 → 缓冲为 null → 换路后永久空框"这一路径。</summary>
@@ -61,38 +101,105 @@ public sealed class MagnifierOverlay : Control
         _lastGy = -1;
     }
 
-    /// <summary>定位到（相对父容器的）光标位置并显示。
-    /// cursor 为"中心点"（放大镜覆盖在光标旁）。</summary>
     /// <summary>更新放大镜位置与采样。
     ///
-    /// <paramref name="localInSurface"/> 必须是**相对该路 PlayerSurface** 的坐标
-    /// （<c>e.GetPosition(surface)</c>），**不能**传 CenterPanel 的全局坐标——
-    /// 后者在多格布局下会把"第 3 格的坐标"当成"第 1 格后台缓冲的坐标"，
-    /// 再加上未乘 RenderScaling、未排 letterbox，显示的就完全不是光标下的内容
-    /// （docs/15 §2.2）。<paramref name="renderScaling"/> 用于 DIP → 物理像素。
+    /// <para><b>坐标契约（#22 修复点）</b>：<paramref name="localInSurface"/> 必须是**相对
+    /// <paramref name="source"/>（该路 PlayerSurface）** 的坐标（<c>e.GetPosition(surface)</c>），
+    /// 本方法负责把它换算到浮窗自己的坐标系——**不能**由调用方直接传 CenterPanel 的全局坐标
+    /// （那会让采样把"第 3 格的坐标"当成"第 1 格后台缓冲的坐标"，docs/15 §2.2），
+    /// 也**不能**把 surface 局部坐标当成浮窗坐标（见下方换算）。
+    /// <paramref name="renderScaling"/> 用于 DIP → 物理像素。</para>
+    ///
+    /// <para><b>为什么必须换算（#22：实测比工单描述更严重）</b>：<see cref="_position"/> 是
+    /// <b>本控件局部</b>坐标（Render 的 DrawingContext 原点在本控件左上角）。旧实现直接把
+    /// surface 局部坐标写进去，于是浮窗被**两重**偏移叠加地摆错：</para>
+    /// <list type="number">
+    /// <item><description>少算了 surface 在容器里的原点 —— 4 路对比模式下第 4 路约 (933,263) DIP，
+    /// 第 1 格只有 (1,1)（工单提到的就是这一重）；</description></item>
+    /// <item><description>少算了本控件自身在容器里的原点 —— 显式 Width/Height + 默认 Stretch 对齐
+    /// 会被 Avalonia <b>居中</b>排布（实测 1332×750 的 CenterPanel 下是 (570,303)）。
+    /// 这一重<b>对所有格都成立</b>，所以"只有第 1 格正确"也不成立：放大镜整体还额外偏了半个面板。</description></item>
+    /// </list>
+    /// <para>现在：构造函数把对齐钉成左上（消除第 2 重，见那里），本方法用 <c>TranslatePoint</c>
+    /// 做第 1 重换算。</para>
+    ///
+    /// <para><b>缩放 / 滚动偏移已由 TranslatePoint 吸收，不需要再除 zoom</b>：视频的视图变换
+    /// （滚轮缩放 / 拖拽平移）与"无缝放大"（<c>CompareGridView.CellMagnify</c>）都只改
+    /// <b>Arrange 出来的矩形</b>（引擎侧 viewport 或窗口的 Bounds），不改坐标系的语义。
+    /// <c>TranslatePoint</c> 读的正是这条视觉树变换链，放大后的窗口偏移/尺寸已经算在里面，
+    /// 故这里既不加滚动偏移、也不除以 zoom（再除一次反而会把浮窗拉回错误位置）。</para>
     /// </summary>
-    public void UpdateAt(Point localInSurface, double renderScaling)
+    /// <param name="source">光标所在的那一路表面（坐标换算的源坐标系）。</param>
+    public void UpdateAt(Visual source, Point localInSurface, double renderScaling)
     {
-        // 浮窗仍按 CenterPanel 坐标摆放：需要把"surface 内坐标"换算回去。
-        // （放大镜本体跟随光标，采样点才用 surface 内坐标。）
-        var cursor = localInSurface;
-        _position = new Point(cursor.X + 16, cursor.Y + 16);
+        // 窗口托管模式：内容恒铺满窗口（局部原点 = 窗口原点），无需局部坐标换算；
+        // 偏移/翻转/钳制改在 HostContainer 坐标系里做，结果经 DesiredPosition 交给宿主摆窗口。
+        if (WindowHosted)
+        {
+            var host = HostContainer;
+            var cursorInHost = host is not null ? source.TranslatePoint(localInSurface, host) : null;
+            if (cursorInHost is null)
+            {
+                HideOverlay();
+                return;
+            }
+            var hostSize = (host as Control)?.Bounds.Size ?? default;
+            DesiredPosition = PlaceOverlay(cursorInHost.Value, hostSize);
+            _position = new Point(0, 0);
+            _visible = true;
+            IsVisible = true;
+            RefreshPixels(localInSurface, renderScaling);
+            InvalidateVisual();
+            PresentationChanged?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+        // ① 源坐标系（surface 局部 DIP）→ 中间坐标系（父容器 CenterPanel）。
+        //    选父容器而不是本控件做中间坐标系，是为了让"钳制"按容器的实际尺寸算：
+        //    本控件自身带显式 Width/Height，Bounds 不一定等于容器，拿它钳制会算错边界。
+        var container = Parent as Visual;
+        var cursor = (container is not null ? source.TranslatePoint(localInSurface, container) : null)
+                     ?? localInSurface;
+        var containerSize = container is Control c ? c.Bounds.Size
+                                                  : new Size(double.PositiveInfinity, double.PositiveInfinity);
+        var inContainer = PlaceOverlay(cursor, containerSize);
+
+        // ② 中间坐标系（CenterPanel）→ 目标坐标系（本控件局部）。容器原点若不在本控件原点
+        //    （显式尺寸 + 对齐方式导致），这一步是必需的；原点重合时它是恒等变换。
+        _position = (container is not null ? container.TranslatePoint(inContainer, this) : null)
+                    ?? inContainer;
         _visible = true;
         IsVisible = true;
-        // 钳制在父容器内
-        if (Parent is Control p)
-        {
-            if (_position.X + Width > p.Bounds.Width) _position = new Point(cursor.X - Width - 8, _position.Y);
-            if (_position.Y + Height > p.Bounds.Height) _position = new Point(_position.X, cursor.Y - Height - 8);
-            // 翻转到光标左侧/上方后可能为负（父容器比浮窗还窄，或光标贴着左上角），
-            // 负坐标会让浮窗整块滑出可视区 —— 用户看到的仍是"放大镜不显示"。
-            // 上界同样要按 (容器 - 浮窗) 钳制，避免小容器下浮窗被推到右下角之外。
-            _position = new Point(
-                Math.Clamp(_position.X, 0, Math.Max(0, p.Bounds.Width - Width)),
-                Math.Clamp(_position.Y, 0, Math.Max(0, p.Bounds.Height - Height)));
-        }
         RefreshPixels(localInSurface, renderScaling);
         InvalidateVisual();
+        PresentationChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>浮窗相对光标的默认偏移（右下）。</summary>
+    private const double OverlayGap = 16;
+    /// <summary>翻转到光标左上时的额外内缩（沿用既有取值，不改视觉）。</summary>
+    private const double OverlayFlipGap = 8;
+
+    /// <summary>浮窗摆放（纯计算，坐标全部在<b>同一个容器坐标系</b>里）。
+    ///
+    /// <para>抽成 <c>internal static</c> 纯函数的理由：这是 #22 唯一与视觉树无关的部分
+    /// （偏移 / 翻转 / 钳制），可以在单测里逐条验算；而"坐标换算"本身依赖视觉树，
+    /// 只能由 <c>--selftest</c> 的几何断言覆盖（见 <c>AssertMagnifierFollowsCursor</c>）。
+    /// 两者分工明确：单测钉算术，实机断言钉换算链路。</para>
+    ///
+    /// <para>行为与改动前逐字一致（右下优先 → 越界翻到左上 → 再钳到容器内），
+    /// 只是不再依赖实例字段 <see cref="_position"/> 的中间值。</para></summary>
+    internal static Point PlaceOverlay(Point cursorInContainer, Size container)
+    {
+        var x = cursorInContainer.X + OverlayGap;
+        var y = cursorInContainer.Y + OverlayGap;
+        // 越界则翻到光标左上；翻完仍可能为负（容器比浮窗还窄，或光标贴着左上角），
+        // 负坐标会让浮窗整块滑出可视区 —— 用户看到的仍是"放大镜不显示"。
+        if (x + WidthPx > container.Width) x = cursorInContainer.X - WidthPx - OverlayFlipGap;
+        if (y + HeightPx > container.Height) y = cursorInContainer.Y - HeightPx - OverlayFlipGap;
+        // 上界同样要按 (容器 - 浮窗) 钳制，避免小容器下浮窗被推到右下角之外。
+        return new Point(
+            Math.Clamp(x, 0, Math.Max(0, container.Width - WidthPx)),
+            Math.Clamp(y, 0, Math.Max(0, container.Height - HeightPx)));
     }
 
     /// <summary>两次 GPU 回读之间的最小间隔（约 30Hz）。
@@ -151,6 +258,8 @@ public sealed class MagnifierOverlay : Control
                 return;
             }
             _pixelGrid = buffer;
+            _gridBitDepth = rt.OutputBitDepth;
+            _gridHdr = rt.Hdr;
         }
         catch
         {
@@ -162,6 +271,7 @@ public sealed class MagnifierOverlay : Control
     {
         _visible = false;
         IsVisible = false;
+        PresentationChanged?.Invoke(this, EventArgs.Empty);
     }
 
     // 颜色取自主题令牌（背板/网格/握把类令牌深浅同值：它们压在视频画面上，
@@ -232,8 +342,13 @@ public sealed class MagnifierOverlay : Control
                 for (var gx = 0; gx < ZoomGrid; gx++)
                 {
                     var i = (gy * ZoomGrid + gx) * 4;
-                    var color = Color.FromArgb(
-                        (byte)To8(_pixelGrid[i + 3]), (byte)To8(_pixelGrid[i]), (byte)To8(_pixelGrid[i + 1]), (byte)To8(_pixelGrid[i + 2]));
+                    // 8-bit 显示码值走跨域统一口径（docs/45 P0-4）：SDR 回读是 gamma 编码、
+                    // HDR 回读是线性 scRGB，直接 v*255 会让两者不可比。
+                    ColorNormalizer.ToDisplay8Bit(
+                        _pixelGrid[i], _pixelGrid[i + 1], _pixelGrid[i + 2], _pixelGrid[i + 3],
+                        _gridBitDepth, _gridHdr,
+                        out var r8, out var g8, out var b8, out var a8);
+                    var color = Color.FromArgb((byte)a8, (byte)r8, (byte)g8, (byte)b8);
                     dc.DrawRectangle(CellBrush(color), null,
                         new Rect(rect.X + gx * cellW, rect.Y + gy * cellH, cellW, cellH));
                 }
@@ -261,8 +376,6 @@ public sealed class MagnifierOverlay : Control
         }
         dc.DrawText(_captionText, new Point(rect.X + 4, rect.Bottom - _captionText.Height - 2));
     }
-
-    private static int To8(float v) => Math.Clamp((int)Math.Round(v * 255f), 0, 255);
 
     /// <summary>取采样网格**中心点**的像素值（自测用）。
     ///

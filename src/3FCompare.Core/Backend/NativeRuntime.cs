@@ -104,10 +104,26 @@ public static partial class NativeRuntime
     /// <param name="reason">不可用时的人类可读原因；可用时为 ""。</param>
     private static bool IsAcceptableFfmpegDirectory(string dir, bool autoDetect, out string reason)
     {
-        // ① UNC：Windows 访问网络路径时会自动发起 NTLM 认证，把本机凭据送出去
-        if (dir.StartsWith(@"\\", StringComparison.Ordinal))
+        // ① 空/空白 与 UNC/设备路径：**两种不同的拒绝原因，提示必须分开给**。
+        //    空白串没有网络语义，若并进下面那条 UNC 文案，用户会去查网络/共享，
+        //    而真实原因是 settings.json 里这一项是空的（排查方向被带偏）。
+        //    这只是把提示拆细：空白在共用判据里同样返回 true（fail-closed），
+        //    先判空白不改变任何拒绝/采纳结论，安全面既不削弱也不扩大。
+        if (string.IsNullOrWhiteSpace(dir))
         {
-            reason = "不接受 UNC 网络路径（会泄露本机凭据）";
+            reason = "未配置 FFmpeg 目录（路径为空或只有空白字符）";
+            return false;
+        }
+        //    UNC：Windows 访问网络路径时会自动发起 NTLM 认证，把本机凭据送出去。
+        //    必须走 PathSafety.IsUncPath 而不是 dir.StartsWith(@"\\")：
+        //    "//server/share" 也是 rooted 但不以 "\\" 开头，只查前缀会被它整体绕过；
+        //    共用判据内部先 GetFullPath 归一化（// 与 \\ 归一后形式唯一）再判，
+        //    并把非法字符/超长这类归一化失败按"不可信"拒绝（fail-closed）。
+        //    注：这里的目录来自 settings.json（与 exe 同目录，等同可被投放），
+        //    与会话文件里的视频路径是**不同的可信边界**，所以只共用判据、不共用提示与策略。
+        if (PathSafety.IsUncPath(dir))
+        {
+            reason = "不接受 UNC/设备路径或无法归一化的路径（访问网络路径会自动发起 NTLM 认证，泄露本机凭据）";
             return false;
         }
         // ② 相对路径：会按当前工作目录解析，等于让配置决定加载哪个目录的 DLL

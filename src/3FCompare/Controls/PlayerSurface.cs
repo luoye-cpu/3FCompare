@@ -6,6 +6,7 @@ using Avalonia.Input;
 using Avalonia.Platform;
 using Avalonia.Threading;
 using _3FCompare.Core.Backend;
+using _3FCompare.Core.Diagnostics;
 using _3FCompare.Diagnostics;
 
 namespace _3FCompare.Controls;
@@ -165,6 +166,14 @@ public sealed class PlayerSurface : NativeControlHost
         _realMode = realMode;
         _subclassProc = SubclassedWndProc;
         Focusable = false;
+        // 候选修复（待用户真拖放定案，别当已证）：`AllowDrop` 此前只设在主窗与 CompareGridView 上，
+        // 而指针落在画面上时命中测试给到的是本控件。2026-09-26 用户从资源管理器连拖 3 次，
+        // 被测进程里 DragOver / OnDrop / WM_DROPFILES **三条诊断一条都没有** ⇒ 事件在进入窗口级
+        // handler 之前就被 OLE 层以 DROPEFFECT_NONE 回掉了（Avalonia 在这种情况下不会 raise 路由事件，
+        // 所以"零日志"既可能是这里，也可能是 UIPI／提权，两种要靠一次真拖分辨）。
+        // ⚠ 我先前一次加这行时依据的是自己那个已被对照实验否掉的夹具读数，已撤回；这次是照用户的
+        //    现场观察（零回调）重装的，判据＝用户再拖一次后画面上有没有真的出画面。
+        Avalonia.Input.DragDrop.SetAllowDrop(this, true);
     }
 
     // ---------- 子窗口生命周期 ----------
@@ -184,7 +193,30 @@ public sealed class PlayerSurface : NativeControlHost
         // 作用在一个已销毁的 HWND"的迹象，这里是唯一的对照点。
         ComponentLog.Log(Comp.Surface, "HwndCreate", _index, $"hwnd=0x{_hwnd:X}");
 
-        _origWndProc = SetWindowLongPtr(_hwnd, GWLP_WNDPROC, Marshal.GetFunctionPointerForDelegate(_subclassProc));
+        // 子类化：把窗口过程换成 SubclassedWndProc，原过程存下来供透传。
+        // 必须判返回值（docs/41 #4 同批）：SetWindowLongPtr 失败时返回 0，若照收进
+        // _origWndProc，此后**每条**消息都会走 CallWindowProcW(0, …) —— 未定义行为/崩溃。
+        // 写法对齐 LayoutOverlayWindow.cs:560 / FloatingTransportWindow.cs:387 的同款判 0 分支：
+        // 失败即降级（不子类化）。窗口仍由窗口类过程 DefWindowProcW 正常处理，
+        // 只是本表面收不到鼠标/拖放事件——远好于把每条消息转发给 0。
+        var prevWndProc = SetWindowLongPtr(_hwnd, GWLP_WNDPROC, Marshal.GetFunctionPointerForDelegate(_subclassProc));
+        if (prevWndProc == nint.Zero)
+        {
+            ComponentLog.Log(Comp.Surface, "SubclassFailed", _index,
+                $"hwnd=0x{_hwnd:X} err={Marshal.GetLastWin32Error()}");
+            // 显式清零（docs/41 复核）：本控件可能被 Avalonia 重建（CreateNativeControlCore
+            // 二次进入），此时 _origWndProc 仍残留上一轮的值。若不复位，
+            // DestroyNativeControlCore 会把一个**已失效的旧过程指针**装回去（写别人的窗口过程），
+            // 且 SubclassedWndProc 里 CallWindowProcW 也会走错目标。
+            _origWndProc = nint.Zero;
+            // _origWndProc == nint.Zero 时：SubclassedWndProc 并未被安装，不会被调用，
+            // 因此不存在 CallWindowProcW(0, …) 的机会；下面 DestroyNativeControlCore 的
+            // 还原分支也会因 `_origWndProc != nint.Zero` 为假而跳过（正确：没装就不该卸）。
+        }
+        else
+        {
+            _origWndProc = prevWndProc;
+        }
 
         // 3FCompare 修复：启用子 HWND 文件拖放（WM_DROPFILES），否则 NativeControlHost
         // 子窗口不是 OLE 拖放目标，无法直接把视频拖进画面。
@@ -240,34 +272,96 @@ public sealed class PlayerSurface : NativeControlHost
     private void EnableFileDrop(nint hwnd)
         => DragAcceptFiles(hwnd, true);
 
-    /// <summary>解析 WM_DROPFILES 的文件列表并触发事件。</summary>
+    /// <summary>解析 WM_DROPFILES 的文件列表并触发事件。
+    /// <para><b>为什么整个方法体都要在 try/finally 内</b>（docs/41 #4）：<c>SurfaceFilesDropped</c>
+    /// 的订阅者（<c>OnSurfaceFilesDropped</c> → <c>OpenPaths</c>）会做文件 I/O、建会话，是会抛异常的
+    /// 普通托管代码。原写法里 <c>DragFinish</c> 排在 <c>Invoke</c> 之后，订阅者一抛就永远走不到
+    /// ⇒ HDROP 这块全局内存泄漏（拖几次泄漏几块）；解析循环自身抛（如 AllocHGlobal 失败）同样如此。
+    /// 放进 <c>finally</c> 后，正常/解析失败/订阅者异常三条路都必然释放。</para>
+    /// <para><b>为什么订阅者异常必须在这里吞掉</b>：本方法跑在 <see cref="SubclassedWndProc"/> 的
+    /// 调用栈上，而该 WndProc 是原生 user32 经 reverse P/Invoke 调进来的；托管异常从反向 P/Invoke
+    /// 边界冒出会<b>直接终止进程</b>（不同于普通的 UI 线程未处理异常）。故只记日志、绝不 rethrow。</para>
+    /// <para>记日志用 <see cref="AppLog"/>（后台队列 + 有界丢弃，非阻塞）而<b>不是</b>
+    /// <c>Console.Error</c>：本文件已有"stderr 管道满导致 WndProc 栈阻塞"的历史教训。</para></summary>
     private void HandleDropFiles(nint hDrop)
     {
-        var count = DragQueryFileW(hDrop, 0xFFFFFFFF, nint.Zero, 0);
-        if (count > 0)
+        try
         {
-            var files = new List<string>((int)count);
-            for (uint i = 0; i < count; i++)
+            var count = DragQueryFileW(hDrop, 0xFFFFFFFF, nint.Zero, 0);
+            global::_3FCompare.Diagnostics.DropTrace.Line(
+                $"[surface] WM_DROPFILES 到达 hwnd=0x{_hwnd:X} count={count}");
+            // 诊断：这条以前完全没有读数 ⇒ "拖了没反应"分不清是①消息根本没到本过程
+            //   （DragAcceptFiles 没生效 / 子类化没装上 / 该 HWND 不是接收者），还是
+            //   ②到了但 HDROP 里读出 0 个文件（<c>if (count > 0)</c> 静默跳过）。
+            //   count=0 与消息没到，在日志出现之前是同一个观感。
+            _3FCompare.Core.Diagnostics.AppLog.Info("Drop", $"WM_DROPFILES 到达 hwnd=0x{_hwnd:X} count={count}" +
+                                (count > 0 ? "" : "（⇒ 下面整段不执行，不会打开任何东西）"));
+            if (count > 0)
             {
-                var len = DragQueryFileW(hDrop, i, nint.Zero, 0);
-                var buffer = Marshal.AllocHGlobal((int)((len + 1) * 2));
+                var files = new List<string>((int)count);
+                for (uint i = 0; i < count; i++)
+                {
+                    var len = DragQueryFileW(hDrop, i, nint.Zero, 0);
+                    var buffer = Marshal.AllocHGlobal((int)((len + 1) * 2));
+                    try
+                    {
+                        var got = DragQueryFileW(hDrop, i, buffer, len + 1);
+                        if (got > 0)
+                            files.Add(Marshal.PtrToStringUni(buffer)!);
+                    }
+                    finally
+                    {
+                        Marshal.FreeHGlobal(buffer);
+                    }
+                }
+                // docs/41 #4：订阅者异常既不得穿越反向 P/Invoke 边界（会终止进程），
+                // 也不得阻止下面的 DragFinish（HDROP 泄漏）。这里吞掉，只落盘日志。
                 try
                 {
-                    var got = DragQueryFileW(hDrop, i, buffer, len + 1);
-                    if (got > 0)
-                        files.Add(Marshal.PtrToStringUni(buffer)!);
+                    AppLog.Info("Drop", $"legacy 拖放转发 {files.Count} 条路径给订阅者" +
+                                        (files.Count > 0 ? $"，首个={files[0]}" : ""));
+                    SurfaceFilesDropped?.Invoke(files);
                 }
-                finally
+                catch (Exception ex)
                 {
-                    Marshal.FreeHGlobal(buffer);
+                    AppLog.Error("PlayerSurface.DropFiles", ex);
                 }
             }
-            SurfaceFilesDropped?.Invoke(files);
         }
-        DragFinish(hDrop);
+        finally
+        {
+            // 无条件释放 HDROP：正常路径、解析抛异常、订阅者抛异常三条路都必须走到这里。
+            DragFinish(hDrop);
+        }
     }
 
+    /// <summary>子类化窗口过程：异常边界 + 实际消息处理（<see cref="HandleSurfaceMessage"/>）。
+    /// <para><b>为什么整段都要兜住</b>（docs/41 #5）：本方法是原生 user32 经 reverse P/Invoke
+    /// 调进来的回调栈，<c>SurfacePressed/Moved/Released/Wheel/FilesDropped</c> 都在此栈上同步触发。
+    /// 任一订阅者抛异常都会从反向 P/Invoke 边界冒出 ⇒ <b>直接终止进程</b>。所以这里兜住全部异常，
+    /// 只记日志、绝不外逃；返回值的正常语义由 <see cref="HandleSurfaceMessage"/> 原样保留
+    /// （成功路径只是多一层 try，行为不变）。</para>
+    /// <para>记日志用 <see cref="AppLog"/>（后台队列 + 有界丢弃，非阻塞），不用 <c>Console.Error</c>：
+    /// 后者在 stderr 管道满时会阻塞 WndProc 栈（本文件已知教训）。</para></summary>
     private nint SubclassedWndProc(nint hwnd, uint msg, nint wParam, nint lParam)
+    {
+        try
+        {
+            return HandleSurfaceMessage(hwnd, msg, wParam, lParam);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("PlayerSurface.WndProc", ex);
+            // 异常绝不等于"吞掉消息"：仍按原样转发给原始窗口过程兜底，
+            // 否则该消息（如 WM_SIZE/WM_PAINT）会既没被处理也没被转发，窗口表现为失去响应。
+            // _origWndProc 在此路径上必非 0——子类化失败时（见 CreateNativeControlCore 的判 0 分支）
+            // 本过程根本不会被安装，也就不会被调用。
+            return CallWindowProcW(_origWndProc, hwnd, msg, wParam, lParam);
+        }
+    }
+
+    /// <summary>实际消息处理（不含异常边界，边界见 <see cref="SubclassedWndProc"/> / docs/41 #5）。</summary>
+    private nint HandleSurfaceMessage(nint hwnd, uint msg, nint wParam, nint lParam)
     {
         // 真实模式且会话正常：所有消息透传给原始过程，完全不干预 D3D11 渲染窗口的消息处理。
         // 此前在 WM_PAINT/WM_ERASEBKGND 上做 GDI 绘制或返回自定义值，
@@ -347,7 +441,13 @@ public sealed class PlayerSurface : NativeControlHost
                         _clientH = h;
                         // 组件日志：Surface resize。已被 _clientW/_clientH 去重，只在尺寸真变时写一行，
                         // 不是逐帧路径（WM_SIZE 本身也被 Windows 合并）。
-                        ComponentLog.Log(Comp.Surface, "Resize", _index, $"w={w} h={h}");
+                        // ⚠ 必须用 LogThrottled 而不是 Log（#24）：本方法运行在 **UI 线程**（子 HWND 由
+                        // Avalonia 在 UI 线程创建，WM_SIZE 也投递到该线程），而用户拖动窗口边框时
+                        // WM_SIZE 会连续到来（每个鼠标移动一次）。Log 是"逐条同步 flush 落盘"，
+                        // 磁盘卡顿 / 杀软扫描时就把 UI 线程冻住 —— 与本文件"移除 WndProc 高频 WriteLine"
+                        // 的既有结论自相矛盾。LogThrottled 仍立即写进缓冲（内容/顺序/ring buffer 不变），
+                        // 只把落盘合并到 200ms 一次（见 ComponentLog.FlushThrottleMs 的权衡说明）。
+                        ComponentLog.LogThrottled(Comp.Surface, "Resize", _index, $"w={w} h={h}");
                         // 3FCompare M1: debounce resize → Redraw
                         // 捕获会话引用而不是在闭包里延迟读字段：会话可能在 Post 执行前被释放。
                         // Avalonia Dispatcher 作业里的未处理异常会击穿整个进程，必须兜住。
@@ -356,7 +456,9 @@ public sealed class PlayerSurface : NativeControlHost
                         {
                             // Render 埋点：记在 Post 回调内而非 WndProc 上——语义是"真的发起 Redraw
                             // 的那一刻"，与排队/被丢弃区分开（来源 WM_SIZE，即窗口尺寸变化）。
-                            ComponentLog.Log(Comp.Render, "RedrawRequest", _index, "src=WM_SIZE");
+                            // 同样节流：这个回调也在 UI 线程上执行，且与上面的 Resize 同频，
+                            // 若它逐条 flush，则每次 resize 仍有一次同步落盘，UI 冻结并未真正消除。
+                            ComponentLog.LogThrottled(Comp.Render, "RedrawRequest", _index, "src=WM_SIZE");
                             try { redrawTarget?.Redraw(); }
                             catch (ObjectDisposedException) { /* 会话已释放，无需重绘 */ }
                         }, DispatcherPriority.Background);
@@ -626,7 +728,8 @@ public sealed class PlayerSurface : NativeControlHost
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern nint LoadCursorW(nint hInstance, nint lpCursorName);
 
-    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
+    // SetLastError：上方子类化失败分支要靠 Marshal.GetLastWin32Error() 报出真实原因。
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
     private static extern nint SetWindowLongPtr(nint hwnd, int index, nint newProc);
 
     [DllImport("user32.dll", EntryPoint = "CallWindowProcW")]

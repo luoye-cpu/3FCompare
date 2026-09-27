@@ -16,8 +16,11 @@
 
     <!-- 版本号：与 Core 保持一致，由 SDK 从 Version(+Suffix) 统一派生；
          pack.ps1 用 -p:Version=X.Y.Z 覆盖时全链路生效 -->
-    <Version>0.2.5</Version>
-    <VersionSuffix>BETA</VersionSuffix>
+    <!-- ⚠ VersionSuffix 已移除（docs/45 P1-12）：0.2.5 是正式版本，带 -BETA 会让
+         门禁与开发的 plain build 产出 "0.2.5-BETA"，与发布包（pack.ps1 传 -p:VersionSuffix=
+         清空后为 "0.2.5"）不一致 ⇒ 同一份代码两个版本叙事。需要预发布时再加回来，
+         并且必须同时让 pack.ps1 与门禁保持一致。 -->
+    <Version>0.3.1-beta</Version>
   </PropertyGroup>
 
   <ItemGroup>
@@ -132,6 +135,38 @@
            Text="3FC.WgcCapture.dll 比原生源文件 wgc_capture.cpp 旧 —— 改了原生代码后必须重新构建，否则会静默嵌入旧 DLL（构建全绿但行为对不上）。请在 Git Bash 中运行 native/wgc_capture/build.sh（或 tools/构建全部.ps1）。" />
     <Error Condition="Exists('$(_WgcCaptureDllAbs)') AND Exists('$(_WgcCaptureHAbs)') AND $([System.IO.File]::GetLastWriteTimeUtc('$(_WgcCaptureHAbs)').Ticks) &gt; $(_WgcCaptureDllTicks)"
            Text="3FC.WgcCapture.dll 比原生源文件 wgc_capture.h 旧 —— 改了原生代码后必须重新构建，否则会静默嵌入旧 DLL（构建全绿但行为对不上）。请在 Git Bash 中运行 native/wgc_capture/build.sh（或 tools/构建全部.ps1）。" />
+  </Target>
+
+  <!-- 构建期生成源码指纹（docs/49 切片 1 的 2b）：
+       mtime 判据只能说"有东西比产物新"，内容指纹能说"是哪个文件没进这次构建"。
+       逻辑放在 tools/源码指纹.ps1 —— MSBuild 里做不动：Include 属性值结尾的 `;` 被当列表分隔符
+       吃掉（写成 &#59; 同样被吃），%(Hash) 在 ->变换 里展开成空串，两条都在本机实测踩过。
+       产物两个：
+         ① obj/.../SourceFingerprint.cs —— 编进程序集，供日志 [产物] 行打短摘要
+         ② 输出目录 source-fingerprint.txt —— 供 tools/验证守卫.ps1 -Fingerprint 逐项比对
+       ⚠ 覆盖面 = 本工程自身的 .cs/.axaml；Core / native / 内核 DLL 由验证守卫的 mtime 逐类别兜。 -->
+  <Target Name="GenerateSourceFingerprint" BeforeTargets="BeforeCompile;CoreCompile">
+    <PropertyGroup>
+      <!-- ⚠ 别在单引号包裹的 XML 属性里写 '\'（TrimEnd('\') 那种）：属性会被截断成非法 XML。
+           目录规范化统一交给 NormalizePath / GetFullPath。 -->
+      <_FpScript>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)\..\..\tools\源码指纹.ps1'))</_FpScript>
+      <_FpProjDir>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)'))</_FpProjDir>
+      <_FpOutCs>$([System.IO.Path]::GetFullPath('$(_FpProjDir)\$(IntermediateOutputPath)SourceFingerprint.cs'))</_FpOutCs>
+      <_FpRooted>$([System.IO.Path]::IsPathRooted('$(TargetDir)'))</_FpRooted>
+      <_FpOutTxt Condition=" '$(_FpRooted)' == 'True' ">$([System.IO.Path]::GetFullPath('$(TargetDir)source-fingerprint.txt'))</_FpOutTxt>
+      <_FpOutTxt Condition=" '$(_FpRooted)' != 'True' ">$([System.IO.Path]::GetFullPath('$(_FpProjDir)\$(TargetDir)source-fingerprint.txt'))</_FpOutTxt>
+    </PropertyGroup>
+    <Exec Condition="Exists('$(_FpScript)')"
+          Command='powershell -NoProfile -ExecutionPolicy Bypass -File "$(_FpScript)" -ProjectDir "$(_FpProjDir)" -OutCs "$(_FpOutCs)" -OutTxt "$(_FpOutTxt)"'
+          StandardOutputImportance="low" IgnoreExitCode="true" />
+    <Error Condition="!Exists('$(_FpScript)')"
+           Text="缺少 tools\源码指纹.ps1 —— 宁可编不过，也不产出一份没有身份的二进制（docs/49 切片 1）。" />
+    <!-- fail-closed：脚本跑了却没产出 .cs 也算构建错误，不允许"没指纹但编过了" -->
+    <Error Condition="Exists('$(_FpScript)') And !Exists('$(_FpOutCs)')"
+           Text="源码指纹未生成（$(_FpOutCs) 不存在）—— tools\源码指纹.ps1 执行失败。宁可编不过，也不要一份没有身份的二进制。" />
+    <ItemGroup>
+      <Compile Include="$(_FpOutCs)" Condition="Exists('$(_FpOutCs)')" />
+    </ItemGroup>
   </Target>
 
   <!-- 本地化字符串与窗口帧捕获（自 App 项目迁入；命名空间保持 _3FCompare.App[.Capture] 不变以零改动引用） -->

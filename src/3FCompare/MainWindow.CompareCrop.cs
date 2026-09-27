@@ -81,6 +81,9 @@ public partial class MainWindow
 
     private double _compareZoom = 1.0;
     private double _compareCropX, _compareCropY;
+    /// <summary>本次放大生效的对齐模式（进入放大时从 <c>AppSettings.CompareAlign</c> 取一次）。
+    /// 不在中途跟随设置变化：改设置后重新缩放才会生效，避免"正在放大时窗口尺寸突然跳变"。</summary>
+    private CompareAlign _compareAlign = CompareAlign.Relative;
     /// <summary>每路源画面尺寸（索引 = 路号）；(0,0) = 未知（演示模式）⇒ 该路按"画面铺满窗口"换算。</summary>
     private PixelSize[] _compareMagnifySources = Array.Empty<PixelSize>();
     /// <summary>本次启用生效的像素预算。默认 <see cref="CompareMagnifyPixelBudget"/>；
@@ -93,9 +96,278 @@ public partial class MainWindow
     private const int MaxCompareMagnifyHwndRetries = 8;
     /// <summary>最近一次因超预算而拒绝放大时打的日志指纹，避免结构性变化时刷屏。</summary>
     private string _compareMagnifyBudgetNote = string.Empty;
+    /// <summary>像素级对齐退化（读不到任何一路源尺寸）的提示指纹，同上用途。
+    /// 与上面分开：两者指纹形态不同，共用一个字段会互相覆盖 ⇒ 去重失效。</summary>
+    private string _compareAlignNote = string.Empty;
 
     /// <summary>当前是否处于"子窗口放大"状态。</summary>
     internal bool CompareMagnifyActive => _compareZoom > 1.0;
+
+    // ══════════ 滚轮 / 拖动：无缝放大的交互入口 ══════════
+    //
+    // 内核完整、但此前只有自测 --magnifybench 会调 SetCompareMagnify（生产 UI 没有任何触发路径）。
+    // 这里补上两条：滚轮以光标为锚点缩放、放大态拖动平移。两者都**不**走内核
+    // SetViewTransform —— 那条路径是单路视口变换，且 destination 有 max(0,·) 钳制不能任意平移。
+
+    /// <summary>最近一次被闸门拒绝的倍率（0 = 没有待跳过的拒绝）。
+    /// 滚轮每格都会调进 <see cref="TryHandleCompareWheel"/>，若每次都把拒绝原因写状态栏，
+    /// 连续滚动就是一串刷屏 —— 记下被拒的倍率，同一倍率的重复请求静默跳过。</summary>
+    private double _compareMagnifyRejectedZoom;
+    /// <summary>放大态平移：本次拖动累积的屏幕位移（物理像素）。松手时才一次性提交 ——
+    /// 逐帧改 crop 会连带逐帧 <c>SetWindowRgn</c>，那是 docs/26 明确反对的高频路径。</summary>
+    private double _comparePanAccumX, _comparePanAccumY;
+
+    /// <summary>滚轮 → 多路同步无缝放大（光标锚点）。
+    ///
+    /// <para><b>分流</b>：对比模式下滚轮改的是"所有路共同的放大倍率 + 裁切位置"
+    /// （<see cref="SetCompareMagnify"/>），而不是单路 <c>_viewZoom</c>。
+    /// 非对比模式返回 false，调用方照旧走原路径 —— 既有行为零变化。</para>
+    ///
+    /// <para><b>锚点公式</b>：设当前倍率 <c>z0</c>、露出区间左上角 <c>u0</c>、光标下的源坐标 <c>u</c>，
+    /// 目标倍率 <c>z1</c>。要求"光标下的那一点在屏幕上不动"：
+    /// <c>(u-u0)·z0 == (u-u1)·z1</c> ⇒ <c>u1 = u - (u-u0)·z0/z1</c>。
+    /// z0=1（未放大）时退化为 <c>u1 = u - u/z1</c>，与 docs/47 §4.2 给出的式子一致。</para>
+    ///
+    /// <para><b>为什么不能复用 <c>_viewZoom</c></b>：它是内核视口变换，恒为双线性插值 ⇒
+    /// "放大后看到的是插出来的像素"，而本方案放大子窗口物理尺寸 ⇒ 内核按更高分辨率真实重渲染。
+    /// 这正是"无缝放大"存在的理由。</para></summary>
+    /// <returns>true = 已由对比放大处理（调用方不要再动 <c>_viewZoom</c>）。</returns>
+    internal bool TryHandleCompareWheel(short delta)
+    {
+        // 叠加模式下放大被禁用（两者都改子窗口矩形 + 区域，语义互斥）：不接管滚轮，
+        // 让单路 _viewZoom 路径继续工作，而不是"看似处理了其实什么都没发生"。
+        if (!_compareActive || _compareOverlayActive) return false;
+
+        var z0 = _compareZoom > 1.0 ? _compareZoom : 1.0;
+        var factor = delta > 0 ? 1.15 : 1.0 / 1.15;
+        var z1 = Math.Clamp(z0 * factor, 1.0, MaxCompareZoom);
+
+        // 缩到底：显式退出放大（ResetCompareMagnify 是幂等的，未放大时调用无副作用）。
+        if (z1 <= 1.0 + 1e-9)
+        {
+            _compareMagnifyRejectedZoom = 0;
+            ResetCompareMagnify();
+            ScheduleCompareCrop();
+            NotifyCompareZoomChanged(1.0);
+            return true;
+        }
+
+        // 已经到上限还在往同方向滚：不再调用（否则每格写一次"超过上限"提示 ⇒ 刷屏）
+        if (Math.Abs(z1 - z0) < 1e-9) return true;
+        if (Math.Abs(z1 - _compareMagnifyRejectedZoom) < 1e-9) return true;
+
+        var anchor = CursorSourceFraction(); // 取不到（黑边/演示模式）就按画面中心
+
+        // ⚠ 两种对齐模式下 crop 的**坐标域不同**，锚点换算必须分开，不能共用一套公式：
+        //   · 相对对齐：crop 就是源画面归一化坐标，AnchorCrop 直接适用；
+        //   · 像素级对齐：crop 是"视口在可平移范围内的相对位置"，其与坐标的换算是
+        //     p = view·minW·(1-1/z)（p = 各路相同的源像素起点）。若把 view 当归一化坐标
+        //     直接喂给 AnchorCrop，两种域的数值被相减 ⇒ 锚点偏移（从 1× 起第一次
+        //     滚轮就偏，z=2 时只有正确值的一半）。
+        double cropX, cropY;
+        if (_compareAlign == CompareAlign.Pixel)
+        {
+            // 取不到锚点时也必须留在 Pixel 分支里：else 分支把"视口位置"当归一化坐标喂给
+            // AnchorCrop 并按 [0,1-1/z] 钳位，等于把本轮刚修的"坐标域混用 + 右/下侧拖不到底"
+            // 两个缺陷在光标落在黑边时原样复发（而扁格/瘦格里黑边占大半画面，光标几乎必落在黑边）。
+            // 传 sourceWidth = 0 让 AnchorPixelAligned 走它自己的退化分支 = 视口位置不动。
+            var a = anchor;
+            cropX = AnchorPixelAligned(a?.U ?? 0, a?.SourceWidth ?? 0, _compareCropX, z0, z1);
+            cropY = AnchorPixelAligned(a?.V ?? 0, a?.SourceHeight ?? 0, _compareCropY, z0, z1);
+        }
+        else
+        {
+            var u = anchor?.U ?? 0.5;
+            var v = anchor?.V ?? 0.5;
+            var maxCrop = CompareCropPlanner.MaxCropFraction(z1);
+            cropX = ClampToCrop(CompareCropPlanner.AnchorCrop(u, _compareCropX, z0, z1), maxCrop);
+            cropY = ClampToCrop(CompareCropPlanner.AnchorCrop(v, _compareCropY, z0, z1), maxCrop);
+        }
+
+        if (!SetCompareMagnify(z1, cropX, cropY))
+        {
+            _compareMagnifyRejectedZoom = z1; // 同一倍率的重复请求静默跳过
+            return true;
+        }
+
+        _compareMagnifyRejectedZoom = 0;
+        NotifyCompareZoomChanged(z1);
+        return true;
+    }
+
+    /// <summary>像素级对齐下的锚点缩放：求新倍率对应的"视口位置"（0~1）。
+    ///
+    /// <para><b>推导</b>：各路露出的源像素区间恒为 <c>[p, p + minW/z]</c>（<c>p</c> = 各路相同的
+    /// 像素起点）。锚点条件是"光标在格内的相对位置不变"：
+    /// <c>(q-p0)/(minW/z0) == (q-p1)/(minW/z1)</c> ⇒ <c>p1 = q - (q-p0)·z0/z1</c>，
+    /// 其中 <c>q = u·W_r</c> 是光标下的源像素坐标（<c>W_r</c> = 光标所在路的源宽）。
+    /// 再按 <c>view = p1 / (minW·(1-1/z1))</c> 反算回视口位置。</para>
+    ///
+    /// <para><b>为什么不能直接套 <see cref="CompareCropPlanner.AnchorCrop"/></b>：那个公式的
+    /// 输入/输出都是"源画面归一化坐标"，而像素级对齐下本方法的输入/输出都是"视口位置"。
+    /// 两个域的数值被相减会得到错误结果（z=2 时约为正确值的一半）。</para>
+    ///
+    /// <para><b>退化</b>：<c>z1 = 1</c> 时可平移范围为 0 ⇒ 返回 0（与"贴左上"一致）；
+    /// 源尺寸未知时返回当前视口位置（不动）。</para></summary>
+    private double AnchorPixelAligned(double u, int sourceWidth, double currentView, double z0, double z1)
+    {
+        var min = CompareCropPlanner.MinSourceSize(_compareMagnifySources);
+        if (min.Width <= 0 || sourceWidth <= 0) return currentView;
+
+        var span = min.Width * (1.0 - 1.0 / z1);
+        if (span <= 0) return 0; // z1 == 1：没有可平移的余地
+
+        var q = u * sourceWidth;
+        var p0 = currentView * min.Width * (1.0 - 1.0 / z0);
+        var p1 = q - (q - p0) * (z0 / z1);
+        return ClampUnit(p1 / span);
+    }
+
+    /// <summary>光标下的<b>源画面归一化坐标</b>（u, v）与该路的源尺寸；取不到返回 null
+    ///（落在黑边、演示模式、会话已释放）。复用既有的 <c>MapPointerToVideoPixel</c>
+    ///（已处理 letterbox 与 DPI）。
+    ///
+    /// <para>像素级对齐的锚点换算需要<b>源宽高</b>而不只是归一化坐标：归一化坐标要乘上
+    /// 该路的源尺寸才能得到"像素坐标"，才能与"各路相同的像素起点 p"在同一域里比较。</para></summary>
+    private (double U, double V, int SourceWidth, int SourceHeight)? CursorSourceFraction()
+    {
+        if (!GetCursorPos(out var cursor)) return null;
+        var windowPos = this.PointToClient(new PixelPoint(cursor.X, cursor.Y));
+
+        var surface = HitSurfaceAt(windowPos);
+        if (surface is null) return null;
+
+        var slots = _sync.Slots;
+        if (surface.Index < 0 || surface.Index >= slots.Count) return null;
+
+        var origin = surface.TranslatePoint(new Point(0, 0), this);
+        if (origin is not { } o) return null;
+        var local = new Point(windowPos.X - o.X, windowPos.Y - o.Y);
+
+        var session = slots[surface.Index].Session;
+        var pixel = MapPointerToVideoPixel(surface, session, local);
+        if (pixel is null) return null;
+
+        var media = session.ReadMediaInfo();
+        if (media is null || media.VideoWidth <= 0 || media.VideoHeight <= 0) return null;
+
+        return (pixel.Value.X / (double)media.VideoWidth, pixel.Value.Y / (double)media.VideoHeight,
+                media.VideoWidth, media.VideoHeight);
+    }
+
+    /// <summary>把"视口位置"钳到 [0,1]（NaN → 0）。像素级对齐下 CropX / CropY 用这个区间，
+    /// 与相对对齐的 [0, 1-1/z] 不同（见 <see cref="SetCompareMagnify"/>）。</summary>
+    private static double ClampUnit(double v)
+    {
+        if (double.IsNaN(v)) return 0;
+        if (v < 0) return 0;
+        return v > 1 ? 1 : v;
+    }
+
+    /// <summary>把裁剪分量钳到 [0, <paramref name="maxCrop"/>]（NaN → 0）。
+    /// 与 <c>CompareCropPlanner.ClampCrop</c> 同规则，只是后者是私有的；
+    /// <c>Math.Clamp</c> 会原样放行 NaN，而 NaN 进入矩形会让 <c>SetWindowRgn</c> 收到翻转矩形。</summary>
+    private static double ClampToCrop(double v, double maxCrop)
+    {
+        if (double.IsNaN(v)) return 0;
+        if (v < 0) return 0;
+        return v > maxCrop ? maxCrop : v;
+    }
+
+    /// <summary>放大态的拖动平移：按下时清零累积量。</summary>
+    internal void BeginComparePan()
+    {
+        _comparePanAccumX = _comparePanAccumY = 0;
+    }
+
+    /// <summary>放大态的拖动平移：累积一次屏幕位移（物理像素）。<b>不</b>在这里提交 ——
+    /// 逐帧改 crop 会连带逐帧 <c>SetWindowRgn</c>（docs/26：不要逐帧调用）。</summary>
+    internal void AccumulateComparePan(double dxPx, double dyPx)
+    {
+        _comparePanAccumX += dxPx;
+        _comparePanAccumY += dyPx;
+    }
+
+    /// <summary>放大态的拖动平移：松手时提交一次。
+    ///
+    /// <para><b>换算</b>：<see cref="CompareCropPlanner.Magnify"/> 的构造保证"格宽 Wc 恰好露出
+    /// 源区间的 1/z" ⇒ 源区间整体（归一化 1.0）在屏幕上占 <c>Wc·z</c>。故位移 <c>d</c> 像素
+    /// 对应的归一化位移为 <c>d / (Wc·z)</c>。画面跟手右移 ⇒ 露出的源区间左移 ⇒ 取负号。</para></summary>
+    internal void CommitComparePan()
+    {
+        if (!CompareMagnifyActive) return;
+        if (_comparePanAccumX == 0 && _comparePanAccumY == 0) return;
+
+        var scaling = CompareCropScaling();
+        if (!(scaling > 0)) scaling = 1.0;
+        var dxDip = _comparePanAccumX / scaling;
+        var dyDip = _comparePanAccumY / scaling;
+        _comparePanAccumX = _comparePanAccumY = 0;
+
+        var cells = CompareLayout.ComputeCells(_compareMode, _compareSplit);
+        if (cells.Length == 0) return;
+        var wDip = Grid.Bounds.Width;
+        var hDip = Grid.Bounds.Height;
+        if (wDip <= 0 || hDip <= 0) return;
+
+        // 各格尺寸不同（ABC 的 A 通高、B/C 半高）⇒ 用**光标所在格**的尺寸换算，
+        // 否则在窄格里拖动的灵敏度会与宽格差一倍（表现为"上下拖不动"）。
+        var cellIndex = CompareCellAtCursor();
+        if (cellIndex < 0 || cellIndex >= cells.Length) cellIndex = 0;
+        var cell = cells[cellIndex];
+
+        var cellWDip = Math.Max(1, cell.Width * wDip);
+        var cellHDip = Math.Max(1, cell.Height * hDip);
+
+        // 换算系数随对齐模式而变，且**与钳位上界同源**（下面两者必须一起换，否则"拖不到底"
+        // 或"拖过头"）：
+        //   · 相对对齐：格宽 Wc 显示源画面的 1/z ⇒ 源归一化 1.0 在屏幕上占 Wc·z，
+        //     crop 的合法上界是 1-1/z；
+        //   · 像素级对齐：格宽 Wc 显示 minW/z 个源像素，而可平移总量是 minW·(1-1/z)
+        //     ⇒ 拖满整个量程只需 Wc·(z-1) DIP（不是 Wc·z），view 的合法上界是 1。
+        //     用 Wc·z 会让拖动慢 z/(z-1) 倍（z=2 时整整慢一倍）。
+        var pixelAligned = _compareAlign == CompareAlign.Pixel;
+        var maxCrop = pixelAligned ? 1.0 : CompareCropPlanner.MaxCropFraction(_compareZoom);
+        var divisorX = cellWDip * (pixelAligned ? _compareZoom - 1.0 : _compareZoom);
+        var divisorY = cellHDip * (pixelAligned ? _compareZoom - 1.0 : _compareZoom);
+        if (divisorX <= 0) divisorX = cellWDip; // z→1 时量程趋于 0，避免除零
+        if (divisorY <= 0) divisorY = cellHDip;
+
+        var cropX = ClampToCrop(_compareCropX - dxDip / divisorX, maxCrop);
+        var cropY = ClampToCrop(_compareCropY - dyDip / divisorY, maxCrop);
+
+        SetCompareMagnify(_compareZoom, cropX, cropY);
+    }
+
+    /// <summary>光标落在第几格（放大态命中测试用）；不在对比区内返回 -1。</summary>
+    private int CompareCellAtCursor()
+    {
+        if (!GetCursorPos(out var cursor)) return -1;
+        var windowPos = this.PointToClient(new PixelPoint(cursor.X, cursor.Y));
+        var origin = Grid.TranslatePoint(new Point(0, 0), this);
+        if (origin is not { } o) return -1;
+
+        var p = new Point(windowPos.X - o.X, windowPos.Y - o.Y);
+        var w = Grid.Bounds.Width;
+        var h = Grid.Bounds.Height;
+        if (w <= 0 || h <= 0) return -1;
+
+        var cells = CompareLayout.ComputeCells(_compareMode, _compareSplit);
+        for (var i = 0; i < cells.Length; i++)
+            if (CompareCropPlanner.CellToContainerDip(cells[i], w, h).Contains(p)) return i;
+        return -1;
+    }
+
+    /// <summary>放大倍率变化后给用户可见反馈（状态栏）。
+    /// 只在对比模式下写 —— 否则会把常规状态冲掉。</summary>
+    private void NotifyCompareZoomChanged(double zoom)
+    {
+        if (!_compareActive) return;
+        StatusInfo.Text = zoom <= 1.0
+            ? Loc("已退出无缝放大（1:1）。", "Seamless zoom off (1:1).")
+            : Loc($"无缝放大 {zoom:0.##}×（滚轮缩放 / 拖动平移）。",
+                  $"Seamless zoom {zoom:0.##}× (wheel to zoom / drag to pan).");
+    }
 
     /// <summary>
     /// 启用/更新"子窗口放大 + 裁剪"。<b>默认关闭</b>（<c>zoom = 1</c>，等价于现状）；
@@ -134,6 +406,23 @@ public partial class MainWindow
             return false;
         }
 
+        // ⚠ 对齐模式与源尺寸必须在**估算像素之前**就位：EstimateCompareMagnifyPixels 逐路按
+        // 有效倍率 z_i = z·W_i/minW 累加，而 minW 来自源尺寸、只在像素级对齐下才启用。
+        // 先估算再赋值的话，首次滚轮（或用户刚切成像素级）用的是上一次的 align 与空的
+        // sources ⇒ minW=0 ⇒ 逐路退化成共用 z ⇒ 低估到 (minW/W_i)²（4K 与 1080p 同场、
+        // z=2 时 4K 路实为 8 倍，按 2 倍估算会让显存闸门形同虚设）。
+        _compareAlign = (CompareAlign)_settings.CompareAlign; // AppSettings.Normalize 已钳到 [0,1]
+        _compareMagnifySources = ReadCompareMagnifySources();
+
+        if (_compareAlign == CompareAlign.Pixel)
+        {
+            // 像素级对齐下 CropX / CropY 的语义是"视口在可平移范围内的相对位置"，
+            // 合法区间是 [0,1]，不是相对对齐的 [0, 1-1/z] —— 按后者钳会把右/下侧
+            // 一大块变成永远看不到（表现为"拖不到底"）。
+            cropX = ClampUnit(cropX);
+            cropY = ClampUnit(cropY);
+        }
+
         var budget = pixelBudget > 0 ? pixelBudget : CompareMagnifyPixelBudget;
         var pixels = EstimateCompareMagnifyPixels(zoom);
         if (pixels > budget)
@@ -148,7 +437,6 @@ public partial class MainWindow
         _compareZoom = zoom;
         _compareCropX = cropX;
         _compareCropY = cropY;
-        _compareMagnifySources = ReadCompareMagnifySources();
         _compareMagnifyBudgetNote = string.Empty;
         _compareMagnifyHwndRetries = 0;
         PushCompareMagnifyToGrid();
@@ -163,9 +451,14 @@ public partial class MainWindow
     {
         _compareZoom = 1.0;
         _compareCropX = _compareCropY = 0;
+        // 对齐模式同样要复位：它决定下一次放大的倍率换算，留着旧值会让"复位后第一次
+        // 滚轮"用上一次的模式做预算估算（配合 SetCompareMagnify 里已提前的赋值顺序，
+        // 这里复位能保证"未放大"这一状态在语义上是完整的）。
+        _compareAlign = (CompareAlign)_settings.CompareAlign;
         _compareMagnifySources = Array.Empty<PixelSize>();
         _compareMagnifyBudget = CompareMagnifyPixelBudget;
         _compareMagnifyBudgetNote = string.Empty;
+        _compareAlignNote = string.Empty;
         _compareMagnifyHwndRetries = 0;
         PushCompareMagnifyToGrid();
     }
@@ -186,6 +479,9 @@ public partial class MainWindow
     private static bool SameMagnify(CellMagnify? a, CellMagnify? b)
     {
         if (a is null || b is null) return ReferenceEquals(a, b);
+        // Align 必须参与比较：切换对齐模式后各路的有效倍率 / 裁剪都变了，
+        // 漏比它会让 Grid 认为"参数没变"而不重排（表现为切了模式画面不动）。
+        if (a.Align != b.Align) return false;
         if (a.Zoom != b.Zoom || a.CropX != b.CropX || a.CropY != b.CropY) return false;
         if (a.Sources.Count != b.Sources.Count) return false;
         for (var i = 0; i < a.Sources.Count; i++)
@@ -204,6 +500,14 @@ public partial class MainWindow
         // 裁出格"，叠加是"两窗铺满 + 裁出半区"）。见 MainWindow.CompareOverlay.cs。
         if (!_compareActive || _compareZoom <= 1.0 || _compareOverlayActive) return null;
 
+        // R7（docs/41:119）：源尺寸原本只在"启用放大那一刻"读一次，之后增删路数不会刷新
+        // ⇒ 数组长度与当前路数脱节，新增的路取到 (0,0)（按"画面铺满窗口"换算 ⇒ 露出
+        // **不同**的源区间，"无缝"名不副实）。路↔格映射（互换 / 自选源）会让路序动态变化，
+        // 直接放大这个缺陷，故在这里按"长度不符即重读"兜住 —— 只在真的增删过路时触发，
+        // 不会成为热路径（ReadCompareMagnifySources 是 P/Invoke）。
+        if (_compareMagnifySources.Length != _sync.Slots.Count)
+            _compareMagnifySources = ReadCompareMagnifySources();
+
         var pixels = EstimateCompareMagnifyPixels(_compareZoom);
         if (pixels > _compareMagnifyBudget)
         {
@@ -219,7 +523,26 @@ public partial class MainWindow
         }
         _compareMagnifyBudgetNote = string.Empty;
 
-        return new CellMagnify(_compareZoom, _compareCropX, _compareCropY, _compareMagnifySources);
+        // 像素级对齐但没有一路知道源尺寸（演示模式 / 纯音频）⇒ 没有基准，无从换算。
+        // 这里**不**静默退回相对对齐：那会让用户以为"已经像素对齐了"。写一条提示说明退化。
+        if (_compareAlign == CompareAlign.Pixel &&
+            CompareCropPlanner.MinSourceSize(_compareMagnifySources).Width <= 0)
+        {
+            // 独立字段而不是复用 _compareMagnifyBudgetNote：两者指纹不同（"2.0@70.0Mpx"
+            // vs 固定串），共用一个字段会互相覆盖 ⇒ 交替出现时去重双双失效、提示刷屏。
+            var note = "pixel-nosource";
+            if (note != _compareAlignNote)
+            {
+                _compareAlignNote = note;
+                _3FCompare.Core.Diagnostics.AppLog.Warn("CompareMagnify",
+                    "像素级对齐退化：没有任何一路能读出源尺寸（演示模式 / 纯音频），本次按相对对齐处理");
+                if (_compareActive)
+                    StatusInfo.Text = Loc("像素级对齐不可用：读不到源分辨率，本次按相对对齐处理。",
+                                          "Pixel alignment unavailable: no source resolution known; using relative alignment.");
+            }
+        }
+
+        return new CellMagnify(_compareZoom, _compareCropX, _compareCropY, _compareMagnifySources, _compareAlign);
     }
 
     /// <summary>估算放大后所有路子窗口的总物理像素数。
@@ -236,12 +559,30 @@ public partial class MainWindow
 
         var scaling = CompareCropScaling();
         var cells = CompareLayout.ComputeCells(_compareMode, _compareSplit);
+        // 像素级对齐下各路的**有效**倍率不同（z_i = z·W_i/minW），高分辨率路的窗口按平方更大。
+        // 必须逐路按 z_i 累加：沿用共用 z 会低估到 (minW/W_i)² —— 4K 与 1080p 同场、
+        // z=2 时 4K 路实为 8 倍（64 倍面积），按 2 倍估算等于把显存闸门当成摆设。
+        var sources = _compareMagnifySources;
+        var align = _compareAlign;
+        var minW = align == CompareAlign.Pixel
+            ? CompareCropPlanner.MinSourceSize(sources).Width
+            : 0;
+
         double total = 0;
-        for (var i = 0; i < cells.Length && i < Grid.Count; i++)
+        for (var cell = 0; cell < cells.Length && cell < Grid.Count; cell++)
         {
             var cellPx = CompareCropPlanner.ToPhysicalRect(
-                CompareCropPlanner.CellToContainerDip(cells[i], wDip, hDip), scaling);
-            total += (double)cellPx.Width * zoom * cellPx.Height * zoom;
+                CompareCropPlanner.CellToContainerDip(cells[cell], wDip, hDip), scaling);
+
+            // 必须按"格 → 路"映射配对：cells[i] 是**格**、sources[i] 是**路**，
+            // 互换 / 轮换之后两者不再同序（4 路用 AB 轮换到 [2,3] 时，循环里的
+            // sources[0]/[1] 是根本没在显示的两路）⇒ 会低估到让显存闸门失效。
+            var route = Grid.RouteIndexOfCell(cell);
+            if (route < 0) route = cell;
+            var zi = route < sources.Length && sources[route].Width > 0 && minW > 0
+                ? CompareCropPlanner.AlignedZoom(zoom, sources[route].Width, minW)
+                : zoom;
+            total += (double)cellPx.Width * zi * cellPx.Height * zi;
         }
         return total;
     }
@@ -397,7 +738,10 @@ public partial class MainWindow
             }
 
             // 格数 < 路数时多余的路被隐藏（见 CompareGridView.ArrangeOverride）：它们不该有区域。
-            if (!surface.IsVisible || i >= cells.Length)
+            // 该路显示在哪一格由"格→路"映射决定（互换 / 自选源后不是第 i 格）——
+            // 按路号取格会裁到别的路的格上，表现为"画面缺一块、且裁错了位置"。
+            var cellIndex = Grid.CellIndexOfRoute(i);
+            if (!surface.IsVisible || cellIndex < 0 || cellIndex >= cells.Length)
             {
                 ClearOne(i, hwnd);
                 continue;
@@ -422,7 +766,7 @@ public partial class MainWindow
                 continue;
             }
 
-            var cellDip = CompareCropPlanner.CellToContainerDip(cells[i], wDip, hDip);
+            var cellDip = CompareCropPlanner.CellToContainerDip(cells[cellIndex], wDip, hDip);
             var cellPx = CompareCropPlanner.ToPhysicalRect(cellDip, scaling);
 
             CompareCropPlanner.CropPlan plan;
@@ -437,9 +781,13 @@ public partial class MainWindow
             {
                 // 放大：窗口已被 Grid 排成"格的 z 倍并偏移"，区域由**源画面比例**换算
                 // （含 letterbox 修正，见 CompareCropPlanner.Magnify）。
+                // 像素级对齐下每路裁剪区间不同 ⇒ 逐路取 CropOf（与 ArrangeOverride 同源），
+                // 否则窗口按 A 路的偏移摆、区域却按共用 crop 裁 ⇒ 露出错误的块。
                 var src = magnify.SourceOf(i);
+                var crop = magnify.CropOf(i);
+                var zoom = magnify.ZoomOf(i);
                 var geom = CompareCropPlanner.Magnify(
-                    cellDip, magnify.Zoom, magnify.CropX, magnify.CropY, src.Width, src.Height);
+                    cellDip, zoom, crop.CropX, crop.CropY, src.Width, src.Height);
                 var expectedWinPx = CompareCropPlanner.ToPhysicalRect(geom.WindowDip, scaling);
 
                 // 两重"还没落地"的判定，任一不满足就本拍不下发：
@@ -456,7 +804,7 @@ public partial class MainWindow
                 }
 
                 plan = CompareCropPlanner.MagnifyPlan(
-                    cellDip, magnify.Zoom, magnify.CropX, magnify.CropY, src.Width, src.Height, scaling);
+                    cellDip, zoom, crop.CropX, crop.CropY, src.Width, src.Height, scaling);
             }
 
             if (!plan.ShouldApply)

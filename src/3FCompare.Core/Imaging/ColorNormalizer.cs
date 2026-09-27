@@ -174,6 +174,64 @@ public static class ColorNormalizer
             linear.A, bitDepth);
     }
 
+    /// <summary>把回读采样映射为 <b>8-bit 显示码值（0..255）</b>，供探针/放大镜这类
+    /// "给人看的 8-bit 读数"使用 —— 这是跨域可比的唯一显示口径。
+    ///
+    /// <para><b>为什么不能直接 <c>v*255</c></b>：SDR 回读是 <b>gamma 编码</b>值，HDR 回读是
+    /// <b>线性 scRGB</b>（<c>1.0 = 80 nits</c>），同一个数字在两域里含义完全不同。
+    /// 例：HDR 下 40 nits 的像素 <c>v=0.5</c>，<c>v*255</c> 得 128（把它当成 gamma 值），
+    /// 正确口径约 122；暗部与中间调偏差可达数十个码值 ⇒ 跨路（HDR vs SDR）比较无意义。</para>
+    ///
+    /// <para><b>统一口径</b>：先搬到线性光域（<see cref="ToLinear"/>）再转回 sRGB gamma 编码，
+    /// 于是 SDR 与 HDR 两个域的读数落在同一条曲线上。</para>
+    ///
+    /// <para><b>SDR 走短路</b>：SDR 回读本就是 gamma 编码值，<c>ToLinear→LinearToSrgb</c>
+    /// 往返在数学上恒等（实测 0..255 全部 256 级零偏差）。放大镜每帧要跑数百次，
+    /// 热路径没必要为此付出两次 <c>Pow</c> ⇒ SDR 直接量化，逐值与旧实现一致。</para>
+    ///
+    /// <para><b>饱和是显示上限，不是数据截断</b>：8-bit 表达不了超过 SDR 参考白的高光，
+    /// 会饱和到 255；线性域的 <see cref="ToLinear"/> 结果仍保留 &gt;1 的高光供跨路比较。</para>
+    /// </summary>
+    /// <param name="r">R 通道（回读域编码值）。</param>
+    /// <param name="g">G 通道。</param>
+    /// <param name="b">B 通道。</param>
+    /// <param name="bitDepth">回读位深。</param>
+    /// <param name="hdr">内核 <see cref="RenderTargetInfo.Hdr"/>（权威标志）。</param>
+    /// <param name="r8">R 的 8-bit 显示码值（0..255）。</param>
+    /// <param name="g8">G 的 8-bit 显示码值。</param>
+    /// <param name="b8">B 的 8-bit 显示码值。</param>
+    /// <param name="paperWhiteNits">SDR 参考白亮度（nits），仅 HDR 分支使用。</param>
+    public static void ToDisplay8Bit(
+        float r, float g, float b, float a, uint bitDepth, bool hdr,
+        out int r8, out int g8, out int b8, out int a8,
+        float paperWhiteNits = DefaultPaperWhiteNits)
+    {
+        if (IsHdrDomain(bitDepth, hdr))
+        {
+            var lin = ToLinear(r, g, b, a, bitDepth, hdr: true, paperWhiteNits);
+            r8 = Quantize8(LinearToSrgb(lin.R));
+            g8 = Quantize8(LinearToSrgb(lin.G));
+            b8 = Quantize8(LinearToSrgb(lin.B));
+            a8 = Quantize8(lin.A);
+            return;
+        }
+
+        r8 = Quantize8(r);
+        g8 = Quantize8(g);
+        b8 = Quantize8(b);
+        a8 = Quantize8(a);
+    }
+
+    /// <summary>编码值 → 8-bit 码值，含 NaN→0 与饱和钳制。
+    /// <para>负值（超色域）钳到 0、&gt;1 钳到 255：显示域不允许环绕 ——
+    /// 环绕会把"最亮"翻成"最黑"，比钳制危险得多。</para></summary>
+    private static int Quantize8(float v)
+    {
+        if (float.IsNaN(v)) return 0;
+        var q = (int)MathF.Round(v * 255f);
+        return q < 0 ? 0 : q > 255 ? 255 : q;
+    }
+
     /// <summary>参考白必须是有限正数：0 / 负数会让 HDR 缩放因子变成 Inf 或反号，
     /// NaN 则一路污染到差异值——静默产出无意义的对比结果，比抛异常危险得多。
     /// <para><b>只在 HDR 分支调用</b>：SDR 路径不使用参考白，也就没有理由在校验它时

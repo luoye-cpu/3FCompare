@@ -161,13 +161,15 @@ internal struct Fff3FpVideoPixelProbe
 internal struct Fff3FpRenderTargetInfo
 {
     public uint Size;
-    public uint Version;  // == 1
+    public uint Version;  // == 2（v2 起 destX/destY 为有符号）
     public uint SwapWidth;
     public uint SwapHeight;
     public uint ClientWidth;
     public uint ClientHeight;
-    public uint DestX;
-    public uint DestY;
+    // 有符号：放大平移会把绘制盒的左/上沿推到后台缓冲之外（负原点）。
+    // 与内核 FFF3FPRenderTargetInfo 逐字段对齐；字节宽度与 uint 相同，靠 Version 区分语义。
+    public int DestX;
+    public int DestY;
     public uint DestWidth;
     public uint DestHeight;
     public uint OutputBitDepth;

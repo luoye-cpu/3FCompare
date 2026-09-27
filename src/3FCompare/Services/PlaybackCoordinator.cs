@@ -40,6 +40,19 @@ public sealed class PlaybackCoordinator
     private readonly SyncController _sync;
     private readonly AppSettings _settings;
 
+    /// <summary>同时播放的路数上限（3×3 网格）。</summary>
+    internal const int MaxRoutes = 9;
+
+    /// <summary>本次打开实际会尝试建立的路数（受剩余槽位与 <see cref="MaxRoutes"/> 钳制）。
+    ///
+    /// <para><b>为什么单独抽成纯函数</b>：它原先是内联在 <c>OpenFilesCore</c> 里的
+    /// <c>Math.Min(files.Count, 9 - _sync.Count)</c>，而"不超过 9 路"是并发打开的
+    /// 核心不变式（docs/41 #11 的④：两批并发时若各自算剩余额度就会突破上限）。
+    /// 整条打开路径要 Avalonia 控件（<c>PlayerSurface</c>）才跑得起来，
+    /// 于是这条算术此前完全无覆盖（docs/41 §4.5 第 11 项）。
+    /// 本方法无副作用、不读实例状态，可独立断言。</para></summary>
+    internal static int ComputeOpenCount(int requested, int existing) => Math.Min(requested, MaxRoutes - existing);
+
     /// <summary>最近一次打开被取消/降级的原因（UI 状态栏读取；null = 无待显示错误）。
     /// OpenFiles 是 async void，异常无人接住会击穿进程，因此一切失败都走状态通知而非 throw。</summary>
     public string? LastOpenError { get; private set; }
@@ -55,6 +68,19 @@ public sealed class PlaybackCoordinator
     /// <summary>打开取消源（F3）：关窗时 Cancel()，让事件等待与 100ms 轮询立即结束，
     /// 不再把 surface / slot / session 多持有十几秒。</summary>
     private readonly CancellationTokenSource _cts = new();
+
+    /// <summary>打开编排的串行闸门（docs/41 #11）。
+    /// <para><b>为什么必须整段串行</b>：OpenFilesCore 的每一步都建立在"当前路数 / 分散游标"
+    /// 这个**共享快照**上，而这些读-改-写彼此没有任何保护：
+    /// <c>9 - _sync.Count</c>（算剩余额度）、<c>_surfaceAt(_sync.Count)</c>（选面板）、
+    /// <c>_spreadCursor++</c>（选卡）、<c>_spreadPlan</c>（按本批 count 生成、下一批读）。
+    /// 两批并发（会话恢复在飞 + 用户拖入文件）交错时：两批算出同一个剩余额度 ⇒ 突破 9 路上限；
+    /// 两批读到同一个 count ⇒ <b>同一个 PlayerSurface 被两个 session 覆盖</b>；
+    /// 非原子的 <c>_spreadCursor++</c> ⇒ 两批选到同一张卡。</para>
+    /// <para><b>为什么可以覆盖全程</b>：本类不存在"从批次内部再次进入 OpenFiles"的路径
+    /// （onAllOpened 只做偏移 / Seek / 循环区间），因此不会自锁；而闸门若只包住某几行，
+    /// 就挡不住"取 count → 建会话"之间被另一批插入，等于没加。</para></summary>
+    private readonly SemaphoreSlim _openGate = new(1, 1);
 
     // ★ 实验开关（FC_SPREAD_GPUS）：把不同播放路分配到不同 GPU。
     // 动机：多路 4K/8K 时解码器报告过载；且崩溃根因是"跨渲染器并发 Present"，
@@ -370,15 +396,39 @@ public sealed class PlaybackCoordinator
     /// 自动播放与会话恢复 Seek 永不执行（表现为"文件都打开了但就是不动"）。</para></summary>
     private sealed class OpenBatch
     {
-        /// <summary>本批尚未归还配额的路数（0 = 本批不参与自动播放）。一律走 Interlocked 收支。</summary>
+        /// <summary>本批尚未归还配额的路数（0 = 本批不需要结算）。一律走 Interlocked 收支。
+        ///
+        /// <para>⚠ <b>发放配额的条件是"要 Play 或要有完成回调"，不是"要 Play"</b>：
+        /// 配额归零是 <see cref="PlaybackCoordinator.CompleteBatch"/> 的唯一触发器，
+        /// 而 <c>onAllOpened</c> 也挂在那上面。只按 autoPlay 发放的话，
+        /// <c>autoPlay:false</c> 的批次永远等不到结算 ⇒ 回调里的会话恢复 Seek 与逐路偏移
+        /// 还原<b>永不执行</b>，表现为"文件都打开了但就是不动"。
+        /// 崩溃自愈正是走 <c>autoPlay:false</c> 这一条（恢复后停在原地）。</para></summary>
         public int Remaining;
+
+        /// <summary>本批结算后是否自动播放。与 <see cref="Remaining"/> 解耦：
+        /// 只跑回调、不播放的批次（会话恢复）同样需要配额来触发结算。</summary>
+        public bool AutoPlay;
 
         /// <summary>本批全部完成后的回调（会话恢复 Seek / 循环区间）。
         /// <para>用 Interlocked.Exchange 一次性取走：既保证只执行一次，
         /// 又免去了旧实现那个无锁 <c>Queue&lt;Action&gt;</c>（F4）——
         /// 旧队列依赖"所有续体都回到 Avalonia 同步上下文"的隐式假设，换个续体模型就会静默错乱。</para></summary>
         public Action? OnAllOpened;
+
+        /// <summary>批次登记时刻（ms，<see cref="Environment.TickCount64"/>）。
+        /// 用于判定"某路 OpenAsync 挂死"的陈旧批次——挂死的批次永远不会走到
+        /// <see cref="PlaybackCoordinator.TrySettle"/>，没有时间戳就无从回收。</summary>
+        public long CreatedMs = Environment.TickCount64;
     }
+
+    /// <summary>在飞批次的硬上限。正常交互下同时打开的批次是个位数；
+    /// 触顶只可能是某路 <c>OpenAsync</c> 挂死导致批次只登记不注销 ⇒ 不做上限就是无界增长。</summary>
+    private const int MaxPendingBatches = 16;
+
+    /// <summary>批次陈旧阈值。超过这个时长仍未结算，只可能是某一路永久挂住
+    /// （打开大文件 + 网络盘 + 解码器卡死都可能到分钟级，故取 10 分钟留足余量）。</summary>
+    private const long StaleBatchMs = 10L * 60 * 1000;
 
     /// <summary>归还一份配额。返回 true 表示配额已归零（即"最后一路也还了"）。
     /// <para>配额已为 0 时什么都不做并返回 false（调用方据此不触发后续动作）。
@@ -397,7 +447,37 @@ public sealed class PlaybackCoordinator
 
     private void RegisterBatch(OpenBatch batch)
     {
-        lock (_batchLock) { _batches.Add(batch); }
+        lock (_batchLock)
+        {
+            // 登记前先回收陈旧批次：挂死的批次永远不会结算，只会永久占位（P2-b）。
+            // 用 DiscardBatch 语义（不 Play、不跑回调）——它本就"无路可播"，触发回调只会放大故障。
+            for (var i = _batches.Count - 1; i >= 0; i--)
+            {
+                var age = Environment.TickCount64 - _batches[i].CreatedMs;
+                if (age < StaleBatchMs) continue;
+                var stale = _batches[i];
+                _batches.RemoveAt(i);
+                Interlocked.Exchange(ref stale.OnAllOpened, null);
+                Interlocked.Exchange(ref stale.Remaining, 0);
+                AppLog.Warn("Coordinator",
+                    $"批次超时未结算（{age / 1000}s > {StaleBatchMs / 1000}s，剩余配额 {stale.Remaining}），" +
+                    "判定某路 OpenAsync 挂死，已回收该批次");
+            }
+
+            // 硬上限兜底：陈旧判定靠时间，若挂死批次恰好"年轻"（例如刚连续拖入大批文件），
+            // 时间不到仍会堆积 ⇒ 再按数量裁掉最老的一个，保证表不会无界增长。
+            if (_batches.Count >= MaxPendingBatches)
+            {
+                var oldest = _batches[0];
+                _batches.RemoveAt(0);
+                Interlocked.Exchange(ref oldest.OnAllOpened, null);
+                Interlocked.Exchange(ref oldest.Remaining, 0);
+                AppLog.Warn("Coordinator",
+                    $"在飞批次已达上限 {MaxPendingBatches}，回收最老批次以防无界增长");
+            }
+
+            _batches.Add(batch);
+        }
     }
 
     private void UnregisterBatch(OpenBatch batch)
@@ -426,7 +506,7 @@ public sealed class PlaybackCoordinator
             $"routes={_sync.Count} failed={_sync.Slots.Count(s => s.Failed)} src=coordinator");
         // 先取走再调用：回调内部若再次触发结清，不会重复执行
         Interlocked.Exchange(ref batch.OnAllOpened, null)?.Invoke();
-        _sync.Play();
+        if (batch.AutoPlay) _sync.Play();
     }
 
     /// <summary>某一路完成（成功或失败）时归还配额；归零即结算本批次。</summary>
@@ -478,7 +558,22 @@ public sealed class PlaybackCoordinator
         // 这里只做兜底——任何漏网异常转为状态通知。
         try
         {
-            await OpenFilesCore(batch, files, autoPlay, onAllOpened);
+            // docs/41 #11：整个打开编排必须原子（理由见 _openGate 声明处）。
+            // 闸门放在**唯一调用点**这一层：OpenFilesCore 内部有多个早退分支
+            // （_closed / count<=0 / surface 为空 / 循环中关窗），若把 Release 写进各分支
+            // 极易漏放而永久锁死打开功能；包在这里则每条路径都必经 finally。
+            //
+            // ⚠ 必须是 WaitAsync 而不是 Wait：OpenFiles 跑在 UI 线程上，
+            //   同步等待会在"第二批打开"时冻住整个窗口（连状态栏都刷不出来）。
+            await _openGate.WaitAsync();
+            try
+            {
+                await OpenFilesCore(batch, files, autoPlay, onAllOpened);
+            }
+            finally
+            {
+                _openGate.Release();
+            }
         }
         catch (Exception ex)
         {
@@ -492,7 +587,7 @@ public sealed class PlaybackCoordinator
     private async Task OpenFilesCore(OpenBatch batch, IReadOnlyList<string> files, bool autoPlay, Action? onAllOpened)
     {
         if (_closed) return;
-        var count = Math.Min(files.Count, 9 - _sync.Count);
+        var count = ComputeOpenCount(files.Count, _sync.Count);
         if (count <= 0)
         {
             // 已达 9 路上限：不得同步触发 onAllOpened（会话未就绪时 Play 无意义）
@@ -500,7 +595,11 @@ public sealed class PlaybackCoordinator
             return;
         }
         // 配额在循环前一次性记满，之后每一路无论成败都必须归还一份，否则本批永远结不清。
-        if (autoPlay) Volatile.Write(ref batch.Remaining, count);
+        // 见 OpenBatch.Remaining 的注释：配额是"结算"的开关，而结算既可能是为了 Play，
+        // 也可能是为了跑 onAllOpened（会话恢复的 Seek / 偏移还原、打开完成的快照落盘）。
+        // 任一为真都必须发配额，否则回调永不执行。
+        if (autoPlay || onAllOpened is not null) Volatile.Write(ref batch.Remaining, count);
+        batch.AutoPlay = autoPlay;
         batch.OnAllOpened = onAllOpened;
         RegisterBatch(batch);
 
@@ -547,6 +646,12 @@ public sealed class PlaybackCoordinator
             surface.IsFailed = false;
             surface.ErrorText = string.Empty;
 
+            // docs/41 #10：session 声明在 try 之外 —— catch 需要按"归属"决定是否回收它。
+            IPlayerSession? session = null;
+            // AddSlot 成功前，session 是"孤儿"：既持原生句柄，又持强 GCHandle，
+            // 且不在 _sync.Slots 里 ⇒ DestroyAllSessions() 的遍历覆盖不到它。
+            var sessionOwnedBySync = false;
+
             try
             {
                 // 真实模式需要子 HWND 作为输出窗口：等待 NativeControlHost 附件创建
@@ -562,7 +667,7 @@ public sealed class PlaybackCoordinator
                 var resolvedColorMode = _3FCompare.Core.Settings.ColorModeHelper.Resolve(
                     _settings.ColorMode,
                     hwnd != 0 ? _3FCompare.Core.Display.DisplayCapabilities.ReadForWindow(hwnd) : null);
-                var session = _engine.CreateSession(new EngineSessionOptions
+                session = _engine.CreateSession(new EngineSessionOptions
                 {
                     OutputWindow = hwnd,
                     HardwareDecode = _settings.HardwareDecode,
@@ -572,6 +677,8 @@ public sealed class PlaybackCoordinator
                 });
                 surface.AttachSession(session);
                 _sync.AddSlot(session, path);
+                // 归属移交完成：此后（含并发 RemoveSlotAt）由 SyncController / DestroyAllSessions 负责释放
+                sessionOwnedBySync = true;
 
                 _ = OpenSlotAsync(_sync.Slots[^1], surface, path, batch);
             }
@@ -587,11 +694,26 @@ public sealed class PlaybackCoordinator
                 if (TryConsumeQuota(batch)) DiscardBatch(batch);
                 surface.IsFailed = true;
                 surface.ErrorText = ex.Message;
+
+                // docs/41 #10：本路在 AttachSession / AddSlot 上抛出时，session 已经创建
+                // （CreateSession 成功即占住原生句柄），却没进 _sync.Slots —— 于是
+                // DestroyAllSessions() 的遍历覆盖不到它，而 Fff3FpSession 刻意**没有终结器**
+                // 兜底 ⇒ 原生句柄 + 强 GCHandle（保活原生回调委托）永久泄漏，每失败一路泄一份。
+                // 只有"归属尚未移交"才在此释放；已进 _sync.Slots 的一律留给
+                // DestroyAllSessions，避免提前释放仍在使用的会话（Dispose 有原子守卫，
+                // 即使极端情况下重复释放也只执行一次销毁，不会 double-free）。
+                // surface 上残留的引用无需 DetachSession：所有渲染分支都以 !IsFailed 为前提，
+                // 上面刚置位，不会再拿这个已释放的 session 去取帧。
+                if (session is not null && !sessionOwnedBySync)
+                {
+                    try { session.Dispose(); }
+                    catch { /* 释放失败不能盖住原始打开异常 */ }
+                }
             }
         }
 
-        // autoPlay=false 的批次没有配额可归还，永远不会"完成"：直接注销，
-        // 免得它带着一个永远等不到调用的回调常驻在批次表里。
+        // 既不需要 Play 也没有完成回调的批次没有配额可归还，永远不会"完成"：直接注销，
+        // 免得它常驻在批次表里。（有回调的批次已按 onAllOpened 拿到配额，不在此列。）
         if (Volatile.Read(ref batch.Remaining) <= 0) UnregisterBatch(batch);
 
         StateChanged?.Invoke(this, EventArgs.Empty);

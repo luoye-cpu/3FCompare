@@ -27,7 +27,10 @@ public sealed class ThumbnailPopup : Window
         // 此处直接给依赖属性赋值（WindowDecorationsProperty），避开废弃的 CLR 包装器（CS0618）。
         SetCurrentValue(WindowDecorationsProperty, global::Avalonia.Controls.WindowDecorations.None);
         ShowActivated = false;
-        Topmost = true;
+        // Z 序靠 **Owner**，不用 Topmost（与 LayoutOverlayWindow / FloatingTransportWindow 同口径）：
+        // Topmost 会让缩略图在切到别的程序之后仍浮在最上层，而这里真正需要的只是"高于主窗口"。
+        // Owner 由创建方显式设置（MainWindow.Playback 里 `new ThumbnailPopup { Owner = this }`）。
+        Topmost = false;
         ShowInTaskbar = false;
         IsHitTestVisible = false;
         Width = 220; Height = 130;
@@ -52,6 +55,15 @@ public sealed class ThumbnailPopup : Window
             _hideTimer.Stop();
             Hide();
         };
+    }
+
+    /// <summary>设置宿主窗口。Z 序靠 Owner 而非 Topmost（见构造函数注释），
+    /// 但 <c>Owner</c> 是受保护成员、外部无法赋值 ⇒ 必须由本类型自己暴露入口。</summary>
+    public void SetOwner(Window owner)
+    {
+        if (owner is null) return;
+        try { Owner = owner; }
+        catch (InvalidOperationException) { /* 已显示/已关闭时不允许改 Owner，保持现状即可 */ }
     }
 
     /// <summary>在屏幕坐标 (x,y) 显示；bmp 为 null 时显示拖动提示。

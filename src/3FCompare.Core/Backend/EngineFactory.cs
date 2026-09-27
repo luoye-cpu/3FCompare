@@ -72,9 +72,13 @@ public static class EngineFactory
         {
             var ver = Fff3FpNativeProbe.FFF3FP_GetApiVersion();
             AppLog.Info("EngineFactory", $"IsNativeAvailable: GetApiVersion={ver}");
-            if (ver < 1)
+            // 内核 FFF3FP_Create 对 version 是**严格相等**（PlayerApi.cpp），不是"不低于"。
+            // 故这里也必须判相等：旧判据 `ver < 1` 会让残留的旧内核（如 API 14）被判为可用，
+            // 表现为状态栏"已就绪"而每次 CreateSession 抛 InvalidArgument ⇒ **全部会话创建失败
+            // 且看不出原因**（docs/45 P1-1，历史上真实发生过）。
+            if (ver != Fff3FpEngine.ConfigVersion)
             {
-                reason = $"内核 API 版本异常（{ver}）";
+                reason = $"内核 API 版本不匹配（内核 {ver} ≠ 托管 {Fff3FpEngine.ConfigVersion}）";
                 return false;
             }
             return true;

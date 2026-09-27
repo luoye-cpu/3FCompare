@@ -108,10 +108,13 @@ internal static partial class DxgiOutputInfo
     private const int OffDedicatedVideoMemory = 256 + 16;
     private const int OffAdapterLuid = 256 + 16 + 3 * 8;
 
-    /// <summary>枚举硬上限。8 个在多屏/多卡（含未连接输出的独显）环境下会被轻易触及，
-    /// 触顶后剩余适配器被静默漏检 ⇒ 目标显示器可能根本没被枚举到。取 32 留足余量；
+    /// <summary>枚举硬上限 = 16，与内核 `preferredAdapterIndex` 的合法区间 **-1..15** 对齐
+    /// （`PlayerApi.cpp` 只收 -1..15，越界即 InvalidArgument）。
+    /// ⚠ 曾取 32：UI 会枚举出 32 张卡给用户选，而 16..31 选了也传不进内核，
+    /// 只会被 `AppSettings.Normalize` 静默收敛到 15 ⇒ 用户以为选了 A 卡、实际用了 B 卡。
+    /// 宁可少枚举，也不要给出选不了、选错还静默的项。
     /// 上限只用于防死循环，正常情况下循环会先撞上 DXGI_ERROR_NOT_FOUND 而终止。</summary>
-    private const int MaxAdapters = 32;
+    private const int MaxAdapters = 16;
     private const int MaxOutputs = 32;
 
     [LibraryImport("dxgi.dll")]

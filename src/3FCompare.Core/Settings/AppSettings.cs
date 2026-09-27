@@ -46,8 +46,17 @@ public sealed class AppSettings
 
         FrameStep = Math.Clamp(FrameStep, 1, 999);          // 与设置窗口 NumericUpDown 一致
         SecondsStep = Math.Clamp(SecondsStep, 0.001, 60.0);
+        // 快捷键：显式 null 要补回默认实例（老文件缺整段时属性初始化器已经给了默认，走不到这里）。
+        // 键位本身能不能解析成本地 UI 层的事（Core 不引用 Avalonia，没有 Key 枚举可用），
+        // 本层只做"字符串规范形 + 同键冲突消解"这一层校验，见 KeyBindingsSettings.Normalize。
+        KeyBindings ??= new KeyBindingsSettings();
+        KeyBindings.Normalize();
         DefaultGridCols = Math.Clamp(DefaultGridCols, 1, 3); // 3x3 是网格上限
         DefaultGridRows = Math.Clamp(DefaultGridRows, 1, 3);
+        // 对齐模式：越界值（手改配置文件的 99）会一路直传进 CellMagnify.Align，
+        // 而它的判定是 `!= CompareAlign.Pixel` ⇒ 脏值会被静默当成"相对对齐"，
+        // 用户以为设成了像素级却没有。故必须钳，不能靠 bool 的"天然只有两态"兜底。
+        CompareAlign = Math.Clamp(CompareAlign, 0, 1);
         PreferredAdapterIndex = Math.Clamp(PreferredAdapterIndex, -1, 15); // -1=系统默认
 
         // 侧栏宽度：非正或大得离谱就当作没设置（null = 用默认）
@@ -155,6 +164,17 @@ public sealed class AppSettings
     /// <summary>按秒步进步长（F12），默认 1。</summary>
     public double SecondsStep { get; set; } = 1.0;
 
+    /// <summary>播放器可自定义快捷键（设置页「快捷键」节，见 <see cref="KeyBindingsSettings"/>）。
+    ///
+    /// <para>与 <see cref="FrameStep"/>/<see cref="SecondsStep"/> 是同一族设置：步进量在本类，
+    /// 触发它的键位也放本类，这样"改一次跳几秒 / 按哪个键跳"在配置文件里是一个整体。</para>
+    ///
+    /// <para><b>老配置文件没有这一段时</b>：System.Text.Json 不会调用 setter，属性初始化器给出的
+    /// 默认实例原样保留 ⇒ 直接落到出厂键位；只有显式写了 <c>"KeyBindings": null</c> 才会是 null，
+    /// 由 <see cref="Normalize"/> 补回默认实例。因此<b>不必</b>递增 <see cref="CurrentVersion"/>
+    /// （与 <see cref="AutoEnterCompare"/> 同一套"缺字段即默认值"的约定）。</para></summary>
+    public KeyBindingsSettings KeyBindings { get; set; } = new();
+
     public bool StartFullscreen { get; set; }
 
     public bool HideChromeInFullscreen { get; set; } = true;
@@ -168,8 +188,10 @@ public sealed class AppSettings
     /// 盯帧对比推荐）。显示器链不支持时自动回退 VSync。</summary>
     public bool VrrTearingPresent { get; set; }
 
-    /// <summary>媒体率呈现节奏（内核扩展 A9）：pacing=true 时抑制叠加层固定周期重翻转，
-    /// 使呈现节奏跟随源视频帧率。需 VrrTearingPresent=true 发挥完整效果。</summary>
+    // ⚠ 这里曾有一段"媒体率呈现节奏（pacing）"的 /// 注释，但对应属性**从未实现**
+    // （内核侧也不存在 SetPacingConfig）。悬空的 /// 会被编译器挂到下一个成员上
+    // ⇒ 它实际成了 ScrubPreviewEnabled 的文档，是错的。已删除；若真要实现 pacing，
+    // 需先在内核导出该 API 再回来加属性（记忆条目：SetPacingConfig 不存在）。
 
     /// <summary>时间轴拖动缩略图预览（默认开启）：拖动时每 150ms 抓帧显示弹窗。
     /// 低配设备可关闭，关闭后仅更新时间码和播放头，不触发 BitBlt 屏幕抓取。</summary>
@@ -178,8 +200,164 @@ public sealed class AppSettings
     /// <summary>缩放小地图（默认开启）：缩放 > 1 时在表面右下角显示缩略视口指示器。</summary>
     public bool MinimapEnabled { get; set; } = true;
 
+    /// <summary>打开 / 拖入文件后<b>自动进入对比模式</b>（按路数收敛：2 路→AB、3 路→ABC、≥4 路→ABCD）。
+    /// 默认关闭 —— 自动改变布局属于"替用户做决定"，既有行为是打开后停在均匀网格。
+    ///
+    /// <para>与 <see cref="TimelineCollapsed"/> 同风格：bool 无越界值，故<b>不必</b>进
+    /// <see cref="Normalize"/>、也<b>不必</b>递增 <see cref="CurrentVersion"/>
+    /// （缺字段时反序列化为 false = 既有行为，正是想要的默认值）。</para>
+    ///
+    /// <para>⚠ 新增 bool 字段必须同步改 <c>SettingsWindow</c> 的<b>两处</b>深拷贝
+    /// （构造函数的 <c>_orig</c> 与「确定」时构造 Result 的那处）—— 漏一处会让
+    /// "确认设置"把该字段静默写回默认值（表现为"设置存不住"，且难以归因）。</para></summary>
+    public bool AutoEnterCompare { get; set; }
+
+    /// <summary>对比模式的<b>分辨率对齐模式</b>（<see cref="CompareAlign"/>）：
+    /// 0 = 相对对齐（各路露出各自画面中相同的相对位置，默认、既有行为）；
+    /// 1 = 像素级对齐（各路露出<b>相同源像素尺寸</b>的区域，以最小的那一路为基准）。
+    ///
+    /// <para><b>为什么是可切换的模式而不是静默选一个</b>：各路源分辨率不同时，两种语义
+    /// 指向两块不同的区域，无法同时成立；选哪个取决于用户要比什么
+    /// （构图 vs 细节/噪点）。故做成手动切换的偏好项，默认保持既有行为。</para>
+    ///
+    /// <para><b>为什么是 int 而不是 bool</b>：它是"模式"而非开关，将来若加第三种对齐
+    /// （例如"按面积对齐"）不需要再改类型与迁移。代价是要进 <see cref="Normalize"/> 钳位 ——
+    /// 与 <see cref="SidebarMode"/> 同一套约定（序列化为 int，勿在中间插入新成员）。</para></summary>
+    public int CompareAlign { get; set; }
+
     /// <summary>界面语言（0=中文，1=英文）。</summary>
     public int Language { get; set; } = 0;
+}
+
+/// <summary>播放器可自定义快捷键（<see cref="AppSettings.KeyBindings"/>）。
+///
+/// <para><b>为什么存字符串而不是 Avalonia 的 <c>Key</c> 枚举</b>：本类在 Core 工程，而 Core
+/// <b>不引用 Avalonia</b>（引擎/同步/设置层与 UI 框架解耦）。故只存键名
+/// （<c>"Left"</c>、<c>"A"</c>、<c>"Ctrl+Right"</c>），由 UI 层
+/// <c>src/3FCompare/Services/TransportKeys.cs</c> 解析成 <c>(Key, KeyModifiers)</c>；
+/// 解析不出来的按"未绑定"处理，不抛不崩。</para>
+///
+/// <para><b>空串 = 用户主动解绑</b>（设置页「清除」写的就是空串），与 <c>null</c>
+/// （"这一槽没写值" → 回落默认）是两种语义，不能合并 —— 合并之后"清掉某个键"
+/// 会在下次启动自己长回来。</para>
+///
+/// <para><b>属性声明顺序 = 同键冲突时的优先级</b>（<see cref="Normalize"/> 自上而下，
+/// 先声明者赢），也与设置页的行序一致（UI 侧 <c>TransportKeys.Action</c> 必须同序）。
+/// 新增槽位请<b>加在末尾</b>：插在中间会静默改变既有键位的冲突裁决结果。</para></summary>
+public sealed class KeyBindingsSettings
+{
+    // 默认键位与底栏 5 个播放控制按钮的排布对应：
+    // 最外两侧按秒（←/→）、内侧按帧（A/D）、中间播放/暂停（空格）。
+    public const string DefaultStepSecondBackward = "Left";
+    public const string DefaultStepSecondForward = "Right";
+    public const string DefaultStepFrameBackward = "A";
+    public const string DefaultStepFrameForward = "D";
+    public const string DefaultPlayPause = "Space";
+
+    /// <summary>停止的默认值 = 不占任何键。底栏的【停止】按钮已删除，这个动作目前
+    /// 只有键盘一个入口；与其替用户发明一个键，不如留空，想用的话在设置页显式绑一个。</summary>
+    public const string DefaultStop = "";
+
+    /// <summary>按秒后退（默认 <see cref="DefaultStepSecondBackward"/>）。</summary>
+    public string StepSecondBackward { get; set; } = DefaultStepSecondBackward;
+
+    /// <summary>按秒前进。</summary>
+    public string StepSecondForward { get; set; } = DefaultStepSecondForward;
+
+    /// <summary>按帧后退。</summary>
+    public string StepFrameBackward { get; set; } = DefaultStepFrameBackward;
+
+    /// <summary>按帧前进。</summary>
+    public string StepFrameForward { get; set; } = DefaultStepFrameForward;
+
+    /// <summary>播放/暂停切换。</summary>
+    public string PlayPause { get; set; } = DefaultPlayPause;
+
+    /// <summary>停止（默认未绑定，见 <see cref="DefaultStop"/>）。</summary>
+    public string Stop { get; set; } = DefaultStop;
+
+    /// <summary>加载即校验（与 <see cref="AppSettings.Normalize"/> 同一套做法，不另造机制）：
+    /// <list type="number">
+    /// <item><description>null → 该槽默认值；空串保持空（= 未绑定）；</description></item>
+    /// <item><description>组合键规范成 <c>Ctrl+Left</c> 写法（去空格、修饰键统一拼写）—— 否则
+    /// <c>"ctrl + left"</c> 与 <c>"Ctrl+Left"</c> 会被当成两个不同键位，下面的冲突判定就会漏；</description></item>
+    /// <item><description>同一个键位绑给两个动作时<b>先声明者赢</b>（顺序即类型注释里的槽序），
+    /// 撞车的槽回落自己的默认值、默认值也被占则改为未绑定。</description></item>
+    /// </list>
+    /// <para>③ 的两条出口都写 <c>AppLog.Warn</c>：本方法会改掉用户配置文件里的值，
+    /// 静默改的话表现就是"某个键按下去没反应、也说不清为什么"（本仓库的规矩是宁可显式失败）。</para>
+    /// <para>键名本身能不能被 Avalonia 认出来，本层判不了（没有 <c>Key</c> 枚举），
+    /// 由 UI 层按"解析失败即未绑定"处理并各自留日志。</para></summary>
+    public void Normalize()
+    {
+        StepSecondBackward = Clean(StepSecondBackward, DefaultStepSecondBackward);
+        StepSecondForward = Clean(StepSecondForward, DefaultStepSecondForward);
+        StepFrameBackward = Clean(StepFrameBackward, DefaultStepFrameBackward);
+        StepFrameForward = Clean(StepFrameForward, DefaultStepFrameForward);
+        PlayPause = Clean(PlayPause, DefaultPlayPause);
+        Stop = Clean(Stop, DefaultStop);
+
+        var taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        ResolveConflict(nameof(StepSecondBackward), StepSecondBackward,
+            v => StepSecondBackward = v, DefaultStepSecondBackward, taken);
+        ResolveConflict(nameof(StepSecondForward), StepSecondForward,
+            v => StepSecondForward = v, DefaultStepSecondForward, taken);
+        ResolveConflict(nameof(StepFrameBackward), StepFrameBackward,
+            v => StepFrameBackward = v, DefaultStepFrameBackward, taken);
+        ResolveConflict(nameof(StepFrameForward), StepFrameForward,
+            v => StepFrameForward = v, DefaultStepFrameForward, taken);
+        ResolveConflict(nameof(PlayPause), PlayPause,
+            v => PlayPause = v, DefaultPlayPause, taken);
+        ResolveConflict(nameof(Stop), Stop,
+            v => Stop = v, DefaultStop, taken);
+    }
+
+    private static void ResolveConflict(
+        string slot, string current, Action<string> set, string def, HashSet<string> taken)
+    {
+        // 未绑定的槽之间不算冲突 —— 允许同时有多个"清除绑定"的空串
+        if (current.Length == 0) return;
+        // 第一次出现 = 本槽赢（后面的槽才是撞车方）
+        if (taken.Add(current)) return;
+
+        Diagnostics.AppLog.Warn("KeyBindings",
+            $"键位 \"{current}\" 已被顺序更靠前的槽占用，{slot} 回落默认值 \"{def}\"");
+        if (def.Length > 0 && taken.Add(def))
+        {
+            set(def);
+            return;
+        }
+        // 连默认值都被占：只能不绑。这一步同样要留痕 —— 用户的配置被改动了两次。
+        Diagnostics.AppLog.Warn("KeyBindings",
+            $"{slot} 的默认键位{(def.Length == 0 ? "（本就为空）" : $" \"{def}\" ")}也被占用，改为未绑定");
+        set(string.Empty);
+    }
+
+    /// <summary>单槽清洗：null → 默认值；空白 → 空串（未绑定）；其余去空格并把修饰键
+    /// 规范成 <c>Ctrl/Shift/Alt/Win</c>。键名 token 的原样保留（大小写由 UI 层
+    /// 用 <c>Enum.TryParse(ignoreCase)</c> 兜，展示时再取枚举名，见 TransportKeys.Display）。</summary>
+    private static string Clean(string? raw, string def)
+    {
+        if (raw is null) return def;
+        var s = raw.Trim();
+        if (s.Length == 0) return string.Empty;
+        var parts = s.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length == 0) return string.Empty;
+        // 最后一个 token 是键名，前面全是修饰键（写错的修饰键保持原样，交给 UI 层判失败）
+        for (var i = 0; i < parts.Length - 1; i++)
+            parts[i] = CanonicalModifier(parts[i]) ?? parts[i];
+        return string.Join('+', parts);
+    }
+
+    /// <summary>修饰键的规范写法（接受常见别名）。返回 null = 不是修饰键，本层不猜。</summary>
+    private static string? CanonicalModifier(string token) => token.ToLowerInvariant() switch
+    {
+        "ctrl" or "control" => "Ctrl",
+        "shift" => "Shift",
+        "alt" or "menu" => "Alt",
+        "win" or "meta" or "cmd" => "Win",
+        _ => null,
+    };
 }
 
 /// <summary>工具侧栏三态。
