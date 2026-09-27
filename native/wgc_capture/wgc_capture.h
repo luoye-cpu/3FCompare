@@ -58,6 +58,12 @@ extern "C" {
 #define WGC_ERR_TEXTURE_READ      5  /* 从捕获帧取 D3D11 纹理或 CPU 读回（staging/CopyResource/Map）失败 */
 #define WGC_ERR_INVALID_ARG       6  /* 传入参数非法（空指针等） */
 #define WGC_ERR_INTERNAL          7  /* 其它内部错误（内存分配失败等），细节见 Wgc_LastError */
+#define WGC_ERR_HANDLE_DEAD       8  /* 该 handle 的内部工作线程此前已超时被放弃，**handle 已永久失效**。
+                                        调用方**必须**用 Wgc_Destroy 释放后重新 Wgc_Create，否则此后每一次
+                                        抓帧都会以本码失败。与 WGC_ERR_INTERNAL 的区别：7 是"本次失败，
+                                        handle 仍可用"；8 是"handle 报废，必须重建"。
+                                        注意：对已失效的 handle 调用 Wgc_Destroy 是安全且有界的（它不会
+                                        join 已卡死的线程，直接返回），因此托管侧可以无条件先 Destroy 再 Create。 */
 
 /* ------------------------------------------------------------------ */
 /* 公开函数                                                            */
@@ -132,8 +138,18 @@ WGC_API void WGC_CALL Wgc_Destroy(void* handle);
  *     不对它做 teardown（对已销毁窗口的捕获会话做 Close()/Release() 会永久死锁在系统捕获
  *     服务里，实测 ≥150s 不返回），因此抓帧调用不会因此阻塞；下一次对有效 hwnd 的调用会
  *     正常建立新会话。
- *   - 单次调用最多等待约 2 秒（WGC_TIMEOUT_MS；已有可兜底帧时约 0.4 秒），不会死等。
- *   - 同一 handle 的并发调用会被内部串行化（第二个调用阻塞到第一个返回）；
+ *     该判定**不依赖 IsWindow 的整数值**：DLL 会在被捕获的窗口对象上打一个进程内标记、
+ *     拆除时读回，因此 HWND 值被系统回收复用（宿主反复开关媒体、不断重建视频子窗口时很常见）
+ *     也不会被误判成「还活着」。此外所有在内部工作线程上执行的任务都有**有界等待**：万一
+ *     真踩中该死锁，调用会返回 WGC_ERR_HANDLE_DEAD(8) 而不是永久阻塞 —— 该 handle 在超时
+ *     当刻即已就地报废（与后续调用返回同一个码），调用方必须 Wgc_Destroy 后重新 Wgc_Create
+ *     （对失效 handle 调 Wgc_Destroy 是安全且有界的），此后**每一次**抓帧都立即返回
+ *     WGC_ERR_HANDLE_DEAD(8)（不再等待）。
+ *   - **不会死等**：抓帧本身的超时预算是约 2 秒（WGC_TIMEOUT_MS；已有可兜底帧时约 0.4 秒）；
+ *     内部工作线程的任务另有 6 秒看门狗（kCaptureDeadlineMs），且「等待内部串行锁」也计入
+ *     同一预算 ⇒ 实测最坏情况约 12 秒（≤6s 等串行锁 + ≤6s 等任务）后必定返回错误码，
+ *     绝不永久阻塞。
+ *   - 同一 handle 的并发调用会被内部串行化（第二个调用**有界**等待第一个返回，见上）；
  *     不同 handle 之间完全独立、互不干扰。
  *     ⚠ 唯一例外：不得与 Wgc_Destroy 并发——handle 一旦传入 Wgc_Destroy 即失效。
  *

@@ -1094,6 +1094,64 @@ static int RunOnce() {
         std::printf("    空指针防护调用未崩溃\n");
     }
 
+    /* --- 11b. #6：目标窗口在会话存活期被销毁（teardown 不得死锁） --- */
+    Case("11b #6：目标窗口在会话存活期被销毁");
+    {
+        void* hd = pCreate();
+        CHECK(hd != nullptr, "Wgc_Create（死目标用例）应返回非空 handle，实得 NULL");
+        if (hd) {
+            TestWindow w1;
+            if (!CreateFlipWindow(w1, nullptr, 60, 60, 1.f, 1.f, 0.f, "dead-target")) {
+                CHECK(false, "建窗口失败：dead-target");
+                return 2;
+            }
+            Pump();
+            StartPresent(w1);
+            Frame f1;
+            std::string e1;
+            const int rc1 = Capture(hd, w1.hwnd, f1, e1);
+            StopPresent();
+            CHECK(rc1 == WGC_OK, "建会话后抓帧应成功，实得 rc=%d err=%s", rc1, e1.c_str());
+
+            // 会话**存活期间**销毁目标窗口：下一次抓帧必须判定「目标窗口对象已消失」并走
+            // 「入 Graveyard」分支，绝不对它做 Close()/Release()（那会永久死锁，docs/41 #6）。
+            // 旧实现只靠 IsWindow 判定：HWND 值一旦被系统复用就会误判成「还活着」，
+            // 于是去 Close() 一个已死目标 ⇒ worker 线程永久阻塞。
+            DestroyWindow(w1.hwnd);
+            Pump();
+            Sleep(100);
+            Pump();
+
+            TestWindow w2;
+            if (!CreateFlipWindow(w2, nullptr, 60, 60, 0.f, 1.f, 1.f, "new-target")) {
+                CHECK(false, "建窗口失败：new-target");
+                return 2;
+            }
+            Pump();
+            StartPresent(w2);
+            Frame f2;
+            std::string e2;
+            const DWORD t0 = GetTickCount();
+            const int rc2 = Capture(hd, w2.hwnd, f2, e2);
+            const DWORD ms2 = GetTickCount() - t0;
+            StopPresent();
+            std::printf("    目标窗口已销毁后换新窗口抓帧: rc=%d 耗时 %lu ms\n", rc2, ms2);
+            CHECK(rc2 == WGC_OK, "换到新窗口抓帧应成功，实得 rc=%d err=%s", rc2, e2.c_str());
+            // 死锁的表现是**永久**阻塞，这里给一个远大于正常耗时（几十 ms）的上限。
+            CHECK(ms2 < 3000, "抓帧不得因 teardown 死锁而阻塞，实得 %lu ms", ms2);
+
+            // 会话此时绑在新窗口上：销毁 handle 也应正常返回（旧会话已入 Graveyard，不再触碰）。
+            const DWORD t1 = GetTickCount();
+            pDestroy(hd);
+            const DWORD ms3 = GetTickCount() - t1;
+            std::printf("    Wgc_Destroy 耗时 %lu ms\n", ms3);
+            CHECK(ms3 < 3000, "Wgc_Destroy 不得因 teardown 死锁而阻塞，实得 %lu ms", ms3);
+
+            DestroyWindow(w2.hwnd);
+            Pump();
+        }
+    }
+
     /* --- 收尾 --- */
     Case("12 释放");
     pDestroy(h);
@@ -1557,6 +1615,20 @@ int main(int argc, char** argv) {
         const bool captured = lc.Begin(iterLog);
         std::printf("\n########## 第 %d/%d 遍 ##########\n", it, repeat);
         const int rc = RunOnce();
+        // FATAL 早退**必须计入失败**（S2 假绿堵口）：RunOnce 里所有「初始化失败」都是裸
+        // `return 2`（建窗口失败、创建 swapchain 失败、显存不足……），只要命中一处，本遍用例
+        // 一条都没跑完。旧代码在这里只 break、不计数，而最终 `return failedIters == 0 ? 0 : 1`
+        // ⇒ 返回 0；构建脚本与门禁只看退出码 ⇒「一条都没跑完」被当成「全部通过」。
+        // 这里把它折算成一条失败明细，后续的 df>0 分支会自动保存/回显日志并累加 failedIters。
+        if (rc != 0) {
+            ++g_fail;
+            g_failures.push_back(std::string(g_case) + " :: FATAL 中止：RunOnce 以 rc=" +
+                                 std::to_string(rc) + " 提前返回，本遍用例未跑完");
+            std::fprintf(stderr,
+                         "FATAL：第 %d/%d 遍 RunOnce 以 rc=%d 中止（初始化失败），套件未完成\n", it,
+                         repeat, rc);
+            std::fflush(stderr);
+        }
         const int dp = g_pass - p0, df = g_fail - f0;
         std::printf("\n=== 第 %d 遍结果：%d 项通过, %d 项失败 ===\n", it, dp, df);
         if (df > 0) {
@@ -1594,10 +1666,9 @@ int main(int argc, char** argv) {
                      osd.c_str());
         std::fflush(stderr);
 
-        if (rc == 2) {
-            std::fprintf(stderr, "FATAL：第 %d 遍初始化失败，中止后续迭代\n", it);
-            break;
-        }
+        // FATAL 早退已在上面折算成失败明细（df>0 分支已保存/回显日志并累加 failedIters），
+        // 这里只需无条件中止后续迭代：初始化都失败了，后面的遍只会同样失败。
+        if (rc != 0) break;
         if (df > 0 && stopOnFail) break;
     }
 
