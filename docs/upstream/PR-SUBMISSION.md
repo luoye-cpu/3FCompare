@@ -1,6 +1,12 @@
 # PR 提交文本（已提交）
 
-**已提交**：<https://github.com/Lake1059/FFF_Project/pull/9>（#9，open）
+**已提交**：<https://github.com/Lake1059/FFF_Project/pull/9>
+
+> **状态更正（2026-09-24 核实）**：#9 **已合并**（上游提交
+> `440e662 Merge pull request #9 from luoye-cpu/upstream/pr-b-adapter`）。
+> 本文件是提交时的正文留档，原样保留；状态以实际为准。
+> 另注：PR #9 合入后，`ReadVideoPixelRegion` / `GetRenderTargetInfo` / `preferredAdapterIndex`
+> 已进入上游，不再是 3FCompare 私有扩展。
 
 分支：`upstream/pr-b-adapter` → 目标 `Lake1059/FFF_Project:master`（上游默认分支是 `master`，不是 `main`）
 内容：2 个提交 / 11 文件 / +425 −18，基于 `ea3ce05`

@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3FCompare AB/ABC/ABCD 模式功能可行性报告</title>
+<style>
+  :root{
+    --bg:#14141a; --card:#1e1e26; --card2:#24242e; --line:#33333f;
+    --tx:#e9e9f0; --tx2:#a2a2b4; --tx3:#75758a;
+    --accent:#ffc840; --ok:#4ade80; --warn:#fbbf24; --bad:#ff6b6b; --info:#60a5fa; --purple:#c084fc;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:var(--bg); color:var(--tx);
+    font-family:"Microsoft YaHei","PingFang SC","Segoe UI",system-ui,sans-serif;
+    font-size:14px; line-height:1.75; padding:0 0 80px;
+  }
+  .wrap{max-width:1120px;margin:0 auto;padding:0 28px}
+
+  header{
+    border-bottom:1px solid var(--line);
+    padding:44px 0 28px; margin-bottom:36px;
+    background:linear-gradient(180deg,#1a1a22 0%,#14141a 100%);
+  }
+  header .wrap{padding:0 28px}
+  h1{font-size:27px;font-weight:700;letter-spacing:.3px;margin-bottom:10px}
+  h1 .tag{
+    display:inline-block;font-size:11px;font-weight:600;vertical-align:middle;
+    background:var(--accent);color:#1a1a1a;padding:3px 9px;border-radius:4px;
+    margin-left:10px;letter-spacing:.5px;
+  }
+  .sub{color:var(--tx2);font-size:14px}
+  .meta{color:var(--tx3);font-size:12.5px;margin-top:14px;font-family:Consolas,monospace}
+
+  h2{
+    font-size:19px;font-weight:700;margin:44px 0 18px;
+    padding-left:12px;border-left:4px solid var(--accent);
+  }
+  h3{font-size:15.5px;font-weight:650;margin:26px 0 12px;color:var(--tx)}
+  p{margin-bottom:12px;color:var(--tx)}
+  .lead{color:var(--tx2);font-size:14px;margin-bottom:18px}
+
+  /* 摘要卡 */
+  .verdict{
+    background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);
+    border-radius:8px;padding:22px 24px;margin-bottom:28px;
+  }
+  .verdict h3{margin:0 0 12px;font-size:16px;color:var(--accent)}
+  .verdict p{color:var(--tx);margin-bottom:10px}
+  .verdict ul{margin:10px 0 0 20px;color:var(--tx2)}
+  .verdict li{margin-bottom:7px}
+
+  /* 表格 */
+  table{width:100%;border-collapse:collapse;margin:16px 0 22px;font-size:13.2px}
+  th{
+    background:var(--card2);color:var(--tx);font-weight:650;text-align:left;
+    padding:11px 12px;border:1px solid var(--line);white-space:nowrap;
+  }
+  td{padding:10px 12px;border:1px solid var(--line);vertical-align:top;color:var(--tx2)}
+  tbody tr:nth-child(even){background:rgba(255,255,255,.018)}
+  td code,th code{background:rgba(255,255,255,.07);padding:1px 5px;border-radius:3px;font-size:12px}
+
+  .pill{
+    display:inline-block;padding:2px 9px;border-radius:11px;font-size:11.5px;
+    font-weight:650;white-space:nowrap;line-height:1.6;
+  }
+  .p-ok{background:rgba(74,222,128,.16);color:var(--ok);border:1px solid rgba(74,222,128,.35)}
+  .p-part{background:rgba(251,191,36,.16);color:var(--warn);border:1px solid rgba(251,191,36,.35)}
+  .p-no{background:rgba(255,107,107,.16);color:var(--bad);border:1px solid rgba(255,107,107,.35)}
+  .p-na{background:rgba(160,160,180,.14);color:var(--tx3);border:1px solid rgba(160,160,180,.3)}
+  .p-info{background:rgba(96,165,250,.16);color:var(--info);border:1px solid rgba(96,165,250,.35)}
+
+  /* 风险等级 */
+  .r-hi{background:rgba(255,107,107,.12);border-left:3px solid var(--bad)}
+  .r-md{background:rgba(251,191,36,.10);border-left:3px solid var(--warn)}
+  .r-lo{background:rgba(74,222,128,.09);border-left:3px solid var(--ok)}
+
+  .risk{
+    background:var(--card);border:1px solid var(--line);border-radius:7px;
+    padding:15px 18px;margin-bottom:13px;
+  }
+  .risk .rt{font-weight:650;font-size:14px;margin-bottom:7px;display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+  .risk .rb{color:var(--tx2);font-size:13.2px}
+  .risk .rb strong{color:var(--tx);font-weight:600}
+  .src{font-family:Consolas,monospace;font-size:11.5px;color:var(--tx3);margin-top:8px;display:block}
+
+  /* 功能卡 */
+  .feat{
+    background:var(--card);border:1px solid var(--line);border-radius:8px;
+    padding:20px 22px;margin-bottom:20px;
+  }
+  .feat-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:6px}
+  .feat-head h3{margin:0;font-size:16px}
+  .feat-head .no{
+    color:var(--tx3);font-size:12px;font-family:Consolas,monospace;
+    border:1px solid var(--line);border-radius:4px;padding:1px 7px;
+  }
+  .feat .desc{color:var(--tx2);font-size:13.4px;margin-bottom:14px}
+  .feat dl{display:grid;grid-template-columns:82px 1fr;gap:7px 14px;font-size:13.2px}
+  .feat dt{color:var(--tx3);font-weight:600}
+  .feat dd{color:var(--tx2)}
+  .feat dd strong{color:var(--tx)}
+
+  /* 发现条目 */
+  .find{
+    background:var(--card2);border:1px solid var(--line);border-radius:7px;
+    padding:14px 17px;margin-bottom:11px;display:flex;gap:14px;
+  }
+  .find .idx{
+    flex:0 0 26px;height:26px;border-radius:50%;background:var(--accent);color:#1a1a1a;
+    font-weight:700;font-size:12.5px;display:flex;align-items:center;justify-content:center;
+  }
+  .find .fc{flex:1}
+  .find .ft{font-weight:650;font-size:13.8px;margin-bottom:5px}
+  .find .fb{color:var(--tx2);font-size:13.1px}
+  .find .fb code{background:rgba(255,255,255,.07);padding:1px 5px;border-radius:3px;font-size:11.8px;color:var(--tx)}
+
+  /* 阶段 */
+  .phase{
+    background:var(--card);border:1px solid var(--line);border-radius:8px;
+    padding:20px 22px;margin-bottom:18px;
+  }
+  .phase-h{display:flex;align-items:center;gap:11px;margin-bottom:5px;flex-wrap:wrap}
+  .phase-h h3{margin:0;font-size:16.5px}
+  .phase .goal{color:var(--tx3);font-size:13px;margin-bottom:14px;font-style:italic}
+  .phase ul{margin-left:19px;color:var(--tx2);font-size:13.3px}
+  .phase li{margin-bottom:8px}
+  .phase li strong{color:var(--tx)}
+  .effort{
+    display:inline-block;font-family:Consolas,monospace;font-size:12px;
+    padding:2px 9px;border-radius:4px;background:rgba(255,255,255,.06);
+    border:1px solid var(--line);color:var(--tx2);
+  }
+
+  .note{
+    background:rgba(96,165,250,.09);border:1px solid rgba(96,165,250,.28);
+    border-radius:7px;padding:15px 18px;margin:18px 0;font-size:13.3px;color:var(--tx2);
+  }
+  .note b{color:var(--info)}
+  .warnbox{
+    background:rgba(255,107,107,.09);border:1px solid rgba(255,107,107,.28);
+    border-radius:7px;padding:15px 18px;margin:18px 0;font-size:13.3px;color:var(--tx2);
+  }
+  .warnbox b{color:var(--bad)}
+
+  ul.plain{margin:10px 0 16px 20px;color:var(--tx2);font-size:13.4px}
+  ul.plain li{margin-bottom:7px}
+  ul.plain li strong{color:var(--tx)}
+
+  footer{
+    margin-top:52px;padding-top:22px;border-top:1px solid var(--line);
+    color:var(--tx3);font-size:12.3px;text-align:center;
+  }
+  .nowrap{white-space:nowrap}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <h1>3FCompare AB / ABC / ABCD 模式功能可行性报告<span class="tag">在现有代码内实现</span></h1>
+    <div class="sub">针对设计笔记「问题 14」所列需求的逐项落地评估 —— 现状诊断 · 改动方案 · 风险定级 · 分期建议</div>
+    <div class="meta">基线 HEAD 9701578 (v0.2.5) · 2026-09-23 · 全部结论均附 文件:行号 证据</div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- ═══ 一 ═══ -->
+  <h2>一、结论摘要</h2>
+
+  <div class="verdict">
+    <h3>核心结论：没有任何功能「被删除」，缺的是三类「从未完成」</h3>
+    <p>对照设计笔记的 10 项需求逐条核验代码与提交历史后，结论是：<strong>笔记里描述的功能在 Git 历史中从未真正存在过</strong>，因此不存在「某次提交回退导致消失」的情形。它们分属三种状态：</p>
+    <ul>
+      <li><strong>已实现（5 项）</strong> —— AB 拖分割线、ABC「左大图+右侧上下」、ABCD 四宫格、无缝放大的内核与排版层、「放大一致」（澄清语义后确认，<strong>零成本</strong>）；</li>
+      <li><strong>有内核无入口（1 项）</strong> —— 多路同步「无缝放大」内核逻辑完整且经实测有效，但<strong>生产 UI 完全没有触发路径</strong>，只有自测 <code>--magnifybench</code> 会调用；</li>
+      <li><strong>从未实现（4 项）</strong> —— AB 上下分、A/B 下拉框选源、ABC 三列、按路数自动进模式。</li>
+    </ul>
+    <p style="margin-top:14px"><strong>最重要的判断：</strong>本次工作的性质不是「找回丢失的代码」，而是<strong>在既有骨架上接线与扩展</strong>。其中「无缝放大」只需补 UI 触发即可获得完整能力，性价比最高；而「ABC 三列」受 <code>SplitParams</code> 自由度硬约束，成本显著高于其余各项。</p>
+    <p><strong>架构定位（已按你的说明确定）：</strong>该能力作为<strong>独立于传统模式的额外模式</strong>实现 —— <strong>不扩展 <code>CompareMode</code> 枚举</strong>，改用并列的独立模式开关。这贴合「与传统模式不一样」的定位，且<strong>顺带规避了「序数前缀静默收敛」与「新增枚举无编译警告」两个陷阱</strong>，现有模式体系单测亦完全不受影响（详见 <strong>4.8</strong>）。</p>
+  </div>
+
+  <!-- ═══ 二 ═══ -->
+  <h2>二、需求 × 现状逐项对照</h2>
+  <p class="lead">按笔记原文顺序排列。「状态」一列区分 <span class="pill p-ok">已实现</span> <span class="pill p-part">部分/有内核</span> <span class="pill p-no">未实现</span> <span class="pill p-na">无需做</span>。</p>
+
+  <table>
+    <thead>
+      <tr><th style="width:20%">笔记需求</th><th style="width:12%">状态</th><th>现状与证据</th><th style="width:16%">落地成本</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>AB 拖分割线</strong><br><span style="color:var(--tx3);font-size:12px">调整 A/B 分界</span></td>
+        <td><span class="pill p-ok">已实现</span></td>
+        <td><code>LayoutOverlayWindow</code> 独立覆盖窗口承载手柄，拖动写回 <code>SplitParams.X</code>；<code>CompareLayout.HandleAxis</code> → <code>SplitAxis.X</code>；钳位 <code>MinFraction=0.05</code>。已含 WGC 相位实测。</td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td><strong>AB 横 / 竖</strong><br><span style="color:var(--tx3);font-size:12px">既能左右分也能上下分</span></td>
+        <td><span class="pill p-no">未实现</span></td>
+        <td><code>CompareMode.Ab</code> 在 <code>ComputeCells</code> 中恒为左右两格（CompareLayout.cs:166-170 的 <code>_ =&gt;</code> 兜底）。<code>SplitAxis.Y</code> 枚举与 <code>CursorY</code> 光标<strong>均已存在</strong>，只是无模式使用它。</td>
+        <td>小<br><span style="color:var(--tx3);font-size:12px">~40 行</span></td>
+      </tr>
+      <tr>
+        <td><strong>A/B 下拉框选源</strong><br><span style="color:var(--tx3);font-size:12px">每格可选显示哪一路</span></td>
+        <td><span class="pill p-no">未实现</span></td>
+        <td>路↔格是<strong>固定 i↔i</strong>：CompareGridView.cs:244-257 <code>_surfaces[i]</code> 配 <code>cells[i]</code>；PlaybackCoordinator.cs:631/679 按 <code>_sync.Count</code> 顺序追加。无任何映射字段或预留。</td>
+        <td>大<br><span style="color:var(--tx3);font-size:12px">~200+ 行</span></td>
+      </tr>
+      <tr>
+        <td><strong>ABC 左大图+右侧上下</strong></td>
+        <td><span class="pill p-ok">已实现</span></td>
+        <td>就是当前 <code>CompareMode.Abc</code>：CompareLayout.cs:153-158 三格（A 通高 / B 右上 / C 右下）。</td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td><strong>ABC 三列</strong></td>
+        <td><span class="pill p-no">未实现</span></td>
+        <td><strong>硬约束</strong>：<code>SplitParams(double X, double Y)</code> 仅 2 个自由度，三列需两条竖分割线（x1、x2）。必须先扩展该结构。</td>
+        <td>大<br><span style="color:var(--tx3);font-size:12px">需改签名，调用点 ~8 处</span></td>
+      </tr>
+      <tr>
+        <td><strong>ABC「3×3」</strong></td>
+        <td><span class="pill p-na">无需做</span></td>
+        <td><strong>笔记存在歧义</strong>：均匀 3×3 已由「视图 → 网格布局 → 3x3」预设完整覆盖（GridLayout.cs:15-28 <code>ComputeGrid</code>、MainWindow.axaml:45 <code>Tag="3x3"</code>、<code>OnGridPreset</code>:1947）。而 ABC 是 3 路<strong>非均匀</strong>布局，两者在 CompareLayout.cs:60-61 的分工注释里是<strong>两条独立路径</strong>。判断：笔记的「3×3」指网格模式，非 ABC 变体。</td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td><strong>ABCD 四宫格</strong><br><span style="color:var(--tx3);font-size:12px">拖动十字交叉点</span></td>
+        <td><span class="pill p-ok">已实现</span></td>
+        <td><code>CompareMode.Abcd</code>：CompareLayout.cs:159-165 十字四格；<code>HandleAxis</code> 返回 <code>SplitAxis.Both</code>（同时调 X 与 Y）。</td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td><strong>滚轮放大</strong><br><span style="color:var(--tx3);font-size:12px">同步放大 + 裁切出 AB</span></td>
+        <td><span class="pill p-part">有内核无入口</span></td>
+        <td>内核完整：<code>SetCompareMagnify</code>(CompareCrop.cs:117) + <code>CompareCropPlanner.Magnify</code> + <code>CellMagnify</code> 排版。<strong>但 grep 全仓库仅 SelfTest.cs:2486 一处真正启用</strong>；滚轮 <code>OnSurfaceWheel</code>(axaml.cs:1250) 改的是<strong>单路</strong><code>_viewZoom</code>（内核 <code>SetViewTransform</code>），不是多路同步放大。</td>
+        <td>中<br><span style="color:var(--tx3);font-size:12px">~100 行</span></td>
+      </tr>
+      <tr>
+        <td><strong>分辨率拉到一致</strong><br><span style="color:var(--tx3);font-size:12px">= 放大一致（已澄清）</span></td>
+        <td><span class="pill p-ok">已满足</span></td>
+        <td>用户澄清语义为「<strong>放大倍数一致</strong>」，非像素级对齐。所有路<strong>共用同一个</strong> <code>zoom</code>/<code>cropX</code>/<code>cropY</code>（CompareCrop.cs:103-105「各路共用同一个放大参数 ⇒ 各路露出的是各自画面中相同的相对位置」），且 <code>cropX/cropY</code> 是<strong>源画面归一化坐标</strong>(:112-113) ⇒ 各路必然同步放大到相同相对区间。</td>
+        <td><span class="pill p-ok">0</span><br><span style="color:var(--tx3);font-size:12px">无需改代码</span></td>
+      </tr>
+      <tr>
+        <td><strong>按路数自动进模式</strong><br><span style="color:var(--tx3);font-size:12px">2→AB / 3→AB,ABC / ≥4→全部</span></td>
+        <td><span class="pill p-no">未实现</span></td>
+        <td>规则<strong>已实现</strong>在 <code>AvailableModes</code>(CompareLayout.cs:96-102)，但只用于 C 键循环的合法集合。<code>OpenPaths</code>(axaml.cs:400) 只开文件，<strong>不自动进入</strong>。</td>
+        <td>小<br><span style="color:var(--tx3);font-size:12px">~5 行（+设置项 15 行）</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- ═══ 三 ═══ -->
+  <h2>三、十条关键发现</h2>
+
+  <div class="find"><div class="idx">1</div><div class="fc">
+    <div class="ft">无缝放大的内核已完成并经实测，缺的只是 UI 触发 —— 这是最高性价比的一项</div>
+    <div class="fb"><code>docs/26:786-796</code> 实测：z=1/2/3/4 对应 2.2 / 8.9 / 20.1 / 35.7 Mpx，显存 +10 / +146 / +169 MB，帧率稳在 59.5~60 fps；最大化 z=4 达 100.1 Mpx / +594 MB / 仍 58.1 fps。也就是说放大能力本身是<strong>可用且已验证</strong>的，本项工作纯属「接线」。</div>
+  </div></div>
+
+  <div class="find"><div class="idx">2</div><div class="fc">
+    <div class="ft">最大雷区：改窗口区域后再 ResizeBuffers 会返回 DXGI_ERROR_INVALID_CALL</div>
+    <div class="fb"><code>docs/26:244-246</code> 实测记录，建议顺序为「先清区域 → ResizeBuffers → 重设区域」。而滚轮放大<strong>同时</strong>改子窗口尺寸（触发 swapchain resize）<strong>又</strong>改裁剪区域，正好命中该组合。这是本报告中唯一被实测标记为失败的操作序列，必须专项验证。</div>
+  </div></div>
+
+  <div class="find"><div class="idx">3</div><div class="fc">
+    <div class="ft">好消息：CompareMode 从未被持久化 ⇒ 新增枚举值不破坏任何已保存会话/设置</div>
+    <div class="fb"><code>SessionSnapshot.cs</code> 全文件无 CompareMode / SplitParams（只有 <code>GridLayout</code> 均匀网格码）；<code>AppSettings.cs</code> 同样没有。未知值兜底在 <code>CoerceMode</code>(CompareLayout.cs:120-125)。⇒ 加 <code>AbVertical = 3</code> <strong>无需任何迁移代码</strong>。</div>
+  </div></div>
+
+  <div class="find"><div class="idx">4</div><div class="fc">
+    <div class="ft">陷阱：CoerceMode 用「序数前缀」判定，新增枚举会被静默收敛</div>
+    <div class="fb"><code>MaxAvailableOrdinal</code>(CompareLayout.cs:196-202) + <code>CoerceMode</code>(:120-125) 的规则是 <code>(int)mode &gt;= 0 &amp;&amp; (int)mode &lt;= max</code>，注释 :107-108 明确「可用集合必为前缀是该规则的固有性质」。若 <code>AbVertical=3 &gt; Abcd=2</code>，则 3 路下 max=1，它会被收敛成 <code>Abc</code>。<strong>必须改为集合判定</strong>。</div>
+  </div></div>
+
+  <div class="find"><div class="idx">5</div><div class="fc">
+    <div class="ft">C# 编译器不会警告新增枚举值 —— 无编译期保护</div>
+    <div class="fb">三处 <code>switch</code> 表达式（<code>ComputeCells</code>:151、<code>HandleAxis</code>:175、<code>HandlePosition</code>:183）都带 <code>_ =&gt;</code> 兜底，新增枚举值会<strong>静默落进 default</strong>（C# 仅对无兜底且非穷尽报 CS8509）。⇒ 漏改分支不会报错，只会表现为「竖分画成了左右分」。必须靠单测覆盖。</div>
+  </div></div>
+
+  <div class="find"><div class="idx">6</div><div class="fc">
+    <div class="ft">AB 交换 A/B 存在「格置换」最小改动路径，无需动路↔格映射</div>
+    <div class="fb">不动 surface↔slot，只在 <code>ApplyCompareLayout</code>(axaml.cs:640-662) 产出格表时交换 <code>cells[0]</code>/<code>cells[1]</code> 的矩形即可实现「左右互换」。改动集中在 MainWindow 一处，<strong>不触碰 CompareGridView / PlaybackCoordinator / 命中测试</strong>。</div>
+  </div></div>
+
+  <div class="find"><div class="idx">7</div><div class="fc">
+    <div class="ft">覆盖窗口上放 ComboBox 理论可行，但「未实测」是明确残留项</div>
+    <div class="fb"><code>docs/30:108/135/186-190</code>（浮条倍速/色彩下拉「本轮未实测」）、<code>docs/31:361-363</code>（「理论上不受 <code>WS_EX_NOACTIVATE</code> 影响但未实测」）、<code>docs/42:63</code> 仍为待做。不过 <code>FloatingTransportWindow</code> 已有 ComboBox 先例，<strong>不是从零开始</strong>，属「需补实测」而非「需攻关」。</div>
+  </div></div>
+
+  <div class="find"><div class="idx">8</div><div class="fc">
+    <div class="ft">自动进模式可复用 onAllOpened 时机，但会重置用户已拖好的分割线</div>
+    <div class="fb">现为 <code>OpenFiles(paths, autoPlay:false, onAllOpened: TryAutosave)</code>(axaml.cs:438)，改成 <code>() =&gt; { TryAutosave(); EnterSplitMode(); }</code> 即可——此刻路数已准确（<code>OpenFiles</code> 是 async void，直接在 <code>OpenPaths</code> 末尾调会拿到旧的路数）。<strong>坑</strong>：已有 2 路再拖 1 路时 target 由 Ab 变 Abc，会命中 <code>EnterCompareMode</code>:601 的 <code>_compareSplit = SplitParams.Default(...)</code>，把用户拖好的分割位置重置。</div>
+  </div></div>
+
+  <div class="find"><div class="idx">9</div><div class="fc">
+    <div class="ft">加 bool 设置项不必动 Normalize，但 SettingsWindow 有「两处深拷贝」陷阱</div>
+    <div class="fb"><code>AppSettings.cs:124-126</code>(TimelineCollapsed) 与 <code>:131-138</code>(FloatingTransport) 注释均写明「bool 无越界值，故不必进 <code>Normalize</code>」⇒ 也不必动 <code>CurrentVersion</code>。但 <code>SettingsWindow.cs</code> 有<strong>两处</strong>深拷贝（:94 与 :340），<code>docs/30:120</code> 记录「漏一处则『确认设置』会静默写回默认值」。</div>
+  </div></div>
+
+  <div class="find"><div class="idx">10</div><div class="fc">
+    <div class="ft">SetWindowRgn × flip-model 已不再「未知」，但高频改区域仍未实测</div>
+    <div class="fb"><strong>记忆修正</strong>：该项已于 2026-09-19 实测生效（<code>docs/26:476-492</code>，探针 <code>rgn_vs_flip_probe</code>，区域外 5/5 露出下层，<strong>Present 344 次 0 失败</strong>，改区域不需重建 swapchain），不再是「高风险未知面」。但<strong>「滚轮连续缩放 → 每格高频改区域」无专项实测</strong>；既有设计约束反而是 <code>docs/26:249</code>「不要逐帧调用」与 <code>:450</code>「刻意不接平移过程」。</div>
+  </div></div>
+
+  <!-- ═══ 四 ═══ -->
+  <h2>四、分功能可行性与改动方案</h2>
+
+  <!-- 4.1 -->
+  <div class="feat">
+    <div class="feat-head"><span class="no">4.1</span><h3>AB 竖分（AbVertical）</h3><span class="pill p-ok">可行</span><span class="pill p-part">待定 A/B</span><span class="effort">第三期 · ~40 行</span></div>
+    <div class="desc">使 AB 支持上下分栏。框架层（<code>SplitAxis.Y</code>、<code>CursorY</code>、覆盖层分支）<strong>全部就绪</strong>，缺的只是把「竖」这个概念接进去。<strong>有两条路径，推荐 A。</strong></div>
+    <dl>
+      <dt>路径抉择</dt><dd><strong>A（推荐）· 加枚举值 <code>AbVertical</code></strong> —— 复用 <code>ComputeCells</code>，符合单一实现原则；代价是必须把 <code>CoerceMode</code> 改为集合判定（发现 4），并手动补单测（现有测试不覆盖新增枚举值）。<br><strong>B · 在额外模式内部自持分割轴</strong> —— 不动 <code>CompareMode</code>，隔离性好；代价是格表逻辑出现<strong>两份实现</strong>，正是项目元发现 1 要避免的形态。<br>下方「必须改 / 建议改 / 无需改」清单按<strong>路径 A</strong>列出。</dd>
+      <dt>必须改</dt><dd><strong>①</strong> <code>ComputeCells</code>(CompareLayout.cs:151) 加分支 —— 否则落进 <code>_ =&gt;</code> 被静默画成左右分；<strong>②</strong> <code>HandleAxis</code>(:175) 返回 <code>SplitAxis.Y</code>；<strong>③</strong> <code>CoerceMode</code>/<code>MaxAvailableOrdinal</code>(:120/196) <strong>改为集合判定</strong>（见发现 4，否则 3 路下会被收敛）；<strong>④</strong> <code>EnterSplitMode</code>(axaml.cs:870) 硬编码 <code>CoerceMode(CompareMode.Abcd, count)</code> 取「最大模式」，若新枚举序数最大会被解析成竖分，必须改。</dd>
+      <dt>建议改</dt><dd><code>HandlePosition</code>(:183) 补 <code>(0.5, y)</code>，否则手柄用残留的 X 定位；<code>NotifyCompareMode</code>(axaml.cs:830-835) 补显示名，否则显示成「AB」。</dd>
+      <dt>无需改</dt><dd><code>CellCount</code>（同为 2 格，<code>_ =&gt; 2</code> 天然正确）；<strong><code>LayoutOverlayWindow</code> 零改动</strong>——<code>ApplyDrag</code>(:405-410) 与 <code>CursorFor</code>(:432-437) 已按 <code>SplitAxis</code> 分支，<code>SplitAxis.Y</code> 与 <code>CursorY</code>(:145) 已存在，只要 Core 改对即可（其 <code>Render</code> 与 <code>IsOnHandle</code> 全走 Core 的 <code>ComputeCells</code>/<code>HandlePosition</code>）。</dd>
+      <dt>测试影响</dt><dd><code>ModeSystemTests.cs</code> / <code>CompareLayoutTests.cs</code> <strong>无</strong> <code>Enum.GetValues</code>式遍历，全为显式 InlineData ⇒ 只加枚举值不改 <code>AvailableModes</code> 时测试全绿（即<strong>不覆盖</strong>，需手动补例）。若把竖分加入 2 路集合，<code>ModeSystemTests:20</code> 与 <code>CompareLayoutTests:18</code>（2 路 = <code>{Ab}</code>）会红；<code>ModeSystemTests:81</code> 把 <code>(CompareMode)3</code> 当脏值测收敛，语义需重审。自测 <code>RunCompareModeTestAsync</code>(SelfTest.cs:2169-2178) 遍历 <code>AvailableModes</code>，数据驱动，自动覆盖。</dd>
+    </dl>
+  </div>
+
+  <!-- 4.2 -->
+  <div class="feat">
+    <div class="feat-head"><span class="no">4.2</span><h3>滚轮触发多路同步无缝放大</h3><span class="pill p-ok">可行</span><span class="pill p-part">中风险</span><span class="effort">第二期 · ~100 行</span></div>
+    <div class="desc">把滚轮从「单路 <code>_viewZoom</code>」分流到「多路 <code>SetCompareMagnify</code>」，并实现光标锚点缩放与拖动平移。这是笔记的核心诉求，也是唯一需要触碰高风险路径的功能。</div>
+    <dl>
+      <dt>分流点</dt><dd><code>OnSurfaceWheel</code>(axaml.cs:1250-1255) 现为 <code>_viewZoom = Clamp(_viewZoom*factor, 1f, 32f); ApplyViewTransform();</code>。<code>_compareActive</code> 为真时改走 <code>SetCompareMagnify</code>。当前 zoom 可读 <code>Grid.CellMagnify?.Zoom</code>（CompareGridView.cs:192 public getter）；建议仿 CompareCrop.cs:98 增加 <code>internal double CompareZoom =&gt; _compareZoom;</code>。</dd>
+      <dt>锚点换算</dt><dd><strong>现成可复用</strong>：<code>MapPointerToVideoPixel(surface, session, local)</code>(axaml.cs:1844) → <code>VideoPixelMap.MapToSource</code>(:1867)，<strong>已处理 letterbox</strong>（落在黑边返回 null，:1865），无 RT 信息时走 <code>MapFallback</code>(:1858)。得到源像素后除以 <code>media.VideoWidth/Height</code> 即归一化 u/v。命中哪一路用 <code>HitCompareCellAt</code>(:1195-1212)，且 <code>HitSurfaceAt</code>(:1173) 在放大态已自动切到它。<br><strong>需新写</strong>：以光标为锚点的公式 <code>newCropX = u - (u - cropX)/z</code>，再钳到 <code>[0, MaxCropFraction(z)]</code>(CompareCropPlanner.cs:180)。</dd>
+      <dt>平移</dt><dd><strong>不能复用</strong>现有 <code>OnSurfacePress</code>/<code>OnSurfaceMove</code>（:1268/:1284-1299）——它们改 <code>_viewPanX/Y</code> 走内核 <code>SetViewTransform</code>。CompareCrop.cs:344-348 注释明确「平移/裁剪参数本身是显式设置一次的量，不是拖动量」。⇒ 应改 <code>_compareCropX/Y</code> 后<strong>松手时提交一次</strong> <code>SetCompareMagnify</code>，不逐帧。</dd>
+      <dt>退出</dt><dd><code>SetCompareMagnify</code> 中 <code>zoom &lt;= 1.0</code> 会 <code>ResetCompareMagnify()</code> 且<strong>返回 true</strong>（CompareCrop.cs:124-128）；滚轮缩到底显式传 1.0 即可。退出对比模式时 <code>ExitCompareMode</code>(axaml.cs:718) 已复位。</dd>
+      <dt>闸门刷屏</dt><dd>两道闸门 <code>MaxCompareZoom=4.0</code>(:65)、<code>CompareMagnifyPixelBudget≈66.4 Mpx</code>(:80)。拒绝走 <code>RejectCompareMagnify</code>(:278-285) 写状态栏。<strong>去重字段 <code>_compareMagnifyBudgetNote</code>(:95) 只服务于 <code>BuildCellMagnify</code> 的布局复核</strong>（:210-217，指纹 <code>{zoom}@{Mpx}</code>），对「滚轮每格 zoom 都变」<strong>无效 ⇒ 会刷屏，需新增针对滚轮的去重</strong>。</dd>
+      <dt>落地延迟</dt><dd><code>HwndMatchesPixels</code>(:501-507) + 重试上限 8 拍（:476-490）。每次 <code>SetCompareMagnify</code> 把计数归零(:153) ⇒ 不会累积到放弃；<code>ScheduleCompareCrop</code> 有 <code>_compareCropScheduled</code> 合并(:327) ⇒ 同一轮只排一个任务。滚轮每格仍需 1~2 拍落地。</dd>
+      <dt>自测缺口</dt><dd>现有覆盖：闸门( SelfTest.cs:3094-3119 )、放大五项断言(:3142-3268，含 letterbox 修正)、复位(:3290-3306)、<code>--magnifybench</code>(:2394-2543)。<strong>需补</strong>：① 滚轮→<code>SetCompareMagnify</code> 链路（现有滚轮断言 :1446-1468 只验 <code>_viewZoom</code>）；② 光标→cropX/cropY 锚点换算；③ 连续滚轮每格收敛（Bounds/HWND/区域三一致）；④ 放大态拖动平移；⑤ 拒绝提示不刷屏。</dd>
+    </dl>
+  </div>
+
+  <!-- 4.3 -->
+  <div class="feat">
+    <div class="feat-head"><span class="no">4.3</span><h3>AB 左右互换（最小版「选源」）</h3><span class="pill p-ok">可行</span><span class="pill p-info">低风险</span><span class="effort">第一期 · ~25 行</span></div>
+    <div class="desc">若「下拉框选源」的最低可接受形态只是「AB 两路能互换」，存在一条几乎无侵入的路径。</div>
+    <dl>
+      <dt>方案</dt><dd>不动 surface↔slot 映射，只在 <code>ApplyCompareLayout</code>(axaml.cs:640-662) 产出格表时做<strong>格置换</strong>——交换 <code>cells[0]</code>/<code>cells[1]</code> 的矩形（如 <code>new CellRect(1-x,0,x,1)</code>）。改动集中在 MainWindow 一处。</dd>
+      <dt>不能复用</dt><dd><code>AbSliderView.cs:17</code> 的 <code>_aIndex/_bIndex</code> 与 <code>SetPair</code>(:101-105) <strong>不能复用</strong>：类注释 :12-13 明说它是「合成渐变占位 + 路号标签，真实画面为子 HWND 无法合成进本视图」；MainWindow.axaml.cs:258 的订阅是空实现，<code>SetPair</code> 只改角标签。MainWindow.CompareOverlay.cs:16 称其为「此前的」方案。仓库内<strong>无</strong> <code>_comparePair</code> 字段。</dd>
+    </dl>
+  </div>
+
+  <!-- 4.4 -->
+  <div class="feat">
+    <div class="feat-head"><span class="no">4.4</span><h3>每格下拉框选源（完整路→格映射）</h3><span class="pill p-part">可行但重</span><span class="pill p-part">中高风险</span><span class="effort">第三期 · ~200+ 行</span></div>
+    <div class="desc">真正的「任意路 → 任意格」映射。可行，但要动的地方横跨排版、裁剪、命中测试、自测四处。</div>
+    <dl>
+      <dt>UI 载体</dt><dd>沿用既有覆盖窗口方案：独立无边框透明 <code>Window</code>，<code>TransparencyLevelHint=Transparent</code>、<code>Topmost=false</code>、<code>ShowActivated=false</code>、<code>ShowInTaskbar=false</code>、<code>Focusable=false</code>（LayoutOverlayWindow.cs:19-27、150-171）；<code>Owner = host</code> 显式设(:194)；跟随订阅 <code>host.PositionChanged/SizeChanged/ScalingChanged</code> + anchor 的 <code>BoundsProperty</code>（:252-287）；屏幕矩形用 <code>anchor.PointToScreen</code> 算（:290-340）；命中用 <code>WM_NCHITTEST</code> 钩子，只在控件矩形内返 <code>HTCLIENT</code>、其余 <code>HTTRANSPARENT</code>（:521-532、:584-597）。<code>FloatingTransportWindow.cs:26-27/411-421</code> 已证明<strong>按钮/ComboBox 在此方案下可交互</strong>。</dd>
+      <dt>必须改</dt><dd>引入 <code>routeOfCell[]</code>，波及：<code>CompareGridView.ArrangeOverride/MeasureOverride</code>(:244-257)、<code>HitCompareCellAt</code>(axaml.cs:1206-1210)、CompareCrop.cs:238/378（按 i 下发 <code>SetWindowRgn</code>）、<code>CellMagnify.SourceOf(i)</code>(CompareGridView.cs:33，索引语义是<strong>路号</strong>)、SelfTest <code>AssertCellsDriveLayout</code>(:2683+)。<code>_surfaceAt</code> 打开逻辑不受影响（只按 <code>_sync.Count</code> 顺序追加）。</dd>
+      <dt>建议</dt><dd><strong>先做 4.3 的互换，验证「选源」这个交互本身是否被需要</strong>，再决定是否投入完整映射。</dd>
+    </dl>
+  </div>
+
+  <!-- 4.5 -->
+  <div class="feat">
+    <div class="feat-head"><span class="no">4.5</span><h3>ABC 三列</h3><span class="pill p-part">可行但重</span><span class="pill p-part">中风险</span><span class="effort">第三期 · 需扩展 SplitParams</span></div>
+    <div class="desc">受硬约束，成本高于其表面复杂度。两种方案代价接近，都绕不开扩展 <code>SplitParams</code>。</div>
+    <dl>
+      <dt>硬约束</dt><dd><code>SplitParams(double X, double Y)</code>(CompareLayout.cs:37) 只有 2 个自由度，三列需两条竖分割线（x1、x2）。</dd>
+      <dt>方案 A</dt><dd>新枚举值 <code>AbcColumns</code>：<code>ComputeCells</code> 签名不变（隔离性好），但 <code>AvailableModes</code>/<code>CoerceMode</code> 的前缀假设必须改（同发现 4），且手柄轴要支持「两条竖线」，<code>HandleAxis</code>/<code>HandlePosition</code> 的<strong>单值模型不够</strong>。</dd>
+      <dt>方案 B</dt><dd>给 <code>CompareMode</code> 加「变体」字段：<code>ComputeCells(mode, split)</code> 调用点全要加参数 —— MainWindow.axaml.cs:647/1205、CompareCrop.cs:238/378、LayoutOverlayWindow.cs:472、SelfTest 多处 + MagnifierOverlayWindow 相关，约 8 处。</dd>
+      <dt>判断</dt><dd>方案 A 隔离性更好（不动既有签名），但两者都要先扩展 <code>SplitParams</code>，<strong>工作量接近</strong>。建议放最后做。</dd>
+    </dl>
+  </div>
+
+  <!-- 4.6 -->
+  <div class="feat">
+    <div class="feat-head"><span class="no">4.6</span><h3>按路数自动进入对比模式</h3><span class="pill p-ok">可行</span><span class="pill p-info">低风险</span><span class="effort">第一期 · ~5 行（+设置项 15 行）</span></div>
+    <div class="desc">规则已存在于 <code>AvailableModes</code>，只差「打开文件时触发」这一句接线。</div>
+    <dl>
+      <dt>方案</dt><dd>复用 <code>onAllOpened</code> 时机：现为 <code>OpenFiles(paths, autoPlay:false, onAllOpened: TryAutosave)</code>(axaml.cs:438)，改成 <code>() =&gt; { TryAutosave(); EnterSplitMode(); }</code>。此刻路数已准确。<code>EnterSplitMode</code>:864 自带 <code>AvailableModes(_sync.Count).Count == 0</code> 守卫，安全。</dd>
+      <dt>为何不能简单加在末尾</dt><dd><code>OpenPaths</code> 末尾（:439 <code>UpdateStatus()</code> 前）直接调 <strong>不可靠</strong>：此处 <code>_sync.Count</code> 仍是打开前的值（:415-424 只是预建 Grid），而 <code>OpenFiles</code> 是 <code>async void</code>(PlaybackCoordinator.cs:552)。</dd>
+      <dt>已知副作用</dt><dd>已有 2 路再拖 1 路时，target 由 Ab 变 Abc ⇒ 命中 <code>EnterCompareMode</code>:601 的 <code>_compareSplit = SplitParams.Default(...)</code>，<strong>把用户已拖好的分割位置重置</strong>（<code>EnterSplitMode</code>:871 的「已是目标模式不重进」保护挡不住「模式真的变了」这种情况）。若要保住分割位置需额外处理。</dd>
+      <dt>若做成设置项</dt><dd><code>AppSettings</code> 加属性即可，<strong>不必动 <code>Normalize</code>/<code>CurrentVersion</code></strong>（先例：<code>TimelineCollapsed</code> AppSettings.cs:124-126、<code>FloatingTransport</code> :131-138，注释均写「bool 无越界值」）。<strong>但必须改 <code>SettingsWindow.cs</code> 两处深拷贝（:94 与 :340）</strong>——<code>docs/30:120</code> 记录「漏一处则『确认设置』会静默写回默认值」。另需：菜单项 + <code>Refresh*Checks</code>（仿 axaml.cs:1993-1999）、<code>LanguageManager</code> 中英双表（:191/:401 样式）。<code>SettingsMigrationTests</code> 只测几何迁移(:14-60)，新 bool 默认 false 不触发迁移，<strong>不必改</strong>。</dd>
+    </dl>
+  </div>
+
+  <!-- 4.7 -->
+  <div class="feat">
+    <div class="feat-head"><span class="no">4.7</span><h3>「分辨率一致」= 放大一致</h3><span class="pill p-ok">已澄清 · 零成本</span><span class="pill p-ok">无需改代码</span></div>
+    <div class="desc">你澄清的语义是「<strong>放大倍数一致</strong>」——即各路同步放大，而不是「像素级对齐 / 同尺寸源区域」。该语义<strong>现有实现已完全满足</strong>，本项不产生任何工作量。</div>
+    <dl>
+      <dt>为什么已满足</dt><dd><strong>两个机制叠加即可保证</strong>：<strong>①</strong> 所有路<strong>共用同一个</strong> <code>zoom</code> / <code>cropX</code> / <code>cropY</code> —— CompareCrop.cs:103-105 注释原话「所有路共用同一个 <code>zoom</code>/<code>cropX</code>/<code>cropY</code> ⇒ 各路露出的是各自画面中相同的相对位置（无缝）」；<strong>②</strong> <code>cropX/cropY</code> 是<strong>源画面归一化坐标</strong>(CompareCrop.cs:112-113)，与源分辨率无关。<br>⇒ 1080p 与 4K 两路会被放大<strong>相同的倍数</strong>、露出示意<strong>相同的相对区间</strong>。这正是笔记「① 拉齐 ② 同步放大 ③ 裁切」的描述。</dd>
+      <dt>不需要做的</dt><dd><strong>像素级对齐</strong>（以某一路为基准反算其余路 crop，使露出的源像素尺寸相同）——该语义<strong>已被排除</strong>，仓库内亦无任何实现或预留，无需投入。</dd>
+      <dt>仍需留意</dt><dd><code>ReadCompareMagnifySources()</code>(CompareCrop.cs:254-275) 读不到源尺寸（演示模式/纯音频）时记 <code>(0,0)</code>(:265) ⇒ 按「铺满」换算 ⇒ <strong>该路会露出不同源区间</strong>（<code>docs/26:643-650</code> 的 8:3 vs 3:8 反例）。且<strong>只在启用时读一次(:151)，增删路数不刷新</strong>——<code>docs/41:119</code> 已列为 R7 缺陷。这不阻塞本期，但会削弱「放大一致」的实际观感，建议列入二期收尾。</dd>
+    </dl>
+  </div>
+
+  <!-- 4.8 -->
+  <div class="feat">
+    <div class="feat-head"><span class="no">4.8</span><h3>架构定位：作为独立于传统模式的「额外模式」</h3><span class="pill p-ok">已按你的说明确定</span><span class="pill p-ok">规避两个陷阱</span><span class="effort">第一期 · ~30 行</span></div>
+    <div class="desc">你明确：这套能力应作为<strong>一个额外模式</strong>存在，与传统模式不同。据此，实现方案从「扩展 <code>CompareMode</code> 枚举」改为「<strong>新增并列的独立模式开关</strong>」——这不仅贴合你的定位，还顺带规避了 4.1 的两个陷阱。</div>
+    <dl>
+      <dt>传统 vs 额外</dt><dd><strong>传统模式</strong>＝现有 <code>CompareMode</code> 体系（均匀网格 / AB·ABC·ABCD 分屏 / 叠加），语义是「<strong>各路画面完整显示在各自格子里</strong>」。<br><strong>额外模式</strong>＝在既有分格之上叠加「<strong>各路同步放大到同一画面区间，再裁切出格子</strong>」——这正是 <code>SetCompareMagnify</code> 的现成语义（CompareCrop.cs:29-34「启用放大：子窗口被排成格的 z 倍并偏移到让目标画面块对齐到格」）。<strong>两者的区别恰在于「是否放大裁切」，与你的描述一致。</strong></dd>
+      <dt>推荐形态</dt><dd><strong>上层独立、底层复用</strong>：额外模式表现为<strong>一个与传统模式并列的独立开关/入口</strong>；但分格计算<strong>继续复用 <code>CompareLayout.ComputeCells</code></strong>，不另写一套。</dd>
+      <dt>为何不另起炉灶</dt><dd>项目有一条已归档的教训（元发现 1）：<strong>多处缺陷源于同一功能存在两份实现、其中一份是错的 ⇒ 收敛到单一实现</strong>。若额外模式自持格表逻辑，就正好制造了两份分格实现——这是明确要避免的形态。</dd>
+      <dt>净收益</dt><dd>「与传统模式不一样」体现在<strong>上层语义</strong>（同步放大裁切 vs 各路完整显示）与<strong>UI 入口独立</strong>；而底层格表、手柄、覆盖层继续共用。<strong>直接收益</strong>：额外模式的开关与参数（zoom / crop / 方向）自成一组状态，<strong>不必挤进 <code>CompareMode</code> 枚举</strong>，从而规避下面两个陷阱。</dd>
+      <dt>规避陷阱 ①</dt><dd><strong>不必改 <code>CoerceMode</code></strong> —— 序数前缀判定（发现 4）只在枚举<strong>新增值</strong>时才出问题；枚举不动即不受影响。</dd>
+      <dt>规避陷阱 ②</dt><dd><strong>不再有无编译期警告的静默失败</strong> —— 三处 <code>switch</code> 兜底（发现 5）同样只在新增枚举值时才构成风险。且现有 <code>ModeSystemTests</code> / <code>CompareLayoutTests</code> <strong>完全不受影响</strong>。</dd>
+      <dt>留给 4.1 的抉择</dt><dd>AB 上下分仍需在<strong>两条路径</strong>中选一（详见 4.1 修订）：<strong>A</strong> 加 <code>AbVertical</code> 枚举值（复用 <code>ComputeCells</code>，代价是要改 <code>CoerceMode</code> 为集合判定 + 手动补单测）；<strong>B</strong> 在额外模式内部自持分割轴（不动枚举，代价是格表出现两份实现）。<strong>推荐 A</strong>——单一实现原则优先，且 A 的两个代价都是可控的一次性成本。</dd>
+      <dt>需确认</dt><dd>该额外模式与现有「叠加模式（S 键）」<strong>互斥</strong>——CompareCrop.cs:203-205 <code>BuildCellMagnify</code> 已有守卫 <code>_compareOverlayActive</code> 时返回 null，注释明「放大是窗口大于格 + 裁出格，叠加是两窗铺满 + 裁出半区，语义互斥」。若额外模式要保持此互斥，无需改代码；若要允许叠加共存，则需重新设计裁剪语义（成本显著上升，不建议）。</dd>
+    </dl>
+  </div>
+
+  <!-- ═══ 五 ═══ -->
+  <h2>五、风险清单</h2>
+  <p class="lead">按等级排列。<span class="pill p-no">高</span> 需先专项实测才能动工；<span class="pill p-part">中</span> 需在实现时同步补自测；<span class="pill p-ok">低</span> 按既有模式实现即可。</p>
+
+  <div class="risk r-hi">
+    <div class="rt"><span class="pill p-no">高</span>改区域后立即 ResizeBuffers ⇒ DXGI_ERROR_INVALID_CALL</div>
+    <div class="rb"><strong>影响功能：</strong>4.2 滚轮放大。<code>docs/26:244-246</code> 实测记录，建议顺序「先清区域 → ResizeBuffers → 重设区域」。滚轮放大同时改子窗口尺寸与裁剪区域，<strong>正好命中该组合</strong>。这是全报告唯一被实测标记为失败的操作序列。</div>
+    <span class="src">证据：docs/26:244-246</span>
+  </div>
+
+  <div class="risk r-hi">
+    <div class="rt"><span class="pill p-no">高</span>新增枚举值无编译期保护，漏改分支静默失败</div>
+    <div class="rb"><strong>影响功能：</strong>4.1 AB 竖、4.5 ABC 三列。三处 <code>switch</code> 均带 <code>_ =&gt;</code> 兜底，C# 不报 CS8509。漏改 <code>ComputeCells</code> 的表现是「竖分画成左右分」——看起来像实现了但方向错。<strong>必须靠单测补覆盖</strong>（现有测试无 <code>Enum.GetValues</code> 遍历，不覆盖新增值）。</div>
+    <span class="src">证据：CompareLayout.cs:151/175/183；ModeSystemTests.cs:20/81、CompareLayoutTests.cs:18</span>
+  </div>
+
+  <div class="risk r-md">
+    <div class="rt"><span class="pill p-part">中</span>滚轮高频改区域未实测</div>
+    <div class="rb"><strong>影响功能：</strong>4.2。既有设计约束明确反对逐帧：<code>docs/26:249</code>「每次布局变化都要重设…<strong>不要逐帧调用</strong>」、<code>:450</code>「刻意不接平移过程」。虽 <code>SetWindowRgn</code>×flip-model 本身已实测安全（<code>docs/26:476-492</code>，Present 344 次 0 失败），但<strong>连续高频改区域无专项实测</strong>；<code>ApplyCropRegion</code>(CompareCrop.cs:545-558) 的去重条件 <code>prev.Region == region</code> 在滚轮每格区域必变时<strong>完全失效</strong>。</div>
+    <span class="src">证据：docs/26:249/450/476-492；CompareCrop.cs:545-558</span>
+  </div>
+
+  <div class="risk r-md">
+    <div class="rt"><span class="pill p-part">中</span>滚轮连续缩放会刷屏「拒绝放大」提示</div>
+    <div class="rb"><strong>影响功能：</strong>4.2。<code>_compareMagnifyBudgetNote</code>(CompareCrop.cs:95) 的去重只服务于 <code>BuildCellMagnify</code> 布局复核（指纹 <code>{zoom}@{Mpx}</code>，:210-217），对「每格 zoom 都变」无效 ⇒ 需新增针对滚轮的去重。</div>
+    <span class="src">证据：CompareCrop.cs:95/210-217/278-285</span>
+  </div>
+
+  <div class="risk r-md">
+    <div class="rt"><span class="pill p-part">中</span>覆盖窗口上的 ComboBox 交互「未实测」</div>
+    <div class="rb"><strong>影响功能：</strong>4.4。三项文档均标为待做：<code>docs/30:108/135/186-190</code>、<code>docs/31:361-363</code>、<code>docs/42:63</code>。虽 <code>FloatingTransportWindow</code> 已有先例，但下拉弹窗（独立 Popup）在 <code>WS_EX_NOACTIVATE</code> 覆盖窗上的行为<strong>未经真机验证</strong>。</div>
+    <span class="src">证据：docs/30:108/135/186-190；docs/31:361-363；docs/42:63</span>
+  </div>
+
+  <div class="risk r-md">
+    <div class="rt"><span class="pill p-part">中</span>自动进模式会重置用户已拖好的分割线</div>
+    <div class="rb"><strong>影响功能：</strong>4.6。已有 2 路再拖 1 路时 target 由 Ab 变 Abc ⇒ 命中 <code>EnterCompareMode</code>:601 的 <code>_compareSplit = SplitParams.Default(...)</code>。<code>EnterSplitMode</code>:871 的「已是目标模式不重进」保护挡不住模式真的变了这种情况。</div>
+    <span class="src">证据：MainWindow.axaml.cs:601/871</span>
+  </div>
+
+  <div class="risk r-md">
+    <div class="rt"><span class="pill p-part">中</span>MagnifySources 不随增删路数刷新（R7 现存缺陷，会被 4.4 放大）</div>
+    <div class="rb"><strong>影响功能：</strong>4.4（及 4.2 的边缘情形）。<code>docs/41:119</code> 已列为 R7：放大后增删路数不刷新 <code>ReadCompareMagnifySources</code>；另 <code>CompareCrop.cs:518-528</code> 在 9→2 路后对陈旧 HWND 误清活窗口区域。「每格改源」功能会让路↔格关系动态变化，<strong>直接放大此缺陷</strong>。</div>
+    <span class="src">证据：docs/41:119；CompareCrop.cs:151/518-528</span>
+  </div>
+
+  <div class="risk r-lo">
+    <div class="rt"><span class="pill p-ok">低</span>RTSS 崩溃 —— 判定为不受新功能影响，但须实测确认</div>
+    <div class="rb">定案见 <code>docs/43:12/29-30/143-144/171</code>：RTSS 5 字节钩子非原子写 + 跳板悬空，<strong>唯一杠杆是交换链数 N</strong>（λ 与装卸循环 C 均已证伪）。<code>docs/25:67-71</code> 每会话独立 device+swapchain，<code>docs/26:557-563</code> 放大只改子窗口物理尺寸不改路数 ⇒ <strong>推断 AB 竖 / 无缝放大不新增交换链，N 不变</strong>。但按项目约定「环境结论必须实测，不得推理」，且需按 <code>docs/43 §八</code> 做<strong>同批次交替 A/B</strong>（<code>docs/45:140</code> 明确要求）。</div>
+    <span class="src">证据：docs/43:12/29-30/171；docs/26:557-563；docs/45:140</span>
+  </div>
+
+  <div class="risk r-lo">
+    <div class="rt"><span class="pill p-ok">低</span>设置项漏改 SettingsWindow 第二处深拷贝</div>
+    <div class="rb"><strong>影响功能：</strong>4.6（若做成设置项）。<code>docs/30:120</code> 明确记录「漏一处则『确认设置』会<strong>静默</strong>写回默认值」——静默是关键词，表现为「设置存不住」且难以归因。改 :94 与 :340 两处即可规避。</div>
+    <span class="src">证据：docs/30:120；SettingsWindow.cs:94/340</span>
+  </div>
+
+  <!-- ═══ 六 ═══ -->
+  <h2>六、分期实施建议</h2>
+  <p class="lead">按「<strong>先立骨架 → 再填核心 → 最后扩展</strong>」排序。第一期<strong>不触碰内核</strong>；高频 <code>SetWindowRgn</code> 路径只在第二期出现，且<strong>必须先完成专项实测</strong>。</p>
+
+  <div class="phase">
+    <div class="phase-h"><h3>第一期 · 立起「额外模式」骨架 + 低风险接线</h3><span class="pill p-ok">建议先做</span><span class="effort">约 90 行</span></div>
+    <div class="goal">目标：先按 4.8 把额外模式作为<strong>可开关的独立入口</strong>立起来（此时可以还不具备放大能力），再把改动面极小的项一并做完。</div>
+    <ul>
+      <li><strong>额外模式的独立开关与 UI 入口</strong>（4.8）—— 新增与传统模式并列的模式位 + 菜单项；<strong>确认与叠加模式互斥</strong>（<code>BuildCellMagnify</code> CompareCrop.cs:203-205 已有守卫，保持互斥则零改动）。<span class="effort">~30 行</span></li>
+      <li><strong>AB 左右互换</strong>（4.3）—— 格置换，用于验证「选源」交互是否真的被需要。<span class="effort">~25 行</span></li>
+      <li><strong>按路数自动进对比模式</strong>（4.6）—— 复用 <code>onAllOpened</code>；若做成设置项，务必改 <code>SettingsWindow</code> <strong>两处</strong>深拷贝（:94 与 :340）。<span class="effort">~5 行 + 15 行</span></li>
+    </ul>
+  </div>
+
+  <div class="phase">
+    <div class="phase-h"><h3>第二期 · 填入核心能力（需先做专项实测）</h3><span class="pill p-part">价值最高</span><span class="effort">约 100 行 + 实测</span></div>
+    <div class="goal">目标：把笔记最核心的「同步放大 + 裁切出 AB」接上线 —— 这是额外模式的实质能力。<strong>动工前必须先完成一项实测。</strong></div>
+    <ul>
+      <li><strong>前置实测（阻塞项）</strong>：验证「改区域 → 改窗口尺寸（swapchain resize）」组合，确认 <code>docs/26:244-246</code> 的 <code>DXGI_ERROR_INVALID_CALL</code> 能否用「先清区域 → resize → 重设区域」规避。若规避不了，滚轮放大需改为「先复位 → 再设新倍率」的两段式提交。</li>
+      <li><strong>滚轮分流 + 光标锚点缩放</strong>（4.2）—— 复用 <code>MapPointerToVideoPixel</code>(axaml.cs:1844)，新写锚点公式 <code>u - (u-cropX)/z</code> 并钳到 <code>MaxCropFraction(z)</code>(CompareCropPlanner.cs:180)。</li>
+      <li><strong>拖动平移</strong>—— 松手时提交一次，<strong>不逐帧</strong>（CompareCrop.cs:344-348 的明确约束）。</li>
+      <li><strong>拒绝提示去重</strong>—— 现有 <code>_compareMagnifyBudgetNote</code>(CompareCrop.cs:95/210-217) 对滚轮无效，需补。</li>
+      <li><strong>补 5 条自测断言</strong>（链路 / 锚点 / 连续收敛 / 平移 / 不刷屏），每条按项目约定做<strong>反向验证</strong>（摘掉修复 → 判红 → 恢复）。</li>
+      <li><strong>收尾修 R7</strong>（推荐）—— <code>MagnifySources</code> 不随增删路数刷新（<code>docs/41:119</code>）；源尺寸读不到时该路会露出不同区间，<strong>直接削弱「放大一致」的实际观感</strong>。</li>
+    </ul>
+  </div>
+
+  <div class="phase">
+    <div class="phase-h"><h3>第三期 · 扩展项（视拍板结果而定）</h3><span class="pill p-no">可延后</span><span class="effort">视范围而定</span></div>
+    <div class="goal">目标：补齐剩余能力。<strong>本期每一项都取决于第八章的拍板结果 —— 不拍板就不动工。</strong></div>
+    <ul>
+      <li><strong>AB 竖分</strong>（4.1）—— 待确认路径 A / B。选 A 则需把 <code>CoerceMode</code> 改为集合判定 + 手动补单测（现有测试不覆盖新增枚举值）；选 B 则在额外模式内自持分割轴。<span class="effort">~40 行</span></li>
+      <li><strong>完整路→格映射</strong>（4.4）—— <strong>仅在 4.3 验证「互换不够用」后才做</strong>。引入 <code>routeOfCell[]</code>，横跨排版 / 裁剪下发 / 命中测试 / <code>CellMagnify.SourceOf</code> / 自测五处；<strong>前置</strong>是先修 R7，否则该缺陷会被常态化。<span class="effort">200+ 行</span></li>
+      <li><strong>ABC 三列</strong>（4.5）—— 若「3×3」确认指网格模式则<strong>整项取消</strong>；若确需三列，必须先扩展 <code>SplitParams</code> 到 3 自由度，且手柄模型从「单值」升级为「两条竖线」。</li>
+    </ul>
+  </div>
+
+  <!-- ═══ 七 ═══ -->
+  <h2>七、实施时必须遵守的项目约定</h2>
+
+  <div class="warnbox">
+    <b>提交时机由用户决定。</b>历史上有擅自分 5 笔提交被撤回的记录（<code>git reset --soft a78b02a</code>）。本报告只做评估，<strong>不擅自提交任何改动</strong>。另：禁用 <code>git stash</code>（曾丢 28 提交）。
+    <span class="src">证据：docs/17:37；docs/13:98；MEMORY.md:9</span>
+  </div>
+
+  <ul class="plain">
+    <li><strong>新增断言必须反向验证</strong>：摘掉修复 → 重跑 → 判红 → 恢复。只看变绿等于没验证。<span class="src" style="display:inline">docs/14:232、docs/15:206、MEMORY.md:13</span></li>
+    <li><strong>A/B 实测必须同批次交替对照</strong>：基线事件率 &lt;20% 不下结论；8 路基线 56%~100% 波动，只比相对差。<span class="src" style="display:inline">docs/43 §八、docs/45:140、MEMORY.md:7</span></li>
+    <li><strong>环境结论必须实测，不得推理</strong>：曾误判「本机无 HDR」「无 FFmpeg」「沙箱限制」。本报告中标注为【推断】的两条（RTSS 不受影响、高频改区域风险）都需实测。<span class="src" style="display:inline">MEMORY.md:8/15（⚠ 该条只在记忆文件中，docs 内无原句）</span></li>
+    <li><strong>验证 Release 必须显式带 <code>-c Release</code></strong>：默认输出到 <code>bin\Debug</code>，而门禁与实机跑 <code>bin\Release</code>。<span class="src" style="display:inline">docs/46:98、MEMORY.md:20</span></li>
+    <li><strong>颜色一律走 <code>ColorNormalizer.ToDisplay8Bit</code>，禁止再写 <code>v*255</code></strong>：SDR 回读是 gamma 编码、HDR 是线性 scRGB，同值含义不同。<span class="src" style="display:inline">MEMORY.md:10；docs/45:59-60/195</span></li>
+    <li><strong>若需新增内核参数</strong>：API 版本现为 15（三处一致：<code>PlayerApi.cpp:12</code> / <code>FFF.Native.rc:7</code> VER_API / <code>Fff3FpEngine.cs:12</code> <code>ConfigVersion</code>），且 <code>FFF3FP_Create</code> 对 version <strong>严格相等</strong> ⇒ 新字段只能追加到结构体末尾，并需独立 PR 递增 + 重编译内核。<strong>本报告第一、二期方案均不需要动内核</strong>。<span class="src" style="display:inline">docs/23:338；docs/25:197/264；docs/46:23</span></li>
+    <li><strong>覆盖窗口必须 <code>Owner</code> 而不能用 <code>Topmost</code></strong>；<code>Owner</code> 是 Avalonia 受保护成员，外部赋值会 CS1540，须窗口自曝 <code>SetOwner</code>。<span class="src" style="display:inline">docs/30:107/114；docs/31:353；docs/46:31/103</span></li>
+  </ul>
+
+  <!-- ═══ 八 ═══ -->
+  <h2>八、已澄清项与仍需拍板项</h2>
+
+  <div class="note">
+    <p><b>✅ 已澄清 ①：「分辨率一致」= 放大一致</b><br>
+    语义确认为各路<strong>放大倍数一致</strong>（同步放大），非像素级对齐。该语义由「所有路共用同一 zoom/crop」+「crop 为源画面归一化坐标」两个机制天然保证（CompareCrop.cs:103-105、:112-113）⇒ <strong>零工作量，4.7 关闭</strong>。</p>
+
+    <p style="margin-top:12px"><b>✅ 已澄清 ②：作为独立于传统模式的额外模式</b><br>
+    采纳「<strong>上层独立、底层复用</strong>」形态 —— 额外的独立开关/入口 + 继续复用 <code>CompareLayout</code> 格表（避免两份实现）。详见 4.8。此项使 AB 竖分<strong>不再必须</strong>挤进 <code>CompareMode</code> 枚举，从而规避「序数前缀收敛」与「新增枚举无编译警告」两个陷阱。</p>
+  </div>
+
+  <div class="warnbox">
+    <p><b>❓ 仍需拍板 ①：AB 竖分走路径 A 还是 B？（唯一的架构级抉择）</b><br>
+    <strong>A（本报告推荐）</strong>加 <code>AbVertical</code> 枚举值 —— 复用 <code>ComputeCells</code>，符合单一实现原则；代价是必须把 <code>CoerceMode</code> 改为集合判定（发现 4）+ 手动补单测（现有测试不覆盖新增值）。<br>
+    <strong>B</strong> 在额外模式内部自持分割轴 —— 不动 <code>CompareMode</code>，与传统模式代码上完全解耦；代价是格表逻辑出现<strong>两份实现</strong>，正是项目元发现 1 要避免的形态。<br>
+    <strong>我推荐 A</strong>；但若你希望额外模式与传统模式在<strong>代码层面彻底解耦</strong>（而不仅是 UI 入口独立），则 B 更贴合该意图。</p>
+
+    <p style="margin-top:12px"><b>❓ 仍需拍板 ②：「A/B 下拉框选源」的最低可接受形态</b><br>
+    只需「AB 两路能互换」（4.3，约 25 行、低风险、走格置换），还是完整「任意路 → 任意格」（4.4，200+ 行、横跨排版 / 裁剪下发 / 命中测试 / <code>CellMagnify.SourceOf</code> / 自测五处）？<strong>建议先做前者</strong>验证需求真实强度。</p>
+
+    <p style="margin-top:12px"><b>📌 顺带待定：笔记的「3×3」</b><br>
+    若它指均匀 3×3（9 格），则已被「视图 → 网格布局 → 3x3」预设完整覆盖，<strong>4.5「ABC 三列」可整项取消</strong>，省下扩展 <code>SplitParams</code>（2 自由度硬约束）的成本。此项不影响主架构，可最后再定。</p>
+  </div>
+
+  <footer>
+    3FCompare AB/ABC/ABCD 模式功能可行性报告 · 基线 HEAD 9701578 (v0.2.5) · 2026-09-23<br>
+    本报告全部结论均附 文件:行号 证据；标注【推断】者需实测确认。
+  </footer>
+
+</div>
+</body>
+</html>

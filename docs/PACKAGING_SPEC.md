@@ -2,8 +2,10 @@
 
 > 版本 / Version: 1.1 | 最后更新 / Last updated: 2026-08-19 | 适用于 / Applies to: v0.1.0+
 >
-> **当前项目版本 / Current project version: `v0.2.5`**（2026-09-16 核对：两个 csproj 均为
-> `<Version>0.2.5</Version>` + `<VersionSuffix>BETA</VersionSuffix>`，已与 git tag `v0.2.5` 同步）。
+> **当前项目版本 / Current project version: `v0.3.1-beta`**（2026-09-27 核对：两个 csproj 均为
+> `<Version>0.3.1-beta</Version>`，`<VersionSuffix>` 已按 docs/45 P1-12 移除；git tag `v0.3.1-beta`
+> 随本次发布创建。⚠ `v0.3.0-beta` **从未打过 tag**——0.3.0 的包与文档都在，但没有可回溯的标签，
+> 本次只补 0.3.1，不追溯给旧提交打标签（那会让"tag 指向发布时的树"这条约定失真）。上一有 tag 的版本为 `v0.2.5`。
 
 ---
 
@@ -41,30 +43,38 @@ External tool components are placed in the `PLAN/` subdirectory; the app points 
 ### 2.1 目录结构 / Directory Structure
 
 ```
-3FCompare-v0.1.0-x64-full/
-├── 3FCompare.exe                    ← 主程序（NativeAOT 单文件，内嵌 FFF.Native）
-├── PLAN/                                ← 外部组件根目录
-│   ├── ffmpeg-full/                     ← FFmpeg 预编译 DLL 包（内核配套版本）
-│   │   ├── avcodec-63.dll               ← FFmpeg 编解码库
-│   │   ├── avformat-63.dll              ← FFmpeg 封装格式库
-│   │   ├── avfilter-12.dll              ← FFmpeg 滤镜库
-│   │   ├── avutil-61.dll                ← FFmpeg 工具库
-│   │   ├── swresample-7.dll             ← FFmpeg 音频重采样库
-│   │   ├── swscale-10.dll               ← FFmpeg 图像缩放/色彩转换库
-│   │   └── ass-9.dll                    ← libass 字幕渲染库
-│   └── 使用说明.txt                      ← 用户使用指南（打包时自动生成）
-└── README.md
+3FCompare-v0.3.0-beta-x64-full/
+├── 3FCompare.exe                ← 主程序（NativeAOT 单文件，内嵌播放器内核）
+├── SHA256SUMS                   ← 包内每个文件的 sha256（用户可 `sha256sum -c` 自证）
+├── 使用说明.txt                  ← 用户使用指南（打包时自动生成，位于**包根**，不在子目录里）
+└── ffmpeg-full/                 ← FFmpeg 预编译 DLL 包（内核配套版本，14 个）
+    ├── avcodec-63.dll           ← FFmpeg 编解码库（引擎以它为探测依据）
+    ├── avformat-63.dll          ← FFmpeg 封装格式库
+    ├── avfilter-12.dll          ← FFmpeg 滤镜库
+    ├── avutil-61.dll            ← FFmpeg 工具库
+    ├── avdevice-63.dll          ← FFmpeg 设备库
+    ├── swresample-7.dll         ← FFmpeg 音频重采样库
+    ├── swscale-10.dll           ← FFmpeg 图像缩放/色彩转换库
+    ├── ass-9.dll                ← libass 字幕渲染库
+    └── libc++.dll / libomp.dll / libunwind.dll / libwinpthread-1.dll
+        / libSPIRV-Tools-shared.dll / libshaderc_shared.dll
+                                 ← 上述 FFmpeg/字幕库的间接依赖（缺一即加载失败）
 ```
 
-### 2.2 PLAN 子目录识别规则 / PLAN Subdirectory Detection
+> ⚠ **2026-09-22 修订（docs/45 P1-12）**：旧的这一节画的是 `PLAN/ffmpeg-full/` 与包内 `README.md`，
+> 与实际产物不符——`PLAN\` 只是 `pack.ps1` 的**中间暂存目录**（`publish\PLAN`），
+> 不会出现在发行包里；`README.md` 也从不分发。照旧文档排查"包里缺东西"必然找错位置。
+> 唯一真源是 `SHA256SUMS`：包内容 == 目录内容 == 清单（三条不变式，见 §5）。
 
-程序按以下方式识别 / The app detects PLAN subdirectories as follows:
+### 2.2 FFmpeg 目录识别规则 / FFmpeg Directory Detection
 
-| 子目录 / Subdirectory | 识别条件 / Detection Condition | 使用方式 / Usage |
+程序按以下方式识别 / The app detects the FFmpeg directory as follows:
+
+| 目录 / Directory | 识别条件 / Detection Condition | 使用方式 / Usage |
 |--------|---------|---------|
-| `PLAN/ffmpeg-full/` | 目录存在且含 `avcodec-*.dll` / Exists and contains `avcodec-*.dll` | 设置 F25 → FFmpeg 路径指向此目录 / Point F25 → FFmpeg Path to this directory |
+| `ffmpeg-full/` | 目录存在且含 `avcodec-*.dll` / Exists and contains `avcodec-*.dll` | FFmpeg 路径指向此目录 / Point FFmpeg path to this directory |
 
-> **重要 / Important**: 用户手动设置的 FFmpeg 路径优先级高于 PLAN 自动检测。 / User-configured FFmpeg path takes priority over PLAN auto-detection.
+> **重要 / Important**: 用户手动设置的 FFmpeg 路径优先级高于自动检测。 / User-configured FFmpeg path takes priority over auto-detection.
 
 ---
 
@@ -73,18 +83,20 @@ External tool components are placed in the `PLAN/` subdirectory; the app points 
 ### 3.1 前置准备 / Prerequisites
 
 ```powershell
-# 1. 版本号由 pack.ps1 -p:Version 统一控制（自动覆盖 csproj 中的 <Version>），
-#    无需手动修改 csproj；其中 <Version>/<VersionSuffix> 仅为未传参时的默认值
-#    （SDK 会从 Version+Suffix 自动派生 AssemblyVersion/FileVersion/InformationalVersion）
-#    Version is controlled by pack.ps1 -p:Version (overrides csproj <Version>);
-#    csproj defaults are only fallbacks.
+# 1. 版本号唯一真源 = src/3FCompare/3FCompare.csproj 的 <Version>（不传 -Version 时自动取它）。
+#    pack.ps1 把它以 -p:Version 传给 dotnet publish，全链路生效；<VersionSuffix> **已移除**
+#    （docs/45 P1-12）——带 -BETA 会让门禁/开发的 plain build 与发布包出现两个版本叙事。
+#    Version source of truth = csproj <Version>; pack.ps1 passes it via -p:Version.
+#    <VersionSuffix> was removed: "-BETA" gave dev builds and release packages different versions.
 
-# 2. 确保 FFF.Native 内核已构建（third_party/fff_project/FFF.Native/x64/Release/FFF.Native.dll）
-#    合并使用 tools/构建全部.ps1 一键构建
-#    Ensure FFF.Native is built (use tools/构建全部.ps1 for one-click)
+# 2. 确保播放器内核已构建（FFF.Native.dll）并放到 third_party 的约定位置；
+#    csproj 的 KernelDllPath 指向的那份会被嵌进 exe（发布门禁 [1b/11] 校验这一点）。
+#    Ensure the player kernel is built and placed where csproj KernelDllPath points.
 
-# 3. 准备 PLAN 组件包（third_party/fff_project/runtime/*.dll + ass-9.dll）
-#    Prepare PLAN component package
+# 3. 准备 FFmpeg 组件包：DLL 放入 publish\PLAN\ffmpeg-full\（pack.ps1 的中间暂存目录，
+#    不是发行包内的路径——见 §2.1）。完整版缺了它会在打包时**直接失败**，不静默降级。
+#    Prepare the FFmpeg bundle under publish\PLAN\ffmpeg-full\ (staging dir, NOT the
+#    in-package layout). A missing bundle fails the full-mode build instead of degrading.
 ```
 
 ### 3.2 发布命令 / Publish Commands
@@ -92,44 +104,60 @@ External tool components are placed in the `PLAN/` subdirectory; the app points 
 推荐使用 pack.ps1，一键 2 版本，全部 NativeAOT / Recommended: use pack.ps1 for both variants in one command:
 
 ```powershell
+# ⚠ 一律**不传** -Version：脚本从 csproj 真源派生（§5.2 第 3 条）。
+#    显式传入且与 csproj 不一致只会得到一条告警——历史上 0.2.1 误发就是这么来的。
+
 # 精简版（NativeAOT，不含 PLAN）/ Lite (NativeAOT, no PLAN)
-.\pack.ps1 -Version "0.1.0" -Mode app
+.\pack.ps1 -Mode app
 
 # 完整版（NativeAOT + PLAN 组件包）/ Full (NativeAOT + PLAN bundle)
-.\pack.ps1 -Version "0.1.0" -Mode full
+.\pack.ps1 -Mode full
 
 # 一键全部 2 个版本（默认）/ Both variants (default)
-.\pack.ps1 -Version "0.1.0" -Mode all
+.\pack.ps1 -Mode all
 ```
 
 手动发布命令 / Manual publish (equivalent to pack.ps1):
 
 ```powershell
-# Windows x64 精简版（NativeAOT，内嵌 FFF.Native）/ Lite (NativeAOT, embedded FFF.Native)
+# Windows x64 精简版（NativeAOT）/ Lite (NativeAOT)
 dotnet publish src/3FCompare/3FCompare.csproj `
     -c Release -r win-x64 `
     -p:PublishAot=true `
     -p:SelfContained=true `
-    -p:EmbedFffNative=true `
-    -o publish/build/3FCompare-v0.1.0-x64/
+    -p:WgcCaptureRequired=true `
+    -p:Version=0.3.0-beta -p:VersionSuffix= `
+    --no-restore `
+    -o publish/build/3FCompare-v0.3.0-beta-x64/
 
-# Windows x64 完整版（NativeAOT，另需复制 PLAN/ 目录）/ Full (NativeAOT, plus PLAN/ copy)
+# Windows x64 完整版：publish 命令**完全相同**，差别只在随后把 ffmpeg-full\ 拷进产物目录
+# Full: identical publish command; the only difference is copying ffmpeg-full\ afterwards (§3.3)
 dotnet publish src/3FCompare/3FCompare.csproj `
     -c Release -r win-x64 `
     -p:PublishAot=true `
     -p:SelfContained=true `
-    -p:EmbedFffNative=true `
-    -o publish/build/3FCompare-v0.1.0-x64-full/
+    -p:WgcCaptureRequired=true `
+    -p:Version=0.3.0-beta -p:VersionSuffix= `
+    --no-restore `
+    -o publish/build/3FCompare-v0.3.0-beta-x64-full/
+
+> ⚠ **2026-09-22 修订**：旧文档写的 `-p:EmbedFffNative=true` 在**全仓无任何引用**
+> （`grep -rn EmbedFffNative` 只剩历史文档里的一句迁移记录），是无效开关，照抄不会报错、
+> 也不会生效——典型的"看起来配置了其实没有"。
+> `-p:WgcCaptureRequired=true` 才是真实存在且发布路径**必须**带的：缺 WGC 抓屏库时
+> 它让构建直接 Error，否则用户拿到的是"窗口被遮挡就抓到遮挡物"的静默降级版。
 ```
 
 ### 3.3 组装完整包 / Assemble Full Package
 
 ```powershell
-# 将 PLAN 文件夹复制到完整包目录 / Copy PLAN folder into full package directory
-robocopy publish\PLAN publish\build\3FCompare-v0.1.0-x64-full\PLAN /E
+# 把 ffmpeg-full 拷到产物目录（**包内是 ffmpeg-full\，不是 PLAN\ffmpeg-full\**）
+# Copy ffmpeg-full into the output dir (in-package path is ffmpeg-full\, NOT PLAN\ffmpeg-full\)
+robocopy publish\PLAN\ffmpeg-full publish\build\3FCompare-v0.3.0-beta-x64-full\ffmpeg-full /E
 
 # 生成使用说明文档（见第四章）/ Generate usage guide (see §4)
-# → 输出到 / Output to publish\build\3FCompare-v0.1.0-x64-full\PLAN\使用说明.txt
+# → 输出到**包根** / Output to the package ROOT:
+#     publish\build\3FCompare-v0.3.0-beta-x64-full\使用说明.txt
 ```
 
 ### 3.4 压缩打包 / Archive
@@ -253,15 +281,16 @@ Invoke-7zMax 'a -t7z -mx9 -md=3840m -mfb=273 -ms=on -mmt=1 "out.7z" *'
 
 `src/3FCompare/3FCompare.csproj`（**唯一真源** / single source of truth）:
 ```xml
-<Version>0.2.5</Version>
-<VersionSuffix>BETA</VersionSuffix>
+<Version>0.3.0-beta</Version>
 ```
 
-> **2026-09-16 校正**：本节此前仍写着 `0.2.0`，与 csproj 真源（两个工程均为 `0.2.5`）
-> 严重脱节 —— 正是本节 §5.2 想防止的"README/规范与 csproj 不一致"问题本身。
-> 改版本时**本处必须与 csproj 同步**。
+> **2026-09-23 校正**：`<VersionSuffix>` 自 0.2.5 那轮起已移除（docs/45 P1-12）——带独立后缀会让
+> 门禁/开发的 plain build 与发布包产出两个版本叙事。需要预发布时把后缀写进 `<Version>` 本身
+> （`0.3.0-beta`），`pack.ps1` 的 `-p:VersionSuffix=` 清空动作因此不再影响版本字符串。
+> **2026-09-16 校正**：本节此前仍写着 `0.2.0`，与 csproj 真源严重脱节 —— 正是本节 §5.2 想防止的
+> "README/规范与 csproj 不一致"问题本身。改版本时**本处必须与 csproj 同步**。
 
-`pack.ps1` 与 `tools/发布门禁.ps1` **不再硬编码版本号**：不传 `-Version` 时自动读取上面这两行；
+`pack.ps1` 与 `tools/发布门禁.ps1` **不再硬编码版本号**：不传 `-Version` 时自动读取上面这一行；
 显式传入且与 csproj 不一致会告警（防止误发旧包——历史上出现过 `publish/` 里躺着 0.2.1 产物、
 而 README 与 csproj 仍是 0.2.0 的情况）。
 
