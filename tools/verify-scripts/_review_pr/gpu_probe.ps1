@@ -36,7 +36,9 @@ function Test-Done {
     # HasExited 会提前返回 True，导致探针在 exe 仍在跑时就收工）
     if (-not (Test-Path $outFile)) { return $false }
     $t = Get-Content $outFile -Raw -ErrorAction SilentlyContinue
-    return ($t -match 'magnifybench: (完成|闸门拒绝|放大后)' -or $t -match '\[ExitSelfTest\] 准备退出')
+    # 措辞随 exe 变更：闸门拒绝不再打印 "magnifybench: 闸门拒绝"，改为
+    # "magnifybench: ⚠ SKIPPED 闸门拒绝 …" / "magnifybench: 未完成（exit=4 SKIPPED）"。
+    return ($t -match 'magnifybench: (完成|放大后|.*SKIPPED)' -or $t -match '\[ExitSelfTest\] 准备退出')
 }
 
 # 等进程建立 D3D 上下文（首次出现该 PID 的 GPU 计数器实例）

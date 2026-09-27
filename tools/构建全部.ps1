@@ -1,141 +1,39 @@
 ﻿# 3FCompare 构建与部署脚本
-# 用法: powershell -ExecutionPolicy Bypass -File tools/构建全部.ps1 [-SkipTests] [-Configuration Release]
-#       [-SkipPatches] [-ForcePatches] [-AllowKernelDrift]
+# 用法: powershell -ExecutionPolicy Bypass -File tools/构建全部.ps1 [-SkipTests]
 # 前置: Visual Studio 2022+ (C++ 桌面负载), Git, （vcpkg 首次联网）
-#
-# 内核基线策略（P1-13）：
-#   third_party/fff_project 是 **本地归档分支** 3fcompare/zoom-viewport-cover，
-#   含上游没有的 3FCompare 扩展（见 third_party/fff_project/PATCHES.md）。
-#   tag 名是可变的，只有 SHA 不可变 —— 因此本脚本钉死完整 SHA，
-#   并在 HEAD 与钉死值不一致时**直接报错**，绝不静默退回上游默认分支。
 
 param(
-    [switch]$SkipTests,             # 仅跳过单元测试；主程序永远会构建
+    [switch]$SkipTests,
     [ValidateSet("Release", "Debug")]
-    [string]$Configuration = "Release",
-    [switch]$SkipPatches,       # 完全跳过 tools/patches 重放
-    [switch]$ForcePatches,      # 即使 HEAD 等于钉死基线也强制重放
-    [switch]$AllowKernelDrift   # 允许内核 HEAD 与钉死 SHA 不一致（仅本地试验，禁止用于发布）
+    [string]$Configuration = "Release"
 )
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
-$ForkRoot    = Join-Path $ProjectRoot "third_party\fff_project"
+$ForkRoot = Join-Path $ProjectRoot "third_party\fff_project"
 
-# ---------------------------------------------------------------------------
-# 环境兜底：本机 dotnet restore 全域失败
-#   根因：部分终端/沙箱里 APPDATA 为空，NuGet 读资产文件时 Path.Combine 拿到 null，
-#         报 "Value cannot be null. (Parameter 'path1')"（NuGet.targets）。
-#   表现：任何不带 --no-restore 的 dotnet build/test 都直接崩，且崩得与代码无关。
-#   对策：① 补 APPDATA；② 本脚本所有 dotnet 调用一律 --no-restore（依赖需提前 restore 好）。
-# ---------------------------------------------------------------------------
-if (-not $env:APPDATA) {
-    Write-Host "环境缺少 APPDATA，兜底设置为默认用户目录" -ForegroundColor Yellow
-    $env:APPDATA = Join-Path $env:USERPROFILE "AppData\Roaming"
-}
-# 同一个沙箱根因的另一半：LOCALAPPDATA 为空时 Join-Path 会抛参数绑定终止错误。
-# 只在"需要准备 FFmpeg"这条路径上触发，所以长期没暴露。
-if (-not $env:LOCALAPPDATA) {
-    Write-Host "环境缺少 LOCALAPPDATA，兜底设置为默认用户目录" -ForegroundColor Yellow
-    $env:LOCALAPPDATA = Join-Path $env:USERPROFILE "AppData\Local"
-}
-
-# ---------------------------------------------------------------------------
-# 工具绝对路径解析
-#   git / dotnet 未必在 PowerShell 的 PATH 里。用裸命令有两个坑：
-#     ① 命令不存在时 PowerShell 抛 CommandNotFoundException 而不是返回非零退出码；
-#     ② $LASTEXITCODE 会沿用上一次原生命令的旧值 —— 拿到 0 就误判成功。
-#   因此统一解析为绝对路径，缺失即 throw。
-# ---------------------------------------------------------------------------
-function Resolve-Tool {
-    param(
-        [Parameter(Mandatory)] [string]$Name,
-        [string[]]$Fallbacks = @()
-    )
-    $cmd = Get-Command $Name -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
-    foreach ($f in $Fallbacks) { if ($f -and (Test-Path $f)) { return $f } }
-    throw "未找到 $Name。请安装后重试，或加入 PATH。已尝试: $($Fallbacks -join ', ')"
-}
-
-# 安全截断 SHA 用于日志：戳记文件可能被人改坏或写了一半，
-# 直接 Substring(0,12) 会抛"索引和长度必须引用该字符串内的位置"这种与真实原因
-# （DLL 来源不明/需重建）无关的异常，把 S5 的判断逻辑整个盖掉（docs/14 §P2-9）。
-function Short-Sha {
-    param([string]$Value)
-    if ([string]::IsNullOrWhiteSpace($Value)) { return '<空>' }
-    if ($Value.Length -le 12) { return $Value }
-    return $Value.Substring(0, 12)
-}
-
-$Dotnet = Resolve-Tool "dotnet" @("$env:ProgramFiles\dotnet\dotnet.exe", "C:\Program Files\dotnet\dotnet.exe")
-$Git    = Resolve-Tool "git"    @("$env:ProgramFiles\Git\cmd\git.exe", "C:\Program Files\Git\cmd\git.exe",
-                                  "C:\Program Files\Git\bin\git.exe")
-# 原先直接裸写 `powershell`：pwsh7 环境下它未必在 PATH，报出的却是"找不到文件"这类
-# 误导性错误。这里同样走 Resolve-Tool，并把子脚本的调用统一收敛到 Invoke-SubScript。
-# 注意：pwsh7 会话里 Get-Command powershell 常返回 NOT FOUND（已在 Windows 11 实测），
-# 因此 fallback 必须给全；这里额外硬编码一份，避免 $env:SystemRoot 为空时解析失败。
-$Pwsh   = Resolve-Tool "powershell" @("$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe",
-                                      "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
-
-# ---------------------------------------------------------------------------
-# 调用子脚本：除了退出码，还要拦子脚本里**非终止**的 Write-Error。
-# 只判 $LASTEXITCODE 会漏——Write-Error 默认不终止脚本，退出码仍是 0，
-# 于是"子脚本报错了但构建继续"这种假绿会一路带到打包（docs/14 §P2-7）。
-# ---------------------------------------------------------------------------
-function Invoke-SubScript {
-    param(
-        [Parameter(Mandatory)] [string]$ScriptPath,
-        [Parameter(Mandatory)] [string]$What
-    )
-    if (-not (Test-Path $ScriptPath)) { throw "$What：找不到子脚本 $ScriptPath" }
-
-    $out = & $Pwsh -NoProfile -ExecutionPolicy Bypass -File $ScriptPath 2>&1
-    $code = $LASTEXITCODE
-    if ($out) { $out | ForEach-Object { Write-Host "    $_" } }
-
-    # ErrorRecord 是明确的错误信号，不受 $ErrorActionPreference 影响
-    $errs = @($out | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] })
-    if ($code -ne 0) { throw "$What 失败（退出码 $code）" }
-    if ($errs.Count -gt 0) {
-        throw "$What 输出了 $($errs.Count) 条错误（退出码却是 0）：$($errs[0].Exception.Message)"
-    }
-}
-
-# ---- 内核基线（改基线 = 改这里，必须同时是 PATCHES.md 里的归档 tag 指向的提交）----
+# ---- 内核基线（改基线 = 改这里；必须同时是 PATCHES.md 里归档 tag 指向的提交）----
+# 单一真源：tools/发布门禁.ps1 的 [1/11] 用正则从这里提取 $KernelBaselineSha，
+# 不要在门禁里另抄一份字面量（S6 的收敛结论）。
+#
+# 2026-09-27 基线迁移到 b661365：= 上游 a87046e 的合并提交 a8e437e
+#   + 方案A（RenderTargetInfo v2，destX/destY 改有符号；负原点对应放大平移时
+#     被推到 back buffer 之外的目的框，v1 的 uint32 会静默吃掉一半平移量程）
+#   + PATCHES.md 记账。归档 tag `3fcompare-kernel-2026.9.27.1`，
+#   随仓分发的 .3fc_kernel_baseline.bundle 已重建并 `bundle verify` 通过（含该 tag）。
+#   ⚠ 方案A **不改** PlayerApiVersion（仍是 15）：改的是输出结构的语义而非导出签名。
+#     因此"版本号相等"拦不住 ABI 变化 —— PATCHES.md 〇 节记着上游自己也干过这种事。
+#   ⚠ 本脚本只**记录**内核实况（HEAD/脏文件/DLL 哈希写进 .3fc_kernel_build.json），
+#     拦截由门禁 [1/11] 负责：脏内核可以照常构建（开发要能跑），但不能进发布包。
 $KernelRepo        = "https://github.com/Lake1059/FFF_Project.git"
-$KernelBaselineTag = "3fcompare-kernel-2026.9.18.2"
-$KernelBaselineSha = "0d5856edd0465d5b5613dd2447af02d536c0c934"
-# 2026-09-18 上游正式合并 PR #9（440e662 = a6c74b3 Native + 7deabbd Player），
-#   吸收了我方 5 项扩展：A11 preferredAdapterIndex、FFF3FP_ReadVideoPixelRegion、
-#   FFF3FP_GetRenderTargetInfo、SetViewTransform 直写原子路径、16F/HDR HALF 越界修复，
-#   以及 FFF.Native.rc / .gitignore 两个本地产物。PlayerApiVersion 仍为 15。
-#   本基线 = 上游 master 440e662 与我方扩展的合并提交 23bcb09 + PATCHES.md 更新 0d5856e。
-#   重移植负担 8 项 -> 4 项，详见 third_party/fff_project/PATCHES.md 类别四。
-# 上一基线（回滚点）：3fcompare-kernel-2026.9.18.1 / ba6d8759cf8edf58ecaea8eafd2baacdb6b4a061
-# 2026-09-17 上游正式合并 PR #8（= 我方 issue #7 的修复 824093d），本基线迁移到
-#   上游 master（ea3ce05）与我方扩展分支（68e1965）的合并提交 b6b96a6，
-#   外加一条 PATCHES.md 升级记录提交（3ac124a）。
-#   FFF.Native 源码与上一基线 0fe33c4 逐字节一致（差异仅 README），属基线溯源归正。
-# 2026-09-16 在 3fcompare/zoom-viewport-cover 上追加 issue #7 修复
-# （PresentTimedText 与交换链改写竞态，上游 824093d cherry-pick 为 0fe33c4）
-# 2026-09-15 升级至上游 2026.9.14（d8b2c038）。上游该区间只改了 2 个 vbproj（版本号 +
-# Vortice.DirectComposition 包引用），FFF.Native 源码零改动，故 4 项 API 扩展无需重移植。
-# 2026-09-16：在本基线上新增 A11 扩展（preferredAdapterIndex），PlayerApiVersion 14→15，
-#   归档为 3fcompare-kernel-2026.9.14.2。**已用 MSVC 构建并实机验证通过**
-#   （本机有 VS 18 Community 的 MSBuild + MSVC 14.51，旧注释"本机无 MSBuild"已作废）。
-#   ⚠ A11 是 ABI 破坏性变更：托管 Fff3FpEngine.ConfigVersion 必须同为 15，
-#     两者错开会让 FFF3FP_Create 全部返回 InvalidArgument。
-
-# 3FCompare 扩展的云端归档：主仓库自带的 kernel/* 分支 + 同名 tag。
-# 上游 Lake1059/FFF_Project **不含**这些扩展，且本机账号对它只有读权限（push=false），
-# 所以基线归档只能落在主仓库自己的仓库里。bundle 缺失时用它兜底。
+$KernelBaselineTag = "3fcompare-kernel-2026.9.27.1"
+$KernelBaselineSha = "b66136550a99f06c42c47e272c9eb21d01e09887"
+# 上一基线（回滚点）：3fcompare-kernel-2026.9.18.3 / b765a1f8d76619da8583f7ac512621fbfb55dfa5
+# 3FCompare 扩展的云端归档：上游 Lake1059/FFF_Project **不含**这些扩展，
+# 且本机账号对它只有读权限，所以基线归档只能落在主仓库自己的仓库里。
 $KernelArchiveRepo   = "https://github.com/luoye-cpu/3FCompare.git"
 $KernelArchiveBranch = "kernel/3fcompare-zoom-viewport-cover"
 
-# ---------------------------------------------------------------------------
-# 统一 git 调用：显式捕获退出码，不再用 2>$null 吞掉错误（P1-13）
-# ---------------------------------------------------------------------------
 function Invoke-Git {
     param(
         [Parameter(Mandatory)] [string]$Path,
@@ -143,12 +41,43 @@ function Invoke-Git {
     )
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    $raw = & $Git -C $Path @GitArgs 2>&1
+    $raw = & git -C $Path @GitArgs 2>&1
     $code = $LASTEXITCODE
     $ErrorActionPreference = $prev
     return [pscustomobject]@{
         Exit = $code
         Out  = (($raw | ForEach-Object { $_.ToString() }) -join "`n").Trim()
+    }
+}
+
+function Get-FileSha256([string]$path) {
+    if (-not (Test-Path -LiteralPath $path)) { return "" }
+    $stream = [IO.File]::OpenRead($path)
+    try {
+        $hash = [Security.Cryptography.SHA256]::Create().ComputeHash($stream)
+        return ([BitConverter]::ToString($hash) -replace '-', '').ToLowerInvariant()
+    } finally { $stream.Dispose() }
+}
+
+# 内核此刻的实况：HEAD、是否脏、HEAD 上有没有归档 tag。
+# 刻意**不 checkout**：本脚本走"增量补丁应用到工作树"的路子（见上方补丁段），
+# 自动检出基线会把用户未提交的内核工作直接掀掉——HEAD 版本可以这么做是因为它
+# 那时内核总是干净的。核对与拦截交给门禁，构建侧只负责如实记录。
+function Get-KernelState {
+    $head = ""
+    $r = Invoke-Git $ForkRoot @("rev-parse", "HEAD")
+    if ($r.Exit -eq 0) { $head = $r.Out }
+    $dirty = ""
+    $s = Invoke-Git $ForkRoot @("status", "--porcelain")
+    if ($s.Exit -eq 0) { $dirty = $s.Out }
+    $tag = ""
+    $t = Invoke-Git $ForkRoot @("tag", "--points-at", "HEAD")
+    if ($t.Exit -eq 0 -and $t.Out) { $tag = ($t.Out -split "`n")[0].Trim() }
+    return [pscustomobject]@{
+        Head    = $head
+        Dirty   = ($dirty -ne "")
+        DirtyList = @($dirty -split "`n" | Where-Object { $_ -ne "" })
+        Tag     = $tag
     }
 }
 
@@ -167,366 +96,152 @@ function Get-MSBuildPath {
     throw "未找到 MSBuild（需要 Visual Studio 的 MSBuild 组件）"
 }
 
-# ---------------------------------------------------------------------------
-# [0/5] 确保内核存在且停在钉死基线上
-# ---------------------------------------------------------------------------
-function Ensure-KernelBaseline {
-    $vcxproj = Join-Path $ForkRoot "FFF.Native\FFF.Native.vcxproj"
-    if (-not (Test-Path $vcxproj)) {
-        # 优先用随仓库携带的基线归档（bundle）恢复。
-        # 原因：上游 Lake1059/FFF_Project **不含** 3FCompare 扩展，从它克隆出来的内核是错的；
-        # 而归档分支此前只存在于本机，换机器/重装即永久丢失。bundle 让基线可随主仓库分发。
-        $bundle = Join-Path $ProjectRoot ".3fc_kernel_baseline.bundle"
-        if (Test-Path $bundle) {
-            Write-Host "内核目录缺失，从基线归档恢复: $bundle" -ForegroundColor Yellow
-            $clone = Invoke-Git $ProjectRoot @("clone", $bundle, $ForkRoot)
-            if ($clone.Exit -ne 0) { throw "从基线归档恢复失败（退出码 $($clone.Exit)）: $($clone.Out)" }
-        } else {
-            # bundle 也不在：退回主仓库自带的云端归档分支。
-            # 注意：不能直接克隆上游 —— Lake1059/FFF_Project 不含 3FCompare 扩展，
-            # 克隆出来的是错的内核，后面的 Assert-KernelExtensions 才会报错（晚且难查）。
-            Write-Host "内核目录缺失，从云端归档恢复: $KernelArchiveRepo" -ForegroundColor Yellow
-            Write-Host "  分支 $KernelArchiveBranch" -ForegroundColor Yellow
-            $clone = Invoke-Git $ProjectRoot @("clone", "--branch", $KernelArchiveBranch, $KernelArchiveRepo, $ForkRoot)
-            if ($clone.Exit -ne 0) {
-                Write-Host "  云端归档不可用（网络/权限问题），回退上游: $KernelRepo" -ForegroundColor Yellow
-                Write-Host "  警告：上游不含 3FCompare 扩展，检出基线几乎必然失败。" -ForegroundColor Yellow
-                $clone = Invoke-Git $ProjectRoot @("clone", $KernelRepo, $ForkRoot)
-                if ($clone.Exit -ne 0) { throw "克隆内核仓库失败（退出码 $($clone.Exit)）: $($clone.Out)" }
+if (-not (Test-Path (Join-Path $ForkRoot "FFF.Native\FFF.Native.vcxproj"))) {
+    Write-Host "内核 submodule 未初始化，正在拉取..."
+    Push-Location $ProjectRoot
+    git submodule update --init --recursive
+    Pop-Location
+}
+
+# 应用自定义补丁（增量策略：只应用比标记更新或未被跟踪的补丁，见 patches/README.md）
+#
+# ⚠ 这里原来有个真 bug：注释写着"已应用的补丁视为成功"，代码里**却没有这条判断**——
+#   直接 `git apply` 后看退出码。于是当补丁描述的分歧已经被合进内核（今天的 0013 就是），
+#   正向 apply 失败 ⇒ 标记不刷新 ⇒ 每次构建都重演一次失败；更糟的是 $ErrorActionPreference=Stop
+#   下 git 往 stderr 写字就抛，整个构建在第一步就中止（2026-09-27 实跑撞上的就是这个）。
+#   现在按三态判：正向 --check 能过 ⇒ 应用；反向 --check 能过 ⇒ **已在树中**，算满足不动它；
+#   两边都过不去 ⇒ 真冲突，判红停下（半补丁的内核构建出来比不构建更坏）。
+#   原生命令一律走 Invoke-Git，避免 stderr 把 Stop 变成异常。
+$PatchesDir = Join-Path $PSScriptRoot "patches"
+$PatchMarker = Join-Path $ForkRoot ".3fc_patches_applied"
+if (Test-Path $PatchesDir) {
+    $markerTime = if (Test-Path $PatchMarker) { (Get-Item $PatchMarker).LastWriteTime } else { [DateTime]::MinValue }
+    $toApply = @(Get-ChildItem $PatchesDir -Filter *.patch | Where-Object { $_.LastWriteTime -gt $markerTime } | Sort-Object Name)
+    if ($toApply.Count -gt 0) {
+        Write-Host "处理 3FCompare 自定义补丁（增量 $($toApply.Count) 个）..."
+        $pending = @()
+        foreach ($p in $toApply) {
+            $fwd = Invoke-Git $ForkRoot @("apply", "--check", "--ignore-whitespace", $p.FullName)
+            if ($fwd.Exit -ne 0) {
+                # 反向能应用 == 这份补丁的效果已经在树里（已合并/已应用），不是冲突
+                $rev = Invoke-Git $ForkRoot @("apply", "--check", "-R", "--ignore-whitespace", $p.FullName)
+                if ($rev.Exit -eq 0) {
+                    Write-Host "  ✓ $($p.Name) 已在树中（反向 --check 通过），不重复应用" -ForegroundColor Green
+                    continue
+                }
+                Write-Host "  ✗ $($p.Name) 既不正向可应用、也不已在树中 ⇒ 真冲突" -ForegroundColor Red
+                Write-Host "    正向：$($fwd.Out)" -ForegroundColor DarkGray
+                $pending += $p.Name
+                continue
             }
+            $ap = Invoke-Git $ForkRoot @("apply", "--ignore-whitespace", $p.FullName)
+            if ($ap.Exit -eq 0) { Write-Host "  ✅ $($p.Name) 已应用" }
+            else { Write-Host "  ✗ $($p.Name) --check 通过但应用失败：$($ap.Out)" -ForegroundColor Red; $pending += $p.Name }
         }
-    }
-
-    $head = (Invoke-Git $ForkRoot @("rev-parse", "HEAD")).Out
-    if ($head -ne $KernelBaselineSha) {
-        Write-Host "  检出基线提交 $KernelBaselineSha ..." -ForegroundColor Yellow
-        $co = Invoke-Git $ForkRoot @("checkout", $KernelBaselineSha)
-        if ($co.Exit -ne 0) {
-            # 远端可能允许按 SHA 拉取
-            $null = Invoke-Git $ForkRoot @("fetch", "origin", $KernelBaselineSha)
-            $co = Invoke-Git $ForkRoot @("checkout", $KernelBaselineSha)
-        }
-        if ($co.Exit -ne 0) {
-            $coTag = Invoke-Git $ForkRoot @("checkout", $KernelBaselineTag)
-            if ($coTag.Exit -ne 0) {
-                throw @"
-无法检出内核基线 $KernelBaselineSha（tag: $KernelBaselineTag）。
-
-原因：该提交是 3FCompare 的本地归档（分支 3fcompare/zoom-viewport-cover），
-上游 Lake1059/FFF_Project **不包含**这些扩展，且裸克隆也拿不到这个 tag。
-恢复方式（任选一）：
-  1) 用随仓库携带的基线归档重建（推荐，无需网络与远端权限）：
-       git clone .3fc_kernel_baseline.bundle third_party/fff_project
-  2) 从主仓库的云端归档分支重建（需网络，无需上游写权限）：
-       git clone --branch $KernelArchiveBranch $KernelArchiveRepo third_party/fff_project
-  3) 从其它机器的备份恢复 third_party/fff_project（该目录被 .gitignore 忽略，不入库）
-
-注：不要再尝试 push 到上游 $KernelRepo ——
-本机账号对它只有读权限（admin=false, push=false），推不上去。
-"@
-            }
-        }
-        $head = (Invoke-Git $ForkRoot @("rev-parse", "HEAD")).Out
-    }
-
-    if ($head -ne $KernelBaselineSha) {
-        $msg = "内核 HEAD ($($head.Substring(0,12))) 与钉死基线 ($($KernelBaselineSha.Substring(0,12))) 不一致。"
-        if (-not $AllowKernelDrift) {
+        if ($pending.Count -gt 0) {
+            # 不刷新标记：下次重跑还会尝试同一批。宁可停下，也不要拿半补丁的内核去构建。
             throw @"
-$msg
-若确需升级内核：先按 third_party/fff_project/PATCHES.md 完成重移植并打新归档 tag，
-再同步更新本脚本的 `$KernelBaselineSha。
-仅做本地试验可加 -AllowKernelDrift 绕过（产物与基线不同，禁止用于发布）。
+以下内核补丁无法应用、也不在树中：$($pending -join ', ')
+构建已中止（内核未改动）。请人工核对 third_party/fff_project 的 HEAD 与 tools/patches/ 的假设是否对得上：
+  - 补丁描述的分歧若已被合并 ⇒ 把该补丁移进 tools/patches/history/（它只是记录，不再是待应用项）
+  - 若确实还没应用 ⇒ 逐个人工 git apply --3way 解冲突，并在 PATCHES.md 记一笔
 "@
         }
-        Write-Warning "$msg 已用 -AllowKernelDrift 放行：构建产物与发布基线不同，请勿打包发布。"
+        # 全部处理完（应用了或确认已在树中）才刷新标记
+        New-Item -ItemType File -Path $PatchMarker -Force | Out-Null
+        Write-Host "✅ 补丁全部处理完毕，标记已刷新"
     } else {
-        Write-Host "  内核基线已锁定 $($KernelBaselineSha.Substring(0,12)) ($KernelBaselineTag)" -ForegroundColor Green
-        $dirty = (Invoke-Git $ForkRoot @("status", "--porcelain")).Out
-        if ($dirty) {
-            Write-Warning "内核工作区有未提交改动，构建结果不可复现："
-            Write-Warning $dirty
-        }
+        Write-Host "补丁均为最新（标记时间 $(Get-Date $markerTime -Format 'yyyy-MM-dd HH:mm')），跳过"
     }
-
-    # 内核目录内留一份检出记录（该目录不入 git，仅本机可见）。
-    # ⚠️ 项目根的 .3fc_kernel_sha **不能在这里写**：它位于成功路径之前，
-    # 一旦 Assert-KernelExtensions / msbuild / dotnet build 任一步失败退出，
-    # 文件已被刷成基线值，之后单独跑发布门禁就会"内核基线通过 + 增量构建通过"
-    # → 用上一次的陈旧产物全绿。故只在脚本末尾成功路径写入（见文件底部）。
-    Set-Content -Path (Join-Path $ForkRoot ".3fc_kernel_sha") -Value $head -Encoding ASCII
-    return $head
 }
 
-# ---------------------------------------------------------------------------
-# 内核扩展存在性校验（P1-7）
-#   为什么不用「逐 patch 跑 git apply -R --check」来判定扩展是否内置：
-#   tools/patches 是**历史归档**，其上下文相对当前基线已漂移 —— 实测 9 个补丁
-#   正向与反向 apply 全部失败，据此判断会 100% 误报"扩展缺失"。
-#
-#   权威判据来自 third_party/fff_project/PATCHES.md：
-#     「类别一 4 项重移植，以 PlayerApi 导出面为完成判据」。
-#
-#   不做这层校验的后果：基线被重置/克隆到同名 SHA 而实际不含扩展时，
-#   内核照常编译通过、脚本照常打印成功，托管侧直到运行到对应功能才崩 ——
-#   这正是 P1-13 要根治的"用错内核却显示成功"。
-# ---------------------------------------------------------------------------
-function Assert-KernelExtensions {
-    $apiHeader = Join-Path $ForkRoot "FFF.Native\3FP\Api\FFF.Player.Api.h"
-    if (-not (Test-Path $apiHeader)) {
-        throw "未找到内核 API 头文件：$apiHeader`n内核树结构异常，无法确认扩展是否内置。"
-    }
-    $text = Get-Content $apiHeader -Raw -Encoding UTF8
-    $required = @(
-        'FFF3FP_SetPresentConfig',
-        'FFF3FP_SetPacingConfig',
-        'FFF3FP_GetRenderTargetInfo',
-        'FFF3FP_ReadVideoPixelRegion'
-    )
-    $missing = @()
-    foreach ($fn in $required) {
-        if ($text -notmatch [regex]::Escape($fn)) { $missing += $fn }
-    }
-    if ($missing.Count -gt 0) {
-        throw @"
-内核缺少 3FCompare 硬依赖的扩展 API（$($missing.Count)/$($required.Count) 缺失）：
-  $($missing -join ', ')
-
-判定依据：PATCHES.md「类别一」的完成判据是 PlayerApi 导出面。
-缺少这些 API 时内核照样能编译，但托管侧会在运行到对应功能时才失败。
-处理：
-  · 确认内核停在正确的归档分支 3fcompare/zoom-viewport-cover；
-  · 若内核已升级，按 third_party/fff_project/PATCHES.md 完成重移植后再构建。
-"@
-    }
-    Write-Host "  内核扩展校验通过（$($required.Count)/$($required.Count) 项 API 齐全）" -ForegroundColor Green
-}
-
-# ---------------------------------------------------------------------------
-# 补丁重放（P1-12：幂等）
-#   旧实现用「补丁 mtime > 标记文件 mtime」判定，且失败只标记不阻断：
-#   一旦任一补丁失败 → 标记不刷新 → 下次重跑全部 → 已应用的必然再失败 → 永久卡死。
-#   新实现：先 git apply -R --check 反向探测，能反向应用即视为已应用 → 跳过；
-#           真失败直接 throw（可用 -SkipPatches 明确放行）。
-# ---------------------------------------------------------------------------
-function Invoke-KernelPatches {
-    param([string]$HeadSha)
-
-    $PatchesDir = Join-Path $PSScriptRoot "patches"
-    if (-not (Test-Path $PatchesDir)) { return }
-    $patches = @(Get-ChildItem $PatchesDir -Filter *.patch | Sort-Object Name)
-    if ($patches.Count -eq 0) { return }
-
-    if ($SkipPatches) {
-        Write-Host "已按 -SkipPatches 跳过 $($patches.Count) 个补丁" -ForegroundColor Yellow
-        return
-    }
-
-    # 注：这里跳过重放**不再**是"无条件信任"。扩展是否内置已由 Assert-KernelExtensions
-    # 按 PlayerApi 导出面独立校验过；tools/patches 只是历史归档（正反向均 apply 不上），
-    # 无法也不应作为判据。
-    if ((-not $ForcePatches) -and ($HeadSha -eq $KernelBaselineSha)) {
-        Write-Host "内核已是钉死基线，跳过 tools/patches 重放。" -ForegroundColor Green
-        Write-Host "  （扩展存在性已按 PlayerApi 导出面校验；tools/patches 是历史归档，"
-        Write-Host "   新机器重移植流程见 third_party/fff_project/PATCHES.md。）强制重放请加 -ForcePatches。"
-        return
-    }
-
-    Write-Host "重放 3FCompare 自定义补丁（$($patches.Count) 个）..."
-    $applied = @()
-    foreach ($p in $patches) {
-        # 1) 反向探测：已应用则跳过（幂等的关键）
-        $rev = Invoke-Git $ForkRoot @("apply", "-R", "--check", "--ignore-whitespace", $p.FullName)
-        if ($rev.Exit -eq 0) {
-            Write-Host "  ⏭  $($p.Name) 已应用，跳过" -ForegroundColor Gray
-            continue
-        }
-        # 2) 正向应用：先常规，失败再 --3way（容忍上下文漂移）
-        $fwd = Invoke-Git $ForkRoot @("apply", "--ignore-whitespace", $p.FullName)
-        if ($fwd.Exit -ne 0) {
-            $fwd = Invoke-Git $ForkRoot @("apply", "--3way", "--ignore-whitespace", $p.FullName)
-        }
-        if ($fwd.Exit -ne 0) {
-            throw @"
-补丁应用失败: $($p.Name)
-  $($fwd.Out)
-处理建议：
-  · 若内核树已自带该改动（基线分支常如此），用 -SkipPatches 跳过；
-  · 若确实需要，请按 third_party/fff_project/PATCHES.md 手工重移植后更新补丁文件。
-"@
-        }
-        Write-Host "  ✅ $($p.Name) 已应用" -ForegroundColor Green
-        $applied += $p.Name
-    }
-
-    # 仅作追溯记录；幂等性由反向探测保证，不再依赖时间戳
-    $marker = Join-Path $ForkRoot ".3fc_patches_applied"
-    ($applied -join "`n") | Set-Content -Path $marker -Encoding UTF8
-    Write-Host "补丁处理完成（本次新应用 $($applied.Count) 个）" -ForegroundColor Green
-}
-
-$kernelSha = Ensure-KernelBaseline
-Assert-KernelExtensions
-Invoke-KernelPatches -HeadSha $kernelSha
-
-Write-Host "=== [1/6] 准备 FFmpeg（若缺失） ==="
+Write-Host "=== [1/4] 准备 FFmpeg（若缺失） ==="
 $ffmpegMarker = Join-Path $ForkRoot "third_party\ffmpeg\include\libavcodec\avcodec.h"
 if (-not (Test-Path $ffmpegMarker)) {
     Push-Location $ForkRoot
-    try {
-        Invoke-SubScript -ScriptPath ".\tools\准备FFmpeg.ps1" -What "准备 FFmpeg"
-        # 补齐上游脚本偶发遗漏的生成头
-        $cache = Join-Path $env:LOCALAPPDATA "fff-ffmpeg-download\extracted\ffmpeg-master-latest-win64-lgpl-shared\include"
-        if (Test-Path (Join-Path $cache "libavutil\avconfig.h")) {
-            Copy-Item (Join-Path $cache "libavutil\avconfig.h") (Join-Path $ForkRoot "third_party\ffmpeg\include\libavutil\") -Force
-            Copy-Item (Join-Path $cache "libavutil\ffversion.h") (Join-Path $ForkRoot "third_party\ffmpeg\include\libavutil\") -Force -ErrorAction SilentlyContinue
-        }
-    } finally { Pop-Location }
+    powershell -NoProfile -ExecutionPolicy Bypass -File ".\tools\准备FFmpeg.ps1"
+    # 补齐上游脚本偶发遗漏的生成头
+    $cache = Join-Path $env:LOCALAPPDATA "fff-ffmpeg-download\extracted\ffmpeg-master-latest-win64-lgpl-shared\include"
+    if (Test-Path (Join-Path $cache "libavutil\avconfig.h")) {
+        Copy-Item (Join-Path $cache "libavutil\avconfig.h") (Join-Path $ForkRoot "third_party\ffmpeg\include\libavutil\") -Force
+        Copy-Item (Join-Path $cache "libavutil\ffversion.h") (Join-Path $ForkRoot "third_party\ffmpeg\include\libavutil\") -Force -ErrorAction SilentlyContinue
+    }
+    Pop-Location
 } else {
     Write-Host "  FFmpeg 已就绪，跳过"
 }
 
-Write-Host "=== [2/6] 准备 libass（若缺失） ==="
+Write-Host "=== [2/4] 准备 libass（若缺失） ==="
 $assMarker = Join-Path $ForkRoot "third_party\vcpkg_installed\x64-windows\include\ass\ass.h"
 if (-not (Test-Path $assMarker)) {
     Push-Location $ForkRoot
-    try {
-        Invoke-SubScript -ScriptPath ".\tools\准备Libass.ps1" -What "准备 libass"
-    } finally { Pop-Location }
+    powershell -NoProfile -ExecutionPolicy Bypass -File ".\tools\准备Libass.ps1"
+    Pop-Location
 } else {
     Write-Host "  libass 已就绪，跳过"
 }
 
-Write-Host "=== [3/6] 构建 FFF.Native ==="
+Write-Host "=== [3/4] 构建 FFF.Native ==="
+# 在动手编译**之前**取内核实况：编译过程不改 git 状态，但脚本尾部再取会漏掉
+# "构建期间有人往内核目录写东西"这类情况——越早取越接近"这份 DLL 是从哪个树编出来的"。
+$KernelState = Get-KernelState
+if ($KernelState.Dirty) {
+    Write-Host "⚠ 内核工作树脏（$($KernelState.DirtyList.Count) 个文件），构建出的 DLL 不是基线提交本身：" -ForegroundColor Yellow
+    foreach ($d in $KernelState.DirtyList) { Write-Host "    $d" -ForegroundColor Yellow }
+    Write-Host "  本脚本照常构建（开发要能跑），但发布门禁 [1/11] 会因此判红，直到这些改动被提交。" -ForegroundColor Yellow
+}
 $msbuild = Get-MSBuildPath
-
-# ---- S5：把「实际部署的 DLL」与「内核 HEAD」绑定 ----
-# Assert-KernelExtensions 只校验**头文件文本**，证明不了 x64/<配置> 下的 DLL 就是这个 HEAD 编出来的。
-# 而 x64/ 被 .gitignore 且从不清空：一旦内核切过分支或回退过，陈旧 DLL 会被继续复用并部署出去，
-# 现象是"构建全绿，但运行行为与基线对不上"，极难归因。
-# 做法：内核构建成功后，在 DLL 旁写戳记（第 1 行=内核 HEAD，第 2 行=DLL 的 SHA256）；
-#       下次构建前比对戳记里的 HEAD —— 不一致、或压根没有戳记，就强制 /t:Rebuild。
-$kernelDll = Join-Path $ForkRoot "FFF.Native\x64\$Configuration\FFF.Native.dll"
-$stampPath = "$kernelDll.3fcbuild"
-
-function Get-FileSha256([string]$path) {
-    return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-}
-
-$needRebuild = $false
-if (Test-Path $kernelDll) {
-    if (-not (Test-Path $stampPath)) {
-        $needRebuild = $true
-        Write-Host "  DLL 存在但没有构建戳记，来源不明 → 强制重建（S5）" -ForegroundColor Yellow
-    } else {
-        $stampHead = (Get-Content $stampPath -TotalCount 1).Trim()
-        if ($stampHead -ne $kernelSha) {
-            $needRebuild = $true
-            Write-Host "  DLL 由旧内核 HEAD 编出（戳记 $(Short-Sha $stampHead) ≠ 当前 $(Short-Sha $kernelSha)）→ 强制重建（S5）" -ForegroundColor Yellow
-        }
-    }
-}
-
 Push-Location $ForkRoot
-try {
-    $msbuildArgs = @("FFF.Native\FFF.Native.vcxproj", "/p:Configuration=$Configuration", "/p:Platform=x64", "/m", "/v:minimal")
-    if ($needRebuild) { $msbuildArgs += "/t:Rebuild" }
-    & $msbuild @msbuildArgs
-    if ($LASTEXITCODE -ne 0) { throw "FFF.Native 构建失败" }
-    if (-not (Test-Path $kernelDll)) { throw "构建后未找到产物：$kernelDll" }
-    # 构建成功 → 刷新戳记，供下次比对（源 DLL 自此与该 HEAD 绑定）
-    Set-Content -Path $stampPath -Value "$kernelSha`n$(Get-FileSha256 $kernelDll)" -Encoding ASCII
-} finally { Pop-Location }
+& $msbuild "FFF.Native\FFF.Native.vcxproj" /p:Configuration=$Configuration /p:Platform=x64 /m /v:minimal
+if ($LASTEXITCODE -ne 0) { throw "FFF.Native 构建失败" }
+Pop-Location
 
-Write-Host "=== [4/6] 部署 DLL 到应用与冒烟目录 ==="
+Write-Host "=== [4/4] 部署 DLL 到应用与冒烟目录 ==="
 function Deploy-To($targetDir) {
-    $src = Join-Path $ForkRoot "FFF.Native\x64\$Configuration\FFF.Native.dll"
-    if (-not (Test-Path $src)) { throw "未找到构建产物: $src" }
     New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
-    Copy-Item $src $targetDir -Force
-
-    # S5：部署后校验落地副本与源一致。源 DLL 已由 $stampPath 绑定到内核 HEAD，
-    # 这条再把"源 → 目标"这一段钉死，堵住复制被占用/跳过导致的"部署了旧 DLL"。
-    $dst = Join-Path $targetDir "FFF.Native.dll"
-    $srcHash = Get-FileSha256 $src
-    $dstHash = Get-FileSha256 $dst
-    if ($srcHash -ne $dstHash) {
-        throw "部署校验失败：$dst 与源不一致（$dstHash ≠ $srcHash）——可能复制被占用或跳过"
-    }
-
-    # FFmpeg 共享库：数量为 0 必须报错。此前 Get-ChildItem 不校验数量，
-    # 缺件时脚本照样打印"已部署"，应用起来后静默回退演示模式，排查成本很高。
-    $ffDlls = @(Get-ChildItem (Join-Path $ForkRoot "runtime\*.dll"))
-    if ($ffDlls.Count -eq 0) {
-        throw "未找到 FFmpeg 运行库：$ForkRoot\runtime\*.dll（请先在内核目录准备 FFmpeg）"
-    }
-    $ffDlls | ForEach-Object { Copy-Item $_.FullName $targetDir -Force }
-
-    # libass：只影响字幕渲染，缺失不致命，故告警而非中断。
+    Copy-Item (Join-Path $ForkRoot "FFF.Native\x64\$Configuration\FFF.Native.dll") $targetDir -Force
+    Get-ChildItem (Join-Path $ForkRoot "runtime\*.dll") | ForEach-Object { Copy-Item $_.FullName $targetDir -Force }
     $assDll = Get-ChildItem (Join-Path $ForkRoot "third_party\vcpkg_installed\x64-windows\bin\ass-9.dll") -ErrorAction SilentlyContinue
-    $hasAss = $false
-    if ($assDll) { Copy-Item $assDll.FullName $targetDir -Force; $hasAss = $true }
-    else { Write-Warning "未找到 ass-9.dll，字幕渲染将不可用" }
-
-    Write-Host "  已部署 -> $targetDir （FFmpeg $($ffDlls.Count) 个 DLL / ass-9: $(if ($hasAss) { '有' } else { '无' })）"
+    if ($assDll) { Copy-Item $assDll.FullName $targetDir -Force }
+    Write-Host "  已部署 -> $targetDir"
 }
 
-$appBin = Join-Path $ProjectRoot "src\3FCompare\bin\$Configuration\net11.0-windows"
-$smokeBin = Join-Path $ProjectRoot "tests\3FCompare.SmokeTests\bin\$Configuration\net11.0"
-Deploy-To $appBin
-Deploy-To $smokeBin
-
-# P0-2 修复：主程序构建原先被塞在 `if (-not $SkipTests)` 里，
-# 结果 -SkipTests 会把 3FCompare.exe 本身一起跳过，脚本末尾却照样打印"✔ 全部完成"
-# ——典型的假成功。主程序是产物本体，永远不能被"跳过测试"连带跳过。
-# ---------------------------------------------------------------------------
-# S3：WGC 原生抓屏库（3FC.WgcCapture.dll）
-#   托管侧把它作为 EmbeddedResource 嵌进 exe，因此**必须在构建 .NET 之前**确保它是最新的：
-#   原先本脚本不含 wgc 构建，csproj 的 CheckWgcCaptureDll 又只查 Exists 不查新旧，
-#   改了 native/wgc_capture/*.cpp 忘跑 build.sh 就会静默嵌入旧 DLL
-#   （构建全绿、原生行为却与源码对不上）。csproj 侧已补时间戳校验做兜底。
-#   这里只构建（--no-run）：自测是独立环节，不塞进构建链路。
-# ---------------------------------------------------------------------------
-Write-Host "=== [5/6] 构建 WGC 原生抓屏库（3FC.WgcCapture.dll） ==="
-$wgcScript = Join-Path $ProjectRoot "native\wgc_capture\build.sh"
-if (-not (Test-Path $wgcScript)) { throw "找不到 WGC 构建脚本：$wgcScript" }
-# 必须用 Git 自带的 bash：WSL 的 bash 跑不了这个脚本（路径/环境都不对）。
-$gitRoot = Split-Path (Split-Path $Git -Parent) -Parent
-$gitBash = Join-Path $gitRoot "bin\bash.exe"
-$Bash = Resolve-Tool "bash" @($gitBash, "$env:ProgramFiles\Git\bin\bash.exe", "C:\Program Files\Git\bin\bash.exe")
-& $Bash ($wgcScript -replace '\\', '/') --no-run
-if ($LASTEXITCODE -ne 0) { throw "3FC.WgcCapture.dll 构建失败（退出码 $LASTEXITCODE）" }
-$wgcDll = Join-Path $ProjectRoot "native\wgc_capture\3FC.WgcCapture.dll"
-if (-not (Test-Path $wgcDll)) { throw "构建后未找到产物：$wgcDll" }
-Write-Host "  已构建 -> $wgcDll"
-
-Write-Host "=== [6/6] 构建 .NET 解决方案 ==="
-Push-Location $ProjectRoot
-try {
-    # KernelConfiguration 必须随 -Configuration 透传：
-    # csproj 用它拼内核 DLL 路径（默认 Release），若不同步，
-    # Debug 构建会去找 x64\Release\FFF.Native.dll 然后被 CheckKernelDll 硬失败拦下。
-    & $Dotnet build .\src\3FCompare.slnx -c $Configuration -p:KernelConfiguration=$Configuration --no-restore --nologo
-    if ($LASTEXITCODE -ne 0) { throw ".NET 解决方案构建失败（退出码 $LASTEXITCODE）" }
-} finally { Pop-Location }
+Deploy-To (Join-Path $ProjectRoot "src\3FCompare\bin\$Configuration\net11.0-windows")
+Deploy-To (Join-Path $ProjectRoot "tests\3FCompare.SmokeTests\bin\$Configuration\net11.0")
 
 if (-not $SkipTests) {
-    Write-Host "=== [可选] 运行单元测试 ==="
+    Write-Host "=== [可选] 构建 .NET 解决方案 ==="
     Push-Location $ProjectRoot
-    try {
-        & $Dotnet test .\tests\3FCompare.Core.Tests\3FCompare.Core.Tests.csproj -c $Configuration --no-restore --nologo
-        if ($LASTEXITCODE -ne 0) { throw "单元测试失败（退出码 $LASTEXITCODE）" }
-    } finally { Pop-Location }
-} else {
-    Write-Host "已按 -SkipTests 跳过单元测试（主程序仍已构建）" -ForegroundColor Yellow
+    dotnet build .\src\3FCompare.slnx -c $Configuration --nologo
+    Pop-Location
 }
 
-# 项目根的 .3fc_kernel_sha 只在**成功路径**写入：发布门禁 [1/6] 靠它判断
-# "产物内核 == 发布基线"。若提前写在 Ensure-KernelBaseline 里，一旦
-# Assert-KernelExtensions / msbuild / dotnet build 任一步失败退出，
-# 文件已被刷成基线值，之后单独跑门禁就会用上一次的陈旧产物全绿。
-Set-Content -Path (Join-Path $ProjectRoot ".3fc_kernel_sha") -Value $kernelSha -Encoding ASCII
+Write-Host "=== 写内核构建清单（发布门禁 [1/11] 的输入）==="
+# 只在**成功路径**写：写在前面会让"构建失败但清单已更新"变成假绿（HEAD 版本踩过这个坑，
+# 见其注释"项目根的 .3fc_kernel_sha 不能在这里写"）。
+# 清单里记的是"这份 DLL 从哪个树编出来、哈希是多少"——门禁据此复核磁盘上那份有没有被换过
+# （今天真实发生过：Debug bin 里躺着 09-21 的旧内核，跑出来的判据全是假红）。
+$KernelDllPath = Join-Path $ForkRoot "FFF.Native\x64\$Configuration\FFF.Native.dll"
+$manifest = [ordered]@{
+    head          = $KernelState.Head
+    baseline      = $KernelBaselineSha
+    baselineTag   = $KernelBaselineTag
+    kernelTag     = $KernelState.Tag
+    dirty         = [bool]$KernelState.Dirty
+    dirtyFiles    = @($KernelState.DirtyList)
+    configuration = $Configuration
+    kernelDll     = $KernelDllPath
+    dllSha256     = (Get-FileSha256 $KernelDllPath)
+    builtAt       = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+}
+$manifestPath = Join-Path $ProjectRoot ".3fc_kernel_build.json"
+$manifest | ConvertTo-Json | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+# 兼容字段：门禁与老脚本仍会读 .3fc_kernel_sha
+Set-Content -Path (Join-Path $ProjectRoot ".3fc_kernel_sha") -Value $KernelState.Head -Encoding ASCII
+if (-not $manifest.dllSha256) {
+    Write-Host "⚠ 清单里 dllSha256 为空：$KernelDllPath 不存在，门禁 [1/11] 会判红" -ForegroundColor Yellow
+}
+Write-Host "  清单 -> $manifestPath（head $($KernelState.Head.Substring(0,[Math]::Min(12,$KernelState.Head.Length))) dirty=$($manifest.dirty)）"
 
-Write-Host "✔ 全部完成。内核 SHA: $kernelSha"
-Write-Host "✔ 运行冒烟: dotnet run --project tests/3FCompare.SmokeTests -- <视频>"
+Write-Host "✔ 全部完成。运行冒烟: dotnet run --project tests/3FCompare.SmokeTests -- <视频>"
 Write-Host "✔ 运行应用: dotnet run --project src/3FCompare"

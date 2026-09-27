@@ -68,8 +68,9 @@ run_one() {  # $1=round $2=arm $3=zoom
   done
 
   local crash=0
+  # exit=4 现为 --magnifybench 放大闸门拒绝（SKIPPED），不是崩溃 ⇒ 已从崩溃码表移除
   case "$ec" in
-    139|132|11|6|4|3|3221225477|3221225501|3221225725) crash=1 ;;
+    139|132|11|6|3|3221225477|3221225501|3221225725) crash=1 ;;
   esac
   [ "$wer_new" = "1" ] && crash=1
 

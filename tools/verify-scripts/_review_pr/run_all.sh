@@ -23,6 +23,19 @@ run_one() {  # $1=item $2=config $3=run $4=timeout $5..=argv
   local verdict
   case "$ec" in
     0)   verdict="PASS" ;;
+    4)
+      # exit=4 有**两个**来源，不能只看退出码：
+      #   ① --magnifybench 放大闸门拒绝 —— 程序会打印 "SKIPPED 闸门拒绝" 与
+      #      "未完成（exit=4 SKIPPED）"，这才是真 SKIP；
+      #   ② 真崩溃/异常退出恰好也退 4 —— 此时日志里不会有 SKIPPED。
+      # 旧写法一律当 SKIP ⇒ ② 被静默吞掉（假绿）。故回看 $log：只有确实出现
+      # SKIPPED 才判 SKIP，否则按失败处理。
+      if grep -q "SKIPPED" "$log" 2>/dev/null; then
+        verdict="SKIP"
+      else
+        verdict="FAIL($ec,无SKIPPED)"
+      fi
+      ;;
     124) verdict="TIMEOUT" ;;
     139|3221225477) verdict="CRASH_AV" ;;
     132|3221225501) verdict="CRASH_ILLEGAL" ;;

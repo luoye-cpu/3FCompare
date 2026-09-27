@@ -1,0 +1,1025 @@
+diff --git a/FFF.Native/3FP/Api/FFF.Player.Api.h b/FFF.Native/3FP/Api/FFF.Player.Api.h
+index 1b98594..f119db6 100644
+--- a/FFF.Native/3FP/Api/FFF.Player.Api.h
++++ b/FFF.Native/3FP/Api/FFF.Player.Api.h
+@@ -209,6 +209,12 @@ using FFF3FPHandle = void*;
+ using FFF3FPBitmapSubtitleHandle = void*;
+ using FFF3FPAssSubtitleHandle = void*;
+ 
++// 3FCompare extension (F-LOG): process-wide native log sink. The kernel calls
++// this with UTF-8 log lines from any of its threads (decode/present/recovery);
++// the managed side routes them into the on-disk logs/ channel. Install once at
++// startup before creating sessions; passing nullptr detaches the sink.
++using FFF3FPLogCallback = void(__cdecl*)(void* context, const char* utf8Line) noexcept;
++
+ enum class FFF3FPBitmapSubtitleFlags : std::uint32_t {
+     None = 0,
+     Clear = 1,
+@@ -442,6 +448,8 @@ FFF3FP_API std::int32_t FFF3FP_GetColorExtensionStatus() noexcept;
+ FFF3FP_API const char* FFF3FP_GetColorExtensionStatusText(std::uint32_t state, std::uint32_t variant) noexcept;
+ FFF3FP_API void FFF3FP_SetColorExtensionAuthorizationPrompt(int (__cdecl* callback)(char*, std::uint32_t)) noexcept;
+ FFF3FP_API FFFResult FFF3FP_AuthenticateColorExtension(const char* codeUtf8) noexcept;
++// 3FCompare extension (F-LOG): install the process-wide native log sink.
++FFF3FP_API void FFF3FP_SetLogCallback(FFF3FPLogCallback callback, void* context) noexcept;
+ FFF3FP_API FFFResult FFF3FP_Create(const FFF3FPConfiguration* configuration,
+     FFF3FPHandle* player) noexcept;
+ FFF3FP_API FFFResult FFF3FP_Open(FFF3FPHandle player, const char* localPathUtf8) noexcept;
+@@ -473,6 +481,15 @@ FFF3FP_API FFFResult FFF3FP_SetExternalAudioOffset(FFF3FPHandle player,
+ FFF3FP_API FFFResult FFF3FP_SetColorMode(FFF3FPHandle player, FFF3FPColorMode mode,
+     float sdrPeakNits, float hdrPeakNits, float sdrPaperWhiteNits,
+     std::uint32_t forceHdrOutput) noexcept;
++// Present pacing (VRR / G-SYNC / FreeSync low-latency path, 3FCompare extension):
++// enableTearing = 1 selects Present(0, DXGI_PRESENT_ALLOW_TEARING) so a VRR display
++// can scan out on its own schedule; 0 keeps the default vsync-locked Present(1, 0).
++// Swap chains are created with the ALLOW_TEARING capability flag whenever the OS
++// reports support, so toggling does not require chain recreation. If tearing is
++// requested but unsupported by the display chain, the request is remembered while
++// the renderer keeps the vsync path (returns NotSupported).
++FFF3FP_API FFFResult FFF3FP_SetPresentConfig(FFF3FPHandle player,
++    std::uint32_t enableTearing) noexcept;
+ FFF3FP_API FFFResult FFF3FP_SetOutputWindow(FFF3FPHandle player, void* outputWindow) noexcept;
+ FFF3FP_API FFFResult FFF3FP_SetInteractiveMove(FFF3FPHandle player, std::uint32_t enabled) noexcept;
+ // View transform for frame inspection: zoom scales the fitted video box
+@@ -552,6 +569,10 @@ struct FFF3FPRenderTargetInfo {
+ };
+ FFF3FP_API FFFResult FFF3FP_GetRenderTargetInfo(FFF3FPHandle player,
+     FFF3FPRenderTargetInfo* info) noexcept;
++// 3FCompare K5: re-present the last cached frame on the presenter thread.
++// The App calls it after a child HWND resize so flips keep issuing while
++// ResizeBuffers stays on the presenter. Upstream has no equivalent export.
++FFF3FP_API FFFResult FFF3FP_Redraw(FFF3FPHandle player) noexcept;
+ FFF3FP_API void FFF3FP_Destroy(FFF3FPHandle player) noexcept;
+ 
+ FFF3FP_API FFFResult FFF3FP_OpenBitmapSubtitle(const char* localPathUtf8,
+diff --git a/FFF.Native/3FP/Api/PlayerApi.cpp b/FFF.Native/3FP/Api/PlayerApi.cpp
+index dc3056f..793de1d 100644
+--- a/FFF.Native/3FP/Api/PlayerApi.cpp
++++ b/FFF.Native/3FP/Api/PlayerApi.cpp
+@@ -5,6 +5,7 @@
+ #include "3FP/Render/ColorExtension.h"
+ 
+ #include <cmath>
++#include <atomic>
+ 
+ namespace {
+ // Bumped 14 -> 15 because FFF3FPConfiguration gained the preferredAdapterIndex
+@@ -12,6 +13,10 @@ namespace {
+ // every consumer of this header MUST be rebuilt and bumped in lockstep.
+ constexpr std::uint32_t PlayerApiVersion = 15;
+ 
++// 3FCompare extension (F-LOG): process-wide native log sink.
++std::atomic<FFF3FPLogCallback> g_logSink{nullptr};
++std::atomic<void*> g_logContext{nullptr};
++
+ FFFResult CopyUtf8(const std::string& value, char* output, const std::uint32_t outputSize,
+     std::uint32_t* requiredSize) noexcept {
+     const auto bytes = value.size() + 1;
+@@ -50,6 +55,23 @@ FFFResult FFF3FP_AuthenticateColorExtension(const char* codeUtf8) noexcept {
+         ? FFFResult::Success : FFFResult::NotSupported;
+ }
+ 
++// ---- 3FCompare extension (F-LOG) — 本地专属，上游无等价，勿在合并中丢弃 ----
++void FFF3FP_SetLogCallback(FFF3FPLogCallback callback, void* context) noexcept {
++    g_logContext.store(context, std::memory_order_release);
++    g_logSink.store(callback, std::memory_order_release);
++}
++
++// 3FCompare (F-LOG): internal sink invoker. Called via FFF3FP_Log() wrapper
++// above; kept non-exported (static-ish) — the public surface is the callback
++// install function and managed code routing.
++void FFF3FP_KernelLogImpl(const char* utf8Line) noexcept {
++    if (utf8Line == nullptr) return;
++    const auto sink = g_logSink.load(std::memory_order_acquire);
++    if (sink == nullptr) return;
++    const auto ctx = g_logContext.load(std::memory_order_acquire);
++    sink(ctx, utf8Line);
++}
++
+ FFFResult FFF3FP_EvaluateHdrProcessing(FFF3FPHdrProcessingProbe* probe) noexcept {
+     return probe == nullptr ? FFFResult::InvalidArgument : HdrProcessor::EvaluateProbe(*probe);
+ }
+@@ -102,6 +124,11 @@ FFFResult FFF3FP_SetColorMode(const FFF3FPHandle player, const FFF3FPColorMode m
+         static_cast<PlayerSession*>(player)->SetColorMode(mode, sdr, hdr, paper, forceHdr != 0) :
+         FFFResult::InvalidArgument;
+ }
++FFFResult FFF3FP_SetPresentConfig(const FFF3FPHandle player, const std::uint32_t enableTearing) noexcept {
++    return player && enableTearing <= 1 ?
++        static_cast<PlayerSession*>(player)->SetPresentConfig(enableTearing != 0) :
++        FFFResult::InvalidArgument;
++}
+ FFFResult FFF3FP_SetOutputWindow(const FFF3FPHandle player, void* window) noexcept { return player ? static_cast<PlayerSession*>(player)->SetOutputWindow(window) : FFFResult::InvalidArgument; }
+ FFFResult FFF3FP_SetInteractiveMove(const FFF3FPHandle player, const std::uint32_t enabled) noexcept {
+     return player && enabled <= 1 ? static_cast<PlayerSession*>(player)->SetInteractiveMove(enabled != 0)
+@@ -154,6 +181,11 @@ FFFResult FFF3FP_GetTimedTextStatus(const FFF3FPHandle player,
+     return player && status ? static_cast<PlayerSession*>(player)->GetTimedTextStatus(*status)
+         : FFFResult::InvalidArgument;
+ }
++// 3FCompare K5: upstream has no equivalent export.
++FFFResult FFF3FP_Redraw(const FFF3FPHandle player) noexcept {
++    return player ? static_cast<PlayerSession*>(player)->Redraw()
++        : FFFResult::InvalidArgument;
++}
+ FFFResult FFF3FP_GetDanmakuStatus(const FFF3FPHandle player,
+     FFF3FPTimedTextStatus* status) noexcept {
+     return player && status ? static_cast<PlayerSession*>(player)->GetDanmakuStatus(*status)
+diff --git a/FFF.Native/3FP/Core/PlayerSession.cpp b/FFF.Native/3FP/Core/PlayerSession.cpp
+index 5208711..4ce1810 100644
+--- a/FFF.Native/3FP/Core/PlayerSession.cpp
++++ b/FFF.Native/3FP/Core/PlayerSession.cpp
+@@ -35,7 +35,9 @@ constexpr std::int64_t TargetVideoLookAhead100ns = 1'500'000;
+ // Buffered100ns includes both application PCM and samples already submitted to
+ // WASAPI.  Keep the complete audible queue short so seek, stream/volume changes
+ // and the information overlay reflect a low-latency local playback pipeline.
+-constexpr std::int64_t TargetAudioBuffer100ns = 1'200'000;
++// 3FCompare: increase from 120ms to 250ms for high-bitrate multi-channel audio
++// (FLAC 6ch + AV1 soft decode) to prevent audio underruns during decode spikes.
++constexpr std::int64_t TargetAudioBuffer100ns = 2'500'000;
+ constexpr std::size_t MaximumIndexedVideoFrames = 32'768;
+ constexpr std::size_t MaximumPendingVideoPackets = 64;
+ constexpr std::size_t MaximumPendingVideoPacketBytes = 16 * 1024 * 1024;
+@@ -1071,6 +1073,12 @@ FFFResult PlayerSession::ClearExternalAudio() noexcept {
+     return FFFResult::Success;
+ }
+ FFFResult PlayerSession::SetExternalAudioOffset(const std::int64_t offset) noexcept { const auto state = state_.load(); if (state != FFF3FPState::Ready && state != FFF3FPState::Playing && state != FFF3FPState::Paused && state != FFF3FPState::Ended) return FFFResult::InvalidState; Enqueue([this, offset] { externalAudioOffset100ns_ = offset; snapshot_.externalAudioOffset100ns = offset; if (externalFormat_) DoSeek(snapshot_.position100ns); else PublishSnapshot(); }); return FFFResult::Success; }
++FFFResult PlayerSession::SetPresentConfig(const bool enableTearing) noexcept {
++    // Pacing preference: safe in any state; the renderer applies it on the next
++    // present and remembers the request across device/chain re-creation.
++    Enqueue([this, enableTearing] { videoRenderer_.SetPresentConfig(enableTearing); });
++    return FFFResult::Success;
++}
+ FFFResult PlayerSession::SetColorMode(const FFF3FPColorMode mode, const float sdr, const float hdr,
+     const float paper, const bool forceHdrOutput) noexcept {
+     if (mode > FFF3FPColorMode::MapToHdr || !std::isfinite(sdr) || sdr <= 0 ||
+@@ -1683,6 +1691,14 @@ FFFResult PlayerSession::GetRenderTargetInfo(FFF3FPRenderTargetInfo& info) noexc
+     return FFFResult::Success;
+ }
+ 
++// 3FCompare K5: upstream has no equivalent.
++FFFResult PlayerSession::Redraw() noexcept {
++    const auto result = videoRenderer_.Redraw();
++    if (result == FFFResult::DeviceFailure)
++        videoRenderer_.RequestRecoveryIfDeviceLost();
++    return result;
++}
++
+ FFFResult PlayerSession::GetSnapshot(FFF3FPSnapshot& output) const noexcept {
+     if (output.size < sizeof(FFF3FPSnapshot) || output.version != 8) return FFFResult::InvalidArgument;
+     { std::lock_guard lock(snapshotMutex_); output = publishedSnapshot_; }
+@@ -1735,7 +1751,6 @@ FFFResult PlayerSession::ReadVideoPixel(FFF3FPVideoPixelProbe& probe) noexcept {
+         videoRenderer_.RequestRecoveryIfDeviceLost();
+     return result;
+ }
+-
+ FFFResult PlayerSession::ReadVideoPixelRegion(const std::uint32_t x, const std::uint32_t y,
+     const std::uint32_t width, const std::uint32_t height, float* dst,
+     const std::uint32_t dstFloatCount, std::uint32_t* outputBitDepth) noexcept {
+@@ -1878,13 +1893,28 @@ FFFResult PlayerSession::OpenDecoder(AVFormatContext* owner, const std::int32_t
+     }
+     auto result = avcodec_parameters_to_context(context, stream->codecpar);
+     context->pkt_timebase = stream->time_base;
++    // Note: the bundled FFmpeg (libavcodec 63) exposes AVCodecContext.ch_layout
++    // but no request-channel-layout field (request_channel_layout/request_ch_layout
++    // were removed upstream).  Downmix of multi-channel audio is handled in
++    // PlayerWasapiRenderer::EnsureResampler via swr_alloc_set_opts2 with an
++    // endpoint-stereo output layout; see the audio renderer for that path.
+     if (result >= 0 && video && !hardwareRequested) {
+         const auto hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
+         context->thread_count = static_cast<int>(std::min(
+             hardwareThreads, MaximumSoftwareDecoderThreads));
+         context->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+     }
+-    if (disc_ && disc_->Menu() && video &&
++    // 3FCompare patch (0008): multi-threaded audio decoding (FLAC supports
++    // frame-level parallelism). Reduces CPU contention between AV1 video and
++    // FLAC audio decode.
++    if (result >= 0 && !video && !hardwareRequested) {
++        const auto hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
++        context->thread_count = static_cast<int>(std::min(
++            hardwareThreads, MaximumSoftwareDecoderThreads));
++        context->thread_type = FF_THREAD_FRAME;
++    }
++    // Upstream 2026.9: disc menu MPEG2 video needs low-delay single-thread slice decode.
++    if (result >= 0 && disc_ && disc_->Menu() && video &&
+         stream->codecpar->codec_id == AV_CODEC_ID_MPEG2VIDEO) {
+         context->flags |= AV_CODEC_FLAG_LOW_DELAY;
+         context->thread_count = 1;
+@@ -3430,9 +3460,13 @@ void PlayerSession::SetState(const FFF3FPState state, const char* operation) noe
+ 
+ void PlayerSession::Fail(const FFFResult result, std::string message, const char* operation) noexcept {
+     try {
+-        SuspendAudioRenderer(true); snapshot_.state = FFF3FPState::Failed; state_.store(FFF3FPState::Failed); PublishSnapshot();
+-        ReportError(result, std::move(message), operation); }
+-    catch (...) {}
++        // 3FCompare (F-LOG): kernel failure sink
++        extern void FFF3FP_KernelLogImpl(const char*) noexcept;
++        FFF3FP_KernelLogImpl(("FAIL: " + std::string(operation ? operation : "") + ": " + message).c_str());
++    } catch (...) {}
++    try { SuspendAudioRenderer(true); snapshot_.state = FFF3FPState::Failed; state_.store(FFF3FPState::Failed); PublishSnapshot();
++        ReportError(result, std::move(message), operation);
++    } catch (...) {}
+ }
+ 
+ void PlayerSession::ReportError(const FFFResult result, std::string message, const char* operation) noexcept {
+diff --git a/FFF.Native/3FP/Core/PlayerSession.h b/FFF.Native/3FP/Core/PlayerSession.h
+index 06123b1..4beef7f 100644
+--- a/FFF.Native/3FP/Core/PlayerSession.h
++++ b/FFF.Native/3FP/Core/PlayerSession.h
+@@ -53,6 +53,7 @@ public:
+     FFFResult SetExternalAudioOffset(std::int64_t offset100ns) noexcept;
+     FFFResult SetColorMode(FFF3FPColorMode mode, float sdrPeakNits,
+         float hdrPeakNits, float paperWhiteNits, bool forceHdrOutput) noexcept;
++    FFFResult SetPresentConfig(bool enableTearing) noexcept;
+     FFFResult SetOutputWindow(void* outputWindow) noexcept;
+     FFFResult SetInteractiveMove(bool enabled) noexcept;
+     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
+@@ -73,6 +74,8 @@ public:
+     FFFResult GetLyricsStatus(FFF3FPTimedTextStatus& status) noexcept;
+     // Render-target diagnostics
+     FFFResult GetRenderTargetInfo(FFF3FPRenderTargetInfo& info) noexcept;
++    // 3FCompare K5: upstream has no equivalent.
++    FFFResult Redraw() noexcept;
+     std::string MediaInfo() const;
+     std::string LastError() const;
+ 
+diff --git a/FFF.Native/3FP/Render/VideoRenderer.cpp b/FFF.Native/3FP/Render/VideoRenderer.cpp
+index fc74498..343ec0d 100644
+--- a/FFF.Native/3FP/Render/VideoRenderer.cpp
++++ b/FFF.Native/3FP/Render/VideoRenderer.cpp
+@@ -1713,6 +1713,167 @@ FFFResult MeasureTimedTextWidth(const char* textUtf8, const char* fontFamilyUtf8
+     }
+ }
+ 
++// 3FCompare (F-LOG): process log sink, defined in 3FP/Api/PlayerApi.cpp and
++// forwarded to the callback installed through FFF3FP_SetLogCallback. It is a
++// plain C++ symbol rather than FFF3FP_API, so using it adds nothing to the
++// exported surface (which must stay at 82 symbols / API version 15).
++void FFF3FP_KernelLogImpl(const char* utf8Line) noexcept;
++
++namespace {
++// Cooldown for the Present-observability lines. Without it a route that is slow
++// rather than hung emits one line per frame, and every line is written to disk
++// by the managed sink — that would drown logs/app-*.log and add I/O to the very
++// thread whose stall is being investigated.
++constexpr auto PresentObservabilityLogCooldown = std::chrono::seconds(10);
++
++// True (and arms the deadline) when the cooldown since the last line has
++// elapsed. Deadlines are steady_clock milliseconds since epoch, 0 = never.
++bool ObservabilityLogAllowed(std::atomic<std::int64_t>& deadline) noexcept {
++    const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
++        std::chrono::steady_clock::now().time_since_epoch()).count();
++    const auto previous = deadline.load(std::memory_order_acquire);
++    if (previous != 0 && nowMs - previous <
++        std::chrono::duration_cast<std::chrono::milliseconds>(
++            PresentObservabilityLogCooldown).count()) return false;
++    deadline.store(nowMs, std::memory_order_release);
++    return true;
++}
++}
++
++// ══════════════════════════════════════════════════════════════════════════
++// Process-wide presenter.
++//
++// Every PlayerVideoRenderer used to own a TimedTextThread that called
++// IDXGISwapChain::Present on its own swap chain. The overlay hooks installed by
++// RTSS / MSI Afterburner are written for a single-pipeline application: the
++// measured crash rate scales with the number of presenter pipelines alive at
++// once, not with the decoded load and not with the number of D3D11 devices or
++// swap chains (docs/33, docs/35, .review_pr/device_vs_thread). Serialising
++// Present behind a lock did not help, so the pipelines themselves are the
++// variable.
++//
++// This class keeps exactly one thread in the process inside Present. Renderers
++// register here instead of spawning a presenter thread; the pump walks the
++// registry and lets each renderer pace itself through PumpPresentationOnce().
++// A renderer whose owner thread needs a synchronous present (the session's
++// first/last-frame boundary) publishes a handoff flag and waits for the pump
++// instead of presenting from its own thread.
++//
++// docs/40: the two remaining exceptions to that invariant — ClearSurface()'s
++// Present(0, 0) on the caller thread and the handoff timeout fallback — are both
++// excluded now (see ClearSurface() and PresentTimedText()). The pump thread is
++// the only thread in the process that reaches IDXGISwapChain::Present.
++//
++// Lock order: timedTextMutex_ may be held while entering Register/Unregister;
++// the pump never takes its own mutex_ while it is inside a renderer, so the
++// two can never form a cycle.
++// ══════════════════════════════════════════════════════════════════════════
++class PresentationPump {
++public:
++    static PresentationPump& Instance() noexcept {
++        static PresentationPump pump;
++        return pump;
++    }
++
++    void Register(PlayerVideoRenderer* renderer) noexcept {
++        std::lock_guard lock(mutex_);
++        if (std::find(members_.begin(), members_.end(), renderer) == members_.end())
++            members_.push_back(renderer);
++        if (!thread_.joinable())
++            thread_ = std::thread(&PresentationPump::Run, this, ++generation_);
++        wake_.notify_all();
++    }
++
++    void Unregister(PlayerVideoRenderer* renderer) noexcept {
++        std::unique_lock lock(mutex_);
++        members_.erase(std::remove(members_.begin(), members_.end(), renderer),
++            members_.end());
++        // Wait out the round in flight. The pump never takes mutex_ while it is
++        // inside a renderer, so this cannot deadlock against it; the wait is
++        // bounded by one Present of each remaining renderer.
++        idle_.wait(lock, [this] { return inFlight_ == 0; });
++        if (!members_.empty() || !thread_.joinable()) return;
++        // Bumping the generation retires the current pump thread for good: even
++        // if a registration races with the join below, the retired thread stops
++        // pumping instead of running side by side with its replacement.
++        ++generation_;
++        auto retiring = std::move(thread_);
++        lock.unlock();
++        wake_.notify_all();
++        if (retiring.joinable()) retiring.join();
++    }
++
++    void Wake() noexcept {
++        std::lock_guard lock(mutex_);
++        // A wake that lands while the pump is inside a batch would otherwise be
++        // lost (nobody is waiting on the condition variable at that moment), so
++        // latch it and let the pump start another round immediately.
++        if (!members_.empty()) wakePending_ = true;
++        wake_.notify_all();
++    }
++
++private:
++    PresentationPump() = default;
++    PresentationPump(const PresentationPump&) = delete;
++    PresentationPump& operator=(const PresentationPump&) = delete;
++    ~PresentationPump() {
++        std::thread retiring;
++        {
++            std::lock_guard lock(mutex_);
++            ++generation_;
++            retiring = std::move(thread_);
++        }
++        wake_.notify_all();
++        if (retiring.joinable()) retiring.join();
++    }
++
++    void Run(const unsigned long long generation) noexcept {
++        for (;;) {
++            std::vector<PlayerVideoRenderer*> batch;
++            {
++                std::unique_lock lock(mutex_);
++                if (generation_ != generation) return;
++                while (members_.empty() && !wakePending_) {
++                    wake_.wait(lock, [this, generation] {
++                        return generation_ != generation || !members_.empty() ||
++                            wakePending_;
++                    });
++                    if (generation_ != generation) return;
++                }
++                wakePending_ = false;
++                batch = members_;
++                inFlight_ = static_cast<int>(batch.size());
++            }
++            auto next = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
++            for (auto* renderer : batch) {
++                const auto due = renderer->PumpPresentationOnce();
++                if (due < next) next = due;
++            }
++            {
++                std::lock_guard lock(mutex_);
++                inFlight_ = 0;
++            }
++            idle_.notify_all();
++            std::unique_lock lock(mutex_);
++            if (generation_ != generation) return;
++            if (wakePending_) continue;
++            const auto now = std::chrono::steady_clock::now();
++            if (next <= now) continue;
++            wake_.wait_until(lock, next);
++        }
++    }
++
++    std::mutex mutex_;
++    std::condition_variable wake_;
++    std::condition_variable idle_;
++    std::vector<PlayerVideoRenderer*> members_;
++    std::thread thread_;
++    // Read without mutex_ on the pump's fast path, written under mutex_.
++    std::atomic<unsigned long long> generation_{0};
++    int inFlight_ = 0;
++    bool wakePending_ = false;
++};
++
+ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback) noexcept
+     : window_(nullptr), device_(nullptr), context_(nullptr), swapChain_(nullptr),
+       vertexShader_(nullptr), pixelShader_(nullptr), coverBackdropPixelShader_(nullptr),
+@@ -1771,6 +1932,14 @@ PlayerVideoRenderer::PlayerVideoRenderer(std::function<void()> recoveryCallback)
+       view360PitchBits_(std::bit_cast<float>(0.0f)),
+       view360FovYBits_(std::bit_cast<float>(90.0f)),
+       timedTextThreadStop_(false), timedTextThreadRunning_(false),
++      pumpRegistered_(false), pumpThreadId_(std::thread::id{}),
++      pumpObservedPresentationGeneration_(0), pumpObservedVideoGeneration_(0),
++      pumpNextPresentation_(std::chrono::steady_clock::time_point::min()),
++      pumpNextDevicePoll_(std::chrono::steady_clock::now()),
++      pumpHandoffPending_(false), pumpHandoffDone_(false),
++      pumpHandoffResult_(FFFResult::Success),
++      pumpSlowPresentCount_(0), pumpPresentMax100ns_(0), pumpSlowPresentLogAt_(0),
++      offPumpClearSurfacePresents_(0), handoffTimeoutFallbacks_(0), offPumpPresentLogAt_(0),
+       coverBackdropThreadStop_(false), coverBackdropRequestPending_(false),
+       coverBackdropRequestGeneration_(0),
+       presentationGeneration_(0), presentationFrameRate_(60.0f),
+@@ -1819,7 +1988,7 @@ FFFResult PlayerVideoRenderer::SetWindow(const HWND window) noexcept {
+             presentationFrameRate_ = DetectDisplayRefreshRate(window_);
+             ++presentationGeneration_;
+         }
+-        timedTextCondition_.notify_one();
++        PresentationPump::Instance().Wake();
+         return FFFResult::Success;
+     }
+     if (swapChain_ != nullptr) {
+@@ -2011,8 +2180,9 @@ FFFResult PlayerVideoRenderer::EnsureDevice() noexcept {
+     // adapter index was honoured, silently ignored, or fell back to the default
+     // policy — the three cases are indistinguishable in behaviour on a machine
+     // where the default happens to be the same GPU.
+-    // Deliberately OutputDebugStringA and not a log-callback extension: that
+-    // keeps the diagnostic self-contained with no extra API surface to maintain.
++    // 3FCompare: the formatted line is forwarded to the process log sink
++    // (FFF3FP_SetLogCallback) as well as OutputDebugStringA, so it also lands in
++    // logs/app-*.log instead of being visible to a debugger only.
+     {
+         ComPtr<IDXGIDevice> dxgiDevice;
+         ComPtr<IDXGIAdapter> adapter;
+@@ -2025,10 +2195,12 @@ FFFResult PlayerVideoRenderer::EnsureDevice() noexcept {
+                 // OutOfMemory into std::terminate instead of a returned error.
+                 char line[192]{};
+                 _snprintf_s(line, sizeof(line), _TRUNCATE,
+-                    "FFF.Native: device adapter requested=%d vendor=0x%04x device=0x%04x luid=%ld:%lu\n",
++                    "FFF.Native: device adapter requested=%d vendor=0x%04x device=0x%04x luid=%ld:%lu",
+                     preferredAdapterIndex, desc.VendorId, desc.DeviceId,
+                     static_cast<long>(desc.AdapterLuid.HighPart),
+                     static_cast<unsigned long>(desc.AdapterLuid.LowPart));
++                extern void FFF3FP_KernelLogImpl(const char*) noexcept;
++                FFF3FP_KernelLogImpl(line);
+                 OutputDebugStringA(line);
+             }
+         }
+@@ -3046,18 +3218,12 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
+                         std::clamp(item->targetFrameRate, 1.0f, 240.0f));
+                 }
+             }
+-            if (hasVisibleLayer) {
+-                timedTextThreadRunning_ = true;
+-                if (!timedTextThread_.joinable()) {
+-                    timedTextThreadStop_ = false;
+-                    timedTextThread_ = std::thread(&PlayerVideoRenderer::TimedTextThread, this);
+-                }
+-            }
++            if (hasVisibleLayer) StartPresentationPumpMembership();
+             ++presentationGeneration_;
+         }
+         // Submission is intentionally publish-and-wake only. The UI timer must
+         // never wait for 4K conversion, the D3D immediate-context lock or DXGI.
+-        timedTextCondition_.notify_one();
++        PresentationPump::Instance().Wake();
+         return FFFResult::Success;
+     } catch (...) {
+         SetError("Could not retain the timed-text command layer.");
+@@ -3065,83 +3231,162 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
+     }
+ }
+ 
+-void PlayerVideoRenderer::TimedTextThread() noexcept {
+-    std::uint64_t observedPresentationGeneration = 0;
+-    std::uint64_t observedVideoGeneration = 0;
+-    auto nextPresentation = std::chrono::steady_clock::time_point::min();
+-    for (;;) {
+-        float frameRate = 60.0f;
+-        bool videoChanged = false;
+-        bool devicePollOnly = false;
+-        {
+-            std::unique_lock lock(timedTextMutex_);
+-            const auto signaled = timedTextCondition_.wait_for(lock,
+-                std::chrono::milliseconds(500), [this, &observedPresentationGeneration,
+-                    &observedVideoGeneration] {
+-                return timedTextThreadStop_ ||
+-                    presentationGeneration_ != observedPresentationGeneration ||
+-                    (timedTextThreadRunning_ &&
+-                        videoGeneration_.load() != observedVideoGeneration);
+-            });
+-            if (timedTextThreadStop_) return;
+-            if (!signaled) {
+-                devicePollOnly = true;
+-            }
+-            if (!timedTextThreadRunning_) {
+-                observedPresentationGeneration = presentationGeneration_;
+-                observedVideoGeneration = videoGeneration_.load();
+-                continue;
+-            }
+-            if (!devicePollOnly) {
+-                videoChanged = videoGeneration_.load() != observedVideoGeneration;
+-                const auto cameraLive = projection360Enabled_.load(std::memory_order_acquire) != 0;
+-                // A new decoded frame is never held behind the overlay cadence. Static
+-                // subtitle/danmaku updates are still coalesced to their requested rate.
+-                // A live 360 camera follows the same rule as decoded video: submit
+-                // the newest view immediately and let the swap-chain frame-latency
+-                // contract pace it to the physical display (including 120 Hz).
+-                if (const auto now = std::chrono::steady_clock::now();
+-                    !videoChanged && !cameraLive &&
+-                    nextPresentation != std::chrono::steady_clock::time_point::min() &&
+-                    now < nextPresentation) {
+-                    timedTextCondition_.wait_until(lock, nextPresentation,
+-                        [this, &observedVideoGeneration] {
+-                            return timedTextThreadStop_ ||
+-                                videoGeneration_.load() != observedVideoGeneration;
+-                        });
+-                    if (timedTextThreadStop_) return;
+-                }
+-                observedPresentationGeneration = presentationGeneration_;
+-                observedVideoGeneration = videoGeneration_.load();
+-                frameRate = presentationFrameRate_;
+-            }
+-        }
+-        if (devicePollOnly) {
+-            RequestRecoveryIfDeviceLost();
+-            continue;
+-        }
+-        const auto presentationStart = std::chrono::steady_clock::now();
+-        const auto result = PresentTimedText();
+-        if (result != FFFResult::Success) {
+-            if (result == FFFResult::DeviceFailure && RequestRecoveryIfDeviceLost()) continue;
+-            SetError("The independent timed-text presenter could not compose the latest layer.");
+-        }
+-        nextPresentation = presentationStart + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+-            std::chrono::duration<double>(1.0 / std::clamp(static_cast<double>(frameRate), 1.0, 240.0)));
+-    }
++void PlayerVideoRenderer::StartPresentationPumpMembership() noexcept {
++    // Precondition: the caller holds timedTextMutex_. Registering here (rather
++    // than spawning a thread) is what collapses N presenter pipelines into the
++    // one process-wide pump.
++    timedTextThreadStop_ = false;
++    timedTextThreadRunning_ = true;
++    if (pumpRegistered_.load(std::memory_order_acquire)) return;
++    pumpRegistered_.store(true, std::memory_order_release);
++    pumpNextPresentation_ = std::chrono::steady_clock::time_point::min();
++    pumpNextDevicePoll_ = std::chrono::steady_clock::now();
++    PresentationPump::Instance().Register(this);
+ }
+ 
+-void PlayerVideoRenderer::StopTimedTextThread() noexcept {
++void PlayerVideoRenderer::StopPresentationPumpMembership() noexcept {
+     {
+         std::lock_guard lock(timedTextMutex_);
+         timedTextThreadStop_ = true;
+-    }
+-    timedTextCondition_.notify_all();
+-    if (timedTextThread_.joinable()) timedTextThread_.join();
++        pumpHandoffPending_ = false;
++        pumpHandoffDone_ = true;
++    }
++    pumpHandoffCondition_.notify_all();
++    // Unregister waits for the round in flight, so after this returns the pump
++    // is guaranteed not to touch this renderer again. Never call it with
++    // deviceMutex_ held: the pump takes that lock to present.
++    if (pumpRegistered_.exchange(false, std::memory_order_acq_rel))
++        PresentationPump::Instance().Unregister(this);
+     std::lock_guard lock(timedTextMutex_);
+     timedTextThreadRunning_ = false;
+ }
+ 
++std::chrono::steady_clock::time_point PlayerVideoRenderer::PumpPresentationOnce() noexcept {
++    pumpThreadId_.store(std::this_thread::get_id(), std::memory_order_release);
++    bool present = false;
++    bool handoff = false;
++    bool devicePoll = false;
++    float frameRate = 60.0f;
++    std::chrono::steady_clock::time_point presentationStart;
++    {
++        std::lock_guard lock(timedTextMutex_);
++        const auto now = std::chrono::steady_clock::now();
++        if (timedTextThreadStop_) return now + std::chrono::milliseconds(500);
++        if (now >= pumpNextDevicePoll_) {
++            devicePoll = true;
++            pumpNextDevicePoll_ = now + std::chrono::milliseconds(500);
++        }
++        handoff = pumpHandoffPending_;
++        if (handoff) pumpHandoffPending_ = false;
++        if (handoff) {
++            // A first/last-frame boundary asked for this frame explicitly.
++            present = true;
++        } else if (timedTextThreadRunning_) {
++            const auto presentationChanged =
++                presentationGeneration_ != pumpObservedPresentationGeneration_;
++            const auto videoChanged = videoGeneration_.load() != pumpObservedVideoGeneration_;
++            const auto cameraLive = projection360Enabled_.load(std::memory_order_acquire) != 0;
++            // A new decoded frame is never held behind the overlay cadence. Static
++            // subtitle/danmaku updates are still coalesced to their requested rate.
++            // A live 360 camera follows the same rule as decoded video: submit
++            // the newest view immediately and let the swap-chain frame-latency
++            // contract pace it to the physical display (including 120 Hz).
++            present = presentationChanged || videoChanged || cameraLive ||
++                now >= pumpNextPresentation_;
++        }
++        if (!present) {
++            const auto next = std::min(pumpNextPresentation_, pumpNextDevicePoll_);
++            return next > now ? next : now + std::chrono::milliseconds(1);
++        }
++        pumpObservedPresentationGeneration_ = presentationGeneration_;
++        pumpObservedVideoGeneration_ = videoGeneration_.load();
++        frameRate = presentationFrameRate_;
++        presentationStart = now;
++    }
++    if (devicePoll) RequestRecoveryIfDeviceLost();
++    // docs/39 §3.1: one pump thread now drives every route, so a route whose
++    // Present stalls (TDR, driver hang, device recovery) stops *all* routes from
++    // presenting. Timing the whole compose+Present call makes the culprit
++    // identifiable from the log instead of having to guess.
++    const auto presentStarted = std::chrono::steady_clock::now();
++    const auto result = PresentTimedTextOnPump();
++    NotePumpPresentDuration(std::chrono::steady_clock::now() - presentStarted);
++    if (result != FFFResult::Success) {
++        if (result != FFFResult::DeviceFailure || !RequestRecoveryIfDeviceLost())
++            SetError("The process presenter could not compose the latest layer.");
++    }
++    std::chrono::steady_clock::time_point next;
++    {
++        std::lock_guard lock(timedTextMutex_);
++        pumpNextPresentation_ = presentationStart +
++            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
++                std::chrono::duration<double>(
++                    1.0 / std::clamp(static_cast<double>(frameRate), 1.0, 240.0)));
++        if (handoff) {
++            pumpHandoffResult_ = result;
++            pumpHandoffDone_ = true;
++        }
++        next = std::min(pumpNextPresentation_, pumpNextDevicePoll_);
++    }
++    if (handoff) pumpHandoffCondition_.notify_all();
++    return next;
++}
++
++void PlayerVideoRenderer::NotePumpPresentDuration(
++    const std::chrono::steady_clock::duration elapsed) noexcept {
++    // Threshold = 100 ms, i.e. several frame periods (~6 frames at 60 Hz, ~24 at
++    // 240 Hz). A healthy Present is paced by the swap chain's vblank wait, so it
++    // lands well under one frame period; anything in the 100 ms range is either
++    // a stall or a first-frame setup cost, and both are worth a line. The worst
++    // value is kept unconditionally so a later investigation can see how close
++    // the healthy path runs to the threshold.
++    constexpr auto slowPresentThreshold = std::chrono::milliseconds(100);
++    const auto elapsed100ns = static_cast<std::uint64_t>(
++        std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count() / 100);
++    auto worst = pumpPresentMax100ns_.load(std::memory_order_relaxed);
++    while (elapsed100ns > worst && !pumpPresentMax100ns_.compare_exchange_weak(
++            worst, elapsed100ns, std::memory_order_relaxed)) {}
++    if (elapsed < slowPresentThreshold) return;
++    // Counted unconditionally; only the line is cooldown-suppressed.
++    const auto overCount = pumpSlowPresentCount_.fetch_add(1, std::memory_order_relaxed) + 1;
++    if (!ObservabilityLogAllowed(pumpSlowPresentLogAt_)) return;
++    // Fixed-size stack buffer: this runs on the pump thread inside a noexcept
++    // function, so a std::string/std::to_string allocation here could turn an
++    // OutOfMemory into std::terminate.
++    char line[224]{};
++    _snprintf_s(line, sizeof(line), _TRUNCATE,
++        "FFF.Native: presenter pump slow Present window=%p elapsed=%.1fms max=%.1fms over=%llu",
++        static_cast<void*>(window_),
++        std::chrono::duration<double, std::milli>(elapsed).count(),
++        static_cast<double>(pumpPresentMax100ns_.load(std::memory_order_relaxed)) / 10000.0,
++        static_cast<unsigned long long>(overCount));
++    FFF3FP_KernelLogImpl(line);
++    OutputDebugStringA(line);
++}
++
++void PlayerVideoRenderer::NotePumpOwnedPresentExcluded(const char* reason) noexcept {
++    // docs/40: "only one thread in the process is inside Present" used to have
++    // exactly two exceptions — ClearSurface()'s Present(0, 0) on the caller
++    // thread and the handoff 2 s timeout fallback. Both are now *excluded*
++    // instead of performed, so this line reports a suppressed Present rather than
++    // an off-pump one (the former "off-pump Present ... reason=..." line no
++    // longer exists anywhere in the binary). The counters are bumped by the
++    // callers unconditionally; only this line is cooldown-suppressed, because
++    // ClearSurface repeats on every device rebuild and a wedged pump repeats on
++    // every boundary present.
++    if (!ObservabilityLogAllowed(offPumpPresentLogAt_)) return;
++    char line[224]{};
++    _snprintf_s(line, sizeof(line), _TRUNCATE,
++        "FFF.Native: pump-owned Present excluded window=%p reason=%s clearSurface=%llu handoffTimeout=%llu",
++        static_cast<void*>(window_), reason == nullptr ? "unknown" : reason,
++        static_cast<unsigned long long>(
++            offPumpClearSurfacePresents_.load(std::memory_order_relaxed)),
++        static_cast<unsigned long long>(
++            handoffTimeoutFallbacks_.load(std::memory_order_relaxed)));
++    FFF3FP_KernelLogImpl(line);
++    OutputDebugStringA(line);
++}
++
+ FFFResult PlayerVideoRenderer::GetTimedTextStatus(FFF3FPTimedTextStatus& status,
+     const TimedTextLayerSlot slot) noexcept {
+     const auto slotIndex = static_cast<std::size_t>(slot);
+@@ -4140,17 +4385,11 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const bool limitToNa
+     if (coverArt) RequestCoverBackdropRender();
+     {
+         std::lock_guard lock(timedTextMutex_);
+-        if (!timedTextThread_.joinable()) {
+-            timedTextThreadStop_ = false;
+-            timedTextThreadRunning_ = true;
+-            timedTextThread_ = std::thread(&PlayerVideoRenderer::TimedTextThread, this);
+-        } else {
+-            timedTextThreadRunning_ = true;
+-        }
++        StartPresentationPumpMembership();
+         ++presentationGeneration_;
+     }
+     deviceLock.unlock();
+-    timedTextCondition_.notify_one();
++    PresentationPump::Instance().Wake();
+     return FFFResult::Success;
+ }
+ 
+@@ -4164,13 +4403,10 @@ FFFResult PlayerVideoRenderer::Redraw() noexcept {
+     }
+     {
+         std::lock_guard lock(timedTextMutex_);
+-        if (!timedTextThread_.joinable()) {
+-            timedTextThreadStop_ = false; timedTextThreadRunning_ = true;
+-            timedTextThread_ = std::thread(&PlayerVideoRenderer::TimedTextThread, this);
+-        }
++        StartPresentationPumpMembership();
+         ++presentationGeneration_;
+     }
+-    timedTextCondition_.notify_one();
++    PresentationPump::Instance().Wake();
+     return FFFResult::Success;
+ }
+ 
+@@ -4339,7 +4575,7 @@ PlayerVideoRenderer::TryRenderCoverBackdropCache() noexcept {
+             std::lock_guard lock(timedTextMutex_);
+             ++presentationGeneration_;
+         }
+-        timedTextCondition_.notify_one();
++        PresentationPump::Instance().Wake();
+     }
+     return CoverBackdropRenderResult::Complete;
+ }
+@@ -4473,6 +4709,14 @@ FFFResult PlayerVideoRenderer::DrawCoverBackdrop(ID3D11RenderTargetView* target)
+     return FFFResult::Success;
+ }
+ 
++// ---- 3FCompare extension shim (managed API surface; upstream has no equivalent) ----
++FFFResult PlayerVideoRenderer::SetPresentConfig(const bool enableTearing) noexcept {
++    // Preference only: the chain already carries DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING
++    // when the adapter supports it; the toggle takes effect on the next Present.
++    swapAllowTearing_ = enableTearing;
++    return FFFResult::Success;
++}
++
+ FFFResult PlayerVideoRenderer::GetRenderTargetInfo(RenderTargetInfo& info) noexcept {
+     std::lock_guard lock(deviceMutex_);
+     info = {};
+@@ -4524,7 +4768,7 @@ FFFResult PlayerVideoRenderer::Set360View(const bool enabled, const float yaw,
+             std::lock_guard lock(timedTextMutex_);
+             ++presentationGeneration_;
+         }
+-        timedTextCondition_.notify_one();
++        PresentationPump::Instance().Wake();
+     }
+     return FFFResult::Success;
+ }
+@@ -4827,6 +5071,51 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
+ }
+ 
+ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
++    // The pump owns every Present. A caller that is not the pump (the session's
++    // first/last-frame boundary runs on the session queue) hands the request to
++    // the pump and waits, so the process still never has two threads inside
++    // IDXGISwapChain::Present at the same time.
++    if (pumpThreadId_.load(std::memory_order_acquire) == std::this_thread::get_id())
++        return PresentTimedTextOnPump();
++    {
++        std::lock_guard lock(timedTextMutex_);
++        // No pump membership means no pump thread is composing for this
++        // renderer; fall back to the historical direct path.
++        if (!pumpRegistered_.load(std::memory_order_acquire))
++            return PresentTimedTextOnPump();
++        pumpHandoffPending_ = true;
++        pumpHandoffDone_ = false;
++        pumpHandoffResult_ = FFFResult::Success;
++    }
++    PresentationPump::Instance().Wake();
++    std::unique_lock lock(timedTextMutex_);
++    if (!pumpHandoffCondition_.wait_for(lock, std::chrono::seconds(2),
++            [this] { return pumpHandoffDone_; })) {
++        // docs/40 §二: the wait stays bounded (the caller is never stalled for
++        // good), but the timeout no longer falls back to Presenting from this
++        // thread — that fallback was the second off-pump Present path, and it
++        // fired precisely when the pump was wedged, i.e. when the device is
++        // already in trouble (TDR / driver hang / device recovery). Opening a
++        // second presenter pipeline on a device in that state is both the most
++        // dangerous and the least useful thing to do, and it is the one
++        // condition this whole change exists to remove.
++        //
++        // Two seconds is five times the worst pump round measured so far
++        // (slowest Present 372.9 ms, docs/40 §一), so reaching it means the pump
++        // is not merely slow. The pending flag is deliberately left set: the pump
++        // still presents this frame as soon as it unwedges, and the caller
++        // reports a device failure — which both call sites already handle by
++        // requesting device recovery (PlayerSession.cpp:672 / :2900) instead of
++        // failing the session when the device is genuinely gone.
++        lock.unlock();
++        handoffTimeoutFallbacks_.fetch_add(1, std::memory_order_relaxed);
++        NotePumpOwnedPresentExcluded("handoff-timeout");
++        return FFFResult::DeviceFailure;
++    }
++    return pumpHandoffResult_;
++}
++
++FFFResult PlayerVideoRenderer::PresentTimedTextOnPump() noexcept {
+     std::unique_lock deviceLock(deviceMutex_);
+     const auto lyricsLayout = lyricsLayoutEnabled_.load(std::memory_order_acquire);
+     if (window_ == nullptr || (!hasCachedVideo_ && swapChain_ == nullptr && !lyricsLayout))
+@@ -4908,8 +5197,38 @@ FFFResult PlayerVideoRenderer::PresentTimedText() noexcept {
+ }
+ 
+ void PlayerVideoRenderer::ClearSurface() noexcept {
+-    // Precondition: the caller holds deviceMutex_. Presenting here only needs
+-    // presentMutex_; swapChain_ was already validated under deviceMutex_.
++    // Precondition: the caller holds deviceMutex_. The clear only needs the
++    // device/context it was already validated against under that lock.
++    //
++    // docs/39 §3.3 / docs/40 §一: the clear itself is unchanged, but the
++    // Present(0, 0) that used to follow it is gone — this is the (B) option, and
++    // it is the *whole* fix, not a deferral, because of where the two callers
++    // reach here from:
++    //
++    //   * ResetMedia() and Close() both call StopPresentationPumpMembership()
++    //     *before* taking deviceMutex_, so by the time ClearSurface() runs this
++    //     renderer is no longer a pump member and no later pump round will ever
++    //     compose for it. A "present it on the next round" hand-off is therefore
++    //     not available without re-registering a renderer that is being torn
++    //     down.
++    //   * The pump is process-wide, so the danger is not this renderer's own
++    //     membership: it is that *another* route's pump round is inside Present
++    //     right now. That is the normal case during a 4-route open/close batch
++    //     (4 clear-surface Presents were observed clustered within ~1 ms in
++    //     app-2026-09-20.log), and it is exactly the "two threads inside
++    //     IDXGISwapChain::Present" condition the pump exists to remove.
++    //   * Checking "is the pump idle?" here would not close it either: several
++    //     closers can all observe members_ == empty and then Present
++    //     concurrently. Only an unconditional skip is race-free without adding a
++    //     new pump API and a new lock-order edge.
++    //
++    // What is lost: the black frame is not shown. Both call sites are "the media
++    // is going away" — media replaced, or session closed/window destroyed — so
++    // the surface keeps *this route's own* last frame (never another route's
++    // content) until the new media's first composed frame or the window
++    // teardown. No stale pixels can leak into a later frame either: every
++    // compose path fully repaints the back buffer before Present
++    // (DrawCachedVideo() clears the target first, VideoRenderer.cpp:4769).
+     if (context_ != nullptr && device_ != nullptr && swapChain_ != nullptr) {
+         ComPtr<ID3D11Texture2D> backBuffer;
+         ComPtr<ID3D11RenderTargetView> backBufferTarget;
+@@ -4920,8 +5239,10 @@ void PlayerVideoRenderer::ClearSurface() noexcept {
+             context_->ClearRenderTargetView(backBufferTarget.Get(), black);
+             context_->OMSetRenderTargets(0, nullptr, nullptr);
+             context_->Flush();
+-            std::lock_guard presentLock(presentMutex_);
+-            swapChain_->Present(0, 0);
++            // docs/40 §一: counted (not logged per frame) so the next round of
++            // 4-route runs can prove this path was taken and no Present happened.
++            offPumpClearSurfacePresents_.fetch_add(1, std::memory_order_relaxed);
++            NotePumpOwnedPresentExcluded("ClearSurface");
+         }
+     }
+     if (window_ != nullptr && IsWindow(window_))
+@@ -5018,7 +5339,7 @@ void PlayerVideoRenderer::ReleaseDeviceObjects() noexcept {
+ 
+ FFFResult PlayerVideoRenderer::RecreateDeviceResources() noexcept {
+     StopCoverBackdropThread();
+-    StopTimedTextThread();
++    StopPresentationPumpMembership();
+     std::lock_guard deviceLock(deviceMutex_);
+     ReleaseDeviceObjects();
+     const auto result = EnsureDevice();
+@@ -5029,7 +5350,7 @@ FFFResult PlayerVideoRenderer::RecreateDeviceResources() noexcept {
+ 
+ void PlayerVideoRenderer::ResetMedia() noexcept {
+     StopCoverBackdropThread();
+-    StopTimedTextThread();
++    StopPresentationPumpMembership();
+     std::lock_guard deviceLock(deviceMutex_);
+     ClearSurface();
+     if (scaler_ != nullptr) { sws_freeContext(scaler_); scaler_ = nullptr; }
+@@ -5077,14 +5398,15 @@ void PlayerVideoRenderer::ResetMedia() noexcept {
+             timedTextPresentCounts_[index] = 0;
+         }
+     }
+-    timedTextCondition_.notify_one();
++    PresentationPump::Instance().Wake();
+ }
+ 
+ void PlayerVideoRenderer::Close() noexcept {
+-    // Join before taking deviceMutex_: the presenter may already be waiting in
+-    // PresentTimedText and must be allowed to leave that critical section.
++    // Leave the pump before taking deviceMutex_: the presenter may already be
++    // waiting in PresentTimedText and must be allowed to leave that critical
++    // section.
+     StopCoverBackdropThread();
+-    StopTimedTextThread();
++    StopPresentationPumpMembership();
+     std::lock_guard deviceLock(deviceMutex_);
+     ClearSurface();
+     if (scaler_ != nullptr) { sws_freeContext(scaler_); scaler_ = nullptr; }
+diff --git a/FFF.Native/3FP/Render/VideoRenderer.h b/FFF.Native/3FP/Render/VideoRenderer.h
+index 647cc26..ed9f351 100644
+--- a/FFF.Native/3FP/Render/VideoRenderer.h
++++ b/FFF.Native/3FP/Render/VideoRenderer.h
+@@ -46,6 +46,11 @@ struct IDWriteFactory;
+ struct IDWriteTextLayout;
+ struct IDWriteRenderingParams;
+ 
++// Process-wide single presenter. See the definition in VideoRenderer.cpp: the
++// overlay hooks shipped with RTSS / Afterburner assume a one-pipeline process,
++// so the whole process keeps exactly one thread inside IDXGISwapChain::Present.
++class PresentationPump;
++
+ struct TimedTextRenderCommand {
+     FFF3FPTimedTextCommandType type = FFF3FPTimedTextCommandType::Text;
+     FFF3FPTimedTextFlags flags = FFF3FPTimedTextFlags::None;
+@@ -130,6 +135,9 @@ public:
+     // (PlayerApi exports FFF3FP_GetRenderTargetInfo). Reports the current
+     // swap-chain / client / video-destination sizes so the App can position
+     // overlays and map pixel-probe coordinates without guessing.
++    // 3FCompare: SetPresentConfig has no upstream equivalent (PlayerApi exports
++    // FFF3FP_SetPresentConfig); zoom follows the upstream viewport-scaling impl.
++    FFFResult SetPresentConfig(bool enableTearing) noexcept;
+     struct RenderTargetInfo {
+         std::uint32_t swapWidth = 0;
+         std::uint32_t swapHeight = 0;
+@@ -295,8 +303,23 @@ private:
+     FFFResult PresentCurrentFrame(IDXGISwapChain4* swapChain,
+         std::uint64_t renderedVideoGeneration) noexcept;
+     FFFResult DrawTimedText(TimedTextLayerSlot slot) noexcept;
+-    void TimedTextThread() noexcept;
+-    void StopTimedTextThread() noexcept;
++    friend class PresentationPump;
++    // Presenter pump membership (see PresentationPump in VideoRenderer.cpp).
++    // The renderer keeps its per-instance pacing state here; the pump thread
++    // drives it and is the only thread that ever reaches PresentCurrentFrame.
++    void StartPresentationPumpMembership() noexcept;
++    void StopPresentationPumpMembership() noexcept;
++    // One pump round for this renderer. Returns the earliest time this renderer
++    // wants to be pumped again. Called by the pump thread only.
++    std::chrono::steady_clock::time_point PumpPresentationOnce() noexcept;
++    // Composition + Present for one frame. Must only run on the pump thread.
++    FFFResult PresentTimedTextOnPump() noexcept;
++    // Present observability (docs/39 §3.1 / §3.3, docs/40). These never change
++    // what is presented, when, or in what order: they record duration, and count
++    // the two paths that used to Present off the pump thread and are now
++    // excluded instead (see NotePumpOwnedPresentExcluded).
++    void NotePumpPresentDuration(std::chrono::steady_clock::duration elapsed) noexcept;
++    void NotePumpOwnedPresentExcluded(const char* reason) noexcept;
+     void CompositeTimedText(ID3D11RenderTargetView* target, TimedTextLayerSlot slot) noexcept;
+     void ReleaseTimedTextSlotResources(TimedTextLayerSlot slot) noexcept;
+     void ReleaseTimedTextResources(bool resetRenderedState = true) noexcept;
+@@ -436,12 +459,40 @@ private:
+     mutable std::mutex presentMutex_;
+     mutable std::mutex timedTextMutex_;
+     mutable std::mutex coverBackdropThreadMutex_;
+-    std::condition_variable timedTextCondition_;
+     std::condition_variable coverBackdropCondition_;
+-    std::thread timedTextThread_;
+     std::thread coverBackdropThread_;
+     bool timedTextThreadStop_;
+     bool timedTextThreadRunning_;
++    // Presenter pump membership. The pump thread drives PumpPresentationOnce
++    // for every registered renderer, so the loop state that used to live on the
++    // per-instance thread stack lives here instead.
++    std::atomic<bool> pumpRegistered_;
++    std::atomic<std::thread::id> pumpThreadId_;
++    std::uint64_t pumpObservedPresentationGeneration_;
++    std::uint64_t pumpObservedVideoGeneration_;
++    std::chrono::steady_clock::time_point pumpNextPresentation_;
++    std::chrono::steady_clock::time_point pumpNextDevicePoll_;
++    // First/last-frame presents issued by the session thread are handed to the
++    // pump and awaited here so that Present never runs off the pump thread.
++    bool pumpHandoffPending_;
++    bool pumpHandoffDone_;
++    FFFResult pumpHandoffResult_;
++    std::condition_variable pumpHandoffCondition_;
++    // Present observability. The pump serialises every route behind one thread,
++    // so a single route whose Present stalls freezes all of them; these counters
++    // are the only trace that survives such a stall.
++    std::atomic<std::uint64_t> pumpSlowPresentCount_;
++    std::atomic<std::uint64_t> pumpPresentMax100ns_;
++    // Suppression deadlines, steady_clock milliseconds since epoch; 0 = never
++    // logged. A route that is merely slow rather than hung would otherwise emit
++    // one line per frame, and every line is written to disk by the managed sink.
++    // Atomic because the two excluded paths below run on different threads.
++    // docs/40: both counters now count Present *requests that were excluded*
++    // (nothing was presented on the calling thread), not off-pump Presents.
++    std::atomic<std::int64_t> pumpSlowPresentLogAt_;
++    std::atomic<std::uint64_t> offPumpClearSurfacePresents_;
++    std::atomic<std::uint64_t> handoffTimeoutFallbacks_;
++    std::atomic<std::int64_t> offPumpPresentLogAt_;
+     bool coverBackdropThreadStop_;
+     bool coverBackdropRequestPending_;
+     std::uint64_t coverBackdropRequestGeneration_;
