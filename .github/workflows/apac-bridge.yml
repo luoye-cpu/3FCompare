@@ -1,0 +1,58 @@
+name: apac-bridge
+# Zero-token APAC->FOA bridge (route: push-triggered GitHub macOS runner, results pushed back
+# to a branch so the caller can `git fetch` without any API token).
+# - Decoder: fourMs/apac-decode's decode-apac.swift, fetched at run time (upstream main).
+# - Inputs: samples/*.mov|MOV|mp4|m4a committed on this branch.
+# - Outputs: out/*_foa.caf + *_foa.wav committed to branch apac-results-<run_id>.
+# Trigger: any push to branch `apac-bridge` (bump with an empty commit to re-run).
+on:
+  push:
+    branches: [ apac-bridge ]
+permissions:
+  contents: write
+jobs:
+  decode:
+    runs-on: macos-26   # APAC decode tooling needs the macOS 26 image
+    steps:
+      - uses: actions/checkout@v4
+      - name: Runner OS
+        run: sw_vers
+      - name: Fetch decoder (fourMs/apac-decode)
+        run: curl -fsSL -o decode-apac.swift https://raw.githubusercontent.com/fourMs/apac-decode/main/decode-apac.swift
+      - name: Decode APAC -> FOA
+        run: |
+          mkdir -p out
+          shopt -s nullglob nocaseglob
+          for f in samples/*.mov samples/*.mp4 samples/*.m4a; do
+            [ -f "$f" ] || continue
+            base="$(basename "${f%.*}")"
+            echo "=== $f -> out/${base}_foa ==="
+            set +e
+            swift decode-apac.swift "$f" "out/${base}_foa.caf"
+            rc=$?
+            set -e
+            if [ $rc -eq 2 ]; then
+              echo "::warning::$f has no 4-channel spatial track - skipped"
+              rm -f "out/${base}_foa.caf"
+              continue
+            fi
+            if [ $rc -ne 0 ]; then
+              echo "swift decoder rc=$rc; trying afconvert directly"
+              afconvert -f caff -d LEF32@48000 "$f" "out/${base}_foa.caf" || { echo "::warning::could not decode $f"; continue; }
+            fi
+            afinfo "out/${base}_foa.caf" | head -8 || true
+            afconvert -f WAVE -d LEI24@48000 "out/${base}_foa.caf" "out/${base}_foa.wav" || true
+          done
+          echo "--- results ---"
+          ls -la out || true
+      - name: Push results branch
+        run: |
+          git config user.name "apac-bridge-bot"
+          git config user.email "bot@users.noreply.github.com"
+          shopt -s nullglob
+          files=(out/*)
+          if [ ${#files[@]} -eq 0 ]; then echo "NOTHING_TO_PUSH"; exit 0; fi
+          git checkout -b "apac-results-${GITHUB_RUN_ID}"
+          git add -f out
+          git commit -m "APAC FOA results (run ${GITHUB_RUN_ID})"
+          git push origin "HEAD:apac-results-${GITHUB_RUN_ID}"
