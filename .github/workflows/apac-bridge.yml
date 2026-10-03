@@ -60,17 +60,19 @@
 #      (Windows: `py -c "import hashlib;print(hashlib.file_digest(open(F,'rb'),
 #      'md5').hexdigest())"`).  Do NOT trust a bare `md5sum` line under MSYS for
 #      Windows paths -- it prefixes the path and yields false mismatches.
-#   4. commit + push, then Actions -> "APAC -> FOA bridge" -> Run workflow
-#      (or push to a branch matching the `push:` trigger below)
-#   5. download the `apac-foa-artifacts` artifact, or read the results branch if
-#      you enabled the push-back input.
+#   4. commit + push to a branch matching the `push:` trigger below.  The push IS
+#      the trigger: no web click, no token (run 37152363565 finished in 91 s).
+#   5. `git fetch` the results branch that push-back commits, apac-results-<run_id>.
+#      The artifact upload is there too, but reading an artifact needs an API token,
+#      so the branch -- not the artifact -- is the route a tokenless caller can use.
 #   Public-repo standard runners (incl. macOS) are free; the proven run took
 #   minutes.  On a PRIVATE repo macOS minutes are metered -- think first.
 # =============================================================================
 # RUN VARIANT installed on luoye-cpu/3FCompare @ branch apac-bridge.
 # Canonical recipe: spatial-samples/apple/bridge2/apac-bridge.yml, plus the deltas
-# listed in bridge-in/VARIANT.diff.txt (V1 INDIR=samples, V2 push-back also fires
-# on push, V3 paths += samples/**, V4 this block). Nothing else was edited.
+# listed in bridge-in/VARIANT.diff.txt (V1 INDIR=samples because the originals are
+# already committed under samples/, V3 paths += samples/**, V4 this block).
+# Nothing else was edited.  Everything else is byte-identical.
 # =============================================================================
 
 name: APAC -> FOA bridge
@@ -237,7 +239,11 @@ jobs:
           retention-days: 90
 
   # ===========================================================================
-  # OPTIONAL, DOCUMENTED, DISABLED BY DEFAULT
+  # THE ZERO-TOKEN ROUTE, AND IT IS THE ONE THAT RUNS BY DEFAULT
+  # It used to be gated on the workflow_dispatch input alone, which is null on a
+  # push event -> the job was skipped -> a caller with no API token got nothing
+  # back at all, while every static check in the recipe stayed green.  A push to a
+  # branch listed in `push:` now runs it (proven: run 37152363565, 91 s, gate D5).
   # The zero-token route we actually used the first time: no artifact download,
   # no API token, no web click.  Push a tag/branch -> this job runs on the macOS
   # runner -> it commits the decoded FOA files BACK to a results branch -> the
