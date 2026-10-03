@@ -229,7 +229,7 @@ jobs:
           set +e
           shopt -s nullglob
           caf=("$OUTDIR"/*_foa.caf)
-          py=$(command -v python3 || echo none)
+          py=$(command -v python3 || command -v python || echo none)
           echo "::notice::silence gate files=${#caf[@]} python3=${py} ffmpeg=$(command -v ffmpeg || echo none)"
           [ ${#caf[@]} -gt 0 ] || { echo "::error::no *_foa.caf to measure"; exit 1; }
           bad=0
@@ -242,15 +242,16 @@ jobs:
             nz=""
             method=none
             if [ "$py" != none ] && [ -s "$raw" ]; then
-              nz=$("$py" -c 'import sys; d=open(sys.argv[1],\"rb\").read(); print(sum(1 for x in d if x))' "$raw" 2>/dev/null)
-              [ -n "$nz" ] && method=python3
+              # one line, and plain double quotes: a YAML literal block scalar cannot hold a
+              # line dedented below the block indent, and shell single quotes need no escaping
+              nz=$("$py" -c 'import sys; d=open(sys.argv[1],"rb").read(); print(sum(1 for x in d if x))' "$raw" 2>/dev/null)
+              case "$nz" in ''|*[!0-9]*) ;; *) method=python3 ;; esac
             fi
-            if [ -z "$nz" ] && [ -s "$raw" ]; then
-              nz=$(tr -d '\000' < "$raw" 2>/dev/null | wc -c)
-              [ -n "$nz" ] && method="tr-octal000"
-            fi
+            # No tr fallback. BSD tr is not GNU tr and v2's fallback answered 0 for a
+            # file with 1,516,612 non-zero bytes; a second implementation that can
+            # quietly disagree is worse than one that can fail loudly.
             echo "::notice::silence ${c##*/} ffmpeg_rc=${frc} raw_bytes=${tot} nonzero=${nz:-none} method=${method}"
-            if [ "$frc" -ne 0 ] || [ "$tot" = "-1" ] || [ -z "$nz" ]; then
+            if [ "$frc" -ne 0 ] || [ "$tot" = "-1" ] || [ "$method" != python3 ]; then
               echo "::error::cannot measure signal for $c (rc=${frc} size=${tot} nonzero=${nz:-none}) - failing closed rather than passing unchecked"; bad=1; continue
             fi
             if [ "$nz" -eq 0 ]; then
