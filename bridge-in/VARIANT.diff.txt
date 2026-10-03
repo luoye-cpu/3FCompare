@@ -1,0 +1,35 @@
+The workflow committed on branch apac-bridge is the canonical bridge2 recipe with exactly
+these 6 replacements, grouped into 4 deltas. Nothing else changed.
+
+Line endings: bridge2/apac-bridge.yml is stored CRLF on the bridging box (267 CRLF pairs,
+measured); this file is LF (repo-wide `* text=auto eol=lf` in .gitattributes, and a shell
+script belongs in LF). The comparison below is against the canonical file with CR stripped,
+so 'byte-identical' is meant in that normalised sense, not against the CRLF disk bytes.
+Verified with difflib after stripping: 13 changed lines total (6 replacements + the 5-line
+V4 provenance block + its closing rule), no other hunk.
+
+generator: C:/PLAN/qoder-scratch/apac-bridge-run\_install_recipe.py
+
+[V1]  -  MANIFEST: bridge-in/inputs.tsv
+      +  MANIFEST: bridge-in/inputs.tsv
+  INDIR: samples            # VARIANT V1: originals already committed here
+[V1]  -  f="bridge-in/$(basename "$rel")"
+      +  f="$INDIR/$(basename "$rel")"
+[V1]  -  src="bridge-in/$(basename "$rel")"
+      +  src="$INDIR/$(basename "$rel")"
+[V2]  -  if: ${{ github.event.inputs.push_results_back == 'true' }}
+      +  if: ${{ github.event_name == 'push' || github.event.inputs.push_results_back == 'true' }}
+[V3]  -  - "bridge-in/**"
+      +  - "bridge-in/**"
+      - "samples/**"
+[V4]  -  # =============================================================================
+
+name: APAC -> FOA bridge
+      +  # =============================================================================
+# RUN VARIANT installed on luoye-cpu/3FCompare @ branch apac-bridge.
+# Canonical recipe: spatial-samples/apple/bridge2/apac-bridge.yml, plus 4 deltas
+# (V1 INDIR=samples, V2 push-back also fires on push, V3 paths += samples/**,
+# V4 this block). Nothing else was edited. See bridge-in/VARIANT.diff.txt.
+# =============================================================================
+
+name: APAC -> FOA bridge

@@ -1,58 +1,274 @@
-name: apac-bridge
-# Zero-token APAC->FOA bridge (route: push-triggered GitHub macOS runner, results pushed back
-# to a branch so the caller can `git fetch` without any API token).
-# - Decoder: fourMs/apac-decode's decode-apac.swift, fetched at run time (upstream main).
-# - Inputs: samples/*.mov|MOV|mp4|m4a committed on this branch.
-# - Outputs: out/*_foa.caf + *_foa.wav committed to branch apac-results-<run_id>.
-# Trigger: any push to branch `apac-bridge` (bump with an empty commit to re-run).
+# =============================================================================
+# apac-bridge.yml  --  Apple APAC -> FOA bridge, ready to run (NOT run by me)
+# =============================================================================
+# WHAT THIS DOES
+#   On a GitHub-hosted macOS runner, uses Apple's OWN system decoder (driven by
+#   fourMs/apac-decode's single-file decode-apac.swift) to turn original APAC
+#   .mov captures into 4-channel FOA (first-order ambisonics) PCM:
+#       <name>.mov  ->  <name>_foa.caf (float32 @ source rate)  ->  <name>_foa.wav
+#
+# WHY A RUNNER AT ALL  (verified, do not re-litigate)
+#   decode-apac.swift calls AVFoundation -> Apple's system APAC decoder, which
+#   needs macOS 15+.  There is NO Windows-side bitstream decoder: upstream
+#   FFmpeg only RECOGNISES the codec (`..A.L. apple_apac`, no `D` flag), and the
+#   `A....D apac  Marian's A-pac audio` line in `-decoders` is a NAME COLLISION
+#   with an unrelated codec, not Apple's.
+#
+# RUNNER IMAGE
+#   Pinned to `macos-26` = the ONLY image we have actually proven on this project:
+#   the run that produced our reference artefacts used it (see
+#   ..\APAC_BRIDGE_NOTES.md line 9, which also records "APAC 解码工具要求 macOS 26 镜像").
+#   `decode-apac.swift` declares a macOS 15 deployment floor, but a floor is not a
+#   working image: macos-14 / macos-15 have NEVER been run here, so this file does
+#   not claim they work.  If macos-26 is ever renamed, RAISE the pin to the newest
+#   macOS image and re-prove it - never lower it to an untested one.
+#
+# PROVENANCE PIN
+#   fourMs/apac-decode @ 733f9fbc8529be79b83f1ea9162e5470e1d89772 (MIT), single
+#   file decode-apac.swift.  Step "Pin the decoder source" fails closed if the
+#   clone does not land on that commit, so a silent upstream change cannot slip
+#   into an artefact that this recipe calls reproducible.
+#
+# INPUT RULE -- READ THIS BEFORE YOU COMMIT ANYTHING TO bridge-in/
+#   Upload ORIGINAL files only.  A remux/cut is not a smaller input, it is a
+#   broken input: ffmpeg `-c copy` of an APAC .mov keeps the `apac` fourcc but
+#   DROPS the nested `dapa` config box (measured on this box: stsd `apac` entry
+#   225 B with a 133 B `dapa` child -> 56 B, raw scan for `dapa` NOT FOUND), so
+#   the decoder is left without its configuration.  Consequences:
+#     * never `ffmpeg -c copy` / `-ss` / `-t` an original to make a "small
+#       regression fixture" -- there is no cheap fixture, use the whole original;
+#     * never delete an original after bridging -- it is the only copy of the
+#       encoded sound field.
+#
+# FILE LAYOUT THIS WORKFLOW EXPECTS (repo root = your repo)
+#   .github/workflows/apac-bridge.yml        this file
+#   bridge-in/inputs.tsv                     md5 manifest, same 12-column schema
+#                                            as bridge2/inputs.tsv; the gate reads
+#                                            role + relpath + bytes + md5 and
+#                                            requires role == "apac_in"
+#   bridge-in/<file>.mov                     the originals listed there
+#
+# HOW TO RUN (human-owned; I performed no remote action)
+#   1. put this file at .github/workflows/apac-bridge.yml in a repo
+#   2. put the originals in bridge-in/ and a manifest row per original in
+#      bridge-in/inputs.tsv   (tab-separated; see bridge2/inputs.tsv for the
+#      exact 12 columns -- copy those rows and edit role to apac_in)
+#   3. compute md5 ON THE ORIGINAL with something that reports only the digest
+#      (Windows: `py -c "import hashlib;print(hashlib.file_digest(open(F,'rb'),
+#      'md5').hexdigest())"`).  Do NOT trust a bare `md5sum` line under MSYS for
+#      Windows paths -- it prefixes the path and yields false mismatches.
+#   4. commit + push, then Actions -> "APAC -> FOA bridge" -> Run workflow
+#      (or push to a branch matching the `push:` trigger below)
+#   5. download the `apac-foa-artifacts` artifact, or read the results branch if
+#      you enabled the push-back input.
+#   Public-repo standard runners (incl. macOS) are free; the proven run took
+#   minutes.  On a PRIVATE repo macOS minutes are metered -- think first.
+# =============================================================================
+# RUN VARIANT installed on luoye-cpu/3FCompare @ branch apac-bridge.
+# Canonical recipe: spatial-samples/apple/bridge2/apac-bridge.yml, plus 4 deltas
+# (V1 INDIR=samples, V2 push-back also fires on push, V3 paths += samples/**,
+# V4 this block). Nothing else was edited. See bridge-in/VARIANT.diff.txt.
+# =============================================================================
+
+name: APAC -> FOA bridge
+
 on:
+  workflow_dispatch:
+    inputs:
+      push_results_back:
+        description: "also commit the FOA outputs to a results branch (the zero-token route we used)"
+        type: boolean
+        default: false
   push:
-    branches: [ apac-bridge ]
+    branches: [apac-bridge]
+    paths:
+      - "bridge-in/**"
+      - "samples/**"
+      - ".github/workflows/apac-bridge.yml"
+
 permissions:
-  contents: write
+  contents: read          # flip to `contents: write` only for the push-back route,
+                          # which the optional job below requests via its own block.
+
+concurrency:
+  group: apac-bridge-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APAC_DECODE_REPO: https://github.com/fourMs/apac-decode.git
+  APAC_DECODE_SHA: 733f9fbc8529be79b83f1ea9162e5470e1d89772
+  MANIFEST: bridge-in/inputs.tsv
+  INDIR: samples            # VARIANT V1: originals already committed here
+  OUTDIR: apac-foa-out
+
 jobs:
-  decode:
-    runs-on: macos-26   # APAC decode tooling needs the macOS 26 image
+  bridge:
+    name: decode on macOS (Apple system decoder)
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Show the pin this run is held to
+        run: |
+          echo "decoder    : $APAC_DECODE_REPO @ $APAC_DECODE_SHA"
+          echo "runner     : $(sw_vers -productName) $(sw_vers -productVersion)"
+          echo "manifest   : $MANIFEST"
+          echo "The macOS image must be 15 or newer for AVFoundation to own an APAC decoder."
+
+      # ---- gate 1: the decoder source is exactly the audited commit ----------
+      - name: Pin the decoder source (fails closed on any upstream drift)
+        run: |
+          set -euo pipefail
+          git clone --quiet "$APAC_DECODE_REPO" apac-decode
+          git -C apac-decode checkout --quiet --detach "$APAC_DECODE_SHA"
+          got="$(git -C apac-decode rev-parse HEAD)"
+          echo "clone HEAD = $got"
+          if [ "$got" != "$APAC_DECODE_SHA" ]; then
+            echo "::error::decoder clone landed on $got, expected $APAC_DECODE_SHA"; exit 1
+          fi
+          test -f apac-decode/decode-apac.swift
+          echo "--- file we are about to execute ---"
+          ls -l apac-decode/decode-apac.swift
+          shasum -a 256 apac-decode/decode-apac.swift
+          head -12 apac-decode/decode-apac.swift   # its own header: usage + W,Y,Z,X note
+          # Local reference: the copy vendored on the bridging box is byte-identical
+          # to this file after CRLF->LF normalisation (bridge2 check D1).
+
+      # ---- gate 2: inputs are the originals we say they are ------------------
+      - name: Checksum gate on the APAC inputs (md5 manifest)
+        run: |
+          set -euo pipefail
+          test -f "$MANIFEST" || { echo "::error::missing $MANIFEST"; exit 1; }
+          # 12-column tab-separated manifest, same schema as bridge2/inputs.tsv:
+          # role relpath bytes md5 container_stream channels sample_rate
+          # bit_depth frames duration_s acn_verified verification_method
+          awk -F'\t' 'NR>1 && $1=="apac_in" {print $2"\t"$3"\t"$4}' "$MANIFEST" \
+            > gate.tsv
+          n=0
+          while IFS=$'\t' read -r rel bytes md5; do
+            n=$((n+1))
+            f="$INDIR/$(basename "$rel")"
+            test -f "$f" || { echo "::error::$f not committed (upload the ORIGINAL)"; exit 1; }
+            got_bytes=$(stat -f%z "$f")
+            got_md5=$(openssl dgst -md5 "$f" | sed 's/.*= *//')
+            echo "$f  bytes=$got_bytes (manifest $bytes)  md5=$got_md5 (manifest $md5)"
+            [ "$got_bytes" = "$bytes" ] || { echo "::error::$f size mismatch"; exit 1; }
+            [ "$got_md5" = "$md5" ]     || { echo "::error::$f md5 mismatch"; exit 1; }
+            # cheap "is this still an original" probe: the dapa config box must be
+            # present, because a -c copy remux silently drops it.
+            if ! grep -qa dapa "$f"; then
+              echo "::error::$f has no 'dapa' config box -> this is a remux, not an original"
+              exit 1
+            fi
+          done < gate.tsv
+          echo "gate passed for $n input(s)"
+
+      # ---- decode ------------------------------------------------------------
+      - name: Run Apple's decoder over the manifest input list
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUTDIR"
+          awk -F'\t' 'NR>1 && $1=="apac_in" {print $2}' "$MANIFEST" | while IFS= read -r rel; do
+            src="$INDIR/$(basename "$rel")"
+            stem=$(basename "$src"); stem="${stem%.*}"
+            echo "===== $src -> $OUTDIR/${stem}_foa.caf"
+            # interpreter form, exactly as upstream documents:
+            #   swift decode-apac.swift input.mov output.caf
+            # pipefail is on, so a decoder failure fails the step even though the
+            # output is piped through tee; the shape gate below is a second,
+            # independent net that does not trust the exit status at all.
+            swift apac-decode/decode-apac.swift "$src" "$OUTDIR/${stem}_foa.caf" 2>&1 | tee -a "$OUTDIR/${stem}_decode.log"
+          done
+          ls -l "$OUTDIR"
+
+      # ---- gate 3: the outputs are the shape the recipe promises -------------
+      - name: Shape gate (4 channels, 48 kHz, and a FOA-shaped frame count)
+        run: |
+          set -euo pipefail
+          command -v ffprobe >/dev/null 2>&1 || brew install ffmpeg
+          shopt -s nullglob
+          caf=("$OUTDIR"/*_foa.caf)
+          [ ${#caf[@]} -gt 0 ] || { echo "::error::decoder produced no *_foa.caf"; exit 1; }
+          for c in "${caf[@]}"; do
+            echo "--- $c"
+            ffprobe -v error -select_streams a:0 \
+              -show_entries stream=codec_name,channels,sample_rate,bits_per_sample,duration \
+              -of default=noprint_wrappers=1 "$c" | sed 's/^/    /'
+            ch=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels -of csv=p=0 "$c")
+            sr=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of csv=p=0 "$c")
+            [ "$ch" = "4" ] || { echo "::error::$ch channels, expected 4 (FOA first order)"; exit 1; }
+            [ "$sr" = "48000" ] || echo "::warning::sample rate $sr, our reference set is 48000"
+            # caf (float32) -> 24-bit wav, the artefact shape the plugin imports.
+            stem=${c%.caf}
+            ffmpeg -v error -y -i "$c" -c:a pcm_s24le "${stem}.wav"
+          done
+          ls -l "$OUTDIR"
+
+      - name: Record what this run produced (digests for the manifest)
+        run: |
+          set -euo pipefail
+          {
+            echo "run: ${{ github.repository }}@${{ github.sha }}  run_id=${{ github.run_id }}"
+            echo "runner: $(sw_vers -productName) $(sw_vers -productVersion)"
+            echo "decoder: $APAC_DECODE_SHA"
+            echo "# paste-ready rows for inputs.tsv -- BUT the relpath column is runner-relative: rewrite it to the path under apple\\ on the bridging box, and remember a fresh run is a NEW artefact (its md5 goes in a new row, it does not overwrite the proven reference rows)"
+            find "$OUTDIR" -type f \( -name '*_foa.wav' -o -name '*_foa.caf' \) | sort | while read -r f; do
+              printf 'foa_out\t%s\t%s\t%s\tpcm\t4\t48000\t%s\tn/a\tn/a\tsee bridge2/README.md\tsingle-run output, order fact transfers from the proven reference set\n' \
+                "$f" "$(stat -f%z "$f")" "$(openssl dgst -md5 "$f" | sed 's/.*= *//')" \
+                "$([ "${f##*.}" = wav ] && echo 24 || echo 32)"
+            done
+          } | tee "$OUTDIR/RUN_MANIFEST.tsv"
+
+      # ---- publish -----------------------------------------------------------
+      - name: Publish the FOA artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: apac-foa-artifacts
+          path: |
+            apac-foa-out/
+          if-no-files-found: error
+          retention-days: 90
+
+  # ===========================================================================
+  # OPTIONAL, DOCUMENTED, DISABLED BY DEFAULT
+  # The zero-token route we actually used the first time: no artifact download,
+  # no API token, no web click.  Push a tag/branch -> this job runs on the macOS
+  # runner -> it commits the decoded FOA files BACK to a results branch -> the
+  # bridging box just `git fetch`es it.  Requirements:
+  #   * the workflow needs `permissions: contents: write` (top of this file is
+  #     `read`; the block below overrides it for this job only);
+  #   * a push made with the built-in GITHUB_TOKEN does NOT recursively trigger
+  #     workflows, which is what keeps this from looping;
+  #   * on a public repo the standard macOS minutes are free.
+  # Replay afterwards:
+  #   git fetch origin 'refs/heads/apac-results-*:refs/remotes/origin/apac-results-*'
+  #   git checkout -b local-results origin/apac-results-<GITHUB_RUN_ID>
+  # ===========================================================================
+  push-back:
+    if: ${{ github.event_name == 'push' || github.event.inputs.push_results_back == 'true' }}
+    needs: bridge
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Runner OS
-        run: sw_vers
-      - name: Fetch decoder (fourMs/apac-decode)
-        run: curl -fsSL -o decode-apac.swift https://raw.githubusercontent.com/fourMs/apac-decode/main/decode-apac.swift
-      - name: Decode APAC -> FOA
+        with:
+          path: main-repo
+      - uses: actions/download-artifact@v4
+        with:
+          name: apac-foa-artifacts
+          path: foa
+      - name: Commit the FOA outputs to a per-run results branch
         run: |
-          mkdir -p out
-          shopt -s nullglob nocaseglob
-          for f in samples/*.mov samples/*.mp4 samples/*.m4a; do
-            [ -f "$f" ] || continue
-            base="$(basename "${f%.*}")"
-            echo "=== $f -> out/${base}_foa ==="
-            set +e
-            swift decode-apac.swift "$f" "out/${base}_foa.caf"
-            rc=$?
-            set -e
-            if [ $rc -eq 2 ]; then
-              echo "::warning::$f has no 4-channel spatial track - skipped"
-              rm -f "out/${base}_foa.caf"
-              continue
-            fi
-            if [ $rc -ne 0 ]; then
-              echo "swift decoder rc=$rc; trying afconvert directly"
-              afconvert -f caff -d LEF32@48000 "$f" "out/${base}_foa.caf" || { echo "::warning::could not decode $f"; continue; }
-            fi
-            afinfo "out/${base}_foa.caf" | head -8 || true
-            afconvert -f WAVE -d LEI24@48000 "out/${base}_foa.caf" "out/${base}_foa.wav" || true
-          done
-          echo "--- results ---"
-          ls -la out || true
-      - name: Push results branch
-        run: |
-          git config user.name "apac-bridge-bot"
-          git config user.email "bot@users.noreply.github.com"
-          shopt -s nullglob
-          files=(out/*)
-          if [ ${#files[@]} -eq 0 ]; then echo "NOTHING_TO_PUSH"; exit 0; fi
-          git checkout -b "apac-results-${GITHUB_RUN_ID}"
-          git add -f out
-          git commit -m "APAC FOA results (run ${GITHUB_RUN_ID})"
-          git push origin "HEAD:apac-results-${GITHUB_RUN_ID}"
+          set -euo pipefail
+          cd main-repo
+          git config user.name "apac-bridge[bot]"
+          git config user.email "apac-bridge@users.noreply.github.com"
+          br="apac-results-${GITHUB_RUN_ID}"
+          git checkout --orphan "$br"
+          git rm -rf --quiet . || true
+          mkdir -p apac_foa && cp -v ../foa/*_foa.wav ../foa/*_foa.caf apac_foa/
+          cp -v ../foa/RUN_MANIFEST.tsv apac_foa/ 2>/dev/null || true
+          git add -f apac_foa
+          git commit -m "APAC->FOA bridge outputs (run ${GITHUB_RUN_ID}, decoder ${APAC_DECODE_SHA})"
+          git push --force origin "$br"

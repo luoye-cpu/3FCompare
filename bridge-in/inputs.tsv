@@ -1,0 +1,4 @@
+role	relpath	bytes	md5	container_stream	channels	sample_rate	bit_depth	frames	duration_s	acn_verified	verification_method
+apac_in	samples/sample.MOV	14786195	cc78227a5c08ecf2a653e667d81f3018	mov a:1=apple_apac 4ch (a:2=aac 2ch companion track)	4	48000	n/a	n/a	2.038333	n/a	Immich-sourced original; apac sample entry + nested dapa config box 133 B, boxwalk on the bridging box.
+apac_in	samples/iphone16_apac.MOV	2063788	cfb9d96087097aebf83d6cda83267be0	mov a:2=apple_apac 4ch (a:1=aac 2ch companion track)	4	48000	n/a	n/a	0.898333	n/a	iPhone 16 recording; apac + dapa 133 B confirmed by boxwalk on the bridging box.
+excluded	samples/hls_apac_full.mp4	522874	ae5caa7e3370e86f26213192d7630936	mp4 (HLS segment concatenation, not an original camera file)	n/a	n/a	n/a	n/a	n/a	n/a	excluded from this run on purpose: it is a derived HLS asset, and the 10-03 glob run produced no FOA output for it (skipped rc=2). Only originals go over the bridge.
