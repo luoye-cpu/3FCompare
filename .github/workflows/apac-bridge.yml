@@ -22,9 +22,13 @@
 #   the run that produced our reference artefacts used it (see
 #   ..\APAC_BRIDGE_NOTES.md line 9, which also records "APAC 解码工具要求 macOS 26 镜像").
 #   `decode-apac.swift` declares a macOS 15 deployment floor, but a floor is not a
-#   working image: macos-14 / macos-15 have NEVER been run here, so this file does
-#   not claim they work.  If macos-26 is ever renamed, RAISE the pin to the newest
-#   macOS image and re-prove it - never lower it to an untested one.
+#   working image.  `macos-15` HAS now been run (throwaway probe, run 37159937543):
+#   the pinned decoder exits 0 and writes a structurally valid 4ch/48kHz CAF whose
+#   payload is 1,565,440 ZERO bytes - silence.  So this pin is not conservatism, it
+#   is load-bearing: lowering it yields a green run and an empty sound field, which
+#   is exactly what the silence gate below is there to catch.  `macos-14` has never
+#   been run.  If macos-26 is ever renamed, RAISE the pin to the newest macOS image
+#   and re-prove it against a reference .caf -- never lower it.
 #
 # PROVENANCE PIN
 #   fourMs/apac-decode @ 733f9fbc8529be79b83f1ea9162e5470e1d89772 (MIT), single
@@ -212,6 +216,27 @@ jobs:
             ffmpeg -v error -y -i "$c" -c:a pcm_s24le "${stem}.wav"
           done
           ls -l "$OUTDIR"
+
+      # ---- gate 4: the decode must contain signal, not just the right shape ----
+      # A decode can be structurally perfect and completely empty.  The macos-15 probe
+      # (run 37159937543) exited 0 and wrote a valid 4ch/48kHz CAF whose payload was
+      # 1,565,440 zero bytes; gates 1-3 pass on that file, so silence needs its own net.
+      - name: Silence gate (the FOA has to carry signal, not only the right shape)
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          caf=("$OUTDIR"/*_foa.caf)
+          [ ${#caf[@]} -gt 0 ] || { echo "::error::no *_foa.caf to measure"; exit 1; }
+          for c in "${caf[@]}"; do
+            raw="$OUTDIR/$(basename "${c%.caf}").raw32"
+            ffmpeg -v error -y -i "$c" -f s32le "$raw"
+            tot=$(stat -f%z "$raw")
+            nz=$(tr -d '\0' < "$raw" | wc -c)
+            echo "--- $c: linear PCM $tot B, non-zero $nz B"
+            [ "$nz" -gt 0 ] || { echo "::error::$c is DIGITALLY SILENT - every PCM byte is zero. The decoder returned 0 and produced a well-formed file with no signal."; exit 1; }
+            awk -v n="$nz" -v t="$tot" 'BEGIN{ r=(t>0? n/t : 0); printf("    non-zero fraction %.2f%%\n", 100*r); if (r < 0.5) print "::warning:: less than half the bytes carry signal - suspiciously quiet" }'
+            rm -f "$raw"
+          done
 
       - name: Record what this run produced (digests for the manifest)
         run: |
