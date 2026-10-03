@@ -50,6 +50,10 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 15
     continue-on-error: true
+    permissions:
+      contents: write     # only this leg pushes its caf back, so the byte-level delta can
+                          # be measured locally with proven readers instead of a parser
+                          # invented on a runner nobody can debug. md5 a0413aaf... identifies it.
     env:
       P: probe15
       LABEL: macos-15
@@ -129,6 +133,29 @@ jobs:
           set +e
           [ -f ".done.${P}" ] && exit 0
           echo "::warning::${P} VERDICT ABORTED reporting step died before the verdict, os=$(sw_vers -productVersion 2>/dev/null) arch=$(uname -m 2>/dev/null)"
+          exit 0
+
+      # Push the macos-15 caf to a probe-only branch so the byte-level difference can be
+      # measured locally by the readers that are already proven, instead of by a CAF parser
+      # written inside a job nobody can debug. Untracked files survive `git rm -rf .`, but
+      # the copy to ../ is done first anyway, mirroring the shipped recipe's push-back job.
+      - name: push the macos-15 caf for local byte analysis
+        if: always()
+        run: |
+          set +e
+          [ -f "$OUT_CAF" ] || { echo "::warning::${P} push_skipped no caf on disk"; exit 0; }
+          cp "$OUT_CAF" ../m15.caf || { echo "::warning::${P} push_skipped copy failed"; exit 0; }
+          git config user.name "apac-bridge-probe"
+          git config user.email "apac-bridge-probe@users.noreply.github.com"
+          br="apac-probe-m15-${GITHUB_RUN_ID}"
+          git checkout --orphan "$br" >/dev/null 2>&1
+          git rm -rf --quiet . >/dev/null 2>&1
+          mkdir -p probe && cp ../m15.caf probe/sample_macos15.caf
+          git add -f probe
+          git commit -q -m "macos-15 APAC probe decode (run ${GITHUB_RUN_ID}, decoder ${APAC_DECODE_SHA})"
+          git push -f origin "HEAD:refs/heads/${br}" >/dev/null 2>&1
+          prc=$?
+          echo "::notice::${P} push rc=${prc} branch=${br} file=probe/sample_macos15.caf md5=$(md5 -q ../m15.caf) bytes=$(stat -f%z ../m15.caf)"
           exit 0
 
   control26:
