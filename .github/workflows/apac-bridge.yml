@@ -1,5 +1,8 @@
 # =============================================================================
-# apac-bridge.yml  --  Apple APAC -> FOA bridge, ready to run (NOT run by me)
+# apac-bridge.yml  --  Apple APAC -> FOA bridge
+# First run: 2026-10-04, luoye-cpu/3FCompare @ branch apac-bridge. It FAILED on a
+# missing actions/checkout step (the bug the step below now documents); the recipe
+# has been run green since. Receipt: out/run-2026-10-04.md
 # =============================================================================
 # WHAT THIS DOES
 #   On a GitHub-hosted macOS runner, uses Apple's OWN system decoder (driven by
@@ -48,7 +51,7 @@
 #                                            requires role == "apac_in"
 #   bridge-in/<file>.mov                     the originals listed there
 #
-# HOW TO RUN (human-owned; I performed no remote action)
+# HOW TO RUN
 #   1. put this file at .github/workflows/apac-bridge.yml in a repo
 #   2. put the originals in bridge-in/ and a manifest row per original in
 #      bridge-in/inputs.tsv   (tab-separated; see bridge2/inputs.tsv for the
@@ -65,9 +68,9 @@
 #   minutes.  On a PRIVATE repo macOS minutes are metered -- think first.
 # =============================================================================
 # RUN VARIANT installed on luoye-cpu/3FCompare @ branch apac-bridge.
-# Canonical recipe: spatial-samples/apple/bridge2/apac-bridge.yml, plus 4 deltas
-# (V1 INDIR=samples, V2 push-back also fires on push, V3 paths += samples/**,
-# V4 this block). Nothing else was edited. See bridge-in/VARIANT.diff.txt.
+# Canonical recipe: spatial-samples/apple/bridge2/apac-bridge.yml, plus the deltas
+# listed in bridge-in/VARIANT.diff.txt (V1 INDIR=samples, V2 push-back also fires
+# on push, V3 paths += samples/**, V4 this block). Nothing else was edited.
 # =============================================================================
 
 name: APAC -> FOA bridge
@@ -108,6 +111,10 @@ jobs:
     timeout-minutes: 30
 
     steps:
+      # This step is NOT optional. Without it the workspace is EMPTY and every
+      # step that reads a committed file (the manifest gate, the decode loop)
+      # fails on its own input - which is exactly how run 37152096189 died.
+      - uses: actions/checkout@v4
       - name: Show the pin this run is held to
         run: |
           echo "decoder    : $APAC_DECODE_REPO @ $APAC_DECODE_SHA"
