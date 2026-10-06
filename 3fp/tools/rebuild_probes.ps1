@@ -26,6 +26,8 @@ $extraLibs = @{
     'block_scale_probe'    = 'user32.lib'
     'image_zoom_probe'     = 'user32.lib'
     'scale_policy_probe'   = 'user32.lib'
+    # Queries DXGI for the monitor's live HDR state, so it needs dxgi.
+    'vsr_scrgb_probe'      = 'dxgi.lib'
 }
 $simple = @('decode_profile','block_scale_probe','image_zoom_probe','scale_policy_probe',
             'upload_layout_probe','adaptive_scale_probe','read_pixel_probe','rotation_probe',
@@ -35,7 +37,7 @@ $simple = @('decode_profile','block_scale_probe','image_zoom_probe','scale_polic
             # long after the header changed -- the same trap the delete-first fix above
             # exists to prevent, one level up.
             'frame_pool_probe','backend_probe','loop_stutter_probe','apng_seek_repro',
-            'vsr_pixel_probe')
+            'vsr_pixel_probe','vsr_scrgb_probe')
 $iamf = @('iamf_layout_regression','iamf_playback_probe','iamf_probe')
 
 function Invoke-Build([string]$name, [string]$extra) {
@@ -46,11 +48,12 @@ function Invoke-Build([string]$name, [string]$extra) {
     # 从而发布一个用旧结构体编译的探针（这正是之前排查困难的根源）。
     Remove-Item $exe -Force -ErrorAction SilentlyContinue
     $batPath = Join-Path $out 'rb_one.bat'
+    $libs = if ($extraLibs.ContainsKey($name)) { "user32.lib " + $extraLibs[$name] } else { "user32.lib" }
     $lines = @(
         '@echo off',
         'call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" >nul',
         "cd /d `"$root`"",
-        "cl /nologo /EHsc /std:c++20 /O2 /I `"$kernel`" $extra /Fe:`"$exe`" /Fo:`"$out\\`" `"$src`" `"$lib`" user32.lib"
+        "cl /nologo /EHsc /std:c++20 /O2 /I `"$kernel`" $extra /Fe:`"$exe`" /Fo:`"$out\\`" `"$src`" `"$lib`" $libs"
     )
     Set-Content -Path $batPath -Value ($lines -join "`r`n") -Encoding ASCII
     $log = cmd /c "`"$batPath`" 2>&1"
