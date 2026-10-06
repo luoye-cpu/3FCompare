@@ -1,4 +1,5 @@
 using Avalonia.Styling;
+using _3FCompare.Themes;
 
 namespace _3FCompare.Platform.Tests;
 

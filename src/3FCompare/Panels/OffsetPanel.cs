@@ -1,9 +1,12 @@
 using System;
+
+using _3FCompare.Themes;
+using System;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
-using _3FCompare.App;
+using _3FCompare.Localization;
 using _3FCompare.Controls;
 
 namespace _3FCompare.Panels;

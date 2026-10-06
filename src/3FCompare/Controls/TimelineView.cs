@@ -1,10 +1,13 @@
 using System;
+
+using _3FCompare.Themes;
+using System;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.Styling;
-using _3FCompare.App;
+using _3FCompare.Localization;
 
 namespace _3FCompare.Controls;
 

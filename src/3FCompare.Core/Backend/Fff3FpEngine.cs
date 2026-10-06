@@ -13,9 +13,10 @@ public sealed class Fff3FpEngine : IPlayerEngine
     // 且要求 `size >= sizeof(FFF3FPConfiguration)` ⇒ 内核与托管侧必须同步递增，否则全部会话创建失败。
     //   14 = 内核 2026.9.11 合并（f25c28f）起
     //   15 = 3FCompare A11 扩展：新增 FFF3FPConfiguration.preferredAdapterIndex（2026-09-16）
+    //   16 = 3FCompare 扩展：新增 FFF3FPConfiguration.sdrScRgbMode（2026-09-29）
     // internal：EngineFactory 的版本门必须与这里同源（内核对 version 严格相等），
     // 两处各写一个字面量迟早会漂移（docs/45 P1-1）。
-    internal const uint ConfigVersion = 15;
+    internal const uint ConfigVersion = 16;
 
     public IReadOnlyList<AdapterInfo> EnumerateAdapters()
     {
@@ -49,6 +50,9 @@ public sealed class Fff3FpEngine : IPlayerEngine
             // A11：把用户在设置里选的解码 GPU 真正交给内核（此前该字段一直被丢弃）。
             // -1 = 跟随窗口所在显示器；≥0 = DXGI 适配器索引（与 GpuEnumeration 的 DXGI 枚举同源）。
             PreferredAdapterIndex = options.PreferredAdapterIndex,
+            // v16：SDR 源是否经 scRGB 链呈现（0=从不，1=自动）。内核在 FFF3FP_Create
+            // 里对 &gt;1 返回 InvalidArgument，故这里钳到 [0,1] 而不是直接透传。
+            SdrScRgbMode = (uint)Math.Clamp(options.SdrScRgbMode, 0, 1),
         };
 
         var result = Fff3FpNative.FFF3FP_Create(in config, out var handle);
@@ -360,6 +364,13 @@ public sealed class Fff3FpEngine : IPlayerEngine
             var result = WithNative<FffResult>(h => Fff3FpNative.FFF3FP_SetViewTransform(h, zoom, panX, panY));
             if (result != FffResult.Success)
                 throw new EngineException((int)result, $"SetViewTransform 失败: {result}");
+        }
+
+        public void SetFitLimitToNative(bool enable)
+        {
+            var result = WithNative<FffResult>(h => Fff3FpNative.FFF3FP_SetFitLimitToNative(h, enable ? 1u : 0u));
+            if (result != FffResult.Success)
+                throw new EngineException((int)result, $"SetFitLimitToNative 失败: {result}");
         }
 
         public EngineSnapshot ReadSnapshot()

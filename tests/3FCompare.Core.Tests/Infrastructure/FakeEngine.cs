@@ -169,6 +169,14 @@ public sealed class FakeSession : IPlayerSession
         ViewTransforms.Add((zoom, panX, panY));
     }
 
+    public void SetFitLimitToNative(bool enable)
+    {
+        ThrowIfDisposed();
+        FitLimitToNativeCalls.Add(enable);
+    }
+
+    public List<bool> FitLimitToNativeCalls { get; } = new();
+
     public EngineSnapshot ReadSnapshot() => new()
     {
         Position100ns = Position100ns,

@@ -107,15 +107,23 @@ public partial class MainWindow
     //
     // 内核完整、但此前只有自测 --magnifybench 会调 SetCompareMagnify（生产 UI 没有任何触发路径）。
     // 这里补上两条：滚轮以光标为锚点缩放、放大态拖动平移。两者都**不**走内核
-    // SetViewTransform —— 那条路径是单路视口变换，且 destination 有 max(0,·) 钳制不能任意平移。
+    // SetViewTransform —— 那条是单路视口变换：同一组归一化 pan 在各行宽不同的路上对应的
+    // 像素位置不一样，而且是内核插值放大（拿不到"按更高分辨率真实重渲染"的像素）。
+    // （过去这里还写着"destination 有 max(0,·) 钳制不能任意平移"：内核已改成两侧钳到
+    //  [拟合原点−(放大尺寸−拟合尺寸), 拟合原点]，2026-09-26 实机扫过 ±1 全程，跨度=拟合盒。）
 
     /// <summary>最近一次被闸门拒绝的倍率（0 = 没有待跳过的拒绝）。
     /// 滚轮每格都会调进 <see cref="TryHandleCompareWheel"/>，若每次都把拒绝原因写状态栏，
     /// 连续滚动就是一串刷屏 —— 记下被拒的倍率，同一倍率的重复请求静默跳过。</summary>
     private double _compareMagnifyRejectedZoom;
-    /// <summary>放大态平移：本次拖动累积的屏幕位移（物理像素）。松手时才一次性提交 ——
-    /// 逐帧改 crop 会连带逐帧 <c>SetWindowRgn</c>，那是 docs/26 明确反对的高频路径。</summary>
+    /// <summary>放大态平移：本次拖动累积的屏幕位移（物理像素）。拖动中按 ~60Hz 合并提交
+    /// （见 <c>MainWindow.OnSurfaceMove</c>，成本由 <c>--magnifybench</c> 的 [平移提交] 实测过），
+    /// 松手时再补一次残余位移。</summary>
     private double _comparePanAccumX, _comparePanAccumY;
+
+    /// <summary>上一次"拖动中提交"的 TickCount64（0 = 还没提交过 ⇒ 第一次移动就提交，
+    /// 拖动起点不会有 16ms 死区）。</summary>
+    private long _lastCompareCommitTicks;
 
     /// <summary>滚轮 → 多路同步无缝放大（光标锚点）。
     ///
@@ -156,7 +164,7 @@ public partial class MainWindow
         if (Math.Abs(z1 - z0) < 1e-9) return true;
         if (Math.Abs(z1 - _compareMagnifyRejectedZoom) < 1e-9) return true;
 
-        var anchor = CursorSourceFraction(); // 取不到（黑边/演示模式）就按画面中心
+        var anchor = CursorSourceFraction(); // 取不到（黑边/演示模式）按可见区中心那点退化，见下
 
         // ⚠ 两种对齐模式下 crop 的**坐标域不同**，锚点换算必须分开，不能共用一套公式：
         //   · 相对对齐：crop 就是源画面归一化坐标，AnchorCrop 直接适用；
@@ -177,8 +185,12 @@ public partial class MainWindow
         }
         else
         {
-            var u = anchor?.U ?? 0.5;
-            var v = anchor?.V ?? 0.5;
+            // 退化锚的优先级写在 ViewPan.ResolveAnchorFraction（单路滚轮共用同一条）：光标下那点 →
+            // 可见区中心那点（VisibleCenterFractionsAtCursor）→ 源中心。0.5 是**源画面的中心**，
+            // 与"当前视口的中心"在已平移时是两个不同的点 —— 直接拿它兜底会把画面猛地拽回源中心，
+            // 而光标落在黑边是常态（扁格/瘦格里黑边占大半画面），等于每次滚轮都在拽。
+            var (u, v) = _3FCompare.Platform.ViewPan.ResolveAnchorFraction(
+                anchor is { } a ? (a.U, a.V) : null, VisibleCenterFractionsAtCursor());
             var maxCrop = CompareCropPlanner.MaxCropFraction(z1);
             cropX = ClampToCrop(CompareCropPlanner.AnchorCrop(u, _compareCropX, z0, z1), maxCrop);
             cropY = ClampToCrop(CompareCropPlanner.AnchorCrop(v, _compareCropY, z0, z1), maxCrop);
@@ -224,8 +236,8 @@ public partial class MainWindow
     }
 
     /// <summary>光标下的<b>源画面归一化坐标</b>（u, v）与该路的源尺寸；取不到返回 null
-    ///（落在黑边、演示模式、会话已释放）。复用既有的 <c>MapPointerToVideoPixel</c>
-    ///（已处理 letterbox 与 DPI）。
+    ///（落在黑边、演示模式、会话已释放）。复用 <c>MapPointerToVideoFraction</c>
+    ///（已处理 letterbox 与 DPI，且<b>不截整数像素</b> —— 锚点要亚像素）。
     ///
     /// <para>像素级对齐的锚点换算需要<b>源宽高</b>而不只是归一化坐标：归一化坐标要乘上
     /// 该路的源尺寸才能得到"像素坐标"，才能与"各路相同的像素起点 p"在同一域里比较。</para></summary>
@@ -245,14 +257,10 @@ public partial class MainWindow
         var local = new Point(windowPos.X - o.X, windowPos.Y - o.Y);
 
         var session = slots[surface.Index].Session;
-        var pixel = MapPointerToVideoPixel(surface, session, local);
-        if (pixel is null) return null;
+        var frac = MapPointerToVideoFraction(surface, session, local);
+        if (frac is not { } f) return null;
 
-        var media = session.ReadMediaInfo();
-        if (media is null || media.VideoWidth <= 0 || media.VideoHeight <= 0) return null;
-
-        return (pixel.Value.X / (double)media.VideoWidth, pixel.Value.Y / (double)media.VideoHeight,
-                media.VideoWidth, media.VideoHeight);
+        return (f.U, f.V, f.VideoWidth, f.VideoHeight);
     }
 
     /// <summary>把"视口位置"钳到 [0,1]（NaN → 0）。像素级对齐下 CropX / CropY 用这个区间，
@@ -278,6 +286,9 @@ public partial class MainWindow
     internal void BeginComparePan()
     {
         _comparePanAccumX = _comparePanAccumY = 0;
+        // 清零时间戳 ⇒ 第一次 WM_MOUSEMOVE 就提交（否则起手最多要再等 16ms 才动，
+        // 而那 16ms 正好是用户判断"跟不跟手"的那一下）。
+        _lastCompareCommitTicks = 0;
     }
 
     /// <summary>放大态的拖动平移：累积一次屏幕位移（物理像素）。<b>不</b>在这里提交 ——

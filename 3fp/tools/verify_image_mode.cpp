@@ -7,8 +7,9 @@
 //   · 广色域 SDR 源能不能进 scRGB（门禁是否真的放开）
 //
 // 用法：
-//   verify_image_mode <媒体路径> [--hdr]
-//     --hdr  初始即请求 MapToHdr（默认 MapToSdr）
+//   verify_image_mode <媒体路径> [--hdr] [--sdr-scrgb]
+//     --hdr         初始即请求 MapToHdr（默认 MapToSdr）
+//     --sdr-scrgb   打开"SDR 源经 scRGB 呈现"策略（10bit / 广色域 SDR 源走 16bit 链）
 //
 // 构建（VS 的 x64 环境）：
 //   vcvars64.bat
@@ -118,6 +119,19 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM w, LPARAM l) 
     return DefWindowProcW(window, message, w, l);
 }
 
+// FFF3FP_GetImageInfo 是本分支新增的导出，**基线内核（上游 2acd96d）没有**。
+// 若静态导入它，exe 在基线上会因"找不到入口点"直接加载失败 ⇒ 无法做 A/B 对照。
+// 因此改为运行时解析：同一份 exe 既能跑改动内核，也能跑基线内核。
+using GetImageInfoFn = FFFResult(__cdecl*)(FFF3FPHandle, FFF3FPImageInfo*);
+
+GetImageInfoFn ResolveGetImageInfo() {
+    HMODULE module = GetModuleHandleW(L"FFF.Native.dll");
+    if (module == nullptr) module = LoadLibraryW(L"FFF.Native.dll");
+    if (module == nullptr) return nullptr;
+    return reinterpret_cast<GetImageInfoFn>(
+        reinterpret_cast<void*>(GetProcAddress(module, "FFF3FP_GetImageInfo")));
+}
+
 void Pump(int milliseconds) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
     MSG message{};
@@ -150,6 +164,10 @@ void ReportSnapshot(const char* label, const FFF3FPSnapshot& snapshot) {
         snapshot.sourcePeakNits,
         static_cast<unsigned long long>(snapshot.presentedVideoFrames),
         static_cast<unsigned long long>(snapshot.swapChainPresents));
+    std::printf("  [%s] hdrFormat=%u hdrPath=%u dynamicMeta=%u\n",
+        label, static_cast<unsigned>(snapshot.hdrFormat),
+        static_cast<unsigned>(snapshot.hdrProcessingPath),
+        snapshot.dynamicHdrMetadataActive);
 }
 
 }  // namespace
@@ -161,13 +179,18 @@ int main(int argc, char** argv) {
     }
     const char* path = argv[1];
     bool requestHdr = false;
+    // --sdr-scrgb: 打开"SDR 源经 scRGB 呈现"策略（AppSettings.SdrScRgbMode=1），
+    // 用来验证 10bit/广色域 SDR 源是否真的被判进 16bit scRGB 链。
+    bool sdrScRgb = false;
     for (int i = 2; i < argc; ++i) {
         if (std::strcmp(argv[i], "--hdr") == 0) requestHdr = true;
+        if (std::strcmp(argv[i], "--sdr-scrgb") == 0) sdrScRgb = true;
     }
 
     std::printf("=== 3FP image mode verification ===\n");
     std::printf("file: %s\n", path);
     std::printf("PlayerApiVersion: %u\n", FFF3FP_GetApiVersion());
+    std::printf("options: requestHdr=%d sdrScRgb=%d\n", requestHdr ? 1 : 0, sdrScRgb ? 1 : 0);
 
     WNDCLASSW windowClass{};
     windowClass.lpfnWndProc = WindowProcedure;
@@ -200,6 +223,7 @@ int main(int argc, char** argv) {
     configuration.videoScalingQuality = FFF3FPVideoScalingQuality::HighQuality;
     configuration.forceHdrOutput = 0u;
     configuration.preferredAdapterIndex = -1;
+    configuration.sdrScRgbMode = sdrScRgb ? 1u : 0u;
     configuration.eventCallback = &OnEvent;
 
     const auto created = FFF3FP_Create(&configuration, &player);
@@ -222,7 +246,11 @@ int main(int argc, char** argv) {
     FFF3FPImageInfo info{};
     info.size = sizeof(info);
     info.version = 1;
-    const auto infoResult = FFF3FP_GetImageInfo(player, &info);
+    const auto getImageInfo = ResolveGetImageInfo();
+    if (getImageInfo == nullptr) {
+        std::printf("  GetImageInfo: 该内核未导出此函数（基线内核的预期结果）\n");
+    } else {
+    const auto infoResult = getImageInfo(player, &info);
     if (infoResult == FFFResult::Success) {
         std::printf("  frameCount=%d loopCount=%d flags=0x%X\n", info.frameCount, info.loopCount, info.flags);
         std::printf("  primaries=%s(%d) transfer=%s(%d) space=%d\n",
@@ -241,6 +269,28 @@ int main(int argc, char** argv) {
             (info.flags & FFF3FP_IMAGE_FLAG_WIDE_GAMUT) != 0);
     } else {
         std::printf("  GetImageInfo: %d\n", static_cast<int>(infoResult));
+    }
+    }
+
+    // staticImage 判定：K3 改的就是它。基线按 demuxer 名判定 ⇒ AVIF/HEIC（走 mov）会被判 false。
+    // 基线内核也导出 GetMediaInfo，故这一项**两版都可读**，可作 K3 的直接对照。
+    std::printf("--- media info: staticImage 判定 ---\n");
+    {
+        char mediaInfo[65536] = {};
+        std::uint32_t requiredSize = 0;
+        const auto mediaResult = FFF3FP_GetMediaInfo(player, mediaInfo, sizeof(mediaInfo), &requiredSize);
+        if (mediaResult == FFFResult::Success) {
+            const char* key = "\"staticImage\"";
+            const char* found = std::strstr(mediaInfo, key);
+            if (found != nullptr) {
+                const char* end = std::strchr(found, ',');
+                std::printf("  %.*s\n", end != nullptr ? static_cast<int>(end - found) : 24, found);
+            } else {
+                std::printf("  staticImage 字段: (未找到)\n");
+            }
+        } else {
+            std::printf("  GetMediaInfo: %d\n", static_cast<int>(mediaResult));
+        }
     }
 
     std::printf("--- request MapToHdr ---\n");
@@ -265,6 +315,46 @@ int main(int argc, char** argv) {
     Pump(200);
     snapshot = ReadSnapshot(player);
     ReportSnapshot("after-seek", snapshot);
+
+    // ⚠ Seek(0) 对静态图**两版都会成功**（av_seek_frame 到起点天然可满足）⇒ 它**不能**证明 K2。
+    //    K2 的真实触发条件是非零 Seek：单图解复用器不可 seek，基线会走 av_seek_frame 失败 →
+    //    字节回退也失败 → ReportError。故必须补这一条，判据才具特异性。
+    const std::size_t eventLogBefore = std::strlen(g_eventLog);
+    const auto seekedNonZero = FFF3FP_Seek(player, 50000000);   // 5 秒（100ns 单位）
+    std::printf("  Seek(5s): %d\n", static_cast<int>(seekedNonZero));
+    Pump(400);
+    if (std::strlen(g_eventLog) > eventLogBefore) {
+        std::printf("  ↑ 本次 Seek 新产生的事件:\n");
+        std::printf("%s", g_eventLog + eventLogBefore);
+    } else {
+        std::printf("  本次 Seek 未产生新事件\n");
+    }
+    snapshot = ReadSnapshot(player);
+    ReportSnapshot("after-seek-nonzero", snapshot);
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 循环播放验证（动图应一直循环，不进入 Ended —— 用户硬要求）
+    //   · 重置 ended 标志，从头 Play
+    //   · 跨过一遍时长（B 类动画 HEIC 约 1.6s）后采样多帧
+    //   · 判据：presented 持续递增 且 全程不出现 PlaybackEnded
+    //     —— 修复前：一遍放完内核 SetState(Ended)+Emit(PlaybackEnded)，presented 冻结；
+    //        修复后：FlushAtEnd 对 animatedImage_ 走 DoSeek(0) 回绕，持续循环。
+    // ════════════════════════════════════════════════════════════════════════
+    std::printf("=== loop playback test ===\n");
+    g_playbackEnded = false;
+    FFF3FP_Seek(player, 0);
+    FFF3FP_Play(player);
+    unsigned long long lp0 = 0, lp1 = 0, lp2 = 0, lp3 = 0;
+    Pump(1000); lp0 = ReadSnapshot(player).presentedVideoFrames;
+    Pump(1500); lp1 = ReadSnapshot(player).presentedVideoFrames;
+    Pump(1500); lp2 = ReadSnapshot(player).presentedVideoFrames;
+    Pump(1500); lp3 = ReadSnapshot(player).presentedVideoFrames;
+    std::printf("  presented@1.0s=%llu @2.5s=%llu @4.0s=%llu @5.5s=%llu\n",
+        static_cast<unsigned long long>(lp0), static_cast<unsigned long long>(lp1),
+        static_cast<unsigned long long>(lp2), static_cast<unsigned long long>(lp3));
+    std::printf("  PlaybackEnded during loop: %s\n", g_playbackEnded ? "yes (BAD)" : "no (good)");
+    const bool loopOk = !g_playbackEnded && (lp3 > lp1) && (lp1 > lp0);
+    std::printf("  LOOP RESULT: %s\n", loopOk ? "PASS" : "FAIL");
 
     FFF3FP_Destroy(player);
     std::printf("=== done ===\n");

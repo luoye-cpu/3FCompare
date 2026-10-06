@@ -1,5 +1,5 @@
 using Avalonia.Input;
-using _3FCompare.App;
+using _3FCompare.Localization;
 using _3FCompare.Core.Settings;
 using _3FCompare.Services;
 using Xunit;

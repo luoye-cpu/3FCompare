@@ -12,7 +12,7 @@
          不再硬编码 AssemblyVersion/FileVersion/InformationalVersion
          （避免 0.1.2 发布时程序集版本错位的同类问题）。 -->
     <!-- VersionSuffix 与 App 工程同步移除（docs/45 P1-12），理由见 App 侧 csproj 注释。 -->
-    <Version>0.3.1-beta</Version>
+    <Version>0.3.2-beta</Version>
   </PropertyGroup>
 
 </Project>

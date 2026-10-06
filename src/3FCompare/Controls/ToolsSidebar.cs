@@ -1,10 +1,13 @@
 using System;
+
+using _3FCompare.Themes;
+using System;
 using System.Collections.Generic;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
-using _3FCompare.App;
+using _3FCompare.Localization;
 using _3FCompare.Core.Settings;
 using _3FCompare.Panels;
 // 本工程开了 ImplicitUsings，System.IO.Path 在作用域内 ⇒ 必须起别名，否则 Path 二义

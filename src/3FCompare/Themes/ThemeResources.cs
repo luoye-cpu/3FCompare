@@ -3,7 +3,7 @@ using Avalonia.Markup.Xaml.MarkupExtensions;
 using Avalonia.Media;
 using Avalonia.Styling;
 
-namespace _3FCompare;
+namespace _3FCompare.Themes;
 
 /// <summary>主题资源（代码装配；对应 WinForms AppTheme.Colors/Fonts/Sizes）。
 /// 注：App.axaml 内嵌 Resources/Styles 在本机 .NET 11 预览运行时触发

@@ -142,6 +142,8 @@ public sealed class SimulatedEngine : IPlayerEngine
 
         public void SetViewTransform(float zoom, float panX, float panY) { /* 演示模式略过 */ }
 
+        public void SetFitLimitToNative(bool enable) { /* 演示模式略过：判据须自报 SKIP，不得当成 1:1 达成 */ }
+
         public EngineSnapshot ReadSnapshot()
         {
             lock (_lock)

@@ -43,6 +43,9 @@ public sealed class AppSettings
     {
         // 枚举合法性：**不要**用 Enum.IsDefined——它是反射，在 NativeAOT 下不保证可用
         if ((int)ColorMode < 0 || (int)ColorMode > 3) ColorMode = ColorModeSetting.Auto;
+        // 越界值会直传进内核 FFF3FP_Create（>1 返回 InvalidArgument = 全部会话创建失败），
+        // 必须在这里钳住，不能靠 int 字段"看起来只有三态"。
+        SdrScRgbMode = Math.Clamp(SdrScRgbMode, 0, 1);
 
         FrameStep = Math.Clamp(FrameStep, 1, 999);          // 与设置窗口 NumericUpDown 一致
         SecondsStep = Math.Clamp(SecondsStep, 0.001, 60.0);
@@ -157,6 +160,14 @@ public sealed class AppSettings
     /// <summary>色彩模式：Auto=0 表示根据显示器能力自动选择 HDR/SDR。
     /// 旧值：MapToSdr=0→新 Auto=0 冲突，故 Auto 设为 3 保持向后兼容。</summary>
     public ColorModeSetting ColorMode { get; set; } = ColorModeSetting.Auto;
+
+    /// <summary>SDR 源的 scRGB 呈现策略（内核 v16）：
+    /// 0 = 从不：SDR 源始终走 8/10bit sRGB 交换链（历史行为）；
+    /// 1 = 自动（默认）：显示器开启 Advanced Color 时，位深 &gt; 8 或广色域 primaries 的 SDR 源
+    /// 改走 16bit scRGB 链，避免 gamma R10G10B10A2 链上的二次处理与广色域被折叠回 Rec.709。
+    /// 显示器未开启 Advanced Color 时自动回退，行为与 0 一致。
+    /// 用 int 而非 bool：将来若加"始终"档位不必改类型与迁移（同 CompareAlign 的取舍）。</summary>
+    public int SdrScRgbMode { get; set; } = 1;
 
     /// <summary>按帧步进步长（F12），默认 1。</summary>
     public int FrameStep { get; set; } = 1;

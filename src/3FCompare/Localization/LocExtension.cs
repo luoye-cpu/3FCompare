@@ -1,6 +1,6 @@
 using Avalonia.Data;
 using Avalonia.Markup.Xaml;
-using _3FCompare.App;
+using _3FCompare.Localization;
 
 namespace _3FCompare.Localization;
 

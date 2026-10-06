@@ -182,6 +182,16 @@ def capture_stack(hproc, hthread, dump_path, tid, want=0x10000):
                                           ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
         k32.ReadProcessMemory.restype = wt.BOOL
         ok = k32.ReadProcessMemory(hproc, rsp, buf, want, ctypes.byref(read))
+        # RIP 处（前 8 后 24）的代码字节：用来判"执行的是不是被改写中的字节"。
+        # 为什么要它：#17 的第一现场 RIP = dxgi!+0x33AF3，而磁盘镜像该处是函数 0x33AF0 的
+        # 第 4 个字节（合法指令的中段）⇒ 只有把**当时内存里的字节**抓下来，才能区分
+        # "入口被第三方 detour 改写、写到一半被别的线程执行"与"控制流自己跳错偏移"。
+        code, code_ok = None, False
+        code_read = ctypes.c_size_t(0)
+        cbuf = ctypes.create_string_buffer(32)
+        code_ok = bool(k32.ReadProcessMemory(hproc, max(rip - 8, 0), cbuf, 32,
+                                             ctypes.byref(code_read)))
+        code = bytes(cbuf[:code_read.value]) if code_read.value else b""
         base = dump_path[:-4] if dump_path.endswith(".dmp") else dump_path
         meta = f"{base}.meta.txt"
         stack = f"{base}.stack.bin"
@@ -190,8 +200,11 @@ def capture_stack(hproc, hthread, dump_path, tid, want=0x10000):
         with open(meta, "w", encoding="utf-8") as fh:
             fh.write(f"tid={tid}\nrip=0x{rip:X}\nrsp=0x{rsp:X}\nrbp=0x{rbp:X}\n"
                      f"stack_file={os.path.basename(stack)}\n"
-                     f"stack_bytes={read.value}\nread_ok={int(bool(ok))}\n")
+                     f"stack_bytes={read.value}\nread_ok={int(bool(ok))}\n"
+                     f"rip_bytes={code.hex(' ')} rip_bytes_ok={int(code_ok)}\n")
         print(f"[dump_capture] 栈已存: {stack}（{read.value} 字节）；元信息: {meta}", flush=True)
+        print(f"[dump_capture] RIP-8 起 {len(code)} 字节: {code.hex(' ')}（读={code_ok}）",
+              flush=True)
     except Exception as exc:                                    # pragma: no cover
         print(f"[dump_capture] 抓栈失败: {exc}", file=sys.stderr)
 

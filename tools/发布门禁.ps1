@@ -117,14 +117,22 @@ function Invoke-Cmd {
     # 必须先清空：$LASTEXITCODE 是"上一次原生调用"的残留值。若本次进程压根没起来
     # （沙箱 / PATH 缺失），它会沿用上一次成功调用的 0 → 门禁假绿。
     $global:LASTEXITCODE = $null
-    $raw = & $FilePath @Arguments 2>&1
-    # 某些受限环境（如自动化沙箱）根本起不了进程：此时 $LASTEXITCODE 为 null。
+    # ⚠ 输出必须**管道流式**收，不能写成 `$raw = & $FilePath @Arguments 2>&1`。
+    # 本仓要量的 3FCompare.exe 是 GUI 子系统程序（PE Subsystem=2，实测三个 bin 都是 2）。
+    # PowerShell 对"赋值给变量"的 GUI 子进程**不等退出**：实测同一份包内 exe 跑
+    # `--selftest C:\nope.mp4`，赋值式 433ms 返回 / 0 行 / $LASTEXITCODE 为空，
+    # 而管道式 2538ms 返回 / 7 行 / exit=2 —— 差的那 2.1 秒正是程序真正跑完的时间。
+    # 后果不是"少几行日志"而是整条判据失配：exit 为空被兜成 -1，详情写"命令未能启动"，
+    # 而门禁里所有 *-test 步骤（selftest / comparemodetest / sessiontest / multitest）都走这里。
+    $lines = New-Object System.Collections.Generic.List[string]
+    & $FilePath @Arguments 2>&1 | ForEach-Object { $lines.Add($_.ToString()) }
+    # 某些受限环境（如自动化沙箱）根本起不了进程：此时 $LASTEXITCODE 仍为 null。
     # 不显式兜底的话，门禁只会显示"exit="空值，看不出到底是测试失败还是命令没跑起来。
     $code = if ($null -eq $LASTEXITCODE) { -1 } else { $LASTEXITCODE }
     $ErrorActionPreference = $prev
     return [pscustomobject]@{
         Exit = $code
-        Out  = @($raw | ForEach-Object { $_.ToString() })
+        Out  = @($lines)
     }
 }
 
@@ -195,6 +203,12 @@ if (-not $KernelBaselineSha) {
             $n = @($mf.dirtyFiles).Count
             $fails += "内核工作树脏（$n 个文件未提交）：$(($mf.dirtyFiles | Select-Object -First 3) -join ' | ')"
         }
+        # 清单必须描述**本次要校验的那个配置**的内核。2026-09-30 实测：Release 一轮里
+        # [1/11] 打着 `cfg=Debug dll=50C86906…` 仍判 ✅，而 [2/11] 校验的是 x64\Release 那份
+        # ⇒ 基线项的溯源陈述与被验对象无关，等于白说。配置不一致就直接红，不靠人记得先跑哪个构建。
+        if ([string]$mf.configuration -ne $KernelConfiguration) {
+            $fails += "清单配置 $($mf.configuration) ≠ 本次 -KernelConfiguration $KernelConfiguration（先跑 tools/构建全部.ps1 -Configuration $KernelConfiguration）"
+        }
         if (-not $mHash) {
             $fails += "清单里 dllSha256 为空（构建时该路径不存在内核）"
         } elseif (-not (Test-Path -LiteralPath $mDll)) {
@@ -232,7 +246,7 @@ if (-not $KernelBaselineSha) {
 #   反过来，上次成功构建是 Debug / 刚跑过 run_ab 时它又陈旧，会判红而 exe 其实是对的（假红）。
 #   为了把"同一份内核"钉死，这里再**额外断言 bin 副本与进包内核 SHA256 相同**：
 #   bin 副本不存在时只打印提示、不判红（Debug 构建确实不会有它）。
-Write-Host "      · 内核导出面（--min-exports 82 --min-api 15，必需导出 25 个）" -ForegroundColor Yellow
+Write-Host "      · 内核导出面（--min-exports 82 --min-api 15，必需导出=REQUIRED 全量清单，条数由脚本自己打印）" -ForegroundColor Yellow
 
 # KernelDllPath 从 csproj 正则提取（不硬编码路径），再把 MSBuild 属性展开成本机绝对路径
 $kernelDll = ""
@@ -279,7 +293,12 @@ if ($pyExe -and ($pyExe -match '(?i)[\\/]WindowsApps[\\/]')) {
     $pyAliasHint = "；⚠ python 解析到 Windows Store 应用执行别名（$pyExe）——若它只是未安装时的占位桩，执行会返回 9009，请安装真实 Python 3，或在「设置 → 应用 → 高级应用设置 → 应用执行别名」中关闭 python.exe"
 }
 
-$binKernel = Join-Path (Split-Path $Exe -Parent) "FFF.Native.dll"
+# bin 副本要比的是"这份内核部署到它自己那套应用配置里之后有没有被换过"。$Exe 固定指 Release
+# （门禁跑的是 Release 产物），但 -KernelConfiguration Debug 时 tools/构建全部.ps1 部署的是
+# bin\Debug ⇒ 沿用 $Exe 所在目录会拿 Debug 内核去比 Release 副本，恒判红（2026-09-30 实测：
+# 进包 50C86906B847 / bin E9A18DDF492A）。按内核配置取对应 bin，两条路径都仍然可比。
+$binFlavor  = if ($KernelConfiguration -eq 'Debug') { 'Debug' } else { 'Release' }
+$binKernel = Join-Path $ProjectRoot "src\3FCompare\bin\$binFlavor\net11.0-windows\FFF.Native.dll"
 # 结论里打印**实际校验的那条路径**（相对仓库根，便于对照）：若 csproj 的 KernelDllPath
 # 被改成非默认位置，标签不会与事实不符。
 $kernelRel = $kernelDll
@@ -322,8 +341,19 @@ if (-not $kernelDll) {
             $binNote = "bin 副本 SHA256 不一致（进包 $($srcHash.Substring(0,12)) / bin $($binHash.Substring(0,12))）——bin 里是旧内核或 run_ab 留下的实验内核，请重跑 tools/构建全部.ps1 -Configuration $KernelConfiguration"
         }
     }
-    Add-Result "内核导出面" (($expExit -eq 0) -and $binOk) `
-        (Format-FailDetail $expExit "${kernelRel}: $expTail；$binNote$pyAliasHint")
+    # 配对守卫：进包内核必须满足托管侧的**实际**要求 —— API 版本恰好相等 + 25 个必需入口齐。
+    # 上面的 --min-api 15 只是下限，"托管要 16 / 进包是 15"这种**错配**它是放行的；
+    # 而错配的真实后果就是 2026-09-29 撞到的那个形状：构建全绿 → 会话创建被内核拒 →
+    # 整轮 --selftest 在演示模式空跑（真机判据全 SKIP）而退出码仍为 0。
+    $pair     = Invoke-Cmd $pyExe @((Join-Path $PSScriptRoot "check_kernel_pairing.py"), $kernelDll)
+    $pairExit = $pair.Exit
+    $pairTail = ($pair.Out | Where-Object { $_ -and $_.Trim() -ne "" } | Select-Object -Last 1)
+    if (-not $pairTail) { $pairTail = "配对检查无输出（exit=$pairExit）——守卫没跑等于没守卫" }
+    if ($pairExit -ne 0) { $pair.Out | Select-Object -Last 4 | ForEach-Object { Write-Host "      $_" } }
+    # 详情里的退出码取"坏的那个"：只报 expExit 会在"导出面 OK、配对红"时打出一个误导性的 0。
+    $worstExit = if ($expExit -ne 0) { $expExit } else { $pairExit }
+    Add-Result "内核导出面" (($expExit -eq 0) -and ($pairExit -eq 0) -and $binOk) `
+        (Format-FailDetail $worstExit "${kernelRel}: $expTail；$binNote；配对: $pairTail$pyAliasHint")
 }
 
 # ── [3/11] Release 编译：0 error，且非白名单告警必须为 0 ──
@@ -424,7 +454,24 @@ if (-not $SkipSelfTest) {
         $run  = Invoke-Cmd $Exe $stArgs
         $code = $run.Exit
         $line = ($run.Out | Where-Object { $_ -match 'selftest\[|全部通过' } | Select-Object -Last 1)
-        Add-Result "单路全量" ($code -eq 0) (Format-FailDetail $code "$line (exit=$code)")
+        # ⚠ --selftest 的退出码**不反映 SKIP**（有跳过也照样 exit=0，只在末尾打一行
+        # "本次自测有 N 项跳过（未验证，不等于通过）"）。只判 exit 就会把"没验"报成 PASS。
+        # 这里把跳过项拉进判决：本步没跑完 ⇒ 不得作为发布依据，原因逐条进详情。
+        $skipBullets = @($run.Out | Where-Object { $_ -match '• \[' })
+        $banner = ($run.Out | Where-Object { $_ -match '本次自测有 (\d+) 项跳过' } | Select-Object -Last 1)
+        # 显式再匹配一次，不抄 ambient $Matches：中间那条 -match '\[\S.*\]' 也写过它，
+        # 组号对不上时 [int]$Matches[1] 会静默变 0 ⇒ "有跳过"被判成"没跳过"。
+        $skipN = if ($banner) { [int][regex]::Match($banner, '本次自测有 (\d+) 项跳过').Groups[1].Value } else { 0 }
+        # 两个来源互相核对：横幅声明的 N 与实际数到的条数不等 ⇒ 自测输出格式漂移了，
+        # 此时宁可判红，也不能因为"正则失配 ⇒ 数到 0"而报全绿。
+        $ok = ($code -eq 0) -and ($skipBullets.Count -eq 0) -and ($skipN -eq 0)
+        $detail = if ($skipBullets.Count -gt 0 -or $skipN -gt 0) {
+            "$line (exit=$code) — 有跳过项（未验证 ≠ 通过），横幅=$skipN 条 / 实到=$($skipBullets.Count) 条：" +
+            (($skipBullets | ForEach-Object { ($_ -replace '^.*?• ', '') }) -join ' | ')
+        } else {
+            Format-FailDetail $code "$line (exit=$code)"
+        }
+        Add-Result "单路全量" $ok $detail
     }
 
     # ── [7/11] 追加一行：多路对比回归（--comparemodetest，5 路档）──

@@ -1,4 +1,7 @@
 using System;
+
+using _3FCompare.Themes;
+using System;
 using System.Collections.Generic;
 using Avalonia;
 using Avalonia.Controls;
@@ -7,7 +10,7 @@ using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using Avalonia.Rendering.SceneGraph;
 using Avalonia.Threading;
-using _3FCompare.App;
+using _3FCompare.Localization;
 using _3FCompare.Core.Display;
 using _3FCompare.Platform;
 

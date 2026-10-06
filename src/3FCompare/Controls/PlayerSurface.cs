@@ -129,12 +129,28 @@ public sealed class PlayerSurface : NativeControlHost
     // 3FCompare M1：当前 client 尺寸（DIP 到物理由获取时换算），用于 WM_SIZE 变化检测。
     private int _clientW;
     private int _clientH;
-    // 防抖：resize 高频触发时合并同尺寸请求。
-    private const int RedrawDebounceMs = 16;
+    // resize → Redraw 的合并：同一表面在途只留一次（见 HandleSurfaceMessage 的 WM_SIZE 分支）。
+    // 取代原先那个从未被引用的 RedrawDebounceMs —— 常量在、逻辑不在，注释还写着"debounce"。
+    private bool _redrawQueued;
 
     public int Index => _index;
     public bool RealMode => _realMode;
     public nint Hwnd => _hwnd;
+
+    // ── #17 归因用的实验开关（两个臂跑**同一份二进制**，只换环境变量）──
+    // FC_SKIP_RESIZE_REDRAW=1 ⇒ WM_SIZE 只改客户端尺寸，不再 Post 那次 Redraw。
+    // 目的：看崩溃带是否随这一条内核调用消失。它不是候选修复（本仓自记契约：子窗口尺寸变了
+    // 不 Redraw 就停 flips），只是把"这条调用是不是暴露点"这一刀切出来。
+    private static readonly bool SkipResizeRedraw =
+        System.Environment.GetEnvironmentVariable("FC_SKIP_RESIZE_REDRAW") == "1";
+
+    // FC_NO_REDRAW_COALESCE=1 ⇒ 把"同一表面在途只留一次"这个合并**关掉**（每个尺寸变化都各发一次
+    // Redraw，即合并落地前的行为）。为什么要它：CHANGELOG 里 `9/16 → 3/16` 那组数是
+    // `FC_SKIP_RESIZE_REDRAW`（整条调用都不发）量的，**不是**"合并开/关"的量；拿今天的新数字去和
+    // 那天旧构建比，就是把时间差当臂差（本仓禁项）。这个臂让两臂跑同一份二进制、只换环境变量，
+    // 单独回答"合并本身把崩溃率降了多少"。它同样是**测量臂，不是候选修复**。
+    private static readonly bool NoRedrawCoalescing =
+        System.Environment.GetEnvironmentVariable("FC_NO_REDRAW_COALESCE") == "1";
 
     public bool Selected
     {
@@ -449,19 +465,41 @@ public sealed class PlayerSurface : NativeControlHost
                         // 只把落盘合并到 200ms 一次（见 ComponentLog.FlushThrottleMs 的权衡说明）。
                         ComponentLog.LogThrottled(Comp.Surface, "Resize", _index, $"w={w} h={h}");
                         // 3FCompare M1: debounce resize → Redraw
+                        //   ⚠ 这条注释长期在写"debounce"，而代码里 `RedrawDebounceMs` **从未被引用**，
+                        //   实测每个"尺寸真的变了"的 WM_SIZE 都各发一次内核 Redraw ⇒ 拖一次窗口边框
+                        //   = 几十次 `EnsureSwapChain`（它会 resize/重建交换链）。
+                        //   现在按声明补上合并：**同一表面在途只留一次请求**，回调落地后重新开放。
+                        //   合并是安全的：内核在调用那一刻才从窗口取当前客户区尺寸，
+                        //   所以"最后一次"必然带上了最终尺寸，中间的过渡尺寸没有价值。
+                        //   不会丢更新：最后一次尺寸变化若发生在途期间，flag 已复位 ⇒ 还会再发一次。
                         // 捕获会话引用而不是在闭包里延迟读字段：会话可能在 Post 执行前被释放。
                         // Avalonia Dispatcher 作业里的未处理异常会击穿整个进程，必须兜住。
-                        var redrawTarget = _session;
-                        Dispatcher.UIThread.Post(() =>
+                        //
+                        // 【实验臂，#17 归因】FC_SKIP_RESIZE_REDRAW=1 ⇒ 只跳过这次内核 Redraw。
+                        //   刻意**不在消息分支里 return**：那样连 WM_SIZE 的透传（宿主自己的重排）
+                        //   都会被改掉，量出来的差别就不再是"这一条内核调用"的差别。
+                        //   两个臂跑同一份二进制、只换环境变量 ⇒ 不给"跑的是旧 dll"留余地。
+                        //   这不是候选修复（本仓自记契约：尺寸变了不 Redraw 就停 flips），
+                        //   它只回答一个问题：崩溃带会不会随这条调用一起消失。
+                        // 测量臂 FC_NO_REDRAW_COALESCE=1 只绕过"在途只留一次"这道门槛，
+                        //   其余（透传 WM_SIZE、Post 优先级、会话捕获方式、日志）两臂完全一致 ⇒
+                        //   差别只剩"一次还是几十次内核 Redraw"。
+                        if (!SkipResizeRedraw && (NoRedrawCoalescing || !_redrawQueued))
                         {
-                            // Render 埋点：记在 Post 回调内而非 WndProc 上——语义是"真的发起 Redraw
-                            // 的那一刻"，与排队/被丢弃区分开（来源 WM_SIZE，即窗口尺寸变化）。
-                            // 同样节流：这个回调也在 UI 线程上执行，且与上面的 Resize 同频，
-                            // 若它逐条 flush，则每次 resize 仍有一次同步落盘，UI 冻结并未真正消除。
-                            ComponentLog.LogThrottled(Comp.Render, "RedrawRequest", _index, "src=WM_SIZE");
-                            try { redrawTarget?.Redraw(); }
-                            catch (ObjectDisposedException) { /* 会话已释放，无需重绘 */ }
-                        }, DispatcherPriority.Background);
+                            _redrawQueued = true;
+                            var redrawTarget = _session;
+                            Dispatcher.UIThread.Post(() =>
+                            {
+                                _redrawQueued = false;
+                                // Render 埋点：记在 Post 回调内而非 WndProc 上——语义是"真的发起 Redraw
+                                // 的那一刻"，与排队/被丢弃区分开（来源 WM_SIZE，即窗口尺寸变化）。
+                                // 同样节流：这个回调也在 UI 线程上执行，且与上面的 Resize 同频，
+                                // 若它逐条 flush，则每次 resize 仍有一次同步落盘，UI 冻结并未真正消除。
+                                ComponentLog.LogThrottled(Comp.Render, "RedrawRequest", _index, "src=WM_SIZE");
+                                try { redrawTarget?.Redraw(); }
+                                catch (ObjectDisposedException) { /* 会话已释放，无需重绘 */ }
+                            }, DispatcherPriority.Background);
+                        }
                     }
                 }
                 return CallWindowProcW(_origWndProc, hwnd, msg, wParam, lParam);
@@ -623,7 +661,7 @@ public sealed class PlayerSurface : NativeControlHost
             using var borderPen = new System.Drawing.Pen(System.Drawing.Color.FromArgb(100, 100, 110), 1);
             g.DrawRectangle(borderPen, miniRect);
             // 视口指示器（当前缩放/平移对应的可见区域）
-            // 同样至少 1px：SharedZoom 极大（缩放上限 8）而 miniSize 为 1 时会得 0.125，
+            // 同样至少 1px：SharedZoom 极大（缩放上限 32，见 MainWindow 的 Math.Clamp）而 miniSize 为 1 时会得 0.125，
             // GDI 画 0 宽矩形等于什么都不画 ⇒ 用户以为小地图没工作。
             var viewW = Math.Max(1, miniSize / SharedZoom);
             var viewH = Math.Max(1, miniSize / SharedZoom);

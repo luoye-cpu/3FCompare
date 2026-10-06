@@ -15,7 +15,8 @@
 
 REQUIRED 的生成方式（**不是猜的**，逐名实测）：
   扫描 src/3FCompare.Core/Backend/Interop/Fff3FpNative.cs 与 Fff3FpNativeProbe.cs 里
-  全部 `[LibraryImport("FFF.Native")]` / `[DllImport(...)]` 的入口名（去重 25 个），
+  全部 `[LibraryImport("FFF.Native")]` / `[DllImport(...)]` 的入口名（2026-09-21 去重 25 个；
+  2026-09-29 加 `FFF3FP_SetFitLimitToNative` 后 26 个），
   再逐个到 FFF.Native.dll 的导出表里查证存在（2026-09-21 实测：Release 与 Release_pr9
   均为 82 导出、25 个候选**全部存在**，无一落空）。
 
@@ -66,6 +67,7 @@ REQUIRED = (
     "FFF3FP_SetVolume",
     "FFF3FP_SetOutputWindow",
     "FFF3FP_SetViewTransform",
+    "FFF3FP_SetFitLimitToNative",
     "FFF3FP_SetColorMode",
     "FFF3FP_SetPresentConfig",
     # ---- 读取 ----

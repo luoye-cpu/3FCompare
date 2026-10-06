@@ -72,6 +72,9 @@ internal struct Fff3FpConfiguration
     /// 不能用 Win32 <c>EnumDisplayDevices</c>（那是 DISPLAY 设备索引，两者不对应）。
     /// 越界或枚举失败时内核静默回落到默认策略。</summary>
     public int PreferredAdapterIndex;
+    /// <summary>v16：SDR 源的 scRGB 呈现策略。0=从不（历史行为），
+    /// 1=自动（显示器开启 Advanced Color 时，位深 &gt;8 或广色域的 SDR 源走 16bit scRGB 链）。</summary>
+    public uint SdrScRgbMode;
 }
 
 /// <summary>FFF3FPSnapshot 完整布局（对照 FFF.Player.Api.h v8，逐字段对齐）。</summary>
@@ -239,6 +242,12 @@ internal static partial class Fff3FpNative
     [LibraryImport(DllName)]
     internal static partial FffResult FFF3FP_SetViewTransform(nint player,
         float zoom, float panX, float panY);
+
+    /// <summary>3FCompare 内核扩展：0=上游行为（zoom 相对"适配窗口后的视频框"）；
+    /// 1=把适配盒封顶到源原生尺寸，于是 zoom 直接就是 屏幕像素/视频像素 之比
+    /// （zoom=1 是逐像素 1:1，窗口比源大时四周留黑边）。光盘在播时返回 NotSupported。</summary>
+    [LibraryImport(DllName)]
+    internal static partial FffResult FFF3FP_SetFitLimitToNative(nint player, uint enable);
 
     [LibraryImport(DllName)]
     internal static partial FffResult FFF3FP_SetColorMode(nint player,

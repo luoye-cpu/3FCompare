@@ -1,5 +1,5 @@
 using System.ComponentModel;
-using _3FCompare.App;
+using _3FCompare.Localization;
 
 namespace _3FCompare.Localization;
 

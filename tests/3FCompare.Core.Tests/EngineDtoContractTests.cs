@@ -33,6 +33,9 @@ public class EngineDtoContractTests
         Assert.Equal(-1, options.PreferredAdapterIndex); // -1 = 系统默认适配器
         Assert.Equal(ColorMode.MapToSdr, options.ColorMode); // 默认不假设 HDR 显示器
         Assert.False(options.ForceHdrOutput);            // 不绕过显示器能力门控
+        // 0 = SDR 源始终走传统 SDR 链。默认不带"自动"语义：策略由宿主显式传入，
+        // DTO 保持中立，避免未设置该字段的调用点悄悄改变呈现契约。
+        Assert.Equal(0, options.SdrScRgbMode);
         Assert.False(options.TearingPresent);            // 默认 VSync 锁定（盯帧推荐）
     }
 

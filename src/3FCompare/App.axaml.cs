@@ -1,8 +1,9 @@
 using Avalonia;
+using _3FCompare.Themes;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 using Avalonia.Themes.Fluent;
-using _3FCompare.App;
+using _3FCompare.Localization;
 using _3FCompare.Core.Settings;
 
 namespace _3FCompare;

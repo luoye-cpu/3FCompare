@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Text;
 
-namespace _3FCompare.App;
+namespace _3FCompare.Localization;
 
 /// <summary>双语语言管理器。
 /// 提供 <see cref="T"/> 资源查找与 <see cref="LanguageChanged"/> 语言切换通知；
@@ -253,6 +253,12 @@ public static class LanguageManager
         ["Tb_Add"] = "加路",
         ["Tb_Remove"] = "减路",
         ["Tb_ColorMode"] = "SDR: 标准动态范围输出 | HDR: 高动态范围输出（自动检测显示器能力）",
+        // 设置窗口「色彩」节：SDR 源在 HDR（Advanced Color）显示器上的呈现路径。
+        // 会话级 —— 改动后新开的会话生效，已开会话不热切换。
+        ["SdrScRgb_Mode"] = "SDR 广色域/10bit 呈现",
+        ["SdrScRgb_Never"] = "从不（传统 SDR 交换链）",
+        ["SdrScRgb_Auto"] = "自动（Advanced Color 显示器上走 scRGB）",
+        ["SdrScRgb_Hint"] = "开启后，10bit 或广色域的 SDR 内容在 HDR（Advanced Color）显示器上改用 16bit scRGB 呈现，避免色域被压回 Rec.709 与 gamma 链上的二次处理。显示器未开启 HDR 时自动回退，无影响。",
         ["Probe_Title"] = "像素探针",
         ["Probe_Coord"] = "坐标: --",
         ["Probe_Hint"] = "鼠标悬停视频面以读取像素\n（显示颜色管理前码值）",
@@ -497,6 +503,13 @@ public static class LanguageManager
         ["Tb_Add"] = "Add lane",
         ["Tb_Remove"] = "Remove lane",
         ["Tb_ColorMode"] = "SDR: Standard Dynamic Range | HDR: High Dynamic Range (auto-detect display)",
+        // Settings window "Color" section: how SDR sources are presented on HDR
+        // (Advanced Color) displays. Session-level — applies to newly opened
+        // sessions, no hot swap for running ones.
+        ["SdrScRgb_Mode"] = "SDR wide-gamut / 10-bit presentation",
+        ["SdrScRgb_Never"] = "Never (classic SDR swap chain)",
+        ["SdrScRgb_Auto"] = "Auto (scRGB when Advanced Color is active)",
+        ["SdrScRgb_Hint"] = "When enabled, 10-bit or wide-gamut SDR content is presented through the 16-bit scRGB path on HDR (Advanced Color) displays, avoiding gamut collapse back to Rec.709 and extra processing on the gamma chain. Displays without HDR simply fall back — no effect.",
         ["Probe_Title"] = "Pixel Probe",
         ["Probe_Coord"] = "Coord: --",
         ["Probe_Hint"] = "Hover over a video surface to read pixels\n(pre-colormanaged values)",

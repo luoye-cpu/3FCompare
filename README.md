@@ -27,14 +27,14 @@
 
 | 维度 / Dimension | 说明 / Description |
 | --- | --- |
-| 产品形态 / Type | Windows 桌面应用（**Avalonia 11**，.NET 11）；**NativeAOT 自包含（精简版 7z 分发约 9.3MB）** / Windows desktop app (**Avalonia 11**, .NET 11); **NativeAOT self-contained (lite 7z ~9.3MB)** |
+| 产品形态 / Type | Windows 桌面应用（**Avalonia 12**，.NET 11）；**NativeAOT 自包含（精简版 7z 分发约 9.3MB）** / Windows desktop app (**Avalonia 12**, .NET 11); **NativeAOT self-contained (lite 7z ~9.3MB)** |
 | 对标产品 / Reference | NVIDIA ICAT（最多 4 路视频/图像对比）——本项目**扩展至 1~9 路**，对齐、双步进、硬件解码开关、窗口/全屏、多显卡解码 / NVIDIA ICAT (up to 4-way) — **extended to 1–9 ways** with alignment, dual stepping, HW decode toggle, window/fullscreen, multi-GPU |
 | 后端 / Backend | FFF_Project 的 **3FP**（`FFF.Native` fork + 自研补丁，见 docs/03-后端接入与能力映射.zh.md） / **3FP** from FFF_Project (forked `FFF.Native` + custom patches, see docs/03-后端接入与能力映射.en.md) |
 | 业务规模 / Scale | **1~9 路对比**（3x3 网格上限），架构按 N 路扩展 / **1–9 way comparison** (3×3 grid max), architecture scales to N-way |
 | 解码 / Decode | 3FP 原生能力：CPU（FFmpeg）/ GPU（CUDA/NVDEC、D3D11VA 优先）+ 自动回退；**硬件开关 + 多 GPU 指定（2026-09-16 起生效）** / 3FP native: CPU (FFmpeg) / GPU (CUDA/NVDEC, D3D11VA preferred) + auto fallback; **HW toggle + multi-GPU selection** |
 
 
-| [PACKAGING_SPEC.md](PACKAGING_SPEC.md) | 打包规范：NativeAOT 双版本发布流程、命名规则、压缩配置 |
+| [docs/PACKAGING_SPEC.md](docs/PACKAGING_SPEC.md) | 打包规范：NativeAOT 双版本发布流程、命名规则、压缩配置 |
 
 ## 🌈 显示链路（ACM / VRR）要点 / Display Chain Highlights
 
@@ -44,42 +44,57 @@
   ~~是否全时刻生效取决于 3FP 交换链（Present 节奏 / `ALLOW_TEARING`），待专项实测~~
   → **2026-09-16 已实测支持**：`SetPresentConfig`（撕裂呈现）「显示器链支持 ✓」、
   `SetPacingConfig`（媒体率节奏）「已启用 ✓」，见 [docs/03](docs/03-后端接入与能力映射.zh.md) 的 **A8/A9**。
+- **2026-09-30 复核（上游 PR 树 `3fp/kernel`，内核 API 16）**：该树的 `FFF3FP_SetPresentConfig` 是本轮新建入口，
+  第一版把「交换链是否带 `ALLOW_TEARING`」与「用户是否要撕裂」合用一个变量 ⇒ 关它会连带改掉 `ResizeBuffers` 的
+  flag、开启时正常播放分支仍走 `Present(1, 0)`（等于 no-op）、设备重建后偏好丢失。已拆成
+  `swapAllowTearing_`（能力）+ `tearingRequested_`（偏好）并在正常呈现分支生效。
+  ⇒ 上面 09-16 那两行读数来自**另一棵树**（`third_party` 的自研 VRR 补丁），不能迁移成「这条也已验过」；
+  真实撕裂节奏仍需在带 VRR 的显示器上复测。
+  The 09-16 readings come from a different tree (the `third_party` fork's own VRR patch); on the API 16
+  upstream-PR tree the toggle was inert until 2026-09-30, and real tearing cadence is still unmeasured.
 - 专项验收清单见 [docs/01-需求分析.zh.md §5.1](docs/01-需求分析.zh.md)。
 
 ## ⚖️ 依赖与许可提示 / License & Dependencies
 
-- `FFF.Native` 为 **MIT 许可（已确认）**，本项目**基于其源码二次开发**：以 git submodule 固定 commit，
-  在其上追加自研扩展补丁（VRR 交换链 / 视口子区域 / 全帧回读等，见 `docs/03 §6`），保持与上游可合并。
+- `FFF.Native` 为 **MIT 许可（已确认）**，本项目**基于其源码二次开发**：内核以**独立 git 仓库**形式位于
+  `third_party/fff_project/`——**不是 submodule**（`.gitmodules` 已无条目，整目录被 `.gitignore` 忽略），
+  基线由 `tools/构建全部.ps1` 的 SHA/tag 钉死。在其上追加自研扩展补丁（VRR 交换链 / 视口子区域 /
+  全帧回读等，见 `docs/03 §6`），保持与上游可合并。
 - FFmpeg 公共 API：Shared FFmpeg DLL 组（`avcodec` 等）由 BtbN 构建，**不纳入本仓库**，仅在发布说明中指引获取。
 - 本项目的 UI、同步逻辑、对比工具均为独立实现；本仓库不包含任何第三方 DLL 二进制。
 
 > 详细依赖清单、构建步骤与风险见 [docs/06-风险与依赖.zh.md](docs/06-风险与依赖.zh.md)。
 
-## 🛠 工程状态（v0.3.0-beta，2026-09-23）
+## 🛠 工程状态（v0.3.2-beta，2026-09-30）
 
 > ⚠ 本节标题此前长期停留在 `0.2.0-BETA，2026-08-25`，与实际版本严重脱节，现已更正。
 > 版本唯一真源是 csproj 的 `<Version>`，改版本时记得同步此处。
 
 > **版本号唯一真源**：`src/3FCompare/3FCompare.csproj` 的 `<Version>`（预发布后缀直接写进
-> `<Version>`，如 `0.3.0-beta`；独立的 `<VersionSuffix>` 已移除，见 docs/45 P1-12）。
+> `<Version>`，如 `0.3.2-beta`；独立的 `<VersionSuffix>` 已移除，见 docs/45 P1-12）。
 > `pack.ps1` 与 `tools/发布门禁.ps1` 不硬编码版本——不传 `-Version` 时自动从 csproj 派生，
-> 传入不一致会告警。详见 [PACKAGING_SPEC.md §5](PACKAGING_SPEC.md)。
+> 传入不一致会告警。详见 [PACKAGING_SPEC.md §5](docs/PACKAGING_SPEC.md)。
 
 ```text
 src/
-├── 3FCompare.slnx              # 解决方案（.NET 11 新格式）
+├── 3FCompare.slnx              # 解决方案（.NET 11 新格式；**在 src/ 下**，不在仓库根）
 ├── 3FCompare.Core/             # 后端抽象 / 3FP P/Invoke / 演示引擎 / 同步 / 设置 / GPU 枚举 / DXGI 显示器能力
-├── 3FCompare/         # Avalonia 主程序（多路网格 / 双步进 / 时间轴 / 设置 / 全屏 / 对比工具 / 主题；
+├── 3FCompare/                  # Avalonia 主程序（多路网格 / 双步进 / 时间轴 / 设置 / 全屏 / 对比工具 / 主题；
 │                               #   2026-08-22 由 WinForms 迁移而来，WinForms 版归档于 tag `winforms-final`）
 tests/
-├── 3FCompare.SmokeTests/       # E3 冒烟（控制台，演示引擎全流程验证）
-├── 3FCompare.Core.Tests/       # 单元测试（FrameTimeline / SyncController / GridLayout / ToneMapping / PixelReadback / RenderStallWatchdog 等，175 例）
+├── 3FCompare.Core.Tests/       # 单元测试（FrameTimeline / SyncController / GridLayout / ToneMapping / PixelReadback / RenderStallWatchdog 等）
+├── 3FCompare.Platform.Tests/   # 平台层单元测试（视图变换 / 放大镜 / 播放编排 / 抓帧路由 / 崩溃守卫 / 本地化键）
+├── 3FCompare.SmokeTests/       # E3 冒烟（控制台，**始终走演示引擎**，合成画面全流程验证）
 third_party/
-└── fff_project/                # FFF_Project submodule（内核，MIT）
+└── fff_project/                # 3FP 内核独立 git 仓库（MIT，**非 submodule**，被 .gitignore 忽略）
     └── FFF.Native → x64/Release/FFF.Native.dll   # 已构建（Release x64）
     └── runtime/                 # Shared FFmpeg DLL 组（BtbN，已准备）
     └── third_party/vcpkg_installed/  # libass（vcpkg，已准备）
 ```
+
+> 测试数量**不在此处写死**（会随每次提交漂移，写死必然过期）；以 `dotnet test` 的实际输出为准。
+> 另：`3fp/` 是「图片模式」独立工作区（上游 3FP 的 PR 工作树），**不由 3FC 的 csproj 引用**，
+> 与 `third_party/fff_project/` 互不干扰，详见 `3fp/README.md`。
 
 **里程碑状态 / Milestone**: ✅ 真实 3FP 内核全链路已验证（FFmpeg 解码 → D3D 渲染 → App 显示） / Real 3FP kernel pipeline verified (FFmpeg decode → D3D render → App display).
 ✅ **NativeAOT 已启用 / Enabled**: `dotnet publish -c Release -r win-x64` → 原生单文件 `3FCompare.exe`
@@ -99,7 +114,7 @@ third_party/
 - **会话保存/加载**（`.3fcs` JSON：文件列表/偏移/布局/位置/循环区间） / **Session save/load** (`.3fcs` JSON: file list, offsets, layout, position, loop range)
 - **快捷键** / **Keyboard shortcuts**: `空格` 播放/暂停 · `A`/`D` 逐帧 · `←`/`→` 逐秒 · `↑`/`↓` ±10 秒 · `G`/`V`/`S` 视图模式三态 · `C` 对比布局循环 · `F11` 全屏 · `R` 重置视图 · `O` 打开 · `P` 探针 · `Ctrl+H` 侧栏三态 · `Esc` 退出全屏 / Space play/pause, A/D frame step, ←/→ second step, ↑/↓ 10s step, G/V/S view modes, C cycle compare layouts, F11 fullscreen, R reset view, O open, P probe, Ctrl+H sidebar tri-state, Esc exit fullscreen（六项传输键全部可在设置里改 / all six transport keys rebindable in Settings）
 - **对比工具** / **Comparison tools**: 像素探针 pixel probe (F19)、放大镜 magnifier (F17)、书签 bookmarks (F22)、截图导出 screenshot export PNG (F21)、差异叠加 diff overlay heatmap (F20)、媒体信息 media info (F3)、音频面板 audio panel、时间轴 A/B 打点 timeline A/B markers (A/B keys)
-- **同步视图变换**：鼠标滚轮**缩放**（1~32×）+ 拖拽**平移**（多路同步），R 键重置（0.1.1 新增） / **Sync view transform**: mouse wheel **zoom** (1–32×) + drag **pan** (multi-way sync), R reset (0.1.1)
+- **同步视图变换**：鼠标滚轮**缩放**（1~32×，以光标为锚点：光标下那个视频像素钉在光标下）+ 拖拽**平移**（画面 1:1 跟手，与倍率无关；多路同步），R 键重置。注意 ×1 = "恰好铺满窗口"的适配框，**不等于屏幕:视频 1:1**，真比值看状态栏（0.1.1 新增；2026-09-29 修正跟手增益与光标锚点） / **Sync view transform**: mouse wheel **zoom** (1–32×, cursor-anchored — the video pixel under the pointer stays under it) + drag **pan** (picture tracks the pointer 1:1 at any zoom; multi-way sync), R reset. Note ×1 is the fit box ("fills the window"), not 1:1 screen:video — the real ratio is in the status bar (added 0.1.1; tracking gain and cursor anchor corrected 2026-09-29)
 - **网格布局预设菜单**：视图 → 网格布局一键切换 2×1 / 2×2 / 3×3 预设或自动布局（0.1.2 新增） / **Grid layout presets**: View → Grid Layout 2×1/2×2/3×3 or auto (0.1.2)
 - **可停靠工具侧栏**：右侧 Dock 标签页（探针 / 书签 / 偏移 / 媒体 / 音频）+ Pin 置顶固定（0.1.2 新增） / **Dockable tool sidebar**: right dock tabs (probe/bookmarks/offset/media/audio) + Pin (0.1.2)
 - **时间轴拖动缩略图预览**：拖动进度条时悬浮显示当前帧缩略图（节流 >10ms），松手快速定位关键帧（0.1.2 新增） / **Timeline scrub preview**: thumbnail popup on drag, throttle >10ms (0.1.2)
@@ -116,7 +131,11 @@ third_party/
 - **像素回读坐标域修正**：内核 `ReadVideoPixel` 的坐标域是后台缓冲而非片源分辨率，展示仍用片源坐标、仅读取走换算（0.2.5） / **Pixel readback coordinate-domain fix**: kernel reads in backbuffer space; source coords kept for display, converted only for reads (0.2.5)
 - **滚轮缩放最终值不再被节流吞掉**：16ms 节流原为直接丢弃，现改为挂一次性 UI 线程补发（0.2.5） / **Wheel zoom final value no longer swallowed by throttle**: throttled updates are now re-flushed once on the UI thread (0.2.5)
 - **配置原子写 + 会话/FFmpeg 路径校验**：写失败不再损坏配置；拒绝相对路径与 UNC（后者会外泄 NTLM 凭据）（0.2.5） / **Atomic config writes + path validation**: no more corrupted settings; rejects relative and UNC paths (the latter leaks NTLM credentials) (0.2.5)
-- **内核基线 SHA 绑定**：`构建全部.ps1` 钉死内核 SHA，DLL 与 HEAD 不一致即强制重建（0.2.0 新增） / **Kernel baseline SHA pinning**: build script pins the kernel SHA and forces rebuild on mismatch (0.2.0)
+- **内核基线 SHA 绑定**：`构建全部.ps1` 钉死内核 SHA，并把实况（HEAD / 是否 dirty / DLL 哈希）写进
+  `.3fc_kernel_build.json`；**脏树仍会照常构建**（不会拦你），由 `tools/发布门禁.ps1` 据此判红、阻止出包
+  （0.2.0 新增） / **Kernel baseline SHA pinning**: the build script pins the kernel SHA and records the actual
+  state (HEAD / dirty / DLL hash) into `.3fc_kernel_build.json`; a **dirty tree still builds** — it is the
+  release gate that turns it red and blocks packaging (0.2.0)
 
 ### 🧭 对比呈现的两族：传统模式 与 现代模式 / Two families of comparison: classic vs. seamless
 
@@ -235,11 +254,17 @@ _Key keys: `Space` play/pause · `A`/`D` frame step · `←`/`→` second step �
 ### 构建与运行 / Build & Run
 
 ```powershell
-# 一键构建内核 + 部署（需 VS 2022+ C++、Git；首次联网下载 FFmpeg/vcpkg） / One-click kernel build + deploy (requires VS 2022+ C++, Git; first-run downloads FFmpeg/vcpkg)
+# 0. 裸克隆后先恢复内核目录（整目录不入库，随仓带的是基线归档 bundle）
+#    / On a fresh clone, restore the kernel tree first (it is gitignored; the repo ships a baseline bundle)
+#    目标目录必须不存在；重复执行会报 "destination path already exists"。
+git clone .3fc_kernel_baseline.bundle third_party/fff_project
+
+# 1. 一键构建内核 + 部署（需 VS 2022+ C++、Git；首次联网下载 FFmpeg/vcpkg） / One-click kernel build + deploy (requires VS 2022+ C++, Git; first-run downloads FFmpeg/vcpkg)
 powershell -ExecutionPolicy Bypass -File tools/构建全部.ps1
 
 # 单元测试 / Unit tests
 dotnet test  tests/3FCompare.Core.Tests
+dotnet test  tests/3FCompare.Platform.Tests
 
 # 运行应用（有 FFF.Native 时真实模式，无则演示模式） / Run (real mode with FFF.Native, demo mode otherwise)
 dotnet run --project src/3FCompare
@@ -247,13 +272,18 @@ dotnet run --project src/3FCompare
 # 演示模式体验（任意文件，合成画面） / Demo mode: any file, synthetic frames
 dotnet run --project src/3FCompare -- --autodemo &lt;文件...&gt;
 
-# E3 冒烟（真实/演示自动切换） / E3 smoke test (auto real/demo mode)
+# E3 冒烟（**始终走演示引擎**，合成画面；检测到真实 DLL 也只是提示，不会切换）
+# / E3 smoke test (**always the demo engine**; a real DLL only prints a notice, it is never used)
 dotnet run --project tests/3FCompare.SmokeTests -- &lt;视频&gt; [更多视频...]
 ```
 
 ---
 
 ## 📝 更新日志（Changelog）
+
+> ⚠ **本节只保留到 v0.2.0-BETA，是历史留档，已停止更新。**
+> 完整、最新的变更记录一律看 [`CHANGELOG.md`](CHANGELOG.md)（当前最新 `v0.3.1-beta`）——
+> 曾经因为这里单独维护一份，结果长期停在 0.2.0 而与实际版本严重脱节。
 
 ### v0.2.0-BETA（2026-08-25）
 

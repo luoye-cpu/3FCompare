@@ -25,11 +25,19 @@ public class AppSettingsNormalizeTests
             PreferredAdapterIndex = 9999,
             SidebarWidth = -5,
             WindowState = 3,            // FullScreen：恢复它会让用户莫名全屏
+            // 内核 FFF3FP_Create 对 sdrScRgbMode &gt; 1 返回 InvalidArgument
+            // = 全部会话创建失败，所以越界值必须在托管侧就被钳住。
+            SdrScRgbMode = 99,
         };
 
         s.Normalize();
 
         Assert.Equal(ColorModeSetting.Auto, s.ColorMode);
+        Assert.Equal(1, s.SdrScRgbMode);
+        // 负值同样要收敛到 0：Math.Clamp 的下界行为也钉死，防将来改成自定义收敛时回归。
+        var negative = new AppSettings { SdrScRgbMode = -5 };
+        negative.Normalize();
+        Assert.Equal(0, negative.SdrScRgbMode);
         Assert.Equal(999, s.FrameStep);
         Assert.Equal(3, s.DefaultGridCols);
         Assert.Equal(1, s.DefaultGridRows);

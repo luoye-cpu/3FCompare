@@ -4,7 +4,7 @@ using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
 using System.Drawing.Imaging;
-using _3FCompare.App;
+using _3FCompare.Localization;
 using _3FCompare.Core.Backend;
 using _3FCompare.Core.Imaging;
 using _3FCompare.Diagnostics;

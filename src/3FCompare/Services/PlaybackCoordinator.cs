@@ -673,6 +673,8 @@ public sealed class PlaybackCoordinator
                     HardwareDecode = _settings.HardwareDecode,
                     PreferredAdapterIndex = ResolveAdapterIndex(),
                     ColorMode = resolvedColorMode,
+                    // SDR 源是否经 scRGB 链呈现（0=从不 / 1=自动）。会话级：改动后新会话生效。
+                    SdrScRgbMode = _settings.SdrScRgbMode,
                     TearingPresent = _settings.VrrTearingPresent,
                 });
                 surface.AttachSession(session);
@@ -887,6 +889,15 @@ public sealed class PlaybackCoordinator
                     surface.ErrorText = slot.Error;
                 }
                 break;
+            case EngineEventType.StateChanged:
+                // #42 的取证：内核 `SetState(state, operation)` 的 JSON 里带着**是谁把状态改掉的**
+                // （pause / seek / step-frame / step-keyframe / end / play / open），而本文件此前
+                // **根本没有接这个事件** ⇒ "哪一路被按停"只能靠托管层的 `Session.Pause()` 留痕去找。
+                // 但内核自己也会把 Playing 变成 Paused（`DoSeek` 在 Ended 时、帧步进结束时），
+                // 那些路径上没有任何托管调用点，所以 FC_TRACE_PAUSE 整轮看不到"谁按的停"（账本 §11.8）。
+                // 这里**只做留痕，不参与判决**：同步逻辑仍只读快照的 State，行为一字未改。
+                RecordStateTransition(slot, evt.DetailJson);
+                break;
             case EngineEventType.PlaybackEnded:
                 StateChanged?.Invoke(this, EventArgs.Empty);
                 break;
@@ -914,6 +925,45 @@ public sealed class PlaybackCoordinator
                 StateChanged?.Invoke(this, EventArgs.Empty);
                 break;
         }
+    }
+
+    /// <summary>把内核报上来的状态迁移留痕。<b>只记录、不参与判决</b>（权威口径仍是轮询到的快照 State）。</summary>
+    /// <para>为什么要接上：#42 的形状是"某路在已 Active 的情况下停在 Paused、位置一毫秒都不动"，
+    /// 而托管层 `Session.Pause()` 的调用栈留痕抓不到**内核自己发起**的迁移
+    /// （`DoSeek` 在 Ended 时置 Paused、帧步进置 step-frame/step-keyframe、音频丢弃置 pause）。
+    /// 内核 `SetState(state, operation)` 本来就 Emit 了 `operation` 名字，
+    /// 而本文件的 switch 以前没有 `StateChanged` 分支 ⇒ 这份证据一直被丢掉。</para>
+    private void RecordStateTransition(SyncController.SyncSlot slot, string detailJson)
+    {
+        if (string.IsNullOrEmpty(detailJson)) return;
+        string? operation = null;
+        var stateName = "?";
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(detailJson);
+            if (doc.RootElement.TryGetProperty("state", out var s) &&
+                s.ValueKind == System.Text.Json.JsonValueKind.Number)
+                stateName = ((PlayerState)s.GetInt32()).ToString();
+            if (doc.RootElement.TryGetProperty("operation", out var o) &&
+                o.ValueKind == System.Text.Json.JsonValueKind.String)
+                operation = o.GetString();
+        }
+        catch (Exception ex)
+        {
+            // 解析不了也要留原文：这条是"谁把这一路按停"的唯一直接证据，不能静默丢
+            AppLog.Debug("Coordinator",
+                $"[{Path.GetFileName(slot.Path)}] 状态迁移(原文) {detailJson} 解析失败 {ex.GetType().Name}");
+            return;
+        }
+        // 路编号要带上：对比模式常把**同一份素材**开成 4 路，只打文件名就没法知道是哪一格停住的
+        //（#42 要的正是"哪一路、被哪个内核操作停在 Paused"）。Slots 每次返回引用相同的数组副本，
+        // 按引用找得到；找不到（该路已被摘掉）记 -1，不参与判决，只影响留痕。
+        var slots = _sync.Slots;
+        var lane = -1;
+        for (var i = 0; i < slots.Count; i++)
+            if (ReferenceEquals(slots[i], slot)) { lane = i; break; }
+        AppLog.Debug("Coordinator",
+            $"[路{lane}] {Path.GetFileName(slot.Path)} 状态→{stateName}（内核操作={operation ?? "?"}）");
     }
 
     public static bool IsReadyState(PlayerState state)

@@ -1,6 +1,6 @@
 using System;
 using System.IO;
-using _3FCompare.App;                 // LanguageManager 在这个命名空间下
+using _3FCompare.Localization;                 // LanguageManager 在这个命名空间下
 using _3FCompare.Core.Settings;
 using _3FCompare.Services;
 using Xunit;

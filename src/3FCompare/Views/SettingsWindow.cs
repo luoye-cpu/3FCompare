@@ -1,4 +1,7 @@
 using System;
+
+using _3FCompare.Themes;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Avalonia.Controls;
@@ -6,7 +9,7 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
-using _3FCompare.App;
+using _3FCompare.Localization;
 using global::Avalonia.Platform.Storage;
 using _3FCompare.Core.Backend;
 using _3FCompare.Core.Display;
@@ -33,6 +36,9 @@ public sealed class SettingsWindow : Window
     private readonly CheckBox _scrubPreview = new() { IsChecked = true };
     private readonly CheckBox _minimap = new() { IsChecked = true };
     private readonly ComboBox _colorMode = new();
+    /// <summary>SDR 源是否经 16bit scRGB 链呈现（0=从不 / 1=自动）。会话级设置：
+    /// 改动后只对<strong>新开的会话</strong>生效，不热切换已开会话（与 VRR 呈现同一约定）。</summary>
+    private readonly ComboBox _sdrScRgb = new();
     private readonly NumericUpDown _cols = new() { Minimum = 1, Maximum = 3, Increment = 1 };
     private readonly NumericUpDown _rows = new() { Minimum = 1, Maximum = 3, Increment = 1 };
     private readonly TextBox _ffmpegDir = new();
@@ -89,6 +95,9 @@ public sealed class SettingsWindow : Window
             PreferredAdapterIndex = current.PreferredAdapterIndex,
             FfmpegDirectory = current.FfmpegDirectory,
             ColorMode = current.ColorMode,
+            // ⚠ 两处深拷贝都要带上：漏了 _orig 这一处，用户从 0 改到 1 时
+            // _orig 仍是默认值 1 ⇒ changed=false ⇒ 表现为"设置存不住"。
+            SdrScRgbMode = current.SdrScRgbMode,
             FrameStep = current.FrameStep,
             SecondsStep = current.SecondsStep,
             StartFullscreen = current.StartFullscreen,
@@ -161,6 +170,12 @@ public sealed class SettingsWindow : Window
         _colorMode.Items.Add(LanguageManager.T("Color_HDRAuto"));
         _colorMode.SelectedIndex = current.ColorMode == ColorModeSetting.Auto ? 0
             : current.ColorMode == ColorModeSetting.MapToHdr ? 2 : 1;
+        // SDR scRGB 模式：两项与 AppSettings.SdrScRgbMode 的取值一一对应（0=从不 / 1=自动），
+        // 故 SelectedIndex 可直接当值用（读取处再钳一次，避免脏初值被静默当成某一档）。
+        _sdrScRgb.Items.Add(LanguageManager.T("SdrScRgb_Never"));
+        _sdrScRgb.Items.Add(LanguageManager.T("SdrScRgb_Auto"));
+        _sdrScRgb.SelectedIndex = Math.Clamp(current.SdrScRgbMode, 0, 1);
+        ToolTip.SetTip(_sdrScRgb, LanguageManager.T("SdrScRgb_Hint"));
         _cols.Value = current.DefaultGridCols;
         _rows.Value = current.DefaultGridRows;
         // 分辨率对齐模式：两项与 CompareAlign 的取值一一对应（0=相对 / 1=像素级）。
@@ -205,7 +220,9 @@ public sealed class SettingsWindow : Window
         stack.Children.Add(Section(LanguageManager.T("Scrub_SectionTitle"),
             _scrubPreview, _minimap, Hint(LanguageManager.T("Scrub_PreviewHint"))));
         stack.Children.Add(Section(LanguageManager.T("Status_Color"),
-            Row(_colorMode)));
+            Row(_colorMode),
+            Row(Label(LanguageManager.T("SdrScRgb_Mode")), _sdrScRgb),
+            Hint(LanguageManager.T("SdrScRgb_Hint"))));
         stack.Children.Add(Section(LanguageManager.T("Align_SectionTitle"),
             Row(Label(LanguageManager.T("Align_Mode")), _align),
             Hint(LanguageManager.T("Align_Hint"))));
@@ -562,6 +579,9 @@ public sealed class SettingsWindow : Window
         // 对齐模式：越界下标（列表项数变化 / 脏初值）会被静默当成某一档，故显式钳一次，
         // 与 AppSettings.Normalize 的 [0,1] 保持一致。
         var align = Math.Clamp(_align.SelectedIndex, 0, 1);
+        // SDR scRGB 模式：同 align，显式钳一次；&gt;1 会让内核对所有会话创建返回
+        // InvalidArgument（FFF3FP_Create 严格校验），故不能只靠列表项数兜底。
+        var sdrScRgb = Math.Clamp(_sdrScRgb.SelectedIndex, 0, 1);
         var ffmpeg = string.IsNullOrWhiteSpace(_ffmpegDir.Text) ? null : _ffmpegDir.Text.Trim();
 
         // 目录非空但校验失败 ⇒ 阻止保存。旧实现允许带着无效目录"确定"并弹重启询问，
@@ -593,6 +613,7 @@ public sealed class SettingsWindow : Window
             // ⚠ 新设置项必须加进这条链：漏了它 Changed 恒为 false ⇒ 改了设置"确定"后
             // MainWindow 直接 return（Result 不落地），表现为"设置存不住"且无任何报错。
             || align != _orig.CompareAlign
+            || sdrScRgb != _orig.SdrScRgbMode
             // 快捷键：键位表是引用类型，必须逐槽比而不是比引用（Same 见 TransportKeys）
             || !TransportKeys.Same(_orig.KeyBindings, bindings)
             || ffmpeg != _orig.FfmpegDirectory;
@@ -607,6 +628,7 @@ public sealed class SettingsWindow : Window
                 PreferredAdapterIndex = adapter,
                 FfmpegDirectory = ffmpeg,
                 ColorMode = color,
+                SdrScRgbMode = sdrScRgb,
                 FrameStep = frame,
                 SecondsStep = sec,
                 StartFullscreen = startFs,

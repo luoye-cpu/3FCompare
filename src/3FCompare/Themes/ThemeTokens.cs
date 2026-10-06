@@ -1,6 +1,6 @@
 using Avalonia.Styling;
 
-namespace _3FCompare;
+namespace _3FCompare.Themes;
 
 /// <summary>主题偏好（设置窗口「外观」节）。</summary>
 public enum ThemePreference

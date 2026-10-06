@@ -1,0 +1,47 @@
+Add MKS subtitle container support
+
+An external .mks is a subtitle-only Matroska container. The host had no
+way to enumerate its tracks (opening rejects files without playable
+video or audio streams), and libass never saw the fonts attached inside
+the container, so a fansub ASS rendered with fallback fonts - the same
+defect Jellyfin #15222 reports. Both halves are needed: probing alone
+shows grey fallback text, fonts alone give the host nothing to open.
+
+Native (additive only; PlayerApiVersion stays 15):
+
+- FFF3FP_ProbeSubtitleStreams probes the subtitle tracks of a container
+  by path without opening a playback session. The JSON reuses the
+  stream shape of FFF3FP_GetMediaInfo (clients deserialize both with
+  the same type) and adds a top-level startTimeSeconds, because a
+  standalone container has no reference stream to normalize a nonzero
+  start time against (real-world samples carry offsets of minutes). A
+  file without subtitle tracks is Success with an empty array, not an
+  error; an unreadable file is FfmpegFailure.
+- Fonts attached to the container are registered with libass before the
+  track is parsed (a font/opentype/sfnt mimetype, else a .ttf/.otf/.ttc
+  name). This also benefits embedded ASS: the renderer previously only
+  read fonts from the font directories the host passes in, so attached
+  fonts were ignored everywhere.
+
+Player:
+
+- .mks joins the external subtitle whitelist. Loading a container
+  probes its tracks, picks one (explicit index, then default/forced,
+  then the first) and dispatches by codec through the same generators
+  the embedded-subtitle path uses: bitmap tracks (PGS/DVB/XSUB) go to
+  the SUP generator, text tracks to the ASS generator; private font
+  directories are still resolved against the video, while fonts
+  attached to the container are handled by the kernel.
+- The subtitle menu lists every track of a container with codec,
+  language and title from the probe, and switching tracks reloads
+  atomically.
+- The new entry point is resolved at runtime (no static import): a
+  host paired with an older kernel reports the file as unsupported
+  instead of failing.
+
+Verification: kernel probes cover multi-track language labels, PGS
+bitmap output, and attached-font rendering (bit-identical to an
+external font directory; removing the registration restores the
+defective baseline). The host regression covers whitelist, track
+selection, probe JSON deserialization, kernel-capability fallback, and
+a real-sample end to end through the production render dispatch.

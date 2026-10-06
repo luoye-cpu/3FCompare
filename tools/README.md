@@ -6,10 +6,22 @@
 
 | 脚本 | 用途 |
 | --- | --- |
-| `构建全部.ps1` | 构建 FFF.Native 内核并部署 DLL。**内核补丁的唯一入口**。参数：`-Configuration Release\|Debug`、`-SkipTests`、`-SkipPatches`、`-ForcePatches`、`-AllowKernelDrift`、`-CheckOnly`（只校验内核基线，不 checkout / 不构建 / 不写文件） |
+| `构建全部.ps1` | 构建 FFF.Native 内核并部署 DLL。**内核补丁的唯一入口**。参数只有两个：`-Configuration Release\|Debug`、`-SkipTests`。<br>⚠ 早期文档提过的 `-SkipPatches` / `-ForcePatches` / `-AllowKernelDrift` / `-CheckOnly` **均已不存在**（补丁重放规则已收敛；脏内核照常构建，拦截交给 `发布门禁.ps1`）。以脚本 `param` 块为准 |
 | `更新内核.ps1` | 内核升级**体检**：核对基线 SHA、查询上游差速与归档 tag 是否可复现、列出人工重移植流程。默认会 `git fetch`；`-CheckOnly` 只查不联网 |
 | `发布门禁.ps1` | 发布前门禁：编译零告警 → 单元测试全绿 → 打包 → 产物自检（见下） |
 | `patches/` | 3FCompare 自研扩展的**历史留档**。当前基线已内置这些扩展，构建时默认跳过；重放规则见该目录 README |
+
+### 构建期被调用的脚本（MSBuild 硬依赖，漏了会直接编译失败）
+
+这几个被 `src/3FCompare/3FCompare.csproj` 调用，**不是可选的辅助脚本**：
+
+| 脚本 | 调用点 | 缺失后果 |
+| --- | --- | --- |
+| `源码指纹.ps1` | `3FCompare.csproj:152`，由 `-Fingerprint` 触发 | 构建直接 `Error` 中止（脚本注释：宁可编不过，也不要悄悄跳过校验） |
+| `验证守卫.ps1` | 同上，供指纹逐项比对 | 指纹可生成但无法比对，校验形同虚设 |
+| `探测FFmpeg能力.ps1` | 构建期探测 FFmpeg DLL 能力 | 能力探测缺失 |
+
+新机器上看到“缺少 `tools\源码指纹.ps1`”的报错，就是这三个文件没带上（它们不在 `debug/`，**是入库的**）。
 
 ### 内核基线
 
@@ -44,10 +56,11 @@
    （admin=false, push=false），推不上去。上面"该分支只存在于本机"的说法已随
    bundle 入仓失效。
 
-**当前基线**：`3fcompare-kernel-2026.9.18.3` / `b765a1f8d76619da8583f7ac512621fbfb55dfa5`
-（上一基线 `3fcompare-kernel-2026.9.18.2` / `0d5856ed…` 为回滚点）。
+**当前基线**：`3fcompare-kernel-2026.9.30.1` / `394099019aaff37c4b6ce482c2e835527e5b124a`
+（上一基线 `3fcompare-kernel-2026.9.27.1` / `b66136550a99f06c42c47e272c9eb21d01e09887` 为回滚点）。
 ⚠ 本行只是便于阅读的副本：**以 `构建全部.ps1` 的 `$KernelBaselineTag` / `$KernelBaselineSha` 为准**
 （该值随每次内核升级漂移，本行不保证同步）。
+本行 2026-09-30 更新：此前长期停在 `.18.3 / b765a1f`，落后两个基线（`.27.1 → .30.1`）。
 
 升级内核是**人工重移植**流程，见 `third_party/fff_project/PATCHES.md`。
 
@@ -62,7 +75,7 @@
 
 | 脚本 | 用途 | 可否接门禁 |
 | --- | --- | --- |
-| `check_kernel_exports.py` | 解析 FFF.Native.dll 的 **PE 导出表**，核对 25 个必需导出 + 导出数下界（默认 82）+ API 版本（默认 15）。已接 `发布门禁.ps1` | ✅ 门禁判据（有明确 exit 0/1 语义） |
+| `check_kernel_exports.py` | 解析 FFF.Native.dll 的 **PE 导出表**，核对 **26 个**必需导出 + 导出数下界（默认 82）+ API 版本（默认 15）。已接 `发布门禁.ps1`。<br>⚠ 它只做**下界**检查（`>=82` / `API>=15`）；当前内核是 87 / API 16，**精确配对**由 `check_kernel_pairing.py` 按"恰好相等"拦 | ✅ 门禁判据（有明确 exit 0/1 语义） |
 | `analyze_crashdump.py` | 直接解析 minidump（无需 WinDbg）：异常码 / 寄存器 / 近似调用栈 / 全线程 RIP 分布 / 模块清单 | ❌ 人读型取证脚本 |
 | `screenshot.py` | ctypes 调 GDI 抓屏并手工编码 PNG（PowerShell `Add-Type` 被策略拦截时的替代路径） | ❌ 人读型取证脚本 |
 | `probe_tooltip.py` | 悬停探针：临时把遮挡窗口压到 Z 序底部后抓 ToolTip Popup 取证 | ❌ 人读型取证脚本（且会**临时改动本机窗口 Z 序**） |
@@ -77,7 +90,10 @@
 > **退出码即结论**的脚本。
 
 > 说明：本仓库不包含第三方二进制；FFmpeg DLL 取自 `third_party/fff_project/runtime/`（BtbN 构建），libass 由 vcpkg 准备。
-> 单元测试与 E3 冒烟分别通过 `dotnet test tests/3FCompare.Core.Tests` 与 `dotnet run --project tests/3FCompare.SmokeTests` 执行。
+> 单元测试有两套，都要跑：`dotnet test tests/3FCompare.Core.Tests` 与
+> `dotnet test tests/3FCompare.Platform.Tests`（Platform 覆盖视图变换 / 放大镜 / 播放编排 / 抓帧路由等，
+> **只跑 Core 会漏掉一整套**）。E3 冒烟：`dotnet run --project tests/3FCompare.SmokeTests`
+> （**始终走演示引擎**，见 `tests/README.md`）。
 
 > ~~⚠️ 本机 `dotnet restore` 全域失败（`Value cannot be null. (Parameter 'path1')`）。
 > 根因是沙箱里 `APPDATA` 为空。所有 build/test 必须前置环境变量：

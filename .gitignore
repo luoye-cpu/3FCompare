@@ -23,11 +23,18 @@ Desktop.ini
 *~
 
 # Native (FFF.Native fork 构建产物)
+# *.obj：2026-09-30 补。此前漏了它 ⇒ 根目录 verify_image_mode.obj 与
+# 3fp/verify_image_mode.obj（手工 cl 编译 verify_image_mode.cpp 的产物）一直冒出来。
 x64/
 *.lib
 *.exp
 *.pdb
 *.ilk
+*.obj
+
+# 打包/交付归档（可由 patches + 脚本重新生成，不入库；仓库当前无已跟踪的 zip/tar）
+*.zip
+*.tar
 
 # FFmpeg / libass 第三方二进制（不纳入仓库）
 third_party/ffmpeg/
@@ -68,8 +75,33 @@ third_party/fff_project/
 #   *.ps1   测试操作脚本（入库跟踪）
 testmedia/media/
 testmedia/tmp/
+
+# 验收 harness：驱动脚本入库，跑出来的日志/夹具/临时产物不入库。
+# 2026-09-30 实测：tests/output 下 335 个未跟踪文件 ≈ 21.8 MB，而本文件此前只按
+# **扩展名**黑名单拦截（mp4/log/dll/…）⇒ 真正的大头反而漏网：
+#   prcheck/master-tree/ 272 个 —— 上游第三方源码树快照（.vb/.h/.cpp/.resx/.slnx），
+#     与 third_party/fff_project/ 同源，而后者被整目录忽略 ⇒ 两处规则自相矛盾。
+#   scrgb-delivery/ 12 个 —— 内核侧交付快照（含 1.1 MB ShaderBytecode.h）。
+#   crashcap/ 14 个 —— 崩溃取证抓取产物。
+# 改为整目录忽略 + 台账白名单：已跟踪的三个台账是文本，用 ! 显式放行
+# （已跟踪文件本身不会被 ignore 撤回，白名单是为将来误删后能重新 add）。
+tests/output/**
+!tests/output/deleted-artifacts.txt
+!tests/output/gate-20260926.txt
+!tests/output/wip-rescue-20260926.patch
 testmedia/tools/*/bin/
 testmedia/tools/*/obj/
+
+# 根目录编译残留（手工 cl 编译的产物，勿入库；源文件 3fp/tools/verify_image_mode.cpp 入库）
+/verify_image_mode.obj
+
+# ── 整仓副本 / 备份快照（本机产物，勿入库；2026-09-30 追踪审查补）──
+# 3fc-followhand/ 是**嵌套 git 仓库**（自带 .git，整个项目树的一份副本，567 个文件）。
+#   git status 只显示为一行 `?? 3fc-followhand/`，但 `git add -A` 会顺着把它整个吞进主仓。
+# 3fc-backups/ 是 <日期>/ 形式的一次性备份快照（main-untracked-and-binary.tar 5.3 MB
+#   + 两份 1.3 MB patch）。两者此前都没有任何规则覆盖。
+/3fc-followhand/
+/3fc-backups/
 
 # 发布产物（NativeAOT + 第三方 DLL，190+ MB）
 publish/
@@ -80,6 +112,12 @@ publish/
 # 一次性 UI 自动化/调试脚本：硬编码屏幕坐标与进程号，不可复用（已移入 tools/debug/）
 tools/debug/
 tools/_*.py
+# 2026-09-30 补：此前只有 .py / .txt，漏了 .ps1 ⇒ tools/_probe_pkg_selftest_stability.ps1
+# 等一次性探针会以未跟踪状态长期躺在 tools 根。
+# ⚠ 历史遗留：`tools/_probe_build_manifest.ps1` 与 `tools/_probe_gate_step1.ps1` 在补这条
+# 规则**之前**就已入库；已跟踪文件不会被 ignore 撤回，所以它们仍处于跟踪状态。
+# 若确认不再需要，请用 `git rm` 显式移除，不要指望这条规则生效。
+tools/_*.ps1
 tools/_*.txt
 
 # 参考用的第三方 UI 库（GPL/付费双授权，仅作视觉参考，不参与构建）

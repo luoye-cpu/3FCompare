@@ -1,4 +1,7 @@
 using System;
+
+using _3FCompare.Themes;
+using System;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using Avalonia;
@@ -6,7 +9,7 @@ using Avalonia.Controls;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
-using _3FCompare.App;
+using _3FCompare.Localization;
 using _3FCompare.App.Capture;
 
 namespace _3FCompare.Controls;

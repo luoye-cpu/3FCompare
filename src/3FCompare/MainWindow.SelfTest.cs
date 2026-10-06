@@ -1,4 +1,4 @@
-﻿using System;
+﻿﻿using System;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -11,7 +11,7 @@ using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using Avalonia.Media;
-using _3FCompare.App;
+using _3FCompare.Localization;
 using _3FCompare.Controls;
 using _3FCompare.Panels;
 using _3FCompare.Services;
@@ -717,11 +717,13 @@ public partial class MainWindow : Window
         {
             var syncsBeforeResize = win.GeometrySyncs;
             Width = widthBefore + 120;
-            await SettleFloatingTransportAsync(win, "resize 后", syncsBeforeResize);
+            await SettleFloatingTransportAsync(win, "resize 后", syncsBeforeResize,
+                () => FloatingTransportGeometryMatches(win, out _));
             AssertFloatingTransportGeometry(win, "resize 后");
             var syncsBeforeRestore = win.GeometrySyncs;
             Width = widthBefore;
-            await SettleFloatingTransportAsync(win, "resize 还原后", syncsBeforeRestore);
+            await SettleFloatingTransportAsync(win, "resize 还原后", syncsBeforeRestore,
+                () => FloatingTransportGeometryMatches(win, out _));
             AssertFloatingTransportGeometry(win, "resize 还原后");
         }
         else
@@ -760,9 +762,11 @@ public partial class MainWindow : Window
     /// 而断言比的是栏体底边（<c>Position.Y</c> + 高度）。只盯宽度的话，夹取后的错值会被判成
     /// "已收敛"直接放行 —— 浮条停在 1519 而非 1629 那次错值就是这么躲过门禁的。</para>
     private async System.Threading.Tasks.Task SettleFloatingTransportAsync(
-        Controls.FloatingTransportWindow win, string label, int sinceSyncs = 0, int timeoutMs = 3000)
+        Controls.FloatingTransportWindow win, string label, int sinceSyncs = 0,
+        Func<bool>? converged = null, int timeoutMs = 3000)
     {
-        var deadline = System.DateTime.UtcNow + System.TimeSpan.FromMilliseconds(timeoutMs);
+        var startedUtc = System.DateTime.UtcNow;
+        var deadline = startedUtc + System.TimeSpan.FromMilliseconds(timeoutMs);
         // 第一段：等"重算确实发生过"。只要求数值连续不变会在**还没轮到重算**的那段时间上过早收敛——
         // 实测 resize 还原后那轮耗时 558ms，轮询采到的 3 次稳定值全是上一次的 1448 ⇒ 假红。
         // 超时不抛，交给后面的原判据，真不重算照样红（不削弱断言）。
@@ -772,14 +776,24 @@ public partial class MainWindow : Window
             await System.Threading.Tasks.Task.Delay(15);
         }
         var synced = win.GeometrySyncs > sinceSyncs;
-        // 第二段：再等几何稳定（宽度与 Y 连续 3 次采样都不变）。
+        var syncsSeen = win.GeometrySyncs - sinceSyncs;
+
+        // 第二段：给了判据就**重试判据本身**（首选路径）；没给才退回"宽高稳定 3 次采样"。
+        // 为什么优先重试判据：一次"发生过重算"不代表那次重算读的是新尺寸 —— 2026-09-27 包内自测
+        // 红在"还原尺寸后浮条仍是 1448"，就是重算先于主窗尺寸落地发生了一次，代数计数满足了、值却是旧的。
         var lastW = win.Bounds.Width;
         var lastY = (double)win.Position.Y;
         var stable = 0;
-        while (System.DateTime.UtcNow < deadline && stable < 3)
+        var ok = false;
+        while (System.DateTime.UtcNow < deadline)
         {
             Avalonia.Threading.Dispatcher.UIThread.RunJobs();
             await System.Threading.Tasks.Task.Delay(30);
+            if (converged is not null)
+            {
+                if (converged()) { ok = true; break; }
+                continue;
+            }
             var nowW = win.Bounds.Width;
             var nowY = (double)win.Position.Y;
             stable = System.Math.Abs(nowW - lastW) < 0.01 && System.Math.Abs(nowY - lastY) < 0.5
@@ -787,19 +801,34 @@ public partial class MainWindow : Window
                 : 0;
             lastW = nowW;
             lastY = nowY;
+            if (stable >= 3) { ok = true; break; }
         }
-        if (!synced)
+        var elapsedMs = (int)(System.DateTime.UtcNow - startedUtc).TotalMilliseconds;
+        // 只记录、不改判决：这几行是给"又红了"准备的现场，不是新的通过条件。
+        if (converged is null && !synced)
             Log($"{label}：{timeoutMs}ms 内未观测到几何重算（GeometrySyncs 仍为 {win.GeometrySyncs}），仍按原判据断言");
-        else if (stable < 3)
-            Log($"{label}：浮条几何在 {timeoutMs}ms 内未收敛（最后观测 宽={lastW:0.#} Y={lastY:0}），仍按原判据断言");
+        else if (!ok)
+            Log($"{label}：{timeoutMs}ms 内未收敛（耗时 {elapsedMs}ms、观测到 {syncsSeen} 次重算、" +
+                $"最后 宽={win.Bounds.Width:0.#} Y={win.Position.Y}），仍按原判据断言");
+        else
+            Log($"{label}：收敛于 {elapsedMs}ms（重算 {syncsSeen} 次）");
     }
 
     /// <summary>浮条几何闸门：窗口宽 = 视频区宽 - 2×边距 + 2×留白，栏体底边 = 视频区底边 - 边距。
     /// 全部按物理像素比对，容差 2px。</summary>
-    private void AssertFloatingTransportGeometry(Controls.FloatingTransportWindow win, string label)
+    /// <summary>浮条几何是否与主窗<b>当前</b>布局一致：只回答是/否并给出偏差，不抛异常。
+    ///
+    /// <para><b>为什么把判据拆成"判定 + 断言"两层</b>：resize 之后需要<b>有界重试</b>，而重试的必须
+    /// 是这条判据本身。之前重试的是别的东西 —— 先是"数值连续 3 次不变"（会在还没轮到重算时收敛成
+    /// 假红），再改成"等 <c>GeometrySyncs</c> 前进"（2026-09-27 实测仍然红：还原尺寸后确实发生了一次
+    /// 重算，但那次重算读到的还是上一轮的 1448，因为主窗自己的尺寸当时还没落地）。
+    /// 在判据之外猜"什么时候算稳定"，猜错要么把真问题等成绿灯、要么把正常延迟等成假红；
+    /// 直接重试判据本身，只有"超时仍不成立"这一种红，而那正是真故障。</para></summary>
+    private bool FloatingTransportGeometryMatches(Controls.FloatingTransportWindow win, out string mismatch)
     {
-        var h = CenterPanel.Bounds.Height;
-        if (h <= 0) throw new InvalidOperationException($"{label}：视频区高度为 0，无法校验浮条位置");
+        mismatch = "";
+        double h = CenterPanel.Bounds.Height;
+        if (h <= 0) { mismatch = "视频区高度为 0，无法校验浮条位置"; return false; }
 
         PixelPoint tl, br;
         try
@@ -809,7 +838,10 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            throw new InvalidOperationException($"{label}：视频区 PointToScreen 失败 {ex.Message}");
+            // 布局过渡态里 PointToScreen 可能短暂失败：判"尚未成立"，交给重试与超时，
+            // 不在这里下结论（真一直失败到最后，超时后的断言会带着这条原因判红）。
+            mismatch = $"视频区 PointToScreen 失败 {ex.Message}";
+            return false;
         }
 
         var scaling = RenderScaling;
@@ -822,12 +854,28 @@ public partial class MainWindow : Window
         var expectBottom = br.Y - margin * scaling;
 
         if (Math.Abs(win.Bounds.Width - expectWidthDip) > 2)
-            throw new InvalidOperationException(
-                $"{label}：浮条宽度不符 实际={win.Bounds.Width:0.#} 期望={expectWidthDip:0.#} DIP");
+        {
+            mismatch = $"浮条宽度不符 实际={win.Bounds.Width:0.#} 期望={expectWidthDip:0.#} DIP";
+            return false;
+        }
         if (Math.Abs(barBottom - expectBottom) > 2)
-            throw new InvalidOperationException(
-                $"{label}：浮条底边不符 实际={barBottom:0.#} 期望={expectBottom:0.#}（视频区底边 {br.Y}）");
+        {
+            mismatch = $"浮条底边不符 实际={barBottom:0.#} 期望={expectBottom:0.#}（视频区底边 {br.Y}）";
+            return false;
+        }
+        return true;
+    }
 
+    private void AssertFloatingTransportGeometry(Controls.FloatingTransportWindow win, string label)
+    {
+        if (!FloatingTransportGeometryMatches(win, out var mismatch))
+            throw new InvalidOperationException($"{label}：{mismatch}");
+
+        var h = CenterPanel.Bounds.Height;
+        var scaling = RenderScaling > 0 ? RenderScaling : 1.0;
+        const double pad = Controls.FloatingTransportWindow.Pad;
+        var br = CenterPanel.PointToScreen(new Point(CenterPanel.Bounds.Width, h));
+        var barBottom = win.Position.Y + (win.Bounds.Height - pad) * scaling;
         Log($"{label}：浮条 {win.Bounds.Width:0.#}×{win.Bounds.Height:0.#} DIP @ ({win.Position.X},{win.Position.Y}) " +
             $"底边={barBottom:0.#} 视频区底边={br.Y}");
     }
@@ -1460,6 +1508,42 @@ public partial class MainWindow : Window
                     var compared = 0;
                     var worst = 0.0;
                     var worstAt = string.Empty;
+
+                    // 失配时**先取证再抛**：把放大镜那一格周围的缓冲像素摊开，找探针的值落在哪一格。
+                    // 落在别的格 ⇒ 两条路径只是"读了不同的格"（探针绕源域截断、放大镜直接取光标格，
+                    //   比值 >1 时相位差可到 ~1 格，硬边界素材上就是两种颜色）；
+                    // 就在中心格 ⇒ 放大镜读错了面/拿了过期格；
+                    // 邻域里根本没有 ⇒ 两边看的不是同一代帧（这才是真正的取值链路缺陷）。
+                    // 不做这一步就只能靠推测归因 —— 上一轮我把这条红记成"未解释"，就是这个债。
+                    string DescribeSampleOffset(double probeR, double probeG, double probeB)
+                    {
+                        var (gridLeft, gridTop, cursorX, cursorY) = Magnifier.SampleWindowForSelfTest;
+                        const int R = 2;                       // 中心 ±2 格
+                        var span = 2 * R + 1;
+                        if (gridLeft < 0 || gridTop < 0)
+                            return $"｜取证不可得：放大镜没有可信采样窗口（grid=({gridLeft},{gridTop})）";
+                        var cellX = gridLeft + MagnifierOverlay.ZoomGrid / 2;
+                        var cellY = gridTop + MagnifierOverlay.ZoomGrid / 2;
+                        var buf = new float[span * span * 4];
+                        if (!session.TryReadPixelRegion(cellX - R, cellY - R, span, span, buf, out _))
+                            return $"｜取证不可得：({cellX - R},{cellY - R}) 起的 {span}×{span} 回读失败";
+                        var bestCol = -1; var bestRow = -1; var bestErr = double.MaxValue;
+                        for (var row = 0; row < span; row++)
+                            for (var col = 0; col < span; col++)
+                            {
+                                var i = (row * span + col) * 4;
+                                var e = Math.Max(Math.Abs(buf[i] - probeR),
+                                        Math.Max(Math.Abs(buf[i + 1] - probeG), Math.Abs(buf[i + 2] - probeB)));
+                                if (e >= bestErr) continue;
+                                bestErr = e; bestCol = col; bestRow = row;
+                            }
+                        var verdict = bestErr > 0.02 ? "邻域内没有探针这个值 ⇒ 两边不是同一代帧/同一个面（真缺陷）"
+                            : bestCol == R && bestRow == R ? "探针的值就在放大镜那一格里 ⇒ 放大镜读错面或拿了过期格（真缺陷）"
+                            : $"两路读了**不同的格**，格差 ({bestCol - R},{bestRow - R})";
+                        return $"｜放大镜读缓冲格 ({cellX},{cellY})（它当时的光标物理像素=({cursorX},{cursorY})）；" +
+                            $"探针的值落在这块 {span}×{span} 的相对格 ({bestCol - R},{bestRow - R})，残差 {bestErr:F4} ⇒ {verdict}";
+                    }
+
                     foreach (var cand in candidates)
                     {
                         var m = MapPointerToVideoPixel(surface, session, cand.Local);
@@ -1487,7 +1571,9 @@ public partial class MainWindow : Window
                             throw new InvalidOperationException(
                                 $"放大镜与探针在 {cand.Name} 不一致（差 {d:F4}）：" +
                                 $"放大镜=({mr:F3},{mg:F3},{mb:F3}) 探针=({ps.R:F3},{ps.G:F3},{ps.B:F3})" +
-                                $"（§2.2 回归：放大镜显示的不是光标下的内容）");
+                                DescribeSampleOffset(ps.R, ps.G, ps.B) +
+                                "（§2.2 那一族缺陷的形状是「中心格等值却报不一致」或「邻域里根本没有」；" +
+                                "取证说「格差 (dx,dy)」则属源域截断与缓冲格号的相位差，见 #13 的口径）");
                     }
 
                     if (compared == 0)
@@ -1772,7 +1858,393 @@ public partial class MainWindow : Window
                             "画盒原点被夹住（内核 VideoDestination 原点若无符号、平移段用 max(0,·)，" +
                             "左/上半段量程就会整段消失）。见 docs/48 §八");
                 }
+
+                // ── 跟手增益实测（2026-09-29 用户报"缩小了拖动变慢、放大了拖动变快、像素钉不住光标"）──
+                // 上面那条只证明**量程放开了**；这条量的是另一件事：走完整生产换算（ViewPan.Accumulate）
+                // 得到的 pan，落到内核以后，"画面在屏幕上走过的像素"是否 == "光标走过的像素"，
+                // 而且必须在**多个倍率**下都成立 —— 旧换算漏掉 (z−1) 归一化，恰好在 z=2 侥幸成立，
+                // 单点测量永远发现不了（z=2 是用户最常停的那一档）。
+                // 期望值不来自被测公式：拿内核自己上报的 DestX/DestY 当参照尺。
+                _step = "单路跟手";
+                if (haveFitBox)
+                {
+                    // 拖动量取拟合盒的 5%：小到在任何测试倍率下都不会顶到 ±1 端点
+                    // （z=1.15 时量程只有 0.075×拟合盒宽），大到让逐帧取整的 1px 误差不占比。
+                    const double dragFraction = 0.05;
+                    var dragX = (double)fit.DestWidth * dragFraction;
+                    var dragY = (double)fit.DestHeight * dragFraction;
+                    var worstErr = 0.0;
+                    var measured = 0;
+
+                    foreach (var z in new[] { 1.15f, 2f, 4f, 8f })
+                    {
+                        _sync.SetViewTransform(z, 0f, 0f);
+                        await WaitForPresentedAsync(1500);
+                        if (!panSession.ReadRenderTargetInfo(out var before)) continue;
+
+                        // 量程基准与生产路径同源：由内核上报的（变换后）Dest 反推拟合盒
+                        var (fitW, fitH) = _3FCompare.Platform.ViewPan.FitBoxFromDest(
+                            before.DestWidth, before.DestHeight, z);
+                        var (panX, panY) = _3FCompare.Platform.ViewPan.Accumulate(
+                            0f, 0f, dragX, dragY, fitW, fitH, z);
+
+                        _sync.SetViewTransform(z, panX, panY);
+                        await WaitForPresentedAsync(1500);
+                        if (!panSession.ReadRenderTargetInfo(out var after)) continue;
+                        measured++;
+
+                        // 画盒左沿右移 == 画面向右走 == 光标向右拖 ⇒ 同号
+                        var movedX = (double)(after.DestX - before.DestX);
+                        var movedY = (double)(after.DestY - before.DestY);
+                        var err = Math.Max(Math.Abs(movedX - dragX), Math.Abs(movedY - dragY));
+                        worstErr = Math.Max(worstErr, err);
+                        Log($"   z={z:0.##}：拖 ({dragX:0.0},{dragY:0.0})px ⇒ pan=({panX:0.###},{panY:0.###}) ⇒ " +
+                            $"内核原点 ({before.DestX},{before.DestY})→({after.DestX},{after.DestY}) " +
+                            $"= 画面走 ({movedX:0.0},{movedY:0.0})px");
+                    }
+
+                    _sync.SetViewTransform(1.0f, 0f, 0f);
+                    await WaitForPresentedAsync(1500);
+
+                    // fail-closed：一次都没读到就不判绿（守卫空转 == 没有这条门禁）
+                    if (measured == 0)
+                        RecordSelfTestSkip("单路跟手未验证：内核四个倍率下都没上报 RenderTargetInfo");
+                    // 容差 2px：原点逐帧 lround，两端各差 1px。
+                    // 旧律（分母无 (z−1)）在这一条下的误差量级：z=1.15 差 13 倍、z=8 差 7 倍 ⇒ 必红。
+                    else if (worstErr > 2.0)
+                        throw new InvalidOperationException(
+                            $"单路放大不跟手：跨 z=1.15/2/4/8（{measured} 个点）最大偏差 {worstErr:0.##}px（判据 ≤2px）。" +
+                            "pan 增益必须按 (z−1) 归一化并且分轴用被拖那一路的拟合盒，" +
+                            "否则小倍率拖得慢、大倍率冲过头（2026-09-29 用户报的那两条症状）");
+                }
+
+                // ── 光标锚点闭环（同上，2026-09-29 用户报"像素和光标固定不上"）──
+                // 上面那条量的是拖动，这条量的是滚轮改倍率时"光标下那一点会不会跑"。
+                // ⚠ 期望值只用**内核两次上报的 dest 盒**算（屏幕位置 = DestX + u·DestWidth，
+                // u 由第一次读数定义），不掺被测公式 —— 拿 AnchorPan 自己算期望就是构造恒等。
+                // 注：自测的滚轮注入步没有光标落在画面上（走的是"可见区中心"退化支），
+                // 所以锚点在这里必须单独成一步，不能拿那条冒充已验。
+                _step = "单路锚点";
+                if (haveFitBox)
+                {
+                    // "光标"是一个**绝对后台缓冲坐标**（未放大画面 3/4 处），不随读数漂；
+                    // 各倍率下的 u 由内核当次上报的盒子反推，因此不等于 0.75 的恒等假测量。
+                    var cursorX = (double)fit.DestX + 0.75 * fit.DestWidth;
+                    var cursorY = (double)fit.DestY + 0.75 * fit.DestHeight;
+                    var worstAnchor = 0.0;
+                    var anchorPoints = 0;
+                    var clamped = 0;
+
+                    // 跳变对只取"锚点通常可达"的那些：大幅缩小时量程塌缩，光标偏一边可能物理无解，
+                    // 那种跳变会顶到 ±1 端点 —— 端点跳过要计数打印，不能藏进"通过"里。
+                    foreach (var (z0, z1) in new[] { (1.0f, 2.0f), (2.0f, 4.0f), (4.0f, 8.0f),
+                                                     (8.0f, 4.0f), (4.0f, 2.0f) })
+                    {
+                        _sync.SetViewTransform(z0, 0f, 0f);
+                        await WaitForPresentedAsync(1500);
+                        if (!panSession.ReadRenderTargetInfo(out var src0)) continue;
+
+                        var u = (cursorX - src0.DestX) / (double)src0.DestWidth;
+                        var v = (cursorY - src0.DestY) / (double)src0.DestHeight;
+                        if (u is < 0.0 or > 1.0 || v is < 0.0 or > 1.0) continue; // 当次不在画面里
+
+                        var panX = _3FCompare.Platform.ViewPan.AnchorPan(0f, u, z0, z1);
+                        var panY = _3FCompare.Platform.ViewPan.AnchorPan(0f, v, z0, z1);
+                        if (Math.Abs(panX) > 0.999f || Math.Abs(panY) > 0.999f)
+                        {
+                            clamped++;
+                            Log($"   {z0:0.##}→{z1:0.##}：锚点需 pan=({panX:0.###},{panY:0.###}) 已顶到端点 ⇒ 跳过精确比对");
+                            continue;
+                        }
+
+                        _sync.SetViewTransform(z1, panX, panY);
+                        await WaitForPresentedAsync(1500);
+                        if (!panSession.ReadRenderTargetInfo(out var src1)) continue;
+                        anchorPoints++;
+
+                        // 同一个源点在缩放后的屏幕位置（只用内核上报的盒子算，不看被测公式）
+                        var afterX = src1.DestX + u * (double)src1.DestWidth;
+                        var afterY = src1.DestY + v * (double)src1.DestHeight;
+                        var err = Math.Max(Math.Abs(afterX - cursorX), Math.Abs(afterY - cursorY));
+                        worstAnchor = Math.Max(worstAnchor, err);
+                        Log($"   {z0:0.##}→{z1:0.##}：光标 ({cursorX:0.0},{cursorY:0.0}) u=({u:0.###},{v:0.###}) " +
+                            $"⇒ pan=({panX:0.###},{panY:0.###}) ⇒ 该点现在 ({afterX:0.0},{afterY:0.0}) 偏差 {err:0.##}px");
+                    }
+
+                    _sync.SetViewTransform(1.0f, 0f, 0f);
+                    await WaitForPresentedAsync(1500);
+
+                    // fail-closed：可达跳变一个都没测到就不判绿（端点跳过不等于通过）
+                    if (anchorPoints < 1)
+                        RecordSelfTestSkip($"单路锚点未验证：可达跳变 0 个（顶到端点跳过 {clamped} 个）");
+                    // 容差 2px：内核画盒原点逐帧 lround，两端各差 1px。
+                    else if (worstAnchor > 2.0)
+                        throw new InvalidOperationException(
+                            $"滚轮缩放不钉光标：{anchorPoints} 个可达跳变里最大偏差 {worstAnchor:0.##}px（判据 ≤2px，" +
+                            $"另有 {clamped} 个因量程塌缩跳过）⇒ 改倍率时没按光标下那点补偿 pan，" +
+                            "画面仍围绕拟合盒中心放缩（2026-09-29 用户报的'像素和光标固定不上'）");
+                    else
+                        Log($"   ✅ 单路锚点通过：{anchorPoints} 个跳变最大偏差 {worstAnchor:0.##}px（跳过 {clamped} 个塌缩）");
+                }
+
+                // ── 判据：zoom < 1 现在必须真的缩小（绝对比值域的下半段）──
+                // 这一条原来是"只观测不判红"的：2026-09-29 实机量到下发 0.6/0.05 时内核 Dest 恒等
+                // 拟合盒 ⇒ 记下"真 1:1 与『比适配更小』必须走内核入口，托管侧改不出来"。入口已落地
+                // （3fp/kernel 的视口变换段放开到 |z−1|>1e-4，量程取绝对值、原点区间由 min/max 生成），
+                // 所以这里从观测升成判据：盒子按 z 等比缩、且平移在黑边里真的走得动。
+                // ⚠ 拿 old 内核跑这条会红，那是正确的：那份内核确实没有这个能力。
+                _step = "缩放下限";
+                if (haveFitBox)
+                {
+                    const float below = 0.6f;
+                    _sync.SetViewTransform(1.0f, 0f, 0f);
+                    await WaitForPresentedAsync(1500);
+                    var okFit = panSession.ReadRenderTargetInfo(out var atFit);
+                    _sync.SetViewTransform(below, 0f, 0f);
+                    await WaitForPresentedAsync(1500);
+                    var okBelow = panSession.ReadRenderTargetInfo(out var atBelow);
+                    // 平移在黑边里走得动吗：pan=+1 应贴拟合盒左沿，pan=−1 应贴右沿。
+                    _sync.SetViewTransform(below, 1f, 0f);
+                    await WaitForPresentedAsync(1500);
+                    var okLeft = panSession.ReadRenderTargetInfo(out var atLeft);
+                    _sync.SetViewTransform(below, -1f, 0f);
+                    await WaitForPresentedAsync(1500);
+                    var okRight = panSession.ReadRenderTargetInfo(out var atRight);
+                    _sync.SetViewTransform(0.05f, 0f, 0f);
+                    await WaitForPresentedAsync(1500);
+                    var okMin = panSession.ReadRenderTargetInfo(out var atMin);
+                    _sync.SetViewTransform(1.0f, 0f, 0f);
+                    await WaitForPresentedAsync(1500);
+
+                    if (!(okFit && okBelow && okLeft && okRight && okMin))
+                        RecordSelfTestSkip("缩放下限未验证：内核有一次没上报 RenderTargetInfo");
+                    else
+                    {
+                        var wantW = atFit.DestWidth * below;
+                        var wantH = atFit.DestHeight * below;
+                        var travelWant = atFit.DestWidth - wantW;   // 盒子可走的整段区间宽
+                        if (Math.Abs(atBelow.DestWidth - wantW) > 2 || Math.Abs(atBelow.DestHeight - wantH) > 2)
+                            throw new InvalidOperationException(
+                                $"zoom={below} 没有真的缩小：Dest {atBelow.DestWidth}×{atBelow.DestHeight}，" +
+                                $"期望 ≈{wantW:0}×{wantH:0}（z=1 时 {atFit.DestWidth}×{atFit.DestHeight}）" +
+                                " ⇒ 内核仍把 z≤1 当 no-op（需要含『|z−1|>1e-4 才跳过』那段的 API 16 内核）");
+                        if (Math.Abs(atLeft.DestX - atFit.DestX) > 2 ||
+                            Math.Abs(atRight.DestX - (atFit.DestX + travelWant)) > 2)
+                            throw new InvalidOperationException(
+                                $"缩小态的平移量程不对：pan=+1 原点 {atLeft.DestX}（期望贴左 {atFit.DestX}）、" +
+                                $"pan=−1 原点 {atRight.DestX}（期望贴右 {atFit.DestX + travelWant:0}）" +
+                                " ⇒ 量程没取绝对值（max(·,0) 把 z<1 吞成 0），或原点区间在 z<1 时反向");
+                        if (atMin.DestWidth < 1 || atMin.DestWidth >= atFit.DestWidth)
+                            throw new InvalidOperationException(
+                                $"zoom=0.05 的盒子尺寸不合理：{atMin.DestWidth}×{atMin.DestHeight}" +
+                                $"（拟合盒 {atFit.DestWidth}×{atFit.DestHeight}，下限应 ≥1px 且严格小于拟合盒）");
+                        Log($"   ✅ 缩放下限通过：z={below} ⇒ Dest {atBelow.DestWidth}×{atBelow.DestHeight}" +
+                            $"（≈拟合盒 ×{below}）；黑边内平移全程 {travelWant:0}px，pan ±1 各贴一端；" +
+                            $"z=0.05 ⇒ {atMin.DestWidth}×{atMin.DestHeight}（仍有下限兜底）");
+                    }
+                }
+
+                // ── 判据：新内核入口把倍率域从"相对适配盒"换成绝对 屏幕:视频 比（#12）──
+                // 上游语义下 zoom 乘的是"适配到窗口之后的视频盒"，于是同一个 ×2 在不同窗口
+                // 尺寸下对应的真实放大率不同 ⇒ 倍率数字与像素对不上（2026-09-29 用户报的那条）。
+                // 封顶打开后适配盒不超过源原生尺寸（VideoRenderer 走 CalculateVideoDestination
+                // 已有的原生分支），恒等式变成 DestWidth/VideoWidth == zoom，且 zoom=1 是逐像素 1:1。
+                // ⚠ 窗口比源小的时候封顶物理上不生效（内核条件就是 sourceW ≤ outputW），两态同形
+                //   ⇒ 量不出差别只能 SKIP，绝不记成通过。4K 片源 + 1995 宽窗口正是这种情况。
+                _step = "真1:1封顶";
+                if (panSession.ReadMediaInfo() is not { VideoWidth: > 0, VideoHeight: > 0 } capMedia
+                    || !panSession.ReadRenderTargetInfo(out var capOff))
+                {
+                    RecordSelfTestSkip("真 1:1 封顶未验证：读不到媒体尺寸或 RenderTargetInfo");
+                }
+                else if (capOff.SwapWidth < capMedia.VideoWidth || capOff.SwapHeight < capMedia.VideoHeight)
+                {
+                    RecordSelfTestSkip($"真 1:1 封顶未验证：后台缓冲装不下源原生尺寸" +
+                        $"（缓冲 {capOff.SwapWidth}×{capOff.SwapHeight} < 源 {capMedia.VideoWidth}×{capMedia.VideoHeight}" +
+                        " ⇒ 封顶前后同形，换更小片源或更大窗口才量得到）");
+                }
+                else
+                {
+                    panSession.SetFitLimitToNative(true);
+                    _sync.SetViewTransform(1f, 0f, 0f);
+                    await WaitForPresentedAsync(1500);
+                    var oneOk = panSession.ReadRenderTargetInfo(out var atOne);
+                    _sync.SetViewTransform(2f, 0f, 0f);
+                    await WaitForPresentedAsync(1500);
+                    var twoOk = panSession.ReadRenderTargetInfo(out var atTwo);
+                    // 复位：后续判据都在上游语义（不封顶）下跑，不能让这条改动污染别人的场地
+                    panSession.SetFitLimitToNative(false);
+                    _sync.SetViewTransform(1f, 0f, 0f);
+                    await WaitForPresentedAsync(1500);
+
+                    if (!oneOk || !twoOk)
+                        RecordSelfTestSkip("真 1:1 封顶未验证：封顶态下内核不再上报 RenderTargetInfo");
+                    else
+                    {
+                        // 期望值用另一路算术（源尺寸 × 目标倍率），不拿被测实现自己算。
+                        var oneErrX = Math.Abs((double)atOne.DestWidth - capMedia.VideoWidth);
+                        var oneErrY = Math.Abs((double)atOne.DestHeight - capMedia.VideoHeight);
+                        var twoRatio = (double)atTwo.DestWidth / capMedia.VideoWidth;
+                        if (oneErrX > 1 || oneErrY > 1)
+                            throw new InvalidOperationException(
+                                $"封顶后 zoom=1 不是逐像素 1:1：Dest {atOne.DestWidth}×{atOne.DestHeight}，" +
+                                $"源 {capMedia.VideoWidth}×{capMedia.VideoHeight}（宽差 {oneErrX:0.#}px，高差 {oneErrY:0.#}px）" +
+                                " ⇒ SetFitLimitToNative 没接到 DrawCachedVideo 的适配盒参数上");
+                        if (Math.Abs(twoRatio - 2.0) > 0.01)
+                            throw new InvalidOperationException(
+                                $"封顶后倍率不等于绝对 屏幕:视频 比：zoom=2 时 Dest 宽 {atTwo.DestWidth}，" +
+                                $"比值 {twoRatio:0.###}（判据 |比−2|≤0.01）" +
+                                " ⇒ zoom 仍在乘「相对适配盒」，适配盒没被封顶到源原生尺寸");
+                        Log($"   ✅ 真 1:1 封顶通过：zoom=1 ⇒ Dest {atOne.DestWidth}×{atOne.DestHeight}" +
+                            $"（源 {capMedia.VideoWidth}×{capMedia.VideoHeight}，比值 1.000）；" +
+                            $"zoom=2 ⇒ 比值 {twoRatio:0.###} ⇒ 倍率数字就是 屏幕px/视频px");
+                    }
+                }
+
+                // ── 观测：放大镜"按源像素取格"在实机比值下可不可得（#13 的决策数据）──
+                // 全 app 只有后台缓冲这一条回读（TryReadPixel / TryReadPixelRegion，放大镜、差异面板、
+                // 探针都走它），**没有解码帧导出** ⇒ "某个源像素的真值"只有在 屏幕px/视频px ≥ 1 时
+                // 才物理存在于缓冲里；比值 < 1 时它已经被 GPU 混掉了，换任何取格方式都还原不回来。
+                // 这里把比值、一个源像素占几个屏幕像素、取 12×12 源格要读多大一块、单次回读耗时量出来。
+                // ⚠ 只记录、不判红：测的是能力边界与成本，不是对错。
+                _step = "放大镜取格预算";
+                if (haveFitBox && panSession.ReadMediaInfo() is { VideoWidth: > 0, VideoHeight: > 0 } benchMedia)
+                {
+                    const int Grid = MagnifierOverlay.ZoomGrid;   // 用真常量，不再抄一遍数字
+                    foreach (var z in new[] { 1f, 2f, 4f })
+                    {
+                        _sync.SetViewTransform(z, 0f, 0f);
+                        await WaitForPresentedAsync(1500);
+                        if (!panSession.ReadRenderTargetInfo(out var rtZ)) continue;
+
+                        var rx = (double)rtZ.DestWidth / benchMedia.VideoWidth;
+                        var ry = (double)rtZ.DestHeight / benchMedia.VideoHeight;
+                        var readW = Math.Max(1, (int)Math.Ceiling(Grid * rx));
+                        var readH = Math.Max(1, (int)Math.Ceiling(Grid * ry));
+                        var startX = Math.Max(0, rtZ.DestX);
+                        var startY = Math.Max(0, rtZ.DestY);
+                        var buffer = new float[readW * readH * 4];
+
+                        var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                        var okRead = panSession.TryReadPixelRegion(
+                            startX, startY, readW, readH, buffer, out var benchDepth);
+                        var us = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1_000_000.0
+                            / System.Diagnostics.Stopwatch.Frequency;
+
+                        var verdict = rx >= 1.0
+                            ? $"可得（按 {Math.Round(rx):0}px 步进取样，1 源像素 = {rx:F2} 屏幕px）"
+                            : $"**不可得**（1 源像素只占 {rx:F2} 屏幕px，已被重采样混掉 ⇒ 要内核导出解码帧）";
+                        Log($"   [观测] z={z:0.#} 比值=({rx:F3},{ry:F3}) 片源 {benchMedia.VideoWidth}×{benchMedia.VideoHeight} " +
+                            $"Dest {rtZ.DestWidth}×{rtZ.DestHeight} ⇒ 取 {Grid}×{Grid} 源格需读 {readW}×{readH} 缓冲像素，" +
+                            $"一次回读 {us / 1000.0:F2}ms{(okRead ? "" : "（回读失败）")} 位深={benchDepth} ⇒ {verdict}");
+                    }
+                    _sync.SetViewTransform(1.0f, 0f, 0f);
+                    await WaitForPresentedAsync(1500);
+                }
+                else
+                    RecordSelfTestSkip("放大镜取格预算未验证：读不到片源尺寸或拟合盒");
                 _sync.SetViewTransform(1.0f, 0f, 0f);
+            }
+
+            // ── 视图变换跨会话重放（真机侧）── 离线侧已复现→修→变异回红（Core 用例
+            // AddSlot_AfterSetViewTransform_NewSessionReceivesSameTransform），这里补真机读数。
+            // 度量用各路 `DestWidth/SwapWidth`（与窗口大小无关，两路尺寸不同也能比），且**自带对照**：
+            // z=1→2 时该比值必须逐路翻倍 —— 不翻倍就说明这把尺不随内核变换动，后面的断言全是空的。
+            // 追加一路走生产 OpenPaths（同一份素材，不依赖第二个文件）：新那路必须与老路同比值，
+            // 没有重放时它停在"铺满窗口"= 老路的一半。读不到 rt 就把各路 可见性/尺寸/状态/呈现代数
+            // 一起打出来再记 SKIP —— 上一版只留一句"读不到"，害得下一轮重新查一遍为什么。
+            _step = "视图变换跨会话重放";
+            if (_realMode && _sync.Count >= 1)
+            {
+                double[] LaneRatios()
+                {
+                    var list = new System.Collections.Generic.List<double>();
+                    foreach (var slot in _sync.Slots)
+                        if (slot.Session.ReadRenderTargetInfo(out var rt) && rt.SwapWidth > 0)
+                            list.Add((double)rt.DestWidth / rt.SwapWidth);
+                    return list.ToArray();
+                }
+
+                string LaneDiag() => string.Join(" ", _sync.Slots.Select((s, i) =>
+                {
+                    var sv = Grid.GetSurface(i);
+                    var dest = s.Session.ReadRenderTargetInfo(out var r) ? r.DestWidth.ToString() : "noRt";
+                    var sn = s.Session.ReadSnapshot();
+                    return $"#{i}={dest}/{sn?.State}/p{sn?.PresentedVideoFrames ?? -1}" +
+                        $"/vis{(sv?.IsVisible ?? false)} {sv?.Bounds.Width ?? 0:F0}x{sv?.Bounds.Height ?? 0:F0}";
+                }));
+
+                async System.Threading.Tasks.Task SettleZoomAsync(float z)
+                {
+                    _viewZoom = z; _viewPanX = 0f; _viewPanY = 0f;
+                    var before = _sync.ReadMasterSnapshot()?.PresentedVideoFrames ?? -1;
+                    ApplyViewTransform();
+                    var dl = DateTime.UtcNow + TimeSpan.FromSeconds(6);
+                    while (DateTime.UtcNow < dl &&
+                           (_sync.ReadMasterSnapshot()?.PresentedVideoFrames ?? -1) < before + 2)
+                    {
+                        Avalonia.Threading.Dispatcher.UIThread.RunJobs();
+                        await System.Threading.Tasks.Task.Delay(30);
+                    }
+                }
+
+                var countAtStart = _sync.Count;
+                _sync.Play(); SetPlaying(true);
+                await SettleZoomAsync(1f);
+                var fit = LaneRatios();
+                await SettleZoomAsync(2f);
+                var magn = LaneRatios();
+
+                if (fit.Length < countAtStart)
+                    RecordSelfTestSkip($"重放未验证：z=1 时只有 {fit.Length}/{countAtStart} 路报 rt（{LaneDiag()}）");
+                else if (magn.Length != fit.Length)
+                    RecordSelfTestSkip($"重放未验证：z=2 时能读到 rt 的路数变了（{magn.Length}≠{fit.Length}，{LaneDiag()}）");
+                else
+                {
+                    for (var i = 0; i < fit.Length; i++)
+                        if (Math.Abs(magn[i] - fit[i] * 2) > 0.05 * fit[i] + 0.02)
+                            throw new InvalidOperationException(
+                                $"重放判据的度量不成立：第{i}路 z=1→2 比值 {fit[i]:F3}→{magn[i]:F3}，没有翻倍");
+
+                    // ⚠ 轮询里**绝不能再广播一次变换**：广播会把新那路补到 z=2，正好盖掉我要测的
+                    // 缺陷（AddSlot 不重放）—— 首版就是这么假绿过的。只等它自己出帧、自己报 rt。
+                    var replayDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(25);
+                    OpenPaths(new System.Collections.Generic.List<string> { videoPath });
+                    _sync.Play(); SetPlaying(true);
+                    var after = Array.Empty<double>();
+                    while (DateTime.UtcNow < replayDeadline)
+                    {
+                        Avalonia.Threading.Dispatcher.UIThread.RunJobs();
+                        await System.Threading.Tasks.Task.Delay(200);
+                        after = LaneRatios();
+                        if (after.Length >= countAtStart + 1) break;
+                    }
+
+                    if (after.Length < countAtStart + 1)
+                        RecordSelfTestSkip(
+                            $"重放未验证：追加一路后只有 {after.Length}/{countAtStart + 1} 路报 rt（{LaneDiag()}）");
+                    else
+                    {
+                        var reference = after[0];
+                        for (var i = 1; i < after.Length; i++)
+                            if (Math.Abs(after[i] - reference) > 0.05 * reference + 0.02)
+                                throw new InvalidOperationException(
+                                    $"视图变换没有跨会话重放：z=2 时各路比值=({string.Join(", ", after.Select(x => x.ToString("F3")))})，" +
+                                    "新加那一路停在铺满窗口（约为老路的一半）⇒ 多路看到的区域不一致，而屏幕上没有提示");
+                        Log($"   z=1 ({string.Join(", ", fit.Select(x => x.ToString("F3")))}) → z=2 " +
+                            $"({string.Join(", ", after.Select(x => x.ToString("F3")))})，{after.Length} 路一致 ✓");
+                    }
+                }
+                // 收尾：把这条判据临时加的一路撤掉。本机 3 路以上"播着不涨帧/崩溃"是既有问题，
+                // 而门禁还会在后面那步拖入第二个素材 ⇒ 不还原就是让后面的步骤多背一路 4K，
+                // 平白多一分假红来源（也顺手覆盖 RemoveSlotAt 的真实撤路路径）。
+                if (_sync.Count > countAtStart)
+                {
+                    _sync.RemoveSlotAt(_sync.Count - 1);
+                    Grid.SetCount(Math.Max(1, _sync.Count), _realMode);
+                    Log($"   [收尾] 已撤掉判据临时加的那一路 ⇒ 回到判据前的 {countAtStart} 路");
+                }
+                ResetViewTransform();
             }
 
             // C2：倍速切换不得跳位。伪变速的基准点必须在切换瞬间复位，且单次推进量有 2s 上限；
@@ -1851,39 +2323,72 @@ public partial class MainWindow : Window
             // 画面停在旧缩放级别、与状态栏显示不符。触控板惯性滚动（间隔 8~16ms）极易命中。
             _step = "滚轮缩放-节流补发";
             {
-                // 前置条件预热（2026-09-26 实测：32 轮里出现 1 次 dropped=0 的假红）：
-                // 本用例靠"同一 tick 内连发 4 次、至少 1 次被节流丢弃"坐实前置，但**首调走冷路径**
-                // （JIT 首编译 / _transformFlushTimer 首次创建启动 / 首次日志落盘）时，整串连发
-                // 自己就能跨过 16ms 的节流窗口 ⇒ 后几次合法地不被丢弃 ⇒ dropped=0 ⇒ 前置判红。
-                // 所以先把冷路径跑热一次，再等越过 16ms 窗口，之后取的基线与连发才落在同一口径上。
-                // ApplyViewTransform 在此处是"把当前（未变的）变换再下发一次"，不改任何状态语义。
-                // ⚠ 判决、阈值、错误消息的语义一字未改（下面 连发耗时= 的读数保留）。
+                // 前置："至少有一次更新被节流丢弃"。只靠自然连发坐实并不确定——UI 线程被抢走时
+                // 整串连发自己能跨过 16ms 窗口（2026-09-26 实测 32 轮里 1 次 dropped=0，那一轮
+                // 连发耗时 90.30ms），那是**前置不成立**而不是节流失效，直接判红就是假红。
+                // 兜底改成确定性前置：把节流时钟 _lastPanApplyTicks 伪造成"刚刚下发过一次"，
+                // 紧接着的那次调用必然落在窗口内 —— 留给单次同步调用的余量是整个 16ms，
+                // 而不是要求整串 4 次都挤进 16ms。于是判据不再依赖时序运气：
+                // 伪装窗口内仍一次不丢 ⇒ 只能是节流失效 ⇒ 判红。不存在"跳过本步"的第三种结局。
+                // ⚠ 这条兜底是被变异逼出来的：摘掉节流后每次调用都做完整下发，连发自己被拖慢到
+                //   19~48ms ⇒ 自然连发永远"跨过窗口"，只重试会把它判成 SKIP（假绿）。
+                const int BurstCalls = 4;
+                const int MaxNaturalAttempts = 3;
+                const int MaxStampedAttempts = 3;
+                float zoomBefore = 0f;
+                long dropped = 0;
+                // 计时用 Stopwatch：DateTime.UtcNow 在 Windows 上粒度约 15.6ms，量 16ms 窗口不可信。
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+
+                void Burst()
+                {
+                    zoomBefore = _viewZoom;
+                    var droppedBefore = TransformDroppedCount;
+                    sw.Restart();
+                    for (var i = 0; i < BurstCalls; i++) OnSurfaceWheel(120);
+                    sw.Stop();
+                    dropped = TransformDroppedCount - droppedBefore;
+                }
+
+                void StampedBurst()
+                {
+                    zoomBefore = _viewZoom;
+                    var droppedBefore = TransformDroppedCount;
+                    sw.Restart();
+                    for (var i = 0; i < BurstCalls; i++)
+                    {
+                        // 每次调用前重新盖戳 ⇒ 每个"单次调用↔盖戳"的间隔都被钉在窗口内，
+                        // 整串耗时多久都不影响前置成立。（DispatcherTimer 与这里同线程，
+                        // 中间没有消息泵，补发定时器插不进来。）
+                        _lastPanApplyTicks = Environment.TickCount64;
+                        OnSurfaceWheel(120);
+                    }
+                    sw.Stop();
+                    dropped = TransformDroppedCount - droppedBefore;
+                }
+
+                // ① 自然连发：贴近真实用户节奏（触控板惯性滚动 8~16ms 一次），先按老口径试。
+                //    预热：首调走冷路径（JIT / _transformFlushTimer 首次 Start / 首次日志落盘），
+                //    ApplyViewTransform 在此只是"把当前未变的变换再下发一次"，不改状态语义。
                 ApplyViewTransform();
-                await System.Threading.Tasks.Task.Delay(25);   // > 16ms 节流窗口，确保第一次连发不被算作丢弃
-
-                var zoomBefore = _viewZoom;
-                var droppedBefore = TransformDroppedCount;
-
-                // 同一 tick 内连发 4 次（无 await）：第 1 次立即下发，后 3 次间隔 0ms < 16ms
-                // 必然被丢弃。刻意不用 Task.Delay(5)——Windows 上其实际分辨率约 15ms，
-                // 用例会变成时灵时不灵。同步连发是确定性的。
-                // ⚠ 上面那句"确定性"2026-09-26 被实测翻掉一次（32 轮里 dropped=0 出现 1 次）：
-                //   节流比较的是 Environment.TickCount64，若整串连发自己就跨过了 16ms（首调走冷路径），
-                //   后几次就合法地不被丢弃 ⇒ 前置失效。已由上面的**预热 + 越过窗口**修掉前置，
-                //   耗时读数继续保留（只记录、不改判决），下次翻红时能直接分清是哪种。
-                var burstStart = System.DateTime.UtcNow;
-                for (var i = 0; i < 4; i++) OnSurfaceWheel(120);
-                var burstMs = (System.DateTime.UtcNow - burstStart).TotalMilliseconds;
-
-                var dropped = TransformDroppedCount - droppedBefore;
-                Log($"连发 4 次：_viewZoom={_viewZoom:F3} 已下发={LastSentZoom:F3} 丢弃={dropped} " +
-                    $"连发耗时={burstMs:F2}ms（判据只看【丢弃】计数，这个数仅用于归因）");
-                // 前置条件坐实：没有一次被丢弃的话，下面的断言恒绿、毫无意义
+                for (var attempt = 1; attempt <= MaxNaturalAttempts && dropped < 1; attempt++)
+                {
+                    await System.Threading.Tasks.Task.Delay(25);   // > 16ms 窗口：本次首调不被算作丢弃
+                    Burst();
+                    Log($"连发 {BurstCalls} 次〔自然 {attempt}/{MaxNaturalAttempts}〕：_viewZoom={_viewZoom:F3} " +
+                        $"已下发={LastSentZoom:F3} 丢弃={dropped} 连发耗时={sw.Elapsed.TotalMilliseconds:F2}ms");
+                }
+                // ② 确定性前置兜底：只在自然连发没命中窗口时才走，命中过就一次都不跑。
+                for (var attempt = 1; attempt <= MaxStampedAttempts && dropped < 1; attempt++)
+                {
+                    StampedBurst();
+                    Log($"连发 {BurstCalls} 次〔伪装刚下发过 {attempt}/{MaxStampedAttempts}〕：_viewZoom={_viewZoom:F3} " +
+                        $"已下发={LastSentZoom:F3} 丢弃={dropped} 连发耗时={sw.Elapsed.TotalMilliseconds:F2}ms");
+                }
                 if (dropped < 1)
                     throw new InvalidOperationException(
-                        "节流用例空转：没有更新被丢弃（连发被改成异步间隔了？断言已失效）" +
-                        $"本次连发耗时 {burstMs:F2}ms —— 若 ≥16ms 则是【整串连发跨过了节流窗口】，" +
-                        "不是节流失效");
+                        $"节流用例空转：{MaxNaturalAttempts} 次自然连发 + {MaxStampedAttempts} 次【伪装成刚刚下发过】的连发" +
+                        "都没有一次被丢弃 ⇒ 节流本身失效（前置坐实不了 ⇒ 下面的补发断言恒绿、毫无意义）");
 
                 // 等一次性补发定时器（16ms）在 UI 线程跑完
                 await System.Threading.Tasks.Task.Delay(250);
@@ -2908,37 +3413,489 @@ public partial class MainWindow : Window
         await System.Threading.Tasks.Task.Delay(300);
         await AssertRouteActivityAsync(routes, routes, "网格恢复");
 
-        // 重新启用是先 Seek 回规范时间再播的：跑完一段后仍应与 master 同位（与 CheckDrift 同阈值）
-        const long Tolerance = 250_0000;   // 250ms
-        var snaps = _sync.ReadAllSnapshots();
-        var masterPos = snaps[0]?.Position100ns ?? 0;
-        for (var i = 1; i < routes; i++)
+        // 重新启用是先 Seek 回规范时间再播的：**被本单元停用的那几路**应与 master 同位。
+        // 本步原写法有三个错，2026-09-28 由整轮跑出的读数逐个抓出来（账本 §10.8/§10.9）：
+        //   ① 取"全路最差"当判决 ⇒ 把别的单元留下的失步算到本单元头上。整轮里报红的从来是第 1/2/3 路
+        //      （play_r1..r5、state_r1..r3、conv_r1..r6），而本单元停用/再启用的是第 4 路；
+        //   ② 在上一步 helper 结尾的整组 `Pause()` 之后立刻读一次 ⇒ 被测对象被冻住，
+        //      而 `TickDriftCore` 在 master 非 Playing 时整段早退 ⇒ "永不收敛"成为必然红
+        //      （实测 40 次采样位置一毫秒都不动；`FC_TRACE_PAUSE=1` 点名的调用方=SelfTest.cs:2946 那个 helper）；
+        //   ③ 只吃一次采样，没有"等产品确实追平"的等待。
+        // 现在：只对**本单元停用/再启用的那几路**判决；采样只在播放态算数（非播放态由判据自己重新起播，
+        //   并把那一枪记为作废）；轮询到收敛或超时。阈值 250ms 一字未改。
+        const long Tolerance = 250_0000;   // 250ms —— 阈值一字未改
+        const int SettleTimeoutMs = 6000;  // > 5 个校正节拍（DriftCheckIntervalMs=1000ms），留出 Seek + 追帧
+        var firstReactivated = CompareLayout.CellCount(CompareMode.Abcd);
+        var wasPlayingBeforeDrift = _isPlaying;
+        _sync.Play();
+        var trajectory = new System.Collections.Generic.List<string>();
+        long worstTarget = 0, worstAll = 0, prevTargetPos = -1;
+        var validSamples = 0;   // 落在播放态的采样数 —— 只有这些有判决资格
+        var replays = 0;        // 判据为守住"在播"这个前置，被迫重新起播几次
+        var deadline = DateTime.UtcNow + TimeSpan.FromMilliseconds(SettleTimeoutMs);
+        while (true)
         {
-            var s = snaps[i] ?? throw new InvalidOperationException($"网格恢复：第 {i} 路无快照");
-            var drift = Math.Abs(s.Position100ns - (masterPos + _sync.Slots[i].Offset100ns));
-            if (drift > Tolerance)
-                throw new InvalidOperationException(
-                    $"重新启用后第 {i} 路与规范时间相差 {TimeSpan.FromTicks(drift):g} > 250ms" +
-                    $"（停用期间它不跟随 master，切回来必须 Seek 回规范时间）");
+            var snaps = _sync.ReadAllSnapshots();
+            var masterPos = snaps[0]?.Position100ns ?? 0;
+            worstTarget = 0;
+            worstAll = 0;
+            var targetState = "?";
+            long targetPos = 0;
+            for (var i = 1; i < routes; i++)
+            {
+                var s = snaps[i] ?? throw new InvalidOperationException($"网格恢复：第 {i} 路无快照");
+                var drift = Math.Abs(s.Position100ns - (masterPos + _sync.Slots[i].Offset100ns));
+                worstAll = Math.Max(worstAll, drift);
+                if (i >= firstReactivated)
+                {
+                    if (drift > worstTarget) { worstTarget = drift; targetState = s.State.ToString(); }
+                    targetPos = s.Position100ns;
+                }
+            }
+            // 状态与位置增量都要记：Active=True 而 State=Paused = "占着格却停着"，而 TickDriftCore
+            // 只校正 Playing/Ended ⇒ 这种路不可能自己追回来 —— 那是"没人管"，不是"追不上"。
+            // 位置在动 + Playing = 解码追帧（慢但收敛）；Playing 而位置不动 = 校正没对这一路出手。
+            var masterPlaying = snaps[0]?.State == PlayerState.Playing;
+            var entry = $"[{DateTime.Now:HH:mm:ss.fff}]{worstTarget / TimeSpan.TicksPerMillisecond}ms" +
+                $"@{targetState}(全路最差 {worstAll / TimeSpan.TicksPerMillisecond}ms 位置增量 " +
+                (prevTargetPos < 0 ? "首次" : $"{(targetPos - prevTargetPos) / TimeSpan.TicksPerMillisecond}ms") +
+                $"/master={snaps[0]?.State}";
+            if (masterPlaying) validSamples++;
+            else { replays++; _sync.Play(); entry += " 作废：未在播放⇒已重新起播"; }
+            trajectory.Add(entry + ")");
+            prevTargetPos = targetPos;
+            if ((masterPlaying && worstTarget <= Tolerance) || DateTime.UtcNow >= deadline) break;
+            await System.Threading.Tasks.Task.Delay(150);
         }
-        Console.WriteLine($"  路启用态 ✓ {routes} 路：分屏停用第 4..{routes - 1} 路、回网格全部恢复且同位");
+        var worstTargetAtExit = worstTarget;
+        var validSamplesAtExit = validSamples;
+        var replaysAtExit = replays;
+        var trajectoryAtExit = string.Join(" → ", trajectory);
+        // 还原本轮原意：③"暂停态切回"那一相位**要求整组是停着的**（否则 presented 靠正常播放就会涨，
+        // 那一枪变成恒真）。上面为了量同位把组开了起来，这里必须按原样停回去。
+        if (!wasPlayingBeforeDrift) _sync.Pause();
+        var preconditionNote =
+            $"（有效采样 {validSamplesAtExit}/{trajectory.Count}，为守住\u201c在播\u201d前置重新起播 {replaysAtExit} 次）";
+        if (validSamplesAtExit == 0)
+        {
+            // 一次都没落进播放态 ⇒ 这条判据**根本没量到东西**：既不判绿也不判红，登记 SKIP。
+            RecordSelfTestSkip($"路启用态：{SettleTimeoutMs}ms 内 {trajectory.Count} 次采样全部不在播放态" +
+                $"（重新起播 {replaysAtExit} 次仍被别的写者按回暂停）⇒ 同位判据未验证");
+            Console.WriteLine($"  路启用态：**跳过**（全程没落进播放态，未验证 ≠ 通过）{preconditionNote}");
+        }
+        else if (worstTargetAtExit > Tolerance)
+            throw new InvalidOperationException(
+                $"重新启用后第 {firstReactivated}..{routes - 1} 路与规范时间相差 " +
+                $"{worstTargetAtExit / TimeSpan.TicksPerMillisecond}ms > 250ms，等满 {SettleTimeoutMs}ms 仍未收敛" +
+                $"{preconditionNote}（轨迹 {trajectoryAtExit}；" +
+                "停用期间它不跟随 master，切回来必须 Seek 回规范时间）");
+        else
+            Console.WriteLine($"  路启用态 ✓ {routes} 路：分屏停用第 {firstReactivated}..{routes - 1} 路、回网格全部恢复且同位" +
+                              $"（重新启用的那几路 {worstTargetAtExit / TimeSpan.TicksPerMillisecond}ms 内追平{preconditionNote}）");
 
         // ③ **暂停态**下"停用 → 再启用"：Seek 只把位置挪对，画面是否真落下来是另一件事
         //   （本仓自记的内核契约：子窗口尺寸变了不 Redraw 就停 flips，见 SyncController.RedrawAll）。
         //   这一步全程不 Play；停滞看门狗只看第 0 路，看不见"切回来的那一路冻着"。
+        // ⚠ 这一相位的**前提是整组真的停着** ⇒ 由本相位自己立起来（上一相位为了量同位把组开了起来，
+        //   而它的"按原意还原"只在轮子本来就没在播时才停：`_isPlaying==true` 的整轮里旧代码根本不暂停，
+        //   于是 presented 靠正常播放一直涨 ⇒ 这一枪恒真 —— 2026-09-28 新加的守卫当场把它抓出来了
+        //   （fin_r2/r3：`相位③前置失效：整组仍在播放`）。 ⇒ 以前那种"绿"没量到东西。
+        _sync.Pause();
+        await System.Threading.Tasks.Task.Delay(200);   // 给 Pause 一点落地的时间，再验前置
+        if (_sync.ReadMasterSnapshot()?.State == PlayerState.Playing)
+            throw new InvalidOperationException(
+                "相位③前置失效：整组仍在播放 ⇒ 无法把\u201c重新启用后才出帧\u201d与\u201c本来就在播\u201d区分开，这一枪会恒真");
         var beforeReEnable = SnapshotTuple(_sync.ReadAllSnapshots());
         EnterSplitMode();
         await System.Threading.Tasks.Task.Delay(300);
         EnterGridMode();
-        await System.Threading.Tasks.Task.Delay(400);
-        var afterReEnable = SnapshotTuple(_sync.ReadAllSnapshots());
+        // ⚠ 又是一次性采样抢跑：再启用是 `Seek` + 补一次呈现，而** seek 出来的那一帧要等解码**，
+        //   5 路 4K 下这常常超过原来那 400ms 的固定等待 ⇒ 同一份代码 me/rev 两批各 5/8 判红、
+        //   0/10 判绿（`lane_r*`、`rev8_r*`、`fixed_r*`）——红与绿都不说明产品变了。
+        //   改为**有界轮询到 presented 真的涨**（上限 2s）。要求本身没有放松：
+        //   到点仍不涨就是"切回来的那格不落地"，照旧判红，并把每次读到的增量打出来。
         var last = routes - 1;
-        if (afterReEnable[last].presented <= beforeReEnable[last].presented)
+        var presentedWait = new System.Collections.Generic.List<string>();
+        long presentedBefore = beforeReEnable[last].presented, presentedNow = presentedBefore;
+        var presentedDeadline = DateTime.UtcNow + TimeSpan.FromMilliseconds(2000);
+        while (true)
+        {
+            var snapAll = SnapshotTuple(_sync.ReadAllSnapshots());
+            presentedNow = snapAll[last].presented;
+            presentedWait.Add($"{presentedNow - presentedBefore}");
+            if (presentedNow > presentedBefore || DateTime.UtcNow >= presentedDeadline) break;
+            await System.Threading.Tasks.Task.Delay(100);
+        }
+        var afterReEnable = SnapshotTuple(_sync.ReadAllSnapshots());
+        if (presentedNow <= presentedBefore)
             throw new InvalidOperationException(
-                $"暂停态下重新启用第 {last} 路后没有重新出帧（presented {beforeReEnable[last].presented} → " +
-                $"{afterReEnable[last].presented}）：Seek 只挪位置，子窗口从 0×0 改回格尺寸必须补一次 Redraw");
+                $"暂停态下重新启用第 {last} 路后 2s 内没有重新出帧（presented {presentedBefore} → {presentedNow}，" +
+                $"每 100ms 采一次的增量序列 {string.Join(",", presentedWait)}）：" +
+                "Seek 只挪位置，切回格尺寸必须补一次 Redraw；补了还不落帧＝那一格停在旧帧上");
         Console.WriteLine($"  路启用态 ✓ 暂停态切回第 {last} 路重新出帧" +
-                          $"（presented +{afterReEnable[last].presented - beforeReEnable[last].presented}）");
+                          $"（presented +{presentedNow - presentedBefore}，第 {presentedWait.Count} 次采样看到）");
+
+        // ④ **暂停态**下还要量一次"同位"：这一路刚被 `Seek` 回规范时间，而**组是停着的** ⇒
+        //   `TickDriftCore` 在 master 非 Playing 时整段早退，没有任何机制会把它拉回来 ——
+        //   所以这是唯一能干净观察"再启用的那次 Seek 到底做没做"的时刻。
+        //   为什么不在相位②做：那里组在播，漏掉的 Seek 会在下一个校正节拍被补上，
+        //   判据只看到"最终同位"（实测：摘掉 Seek 后②判绿，见 §11.1 的变异）。
+        var pausedDrift = new System.Collections.Generic.List<string>();
+        long pausedWorst = 0;
+        for (var sample = 1; sample <= 6; sample++)
+        {
+            var snapAll = _sync.ReadAllSnapshots();
+            var mPos = snapAll[0]?.Position100ns ?? 0;
+            pausedWorst = 0;
+            for (var i = firstReactivated; i < routes; i++)
+            {
+                var s = snapAll[i] ?? throw new InvalidOperationException($"暂停态切回：第 {i} 路无快照");
+                pausedWorst = Math.Max(pausedWorst,
+                    Math.Abs(s.Position100ns - (mPos + _sync.Slots[i].Offset100ns)));
+            }
+            pausedDrift.Add($"{pausedWorst / TimeSpan.TicksPerMillisecond}ms");
+            if (pausedWorst <= Tolerance) break;
+            await System.Threading.Tasks.Task.Delay(100);
+        }
+        if (pausedWorst > Tolerance)
+            throw new InvalidOperationException(
+                $"暂停态下切回第 {firstReactivated}..{routes - 1} 路后停在离规范时间 " +
+                $"{pausedWorst / TimeSpan.TicksPerMillisecond}ms 外（采样 {string.Join(",", pausedDrift)}）：" +
+                "组是停着的 ⇒ 没有校正会来补，这一格播下去就永久错位；" +
+                "再启用必须先 Seek 回规范时间（`SetActiveRoutes` 的启用分支）");
+        Console.WriteLine($"  路启用态 ✓ 暂停态切回即已同位（{pausedWorst / TimeSpan.TicksPerMillisecond}ms ≤ 250ms，" +
+                          $"组停着没人会补 ⇒ 这一枪直接盯 Seek）");
+    }
+
+    /// <summary>让<b>产品自己的</b>呈现停滞看门狗走一遍轻量恢复，并确认真的把整组唤醒了。</summary>
+    /// <para><b>怎么稳定造出停滞</b>：只叫引擎侧 <c>_sync.Pause()</c>、<b>不</b>动 <c>_isPlaying</c>
+    /// （正常按暂停键会两个一起改）。轮询于是看到"UI 认为在播、presented 却不再增长"——
+    /// 正是 <c>RenderStallWatchdog</c> 的触发条件，阈值 1250ms 后必然给出 LightRecovery。</para>
+    /// <para><b>为什么要它</b>：恢复序列 2026-09-28 改成"读回来再发下一步"（账本 §11.10）。
+    /// 那处改动若写反（等待条件错、Play 没发出、补发分支没走到），症状正是"这一组再也醒不过来"。
+    /// 本单元把这条路径变成常规验收，而不是等真机上偶发的停滞。</para>
+    /// <para><b>牙</b>：判据是"master 的 presented 至少再涨 3 帧、且没有启用路还停在 Paused"。
+    /// 恢复没发生时这两条永远不成立（<c>TickDriftCore</c> 刻意不校正 Paused 路 ⇒ 不会自愈），所以不是恒真判据；
+    /// 要求 +3 帧是为了不让"Pause 落地前那一张在飞的帧"冒充恢复。</para>
+    /// <para><b>前提被抢走时如实 SKIP，不判红也不判绿</b>：轮询每拍会把 <c>_isPlaying</c> 同步回引擎状态
+    /// （<c>MainWindow.Playback.cs:545</c>），本单元每拍把它按回真以维持前提；若整窗都没触发看门狗，
+    /// 那是<b>夹具没把前提立起来</b>，登记 SKIP 而不是指控产品 ——
+    /// 第一版正是把这种情形写成了"恢复序列本身的缺陷"，属于过度归因
+    /// （2026-09-28 07:48:41 实测红过一轮，读数在 <c>tests/output/stallrecovery-1.log</c>；
+    /// 改后 07:50:47 通过：presented 12→19、1754ms、按回 _isPlaying 7 次）。</para>
+    private async Task StallRecoveryUnit()
+    {
+        EnterGridMode();
+        await System.Threading.Tasks.Task.Delay(200);
+        _sync.Play();
+        await System.Threading.Tasks.Task.Delay(300);
+        if (!_isPlaying)
+            throw new InvalidOperationException("停滞唤醒：前置失效 —— _isPlaying=false，看门狗不会检测停滞");
+        var before = _sync.ReadAllSnapshots()[0] ??
+                     throw new InvalidOperationException("停滞唤醒：前置取不到 master 快照");
+        var frozenAt = before.PresentedVideoFrames;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+
+        _sync.Pause();      // 只冻引擎、UI 仍认为在播 ⇒ 制造停滞
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(8);
+        long best = frozenAt;
+        var woke = false;
+        var fought = 0;
+        while (DateTime.UtcNow < deadline)
+        {
+            await System.Threading.Tasks.Task.Delay(250);
+            // ⚠ 轮询每拍都会把 `_isPlaying` 同步回引擎状态（MainWindow.Playback.cs:545：
+            //   `master 非 Playing 且 _isPlaying ⇒ SetPlaying(false)`），而停滞检测的前提正是
+            //   "`_isPlaying` 为真而 presented 不涨"。2026-09-28 第一次跑这条单元时被它清掉，
+            //   8s 内看门狗一次都没触发 —— **那是夹具的前提没成立，不是恢复序列坏了**（我当时把这句
+            //   写进了断言消息，属于过度归因，已改）。这里每拍把 `_isPlaying` 按回真，
+            //   是在**维持前提**，不是伪造恢复：presented 是否真的重新增长仍由内核读数决定。
+            if (!_isPlaying) { SetPlaying(true); fought++; }
+            var sn = _sync.ReadAllSnapshots();
+            if (sn[0] is not { } m) continue;
+            best = Math.Max(best, m.PresentedVideoFrames);
+            var stillPaused = false;
+            for (var i = 0; i < sn.Count && i < _sync.Slots.Count; i++)
+                if (sn[i]?.State == PlayerState.Paused && _sync.Slots[i].Active && !_sync.Slots[i].Failed)
+                    stillPaused = true;
+            if (best >= frozenAt + 3 && m.State == PlayerState.Playing && !stillPaused) { woke = true; break; }
+        }
+        sw.Stop();
+        if (!woke)
+        {
+            // 没触发就如实标 SKIP：这条路径要真验，得给停滞检测加一个注入旋钮（属另一批）。
+            RecordSelfTestSkip(
+                $"停滞唤醒：维持了 {fought} 拍 `_isPlaying=true`，8s 内 presented 仍停在 {best}（门槛 {frozenAt + 3}）" +
+                "⇒ 看门狗没被触发，**本夹具没能把前提立起来**（不是恢复序列失败，产品未判）");
+            return;
+        }
+        Log($"停滞唤醒：看门狗把整组唤醒，presented {frozenAt}→{best}（+{best - frozenAt}），" +
+            $"用时 {sw.ElapsedMilliseconds}ms，期间把 _isPlaying 按回真 {fought} 次以维持前提");
+    }
+
+    /// <summary>#42 的受控探针：把真机上那一次触发（<c>漂移校正 路i 态=Playing Δ=-1590495 → Seek</c>，
+    /// <see cref="SyncController"/> 的 1035 行）压成可重复的 5 轮实验。
+    ///
+    /// <para><b>问的问题只有一个</b>：从 <c>Playing</c> 出发的一次 Seek，会不会把这一路停在 <c>Paused</c>。
+    /// 之所以要做"受控"，是因为 §11.8 的整轮 A/B 各 8 轮都撞不到冻结（0/8 + 0/8），再撞整轮只是掷骰子。</para>
+    ///
+    /// <para><b>为什么用"人为改 offset、让产品自己的校正器去 Seek"，而不是直接调 <c>Session.Seek()</c></b>：
+    /// 校正器那一拍带着它的整段前置（<c>Active</c>、非 <c>Failed</c>、半帧阈值、<c>ClampToDuration</c>、
+    /// 以及"Paused 刻意排除"这条被 multitest 依赖的语义）。绕过它们直接打 Seek，测的就不是同一条路径；
+    /// 而照抄真机顺序正是这类夹具唯一能证伪假设的地方（见账本 §11.8 的教训）。</para>
+    ///
+    /// <para><b>牙在哪里</b>：判据前先跑一次<b>故意</b>的 <c>Pause()</c> 作为阳性对照 ——
+    /// "停在 Paused"这个形状必须由本判据自己报出来，报不出来就是恒真判据，直接判失败。
+    /// 这样即使 5 轮全绿，也说得清"这条判据今天确实能抓到那个形状"，而不是一把没转过的锁。</para>
+    /// </summary>
+    private async Task SeekParksRouteUnit()
+    {
+        const int Cycles = 5;
+        const int PollMs = 50;
+        const int WatchPolls = 40;          // 2s 观察窗
+        const long Perturb = 1_000_0000;    // 1s，远大于半帧阈值 ⇒ 下一拍校正器必然发 Seek
+        const long Converged = 1_500_0000;  // 150ms：只用来判"校正有没有落地"，不参与最终判决
+        if (_sync.Count < 2)
+        {
+            Console.WriteLine($"  单路受控Seek：**跳过**（{_sync.Count} 路没有从路，漂移校正器只处理 i≥1 ⇒ 这条判据恒真）");
+            RecordSelfTestSkip($"单路受控Seek：{_sync.Count} 路无从路 ⇒ 判据恒真");
+            return;
+        }
+        EnterGridMode();
+        await System.Threading.Tasks.Task.Delay(200);
+
+        const int lane = 1;
+        var origOffset = _sync.Slots[lane].Offset100ns;
+        var repro = new System.Collections.Generic.List<string>();
+        var reproB = new System.Collections.Generic.List<string>();
+        var reproC = new System.Collections.Generic.List<string>();
+        var notes = new System.Collections.Generic.List<string>();
+        string? phaseBSkipped = null;
+
+        // 观察窗：返回 (窗口后半段是否一直停在 Paused 且位置不动, 呈现计数增量, 轨迹串)
+        // ⚠ 必须 await，不能 .Wait()：本方法跑在 UI 线程上，阻塞它等于同时把
+        //   `Dispatcher.UIThread.Post` 的引擎事件处理与呈现一起冻住 —— 那会变成夹具自己造出的假 stuck。
+        async System.Threading.Tasks.Task<(bool stuck, long presented, string trace)> Watch(int which)
+        {
+            var first = _sync.ReadAllSnapshots()[which] ??
+                        throw new InvalidOperationException($"受控Seek：观察窗起点第 {which} 路无快照");
+            var seen = new System.Collections.Generic.List<(int i, PlayerState st, long pos)>();
+            var trace = new System.Collections.Generic.List<string>();
+            long posMin = long.MaxValue, posMax = long.MinValue;
+            for (var i = 0; i < WatchPolls; i++)
+            {
+                await System.Threading.Tasks.Task.Delay(PollMs);
+                var s = _sync.ReadAllSnapshots()[which] ??
+                        throw new InvalidOperationException($"受控Seek：观察窗第 {i} 拍第 {which} 路无快照");
+                seen.Add((i, s.State, s.Position100ns));
+                posMin = Math.Min(posMin, s.Position100ns);
+                posMax = Math.Max(posMax, s.Position100ns);
+                if (i % 8 == 0 || i == WatchPolls - 1)
+                    trace.Add($"{i}:{s.State}/{s.Position100ns / TimeSpan.TicksPerMillisecond}ms/p{s.PresentedVideoFrames}");
+            }
+            // 判决口径 = **窗口后半段全在 Paused 且位置不再前进**。
+            // 不用"从第一拍起全部 Paused"：内核 Pause/Play 都是"守卫即时读状态、动作 Enqueue 后执行"，
+            // 刚发完命令那一拍很可能还读到 Playing —— 实测阳性对照正是这样红过一次
+            // (`0:Playing/0ms/p0 8:Paused/0ms/p1 …`)。旧口径会**把中途开始的冻结漏成绿灯**，
+            // 那是往安全侧偏的错口径；新口径仍然有牙：短暂停了又起来 ⇒ 后半段不会全是 Paused。
+            var tail = seen.Skip(seen.Count / 2);
+            var pausedAtTail = tail.All(x => x.st == PlayerState.Paused);
+            var frozen = posMax - posMin <= 2 * TimeSpan.TicksPerMillisecond;
+            var after = _sync.ReadAllSnapshots()[which]!;
+            var traceStr = string.Join(" ", trace) +
+                $"（后半段 {seen.Count - seen.Count / 2} 拍全 Paused={pausedAtTail}、" +
+                $"位置跨度 {(posMax - posMin) / TimeSpan.TicksPerMillisecond}ms）";
+            // 再确认：#42 要抓的是**永久**冻住（现场是分钟级、偏差长到 6718ms），
+            // 而"再启用后排空队列要 1~2 秒"是**已测到的正常慢**（16:50:58.617 补发起播成功 →
+            // 16:51:00.211 才 `状态→Playing`，1.6s；5 路 4K 下更明显）。
+            // 2s 窗口不足以区分这两者 —— 直接把"慢"判成缺陷是假阳性（实测 5 路时 B 2/5 就是这么红的）。
+            // 所以窗口内看着像停住时，再等 4s 读一次：仍然 Paused 且位置没动才算 stuck。
+            if (pausedAtTail && frozen)
+            {
+                await System.Threading.Tasks.Task.Delay(4000);
+                var again = _sync.ReadAllSnapshots()[which]!;
+                traceStr += $" ⇒ 再等 4s：态={again.State}、位置 " +
+                            $"{again.Position100ns / TimeSpan.TicksPerMillisecond}ms" +
+                            $"（窗口末 {after.Position100ns / TimeSpan.TicksPerMillisecond}ms）";
+                var stillParked = again.State == PlayerState.Paused &&
+                                  Math.Abs(again.Position100ns - after.Position100ns) <= 2 * TimeSpan.TicksPerMillisecond;
+                return (stillParked, again.PresentedVideoFrames - first.PresentedVideoFrames, traceStr);
+            }
+            return (false, after.PresentedVideoFrames - first.PresentedVideoFrames, traceStr);
+        }
+
+        try
+        {
+            // ── 阳性对照（先证明这条判据有牙，再谈被测形状）────────────────────────
+            // 故意把这一路按停：真机上"停在 Paused、位置不动"就是要抓的形状，本判据必须报 stuck。
+            _sync.Play();
+            await System.Threading.Tasks.Task.Delay(300);
+            _sync.Slots[lane].Session.Pause();
+            var ctl = await Watch(lane);
+            if (!ctl.stuck)
+                throw new InvalidOperationException(
+                    $"受控Seek：阳性对照失败 —— 我**故意** Pause 了第 {lane} 路，2s 观察窗却没被判成" +
+                    $"\"窗口后半段停在 Paused 且位置不动\"（轨迹 {ctl.trace}）⇒ 这条判据恒真，跑它没有任何意义");
+            notes.Add($"阳性对照：故意 Pause ⇒ stuck=True、presented Δ={ctl.presented}（判据有牙 ✓）");
+
+            for (var c = 0; c < Cycles; c++)
+            {
+                // 前置：master 与这一路都在播，且 master 位置够大（expected 才不会为负）
+                _sync.Play();
+                var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(6);
+                long masterPos = 0;
+                PlayerState laneState = PlayerState.Closed;
+                while (DateTime.UtcNow < deadline)
+                {
+                    var sn = _sync.ReadAllSnapshots();
+                    masterPos = sn[0]?.Position100ns ?? 0;
+                    laneState = sn[lane]?.State ?? PlayerState.Closed;
+                    if (masterPos > 2 * Perturb && sn[0]?.State == PlayerState.Playing &&
+                        laneState == PlayerState.Playing) break;
+                    if (laneState != PlayerState.Playing) _sync.Play();
+                    await System.Threading.Tasks.Task.Delay(150);
+                }
+                if (masterPos <= 2 * Perturb || laneState != PlayerState.Playing)
+                    throw new InvalidOperationException(
+                        $"受控Seek 第 {c} 轮前置取不到读数：master 位置 {masterPos / TimeSpan.TicksPerMillisecond}ms" +
+                        $"（需 >{2 * Perturb / TimeSpan.TicksPerMillisecond}ms）、第 {lane} 路态={laneState} ⇒ " +
+                        "这一轮的 Seek 根本不会被下发，判据无从观测，不能记成通过");
+
+                // 人为把规范时间挪 1s：这一路立刻"落后/超前"半个帧阈值以上 ⇒ 校正器下一拍发 Seek
+                _sync.Slots[lane].Offset100ns = origOffset - Perturb;
+                var seeked = false;
+                // 3s ≈ 3 个校正节拍（DriftCheckIntervalMs=1000ms），留出 Seek + 追帧的余量
+                var corrDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);
+                while (DateTime.UtcNow < corrDeadline)
+                {
+                    var sn = _sync.ReadAllSnapshots();
+                    var expected = (sn[0]?.Position100ns ?? 0) + _sync.Slots[lane].Offset100ns;
+                    if (sn[lane] is { } s1 && Math.Abs(s1.Position100ns - expected) <= Converged)
+                    { seeked = true; break; }
+                    await System.Threading.Tasks.Task.Delay(PollMs);
+                }
+                if (!seeked)
+                    throw new InvalidOperationException(
+                        $"受控Seek 第 {c} 轮没有等到校正：把 offset 挪 -1s 后 3s 内该路仍未回到规范时间" +
+                        $"（态={_sync.ReadAllSnapshots()[lane]?.State}）⇒ 校正器没跑或这一路没被启用，" +
+                        "本判据退化成\"等一个不会来的事件\"，不能记成通过");
+
+                var w = await Watch(lane);
+                if (w.stuck)
+                    repro.Add($"第 {c} 轮：校正落地后 2s 内全程 Paused，轨迹 {w.trace}（presented Δ={w.presented}）");
+                else if (w.presented <= 0)
+                    notes.Add($"第 {c} 轮：态在播但 2s 内 presented 零增量，轨迹 {w.trace}（另一形状，登记）");
+                else
+                    notes.Add($"第 {c} 轮：Seek 后仍在播，presented Δ={w.presented}，{w.trace}");
+                _sync.Slots[lane].Offset100ns = origOffset;
+            }
+
+            // ── 相位 B：真机 #42 的前置形状 —— **停用之后再启用**的那一路 ──────────────
+            // 相位 A 只能证"从 Playing 出发的一次 Seek 不会停住"。而 §11.8 现场那一路是
+            // **被 SetActiveRoutes 再启用**的（启用分支先 Seek 回规范时间，再由 WantPlaying 决定要不要 Play）。
+            // 所以这一步直接问：再启用之后，它是不是停在 Paused 而 master 照常播 —— 这才是 #42 的形状。
+            for (var c = 0; c < Cycles; c++)
+            {
+                _sync.Play();
+                await System.Threading.Tasks.Task.Delay(200);
+                // 明确进 AB（2 格）：3/4 路必然有未占格的路被停用。
+                // 原先写 EnterSplitMode() 在 4 路下会把 4 路全摆出来 ⇒ 没有"停用"发生，
+                // 相位B 的守卫如实报了恒真并 SKIP（2026-09-28 07:32:51 实测）。
+                EnterCompareMode(CompareMode.Ab);
+                await System.Threading.Tasks.Task.Delay(400);   // 占格集合是 Post 出去的，要落地
+                var laneB = -1;
+                for (var i = _sync.Count - 1; i >= 1; i--)
+                    if (!_sync.Slots[i].Active) { laneB = i; break; }
+                if (laneB < 0)
+                {
+                    phaseBSkipped = $"第 {c} 轮起就没有多余路可停用（{_sync.Count} 路在 AB 两格下全占格）";
+                    EnterGridMode();
+                    break;
+                }
+                EnterGridMode();                  // 再启用：SetActiveRoutes 的启用分支 Seek 回规范时间
+                await System.Threading.Tasks.Task.Delay(400);
+                if (!_sync.Slots[laneB].Active)
+                    throw new InvalidOperationException(
+                        $"受控Seek 相位B 第 {c} 轮前置失效：回到网格后第 {laneB} 路仍 Active=false ⇒ " +
+                        "根本没发生“再启用”，这一枪恒真，不能记成通过");
+                var wb = await Watch(laneB);
+                var masterState = _sync.ReadAllSnapshots()[0]?.State;
+                if (wb.stuck && masterState == PlayerState.Playing)
+                    reproB.Add($"第 {c} 轮：再启用第 {laneB} 路后 2s 全程 Paused 而 master 在播（正是 #42），轨迹 {wb.trace}");
+                else if (wb.stuck)
+                    reproB.Add($"第 {c} 轮：再启用第 {laneB} 路后 2s 全程 Paused，但 master 态={masterState}（不是 #42 的形状）");
+                else
+                    notes.Add($"相位B 第 {c} 轮：再启用第 {laneB} 路后在播，presented Δ={wb.presented}，{wb.trace}");
+            }
+            // ── 相位 C：主动把"队列还没排空就又切回去"这个窗口撞开 ──────────────
+            // 停用的 `Pause()` 与再启用的 `Play()` 都是**守卫即时读状态、动作排队执行**
+            // （内核 PlayerSession::Play 只接受 Ready/Paused/Ended；托管 `Check()` 会把 InvalidState
+            // 抛成 EngineException，被 SetActiveRoutes 的 catch 咽掉 ⇒ 这一次"要播"就**永久丢了**）。
+            // 于是：先 SetActiveRoutes(前 2 路) 让各停用路排入 Pause，**不 await**，立刻切回全部路 ⇒
+            // 再启用的 Play 调用时状态仍是 Playing ⇒ 被拒；随后那条 Pause 才落地
+            // ⇒ 该路 Active=true、位置正确、却停在 Paused，而 `TickDriftCore` 刻意不校正 Paused ⇒ #42。
+            // 相位 A/B 用的是"自然节奏"（中间有 400ms 让队列排空），撞不到这个窗口；这里专门撞它。
+            for (var c = 0; c < Cycles; c++)
+            {
+                _sync.Play();
+                await System.Threading.Tasks.Task.Delay(200);
+                var all = new System.Collections.Generic.HashSet<int>();
+                for (var i = 0; i < _sync.Count; i++) all.Add(i);
+                var firstTwo = new System.Collections.Generic.HashSet<int> { 0, 1 };
+                _sync.SetActiveRoutes(firstTwo);      // 第 2/3 路排入 Pause
+                _sync.SetActiveRoutes(all);           // 立刻切回：中间不 await ⇒ Play 可能撞上还在 Playing
+                await System.Threading.Tasks.Task.Delay(2500);
+                var sn = _sync.ReadAllSnapshots();
+                var parked = new System.Collections.Generic.List<string>();
+                for (var i = 1; i < sn.Count && i < _sync.Slots.Count; i++)
+                    if (_sync.Slots[i].Active && !_sync.Slots[i].Failed && sn[i]?.State == PlayerState.Paused)
+                        parked.Add($"路{i}={sn[i]!.Position100ns / TimeSpan.TicksPerMillisecond}ms");
+                if (parked.Count > 0)
+                {
+                    await System.Threading.Tasks.Task.Delay(2000);   // 再等 2s：能不能自己醒过来？
+                    var sn2 = _sync.ReadAllSnapshots();
+                    var still = parked.Find(p =>
+                    {
+                        var idx = int.Parse(p.Substring(1, p.IndexOf('=') - 1));
+                        return sn2[idx]?.State == PlayerState.Paused;
+                    });
+                    var masterState = sn2[0]?.State;
+                    if (still is not null && masterState == PlayerState.Playing)
+                        reproC.Add($"第 {c} 轮：连发两次切换后 {string.Join("、", parked)} 停在 Paused，" +
+                                   $"再等 2s 仍未醒（master={masterState}）⇒ **正是 #42 的形状**");
+                    else
+                        notes.Add($"相位C 第 {c} 轮：{string.Join("、", parked)} 曾停在 Paused，" +
+                                  $"2s 后={still ?? "全部醒了"}（master={masterState}）");
+                }
+            }
+        }
+        finally
+        {
+            _sync.Slots[lane].Offset100ns = origOffset;
+            // 相位 C 会绕过网格直接改启用集合，收尾必须把口径交还给 UI（否则后面的单元看到的是错位状态）
+            _sync.SetActiveRoutes(Grid.VisibleRouteIndices);
+            _sync.Play();
+        }
+
+        foreach (var n in notes) Console.WriteLine($"  单路受控Seek：{n}");
+        if (phaseBSkipped is not null)
+            RecordSelfTestSkip($"单路受控Seek 相位B：{phaseBSkipped} ⇒ 该相位恒真，只判了相位A");
+        if (repro.Count + reproB.Count + reproC.Count > 0)
+            throw new InvalidOperationException(
+                $"#42 复现：相位A {repro.Count}/{Cycles} 轮、相位B {reproB.Count}/{Cycles} 轮、" +
+                $"相位C {reproC.Count}/{Cycles} 轮出现\"停在 Paused\"，" +
+                $"A 样例：{(repro.Count > 0 ? repro[0] : "无")}；B 样例：{(reproB.Count > 0 ? reproB[0] : "无")}；" +
+                $"C 样例：{(reproC.Count > 0 ? reproC[0] : "无")}。" +
+                $"而 master 照常播放 ⇒ 那一格永久冻住，且 TickDriftCore 刻意排除 Paused 所以没有任何机制会恢复它。" +
+                "归因线索：app 日志里这一路紧邻的 `状态→Paused（内核操作=…）` 就是写下这个状态的调用点，" +
+                "以及 `启用第 N 路` 的 ReportRuntimeError（InvalidState 被 SetActiveRoutes 的 catch 咽掉）" +
+                "（见 PlaybackCoordinator.RecordStateTransition / 账本 §11.10）。");
+        Log($"单路受控Seek：相位A（从 Playing 出发的一次校正 Seek）{Cycles}/{Cycles} 轮、" +
+            $"相位B（停用后再启用那一路）{(phaseBSkipped is null ? Cycles + "/" + Cycles + " 轮" : "未跑")}、" +
+            $"相位C（两次切换之间不排队，主动撞守卫窗口）{Cycles}/{Cycles} 轮都回到播放态" +
+            "（阳性对照已证明本判据能抓到 stuck 形状）⇒ 三条假设在受控形状下**均未复现**；" +
+            "真机 #42 是偶发（整轮 16 次 A/B 也 0 复现），本探针只能否证\"每次都停\"，不能证明它不存在。");
     }
 
     /// <summary>P6 单元：「网格」入口必须退出对比模式，并把 2~9 路全部恢复成均匀网格。
@@ -3261,6 +4218,10 @@ public partial class MainWindow : Window
                 async () => await SplitLineHitUnit(_sync.Count)),
             new Unit("view.route-activity", 5, null, new[] { "路启用态" },
                 async () => await RouteActivityUnit(_sync.Count)),
+            new Unit("sync.seek-parks", 4, null, new[] { "单路受控Seek" },
+                async () => await SeekParksRouteUnit()),
+            new Unit("sync.stall-recovery", 2, null, new[] { "停滞唤醒恢复" },
+                async () => await StallRecoveryUnit()),
             new Unit("view.route-added-while-hidden", 2, null, new[] { "新路即停用" },
                 async () => await RouteAddedWhileSetUnchangedUnit(videoPath)),
         };
@@ -3729,6 +4690,48 @@ public partial class MainWindow : Window
             }
 
             var (deltas, fps) = await SampleBenchPhaseAsync("magnified", zoom, secondsPerPhase);
+
+            // ── 平移提交成本实测（docs/26 那条"不要逐帧 SetWindowRgn"当初是估算，没有数）──
+            // 对比模式当前拖动是"松手才一次提交"，所以"实时提交到底贵不贵"从来没有读数；
+            // 没数就没资格改那个决定。这里在固定倍率下按 60Hz 连发 N 次微小 crop 变更
+            // （正是拖动每帧会做的事），逐次计时，并用与 SampleBenchPhaseAsync **同一口径**
+            // 统计这一段的出帧率（presented 取差值，不拿累计计数器相加）。
+            // ⚠ 只打印、不判红：本模式的判据仍是"放大后是否持续出帧"，这条是喂决策的观测。
+            _step = "平移提交成本";
+            {
+                const int CommitCalls = 60;
+                var cropMax = CompareCropPlanner.MaxCropFraction(zoom);
+                // 两个必须**不同**的 crop 交替下发：同值会被 SetCompareMagnify 的去重吞掉，
+                // 那测出来就是"什么都没做"的空转时间（生效数会掉到 1，届时照实打印）。
+                var cropA = _compareCropX;
+                var cropB = cropA + 0.01 <= cropMax ? cropA + 0.01 : Math.Max(0.0, cropA - 0.01);
+                var per = new double[CommitCalls];
+                var applied = 0;
+                var frameStart = SnapshotTuple(_sync.ReadAllSnapshots());
+                var swAll = System.Diagnostics.Stopwatch.StartNew();
+                for (var i = 0; i < CommitCalls; i++)
+                {
+                    var swOne = System.Diagnostics.Stopwatch.StartNew();
+                    if (SetCompareMagnify(zoom, i % 2 == 0 ? cropA : cropB, _compareCropY)) applied++;
+                    swOne.Stop();
+                    per[i] = swOne.Elapsed.TotalMilliseconds;
+                    await System.Threading.Tasks.Task.Delay(16);
+                }
+                swAll.Stop();
+                var frameEnd = SnapshotTuple(_sync.ReadAllSnapshots());
+                var moved = new long[frameEnd.Length];
+                for (var i = 0; i < frameEnd.Length && i < frameStart.Length; i++)
+                    moved[i] = frameEnd[i].presented - frameStart[i].presented;
+                var commitWall = Math.Max(0.001, swAll.Elapsed.TotalSeconds);
+                var commitFps = moved.Length > 0 ? moved.Sum() / commitWall / moved.Length : 0.0;
+                Array.Sort(per);
+                Console.WriteLine(
+                    $"magnifybench: [平移提交] z={zoom:0.#} n={CommitCalls} 生效={applied} " +
+                    $"cropA={cropA:F4} cropB={cropB:F4} 单次 p50={per[CommitCalls / 2]:F2} " +
+                    $"p95={per[(int)(CommitCalls * 0.95) - 1]:F2} max={per[^1]:F2} ms ⇒ " +
+                    $"{CommitCalls / commitWall:F0} 次/秒 提交下 {commitFps:F2} fps/路（观测，不判红）");
+                Console.Out.Flush();
+            }
 
             // 可选：放大**生效之后**再把窗口拉大，验证「拉大窗口绕过闸门」这条被堵死
             // （闸门必须在真正分配之前复核，而不是只在入口检查一次）。置 _3FC_BENCH_MAXIMIZE_AFTER=1。
@@ -4849,6 +5852,51 @@ public partial class MainWindow : Window
         {
             _step = stepBeforeAssert;
         }
+
+        // ── 放大态拖动的"拖动中就提交"判据（2026-09-29 改的行为，之前只有成本实测没有功能判据）──
+        // 走生产同一条链：置 _panDragging（原本由 OnSurfacePress 做）→ BeginComparePan → OnSurfaceMove。
+        // **不调 OnSurfaceRelease** —— 本条要验的正是"没松手也已经提交"。
+        // 先把 crop 播到一个已知中段值：贴 0 或贴上界时钳位会吞掉位移，那种"没变"是几何极限，
+        // 会把判据变成随机红。dx 取正、dy 取 0 ⇒ 顺带验两轴独立（纵轴必须一动不动）。
+        _step = "对比-拖动实时提交";
+        if (!SetCompareMagnify(_compareZoom, 0.06, 0.06))
+            throw new InvalidOperationException("拖动判据前置失败：SetCompareMagnify 拒绝把 crop 播到 (0.06,0.06)");
+        UpdateLayout();
+        await System.Threading.Tasks.Task.Delay(120);
+
+        if (!GetCursorPos(out var dragSeed))
+            throw new InvalidOperationException("拖动判据前置失败：GetCursorPos 取不到游标（本判据靠它的差值造位移）");
+
+        var cropXSeed = _compareCropX;
+        var cropYSeed = _compareCropY;
+        _panDragging = true;
+        BeginComparePan();
+        // 假装"上一次"的游标在左边 24 物理像素处 ⇒ 本次 dx = +24（画面右移 = crop 左移）。取小位移是因为 140
+        // 会把 crop 一口气推到 0 钳位，那时"变了"可能只是顶到头，分不清是不是真提交了。
+        _panLastX = dragSeed.X - 24;
+        _panLastY = dragSeed.Y;
+        try
+        {
+            OnSurfaceMove(0, 0);
+        }
+        finally
+        {
+            _panDragging = false;
+        }
+
+        if (!(_compareCropX < cropXSeed - 1e-9))
+            throw new InvalidOperationException(
+                $"放大态拖动没有实时提交：一次 OnSurfaceMove(dx=+24) 后 crop 仍是 " +
+                $"({_compareCropX:F4},{_compareCropY:F4})，播种值 ({cropXSeed:F4},{cropYSeed:F4})。" +
+                "拖动中必须按 ~60Hz 合并提交一次（--magnifybench 的 [平移提交] 实测 p95 0.27ms、" +
+                "34 次/秒零 hitch），否则用户看到的就是\"拖着不动、松手才跳\"");
+        if (Math.Abs(_compareCropY - cropYSeed) > 1e-9)
+            throw new InvalidOperationException(
+                $"拖动只该动横轴，纵轴却从 {cropYSeed:F4} 变成 {_compareCropY:F4} ⇒ 两轴换算串了");
+
+        Console.WriteLine(
+            $"comparemodetest: 拖动实时提交 ✓ 未松手即提交，crop ({cropXSeed:F4},{cropYSeed:F4}) → " +
+            $"({_compareCropX:F4},{_compareCropY:F4})（纵轴未动）");
 
         // 缩到底必须退出放大：连续反向滚动，倍率单调回落到 1
         var guard = 0;

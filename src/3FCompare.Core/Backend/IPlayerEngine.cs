@@ -58,6 +58,11 @@ public interface IPlayerSession : IDisposable
     /// panX/panY 为相对未缩放视频框的归一化偏移 [-1,1]。</summary>
     void SetViewTransform(float zoom, float panX, float panY);
 
+    /// <summary>3FCompare 内核扩展：把适配盒封顶到源原生尺寸。开启后 <see cref="SetViewTransform"/>
+    /// 的 zoom 就是 屏幕像素/视频像素 之比——zoom=1 为逐像素 1:1（窗口比源大时留黑边），
+    /// 而不是"放大到窗口"。内核不支持时抛 <see cref="EngineException"/>。</summary>
+    void SetFitLimitToNative(bool enable);
+
     /// <summary>读取当前快照（高频安全）。</summary>
     EngineSnapshot ReadSnapshot();
 
@@ -114,6 +119,14 @@ public sealed record EngineSessionOptions
     /// 绕过显示器 HDR 能力门控（针对亮度字段缺失的电视/虚拟显示器）；
     /// 不影响"SDR 源强制回 SDR"的内容门控。默认 false = 按显示器探测结果自动降级。</summary>
     public bool ForceHdrOutput { get; init; }
+
+    /// <summary>SDR 源的 scRGB 呈现策略（内核 v16）。
+    /// 0 = 从不：SDR 源始终走 8/10bit sRGB 交换链（历史行为）；
+    /// 1 = 自动：显示器开启 Advanced Color 时，位深 &gt; 8 或广色域 primaries 的 SDR 源
+    /// 改走 16bit scRGB 链，避免在 gamma R10G10B10A2 链上被 DWM 二次处理、
+    /// 以及广色域被着色器折叠回 Rec.709。
+    /// 显示器未开启 Advanced Color（或交换链拒绝 scRGB）时仍回退 SDR 链。默认 0。</summary>
+    public int SdrScRgbMode { get; init; }
 
     /// <summary>VRR 低延迟呈现（内核扩展）： tearing=true 选择 Present(0, ALLOW_TEARING)，
     /// 让 G-SYNC/FreeSync 显示器按自身节奏扫描输出；false 保持 VSync 锁定（无撕裂）。

@@ -1,4 +1,4 @@
-// ---------------------------------------------------------------------------
+﻿// ---------------------------------------------------------------------------
 // MainWindow 的播放控制分部：倍速 / 帧步进 / 播放暂停 / A-B 循环 / 时间轴刮擦 /
 // 快照轮询与停滞恢复 / 时间码换算。
 //
@@ -292,6 +292,29 @@ public partial class MainWindow
 
     // ══════════ 轮询（WinForms PollSnapshots 移植） ══════════
 
+    /// <summary>轮询到"每个<b>启用</b>且未失败的路都满足 <paramref name="settled"/>"，或超时。
+    /// 返回是否在超时前成立。</summary>
+    /// <remarks>为什么要有它：内核的状态命令是"守卫在调用那一刻读 state、动作排队到工作线程执行"，
+    /// 所以发完命令不等于状态变了。任何"发一个状态命令、再发下一个"的序列都必须**读回来**，
+    /// 否则两条命令会被同一个守卫各挡一次（详见轻量恢复里那段 #42 注释）。</remarks>
+    private async Task<bool> WaitRoutesSettledAsync(Func<EngineSnapshot, bool> settled, int timeoutMs)
+    {
+        var deadline = Environment.TickCount64 + timeoutMs;
+        while (true)
+        {
+            var snaps = _sync.ReadAllSnapshots();
+            var pending = 0;
+            for (var i = 0; i < snaps.Count && i < _sync.Slots.Count; i++)
+            {
+                if (_sync.Slots[i].Failed || !_sync.Slots[i].Active) continue;
+                if (snaps[i] is { } s && !settled(s)) pending++;
+            }
+            if (pending == 0) return true;
+            if (Environment.TickCount64 >= deadline) return false;
+            await Task.Delay(40);
+        }
+    }
+
     /// <summary>呈现停滞看门狗（判定逻辑已下沉到 Core.Sync.RenderStallWatchdog，
     /// 便于单测；历史上 P1-5/P1-6 两个缺陷都出在判定上）。</summary>
     private readonly _3FCompare.Core.Sync.RenderStallWatchdog _stallWatch =
@@ -352,6 +375,10 @@ public partial class MainWindow
 
     private async System.Threading.Tasks.Task PollSnapshotsCoreAsync()
     {
+        // #42：被内核状态守卫拒掉的"起播"在这里补发（挂起意图由 SyncController 自己记账，
+        // 用户主动暂停的路不在账上 ⇒ 不会把暂停叫醒）。没有挂起意图时它只是一次空遍历。
+        _sync.RetryPendingPlays();
+
         // 1 秒低频心跳：本方法是 UI 线程上唯一的周期性节拍，借它把"崩前各组件在做什么"
         // 压进组件日志（节奏由 ComponentLog.HeartbeatDue 内部节流，这里每拍调用一次即可）。
         // 刻意放在两处 early-return（无会话 / 会话重建中）**之前**——恰恰是这两种状态最需要留痕。
@@ -431,8 +458,35 @@ public partial class MainWindow
                         try
                         {
                             _sync.Pause();
-                            await Task.Delay(120);
+                            // ⚠ 这里原来写的是 `await Task.Delay(120)` 然后直接 Play —— 那是**赌**，不是等。
+                            //   内核两个入口的状态守卫读的是**调用那一刻**的 state，而真正的动作被 Enqueue 到
+                            //   会话工作线程上稍后才执行（PlayerSession.cpp：`Pause(){ if (state != Playing)
+                            //   return InvalidState; Enqueue(...); }`，`Play(){ if (state ∉ {Ready,Paused,Ended})
+                            //   return InvalidState; Enqueue(...); }`）。工作线程被 4K 解码/被第三方改写的
+                            //   DXGI Present 卡住超过 120ms 时：Play 看到的仍是 Playing ⇒ 直接空转返回，
+                            //   随后排队中的那条 Pause 才落地 ⇒ **这一路被永久停在 Paused**，而 UI 以为在播；
+                            //   `TickDriftCore` 又刻意不校正 Paused 路（那是 multitest 依赖的语义）⇒ 没有任何
+                            //   机制会恢复它。这正是 #42 的形状。改成"读回来再发下一步"。
+                            var pausedLanded = await WaitRoutesSettledAsync(
+                                static s => s.State != PlayerState.Playing, 1000);
+                            if (!pausedLanded)
+                                ComponentLog.Log(Comp.Sync, "LightRecoveryPauseNotLanded", -1,
+                                    "1s 内仍有路读作 Playing ⇒ 会话工作线程被卡住，Play 可能被状态守卫挡掉");
                             _sync.Play();
+                            // 补一次的机会仍然存在（Pause 恰好排在 Play 之后落地时，上面那次 Play 会被守卫挡掉），
+                            // 所以发完还要**读回**，不是发完就当成功。
+                            if (!await WaitRoutesSettledAsync(
+                                    static s => s.State == PlayerState.Playing, 1000))
+                            {
+                                ComponentLog.Log(Comp.Sync, "LightRecoveryReplay", -1,
+                                    "读到非 Playing ⇒ 补发一次 Play 再读");
+                                _sync.Play();
+                                var replayed = await WaitRoutesSettledAsync(
+                                    static s => s.State == PlayerState.Playing, 1000);
+                                Console.Error.WriteLine(replayed
+                                    ? "[MainWindow] 轻量恢复：补发 Play 后全部回到 Playing ✓"
+                                    : "[MainWindow] ⚠ 轻量恢复后仍有路不在 Playing（见组件日志 LightRecoveryReplay）");
+                            }
                             // 尺寸变化（最大化 / 还原 / 拖动分隔条）导致的停滞，
                             // 根因是交换链停止 flips —— 内核要求由应用调 Redraw
                             // 才会继续呈现，光 Pause→Play 唤不醒（见 SyncController.RedrawAll）。

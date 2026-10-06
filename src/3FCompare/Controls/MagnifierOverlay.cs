@@ -1,4 +1,5 @@
 using Avalonia;
+using _3FCompare.Themes;
 using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
@@ -11,7 +12,7 @@ using _3FCompare.Core.Imaging;
 namespace _3FCompare.Controls;
 
 /// <summary>放大镜覆盖层（WinForms MagnifierOverlay 对应）：
-/// 192×144（12×12 采样网格 × 16px 块）十字线/对齐网格/4x 坐标注记 +
+/// 192×144（12×12 采样网格 × 16px 块）十字线/对齐网格/4x 坐标注记/光标格描边 +
 /// 光标邻域像素放大内容；随光标定位，鼠标不命中（IsHitTestVisible=false）。</summary>
 public sealed class MagnifierOverlay : Control
 {
@@ -25,7 +26,7 @@ public sealed class MagnifierOverlay : Control
     private bool _gridHdr;
 
     private const int Zoom = 4;
-    private const int ZoomGrid = 12; // 12×12 采样网格 → 放大到 16px 块 = 192px
+    internal const int ZoomGrid = 12; // 12×12 采样网格 → 放大到 16px 块 = 192px
 
     /// <summary>浮窗宽（= ZoomGrid × 16px 块）。
     /// 过去这里是硬写的 160，而构造函数里 Width 实际是 192 —— 两者不一致，
@@ -209,31 +210,49 @@ public sealed class MagnifierOverlay : Control
     private long _lastReadTicks;
     private int _lastGx = -1, _lastGy = -1;
 
+    // 最近一次**成功回读**那块的采样窗口左上角（-1 = 还没有可信窗口）。
+    // 必须与 _pixelGrid 同生同灭（与 _gridBitDepth/_gridHdr 同一约束）：光标格是把光标
+    // 物理坐标映射进"缓冲里的那一格"，窗口记错就标错格。
+    // 置 null 的三处生产分支要一并归哨兵——AttachSession 的 ??= 会把缓冲重新造出来，
+    // 那时若窗口还是上一路的，标记格就会对着全黑缓冲乱指。
+    private int _gridLeft = -1, _gridTop = -1;
+
+    // 光标物理坐标与 _gridLeft/_gridTop **故意不同源**：坐标是实时的，窗口是"最近一次成功
+    // 回读"的那块。对不上（窗口被移动而回读还挡在节流后面）时 TryCursorCell 返回 null，
+    // 宁可不画也不把标记按在中心格上。写入时机见 RefreshPixels 开头。
+    private int _cursorPixelX = -1, _cursorPixelY = -1;
+
     private void RefreshPixels(Point localInSurface, double renderScaling)
     {
+        // DIP → 物理像素：DPI 非 100% 时漏掉这步会整体偏移一个缩放倍数
+        // （原实现注释自认"本类不知道 scaling，用 1 兜底"，即永远漏乘）。
+        //
+        // ⚠ 这两个值是本方法**第一段语句**，不能挪到下面任何 return 之后：节流与
+        // "网格未移动"两处提前返回期间光标仍在动（在同一个 12×12 窗口里移动时根本不回读），
+        // 标记格却必须跟着光标换格 —— 只在回读路径上记，窗口内的移动就整段丢显。
+        // 它只依赖 renderScaling、不依赖回读结果，因此可以（也应当）放在最前面。
+        var scale = renderScaling > 0 ? renderScaling : 1.0;
+        _cursorPixelX = (int)(localInSurface.X * scale);
+        _cursorPixelY = (int)(localInSurface.Y * scale);
+
         // 注意：判据里不能含 "_pixelGrid is null"。它一旦被置 null（读回失败 / 引擎未就绪），
         // 就会永远命中同一判据提前返回，再也进不到下面重新赋值的分支 —— 永久只剩空框。
         if (_session is null || !_session.ReadRenderTargetInfo(out var rt) ||
             rt.SwapWidth == 0 || rt.SwapHeight == 0)
         {
             _pixelGrid = null;
+            _gridLeft = _gridTop = -1;
             return;
         }
         try
         {
-            // DIP → 物理像素：DPI 非 100% 时漏掉这步会整体偏移一个缩放倍数
-            // （原实现注释自认"本类不知道 scaling，用 1 兜底"，即永远漏乘）。
-            var scale = renderScaling > 0 ? renderScaling : 1.0;
-            var centerX = (int)(localInSurface.X * scale);
-            var centerY = (int)(localInSurface.Y * scale);
-
             // 采样网格宽 ZoomGrid 像素，以中心为参考。
             // 后台缓冲尺寸可能小于 ZoomGrid（极小窗口），此时上界会变负 → 归零。
             var half = ZoomGrid / 2;
             var maxX = Math.Max(0, (int)rt.SwapWidth - ZoomGrid);
             var maxY = Math.Max(0, (int)rt.SwapHeight - ZoomGrid);
-            var gx = Math.Clamp(centerX - half, 0, maxX);
-            var gy = Math.Clamp(centerY - half, 0, maxY);
+            var gx = Math.Clamp(_cursorPixelX - half, 0, maxX);
+            var gy = Math.Clamp(_cursorPixelY - half, 0, maxY);
 
             // 节流：TryReadPixelRegion 是**同步** P/Invoke，内部要等 GPU staging 拷贝完成
             // （强制管线同步）。指针移动事件可达每帧数十次，逐个回读会拖慢渲染；
@@ -255,16 +274,53 @@ public sealed class MagnifierOverlay : Control
             if (!_session.TryReadPixelRegion(gx, gy, ZoomGrid, ZoomGrid, buffer, out _))
             {
                 _pixelGrid = null;
+                _gridLeft = _gridTop = -1;
                 return;
             }
             _pixelGrid = buffer;
+            _gridLeft = gx;
+            _gridTop = gy;
             _gridBitDepth = rt.OutputBitDepth;
             _gridHdr = rt.Hdr;
         }
         catch
         {
             _pixelGrid = null; // 引擎未就绪时放大镜只画框架
+            _gridLeft = _gridTop = -1;
         }
+    }
+
+    /// <summary>把光标的物理像素坐标映射到采样窗口内的格号（纯计算，不碰 GPU 也不碰视觉树）。
+    ///
+    /// <para>抽成 <c>internal static</c> 纯函数的理由同 <see cref="PlaceOverlay"/>：
+    /// "哪一格在光标下"是这条链上唯一与渲染有关、又能脱离窗口验算的算术，
+    /// Render 需要窗口与绘屏上下文，离线量不到，只能把映射单独钉住。</para>
+    ///
+    /// <para><b>为什么必须有这个映射</b>：RefreshPixels 里的 (gx,gy) 是 <c>Math.Clamp</c> 过的，
+    /// 后台缓冲被钳在 [0, swap-网格]，贴着边缘时窗口整体滑离"以光标为中心"的位置 ——
+    /// 光标像素仍在窗口里，但不再落在中心格 (6,6)。不标出真实格号，边缘处的放大镜
+    /// 就只是"一坨不知道哪点对着指针"的色块，正是本轮的用户投诉。</para>
+    ///
+    /// <para><b>为什么越界返回 null 而不是硬标中心格</b>：还有两种情况光标像素真的不在
+    /// 这块窗口里——"窗口已移动但回读被节流/网格未移动挡住"（缓冲显示的还是旧窗口），
+    /// 以及光标落在后台缓冲之外（surface 比 swap chain 大 / 信箱边距）。
+    /// 这时标中心格就是撒谎，而"放大镜跟着指针"正是这块浮窗唯一的存在理由；
+    /// 不画最多是暂时少一个提示。</para></summary>
+    /// <param name="cursorX">光标物理像素 X（DIP × renderScaling，见 RefreshPixels）。</param>
+    /// <param name="cursorY">光标物理像素 Y。</param>
+    /// <param name="gridLeft">当前缓冲对应的采样窗口左上角 X；负值是"还没有可信窗口"的哨兵。</param>
+    /// <param name="gridTop">采样窗口左上角 Y。</param>
+    /// <param name="gridSize">采样窗口边长（ZoomGrid）。</param>
+    internal static (int Col, int Row)? TryCursorCell(
+        int cursorX, int cursorY, int gridLeft, int gridTop, int gridSize)
+    {
+        // 负原点在本控件里只有一种来源：从未成功回读（_gridLeft 初值 / 失败分支置 -1）。
+        // 真实的 gx 被钳在 [0, swap-网格] 内，永远不为负，所以这里按"不可信"处理。
+        if (gridSize <= 0 || gridLeft < 0 || gridTop < 0) return null;
+        var col = cursorX - gridLeft;
+        var row = cursorY - gridTop;
+        if (col < 0 || col >= gridSize || row < 0 || row >= gridSize) return null;
+        return (col, row);
     }
 
     public void HideOverlay()
@@ -281,6 +337,9 @@ public sealed class MagnifierOverlay : Control
     // 只为消除硬编码副本（单一真源见 ThemeTokens）。
     private IBrush _backdrop = new SolidColorBrush(Color.Parse(ThemeTokens.Get("OverlayScrimBrush").Dark));
     private Pen _accentPen = new(new SolidColorBrush(Color.Parse(ThemeTokens.Get("AccentBrush").Dark)), 2);
+    // 光标格标记用的细描边：不复用 _accentPen 的 2px —— 一格只有 16px，描边居中一半压在格内，
+    // 粗边会吃掉相邻格的内容，标记本身反倒成了遮挡。
+    private Pen _cursorCellPen = new(new SolidColorBrush(Color.Parse(ThemeTokens.Get("AccentBrush").Dark)), 1);
     private Pen _gridLinePen = new(new SolidColorBrush(Color.Parse(ThemeTokens.Get("OverlayGridBrush").Dark)), 1);
     private IBrush _caption = new SolidColorBrush(Color.Parse(ThemeTokens.Get("TextSecondaryBrush").Dark));
     private ThemeVariant? _themeTag;
@@ -291,6 +350,7 @@ public sealed class MagnifierOverlay : Control
         _themeTag = ActualThemeVariant;
         _backdrop = ThemePalette.Brush(this, "OverlayScrimBrush");
         _accentPen = new Pen(ThemePalette.Brush(this, "AccentBrush"), 2);
+        _cursorCellPen = new Pen(ThemePalette.Brush(this, "AccentBrush"), 1);
         _gridLinePen = new Pen(ThemePalette.Brush(this, "OverlayGridBrush"), 1);
         _caption = ThemePalette.Brush(this, "TextSecondaryBrush");
         _captionText = null; // 握着旧画笔，必须重建
@@ -332,11 +392,14 @@ public sealed class MagnifierOverlay : Control
         dc.DrawRectangle(_backdrop, null, rect);
         dc.DrawRectangle(null, _accentPen, rect);
 
+        // 格宽两处共用（像素块 + 光标格标记）：提到 if 外面，避免两处各算一份，
+        // 口径一旦不一致，标记框就和实际画出来的格错开半个像素。
+        var cellW = rect.Width / ZoomGrid;
+        var cellH = rect.Height / ZoomGrid;
+
         // 像素内容：把采样网格最近邻放大成 M×M 块
         if (_pixelGrid is not null)
         {
-            var cellW = rect.Width / ZoomGrid;
-            var cellH = rect.Height / ZoomGrid;
             for (var gy = 0; gy < ZoomGrid; gy++)
             {
                 for (var gx = 0; gx < ZoomGrid; gx++)
@@ -368,6 +431,17 @@ public sealed class MagnifierOverlay : Control
             dc.DrawLine(line, new Point(rect.X, rect.Y + rect.Height * i / 4), new Point(rect.Right, rect.Y + rect.Height * i / 4));
         }
 
+        // 光标所在格的描边：画在网格线之后，否则十字线/1/4 线会把它压住一半。
+        // 贴边时窗口被钳过、光标不在中心格 —— 这里按真实格号描边（正是"放大镜跟指针脱节"
+        // 的成因）；回读落后于光标或光标落在缓冲之外时 TryCursorCell 返回 null，
+        // 宁可不画也不把标记硬按在中心格上（判据与理由见该方法）。
+        if (_pixelGrid is not null &&
+            TryCursorCell(_cursorPixelX, _cursorPixelY, _gridLeft, _gridTop, ZoomGrid) is { } cursorCell)
+        {
+            dc.DrawRectangle(null, _cursorCellPen,
+                new Rect(rect.X + cursorCell.Col * cellW, rect.Y + cursorCell.Row * cellH, cellW, cellH));
+        }
+
         if (_captionText is null || Math.Abs(_captionZoom - Zoom) > 0.01)
         {
             _captionText = new FormattedText($"{Zoom:0}x", System.Globalization.CultureInfo.CurrentCulture,
@@ -396,4 +470,11 @@ public sealed class MagnifierOverlay : Control
         b = _pixelGrid[i + 2];
         return true;
     }
+
+    /// <summary>自测取证用：最近一次成功回读的窗口左上角 + 当次光标物理坐标。
+    /// 中心格恒为 <c>(ZoomGrid/2, ZoomGrid/2)</c> ⇒ 放大镜实际读到的缓冲像素是
+    /// <c>(GridLeft + 6, GridTop + 6)</c>。"放大镜和探针读的不是同一格"这种失配，
+    /// 只有把这个坐标摊出来才分得清是**格号差**还是**同一格给出两个值**（后者才是坐标算错）。</summary>
+    internal (int GridLeft, int GridTop, int CursorX, int CursorY) SampleWindowForSelfTest =>
+        (_gridLeft, _gridTop, _cursorPixelX, _cursorPixelY);
 }

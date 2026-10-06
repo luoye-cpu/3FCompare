@@ -43,6 +43,33 @@ public class SyncControllerIntegrationTests
         return (sync, engine);
     }
 
+    /// <summary>视图变换的跨会话一致性（2026-09-29 发现）：广播过一次放大<b>之后</b>才建的会话
+    /// （加路、把新文件开进空 lane、崩溃自愈重建都走这条路）必须立刻拿到同一变换。
+    ///
+    /// <para><b>为什么这是缺陷而不是"没做"</b>：<c>SyncController.SetViewTransform</c> 自己的注释是
+    /// "保证多路看到同一区域"，但它只向**当时存在**的会话广播、不留状态 ⇒ 后建那一路停在"铺满窗口"、
+    /// 老路仍在 4×，多路看到的区域不再相同，而屏幕上没有任何提示。用户随后随手一拖会把整套值广播过去，
+    /// 表现为"那一路突然跳一下放大"。</para></summary>
+    [Fact]
+    public void AddSlot_AfterSetViewTransform_NewSessionReceivesSameTransform()
+    {
+        var (sync, engine) = CreateSync(1);
+        try
+        {
+            sync.SetViewTransform(4f, 0.2f, -0.3f);
+            var first = (FakeSession)sync.Slots[0].Session;
+            Assert.Single(first.ViewTransforms);                   // 前置：当时存在的那一路确实收到了
+
+            var late = (FakeSession)engine.CreateSession(
+                new EngineSessionOptions { OutputWindow = 0, HardwareDecode = false });
+            late.OpenAsync("late.mp4").GetAwaiter().GetResult();
+            sync.AddSlot(late, "late.mp4");
+
+            Assert.Equal(new[] { (4f, 0.2f, -0.3f) }, late.ViewTransforms);
+        }
+        finally { sync.Clear(); }
+    }
+
     [Fact]
     public void MultiSession_AllSlotsSeekTogether()
     {

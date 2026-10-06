@@ -1,4 +1,5 @@
-﻿using System;
+﻿﻿﻿using System;
+using _3FCompare.Themes;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -10,7 +11,7 @@ using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using Avalonia.Media;
-using _3FCompare.App;
+using _3FCompare.Localization;
 using _3FCompare.Controls;
 using _3FCompare.Panels;
 using _3FCompare.Platform;
@@ -1508,8 +1509,11 @@ public partial class MainWindow : Window
         var rt = _lastRtInfo;
         if (rt is { } r && r.SwapWidth > 0 && r.SwapHeight > 0)
             parts.Add($"{r.SwapWidth}×{r.SwapHeight}");
-        var zoom = PlayerSurface.SharedZoom;
-        if (zoom > 1.001f) parts.Add($"×{zoom:0.##}");
+        // 这里原来还有一格 `×{SharedZoom}`，已删（2026-09-29 用户口径对齐）：它是**相对适配框**
+        // 的倍率，×1 的含义是"恰好铺满窗口"，与片源尺寸无关 —— 长得像"屏幕:视频"却不是说这件事。
+        // 真正那个绝对比值由下面的可信度串给出（RatioX/RatioY = zoom/pan **之后**的 Dest ÷ 源尺寸，
+        // 滚轮改倍率时它跟着变，所以缩放反馈没丢）。留两个"×"并列正是"像素和光标对不上"这类
+        // 误解的来源；比值不可用时宁可这格空着，也不拿相对倍率冒充。
         // 3.1-UI（docs/26 D1）：像素可信度——档位 + 缩放比 + 文案。
         if (_lastFidelity.IsUsable) parts.Add(DescribeFidelity(_lastFidelity));
         StatusView.Text = string.Join("   ", parts);
@@ -1615,9 +1619,7 @@ public partial class MainWindow : Window
             // 不是单路 _viewZoom —— 后者是内核插值放大，各路也不会同步。
             if (TryHandleCompareWheel((short)(Math.Sign(e.Delta.Y) * 120))) { e.Handled = true; return; }
 
-            var factor = e.Delta.Y > 0 ? 1.15f : 1f / 1.15f;
-            _viewZoom = Math.Clamp(_viewZoom * factor, 1f, 32f);
-            ApplyViewTransform();
+            ZoomStepKeepingCursorAnchor(e.Delta.Y > 0 ? 1 : -1);
             e.Handled = true;
         }
     }
@@ -1627,6 +1629,10 @@ public partial class MainWindow : Window
 
     private bool _panDragging;
     private int _panLastX, _panLastY;
+    /// <summary>本次拖动命中的那一路。平移量是<b>共享</b>的（一次下发作用于各路），
+    /// 但换算 pan 的<b>量程基准</b>必须来自被拖那一路的实机绘制盒 —— 多路时各路盒子远小于窗口，
+    /// 黑边时同一路的横/纵量程也不等（见 <see cref="_3FCompare.Platform.ViewPan"/>）。</summary>
+    private PlayerSurface? _panSurface;
     /// <summary>窗口正在关闭（D4）。
     /// <para><c>volatile</c>：赋值发生在 UI 线程（OnClosing），读取发生在
     /// <c>RecoverFromFailedAsync</c> 的 await 续体（可能是线程池线程）——
@@ -1650,9 +1656,64 @@ public partial class MainWindow : Window
         // 两条路径都改"看起来像缩放"的量，同时生效会互相打架（窗口尺寸 vs 内核视口）。
         if (TryHandleCompareWheel(delta)) return;
 
-        var factor = delta > 0 ? 1.15f : 1f / 1.15f;
-        _viewZoom = Math.Clamp(_viewZoom * factor, 1f, 32f);
+        ZoomStepKeepingCursorAnchor(delta > 0 ? 1 : -1);
+    }
+
+    /// <summary>滚轮一格：改倍率时把<b>光标下那一点钉在光标下</b>，而不是围绕画面中心放缩。
+    ///
+    /// <para><b>为什么原来"像素和光标固定不上"</b>：旧实现只动 <c>_viewZoom</c>、不动
+    /// <c>_viewPan</c> ⇒ 内核始终围绕<b>拟合盒中心</b>放缩（<c>VideoRenderer.cpp:4826-4829</c>），
+    /// 光标不在中心时每格滚轮那点都会朝中心方向滑一段，放大十几格就完全找不到原处。
+    /// 锚点式与钳位区间的推导见 <see cref="_3FCompare.Platform.ViewPan.AnchorPan"/>。</para>
+    ///
+    /// <para><b>退化约定</b>：光标落在黑边时改钉"可见区中心当前对着的那一点"（见
+    /// <see cref="WheelAnchorFractions"/>）；缩回 1× 时量程塌缩，pan 归零。
+    /// 顶到 1 或 32 端点时<b>什么都不动</b> —— 不发"抖一下"的无效变换。</para></summary>
+    private void ZoomStepKeepingCursorAnchor(int direction)
+    {
+        var z0 = _viewZoom;
+        var factor = direction > 0 ? 1.15f : 1f / 1.15f;
+        var z1 = Math.Clamp(z0 * factor, 1f, 32f);
+        if (Math.Abs(z1 - z0) < 1e-6) return;
+
+        var (u, v) = WheelAnchorFractions();
+        _viewZoom = z1;
+        _viewPanX = ViewPan.AnchorPan(_viewPanX, u, z0, z1);
+        _viewPanY = ViewPan.AnchorPan(_viewPanY, v, z0, z1);
         ApplyViewTransform();
+    }
+
+    /// <summary>滚轮放缩要钉住的那个<b>源画面归一化坐标</b>（横除源宽、纵除源高）。
+    ///
+    /// <para>优先光标下那一点。光标落在<b>黑边</b>时（扁格里黑边占大半画面，这是常态而不是意外）
+    /// 退到"这一路可见区中心当前正对着的那一点"= 围绕可见画面中心放缩 —— 连续、不跳。</para>
+    ///
+    /// <para><b>为什么不能拿 0.5 兜底</b>：0.5 是"源画面的中心"，与"当前视口的中心"在已平移的
+    /// 状态下是两个不同的点 —— 拿它兜底会把画面猛地拽回源中心，用户会觉得"一滚就飞"。
+    /// 只有连表面都命中不到（会话未就绪 / 演示模式，此时内核本就不应用变换）才用 0.5。</para></summary>
+    private (double U, double V) WheelAnchorFractions() =>
+        _3FCompare.Platform.ViewPan.ResolveAnchorFraction(
+            CursorSourceFraction() is { } a ? (a.U, a.V) : null,
+            VisibleCenterFractionsAtCursor());
+
+    /// <summary>光标所在那一路的<b>可见区中心当前正对着的源坐标</b>（黑边退化锚）；取不到返回 null。</summary>
+    private (double U, double V)? VisibleCenterFractionsAtCursor()
+    {
+        if (!GetCursorPos(out var pt) || SurfaceAtScreenPoint(pt) is not { } sv) return null;
+        return VisibleCenterFractions(sv);
+    }
+
+    /// <summary>该路可见区中心（= 表面中心）正对着的源归一化坐标；会话不可用时返回 null。
+    /// <para>两条缩放路径（单路 <see cref="WheelAnchorFractions"/> 与对比模式
+    /// <c>TryHandleCompareWheel</c> 的相对对齐支）共用这一条，避免"同一个退化各写一份、
+    /// 一份跳一份不跳"。</para></summary>
+    internal (double U, double V)? VisibleCenterFractions(PlayerSurface surface)
+    {
+        var slots = _sync.Slots;
+        if (surface.Index < 0 || surface.Index >= slots.Count ||
+            slots[surface.Index].Session is not { } session) return null;
+        var f = MapPointerToVideoFraction(surface, session, surface.Bounds.Center);
+        return f is { } g ? (g.U, g.V) : null;
     }
 
     /// <summary>文件拖入（PlayerSurface 子 HWND/覆盖层 WM_DROPFILES 转发）。
@@ -1671,8 +1732,14 @@ public partial class MainWindow : Window
         // 对比模式的无缝放大同样可拖动平移（改的是 crop，不是 _viewPan）。
         // 两条路径都用 _panDragging 表达"正在拖"，但提交的目标不同（见 OnSurfaceRelease）。
         var magnifyPan = CompareMagnifyActive;
-        Console.Error.WriteLine($"[Pan] OnSurfacePress zoom={_viewZoom:F3} magnify={magnifyPan} willDrag={_viewZoom > 1.001f || magnifyPan}");
-        if (_viewZoom > 1.001f || magnifyPan)
+        // "能不能拖"取决于内核有没有平移量程 —— 现在是 **两侧**：放大时盒子比窗口大、
+        // 缩小时盒子比窗口小但能在黑边里走。写死 `zoom > 1.001f` 的那份是旧内核语义
+        // （z ≤ 1 整段跳过变换），与内核放开 |z−1|>1e-4 之后不一致 ⇒ 会出现
+        // "内核认 pan、app 不给拖"。判据交给同一条 ViewPan.KernelAppliesTransform，
+        // 门槛只留一处（诊断行与分支必须读同一个值，否则日志与行为会各自说一套）。
+        var hasTravel = _3FCompare.Platform.ViewPan.KernelAppliesTransform(_viewZoom);
+        Console.Error.WriteLine($"[Pan] OnSurfacePress zoom={_viewZoom:F3} magnify={magnifyPan} willDrag={hasTravel || magnifyPan}");
+        if (hasTravel || magnifyPan)
         {
             _panDragging = true;
             if (magnifyPan) BeginComparePan();
@@ -1681,7 +1748,11 @@ public partial class MainWindow : Window
             GetCursorPos(out var pt);
             _panLastX = pt.X;
             _panLastY = pt.Y;
-            Console.Error.WriteLine($"[Pan] Dragging started at screen ({pt.X},{pt.Y})");
+            // 记住被拖那一路：pan 的量程基准是它的实机绘制盒，不是窗口短边（多路时各路盒子
+            // 远小于窗口，黑边时横纵还不等）。中途换路不改 —— 一次拖动的增益应当恒定，
+            // 否则光标划过格线就会突然变快/变慢，那正是"手感和倍数对不上"的另一半。
+            _panSurface = SurfaceAtScreenPoint(pt);
+            Console.Error.WriteLine($"[Pan] Dragging started at screen ({pt.X},{pt.Y}) lane={_panSurface?.Index ?? -1}");
         }
     }
 
@@ -1695,20 +1766,56 @@ public partial class MainWindow : Window
         _panLastX = pt.X;
         _panLastY = pt.Y;
 
-        // 放大态：只累积位移，**不**逐帧提交（逐帧改 crop ⇒ 逐帧 SetWindowRgn，
-        // 那是 docs/26 明确反对的高频路径）。松手时一次性提交，见 OnSurfaceRelease。
+        // 放大态：拖动过程中就跟着走（原来只在松手时一次性提交，于是"拖着不动、一松手跳过去"）。
+        // docs/26 当年反对"逐帧 SetWindowRgn"是**估算**；2026-09-29 用 --magnifybench 新加的
+        // [平移提交] 实测：z=2、2 路下 SetCompareMagnify 单次 p50=0.03ms / p95=0.27ms / max=0.78ms，
+        // 连续 34 次/秒提交期间出帧 59.87 fps/路，与同轮基准 58.92 / 放大态 59.14 持平且零 hitch
+        // ⇒ 按 ~60Hz 合并提交负担得起。日志：tests/output/magnifybench-pancommit-z2-20260929.log
         if (CompareMagnifyActive)
         {
             AccumulateComparePan(dx, dy);
+            var nowMs = Environment.TickCount64;
+            if (nowMs - _lastCompareCommitTicks >= 16)
+            {
+                _lastCompareCommitTicks = nowMs;
+                CommitComparePan();   // 提交并清零累积量，松手时只补最后一段残余
+            }
             return;
         }
 
-        // 方向、DPI 量纲与短边归一化的理由都写在 ViewPan 里（那三条各错过一次，且离线才可验）。
-        var scaling = TopLevel.GetTopLevel(Grid)?.RenderScaling ?? RenderScaling;
-        (_viewPanX, _viewPanY) = ViewPan.Accumulate(_viewPanX, _viewPanY, dx, dy,
-            scaling, Math.Min(Bounds.Width, Bounds.Height));
+        // 方向、量程基准、以及"分母为什么是被拖那一路的适配盒而不是窗口短边"，都写在 ViewPan 里。
+        var (fitW, fitH) = DragFitBoxPhys(_panSurface);
+        (_viewPanX, _viewPanY) = ViewPan.Accumulate(_viewPanX, _viewPanY, dx, dy, fitW, fitH, _viewZoom);
         ApplyViewTransform();
     }
+
+    /// <summary>被拖那一路的<b>适配盒</b>（物理像素，即 <c>z=1</c> 时的等比绘制框）。
+    ///
+    /// <para>首选内核实机上报的 Dest 反推（<c>rt.DestWidth / z</c>）：只有实机数才含变形宽银幕的
+    /// 显示宽高比（<c>VideoRenderer.cpp:4804-4806</c> 按 <c>discAspect_</c> 折算源宽），自己按窗口
+    /// 尺寸算会得到另一个框。拿不到诊断信息（演示模式 / 旧内核）时退回"画面铺满该路表面"，
+    /// 与 <c>VideoPixelMap.MapFallbackFraction</c> 同一假设 —— 注意分母是<b>那一路</b>的 Bounds。</para>
+    /// <para>返回 (0,0) 表示无从换算，<see cref="ViewPan.Accumulate"/> 据此本次不动（不猜增益）。</para></summary>
+    private (double Width, double Height) DragFitBoxPhys(PlayerSurface? surface)
+    {
+        if (surface is not { } sv || sv.Bounds.Width <= 0 || sv.Bounds.Height <= 0) return (0, 0);
+
+        var slots = _sync.Slots;
+        if (sv.Index < 0 || sv.Index >= slots.Count) return (0, 0);
+        var session = slots[sv.Index].Session;
+        if (session is null) return (0, 0);
+
+        if (session.ReadRenderTargetInfo(out var rt) && rt.DestWidth > 0 && rt.DestHeight > 0)
+            return _3FCompare.Platform.ViewPan.FitBoxFromDest(rt.DestWidth, rt.DestHeight, _viewZoom);
+
+        var scale = TopLevel.GetTopLevel(Grid)?.RenderScaling ?? RenderScaling;
+        if (!(scale > 0)) scale = 1.0;
+        return (sv.Bounds.Width * scale, sv.Bounds.Height * scale);
+    }
+
+    /// <summary>屏幕物理坐标 → 该点命中的那一路表面（与选中/释放同一套命中换算，含 DPI 与外框偏移）。</summary>
+    private PlayerSurface? SurfaceAtScreenPoint(System.Drawing.Point screenPt) =>
+        HitSurfaceAt(this.PointToClient(new PixelPoint(screenPt.X, screenPt.Y)));
 
     /// <summary>左键释放（WndProc 转发）：结束平移或触发选中。
     /// 立即发送最终变换值确保松手后精确对齐，恢复轮询频率。</summary>
@@ -1747,8 +1854,7 @@ public partial class MainWindow : Window
         //   ① 没做物理像素 → DIP 换算（150% 缩放偏 1.5 倍、250% 偏 2.5 倍）；
         //   ② Position 是窗口外框左上角（含标题栏与边框），客户区原点在其下方。
         // 两者叠加会让高 DPI 用户点 A 画面却选中 B 画面，且缩放越大偏得越多。
-        var windowPos = this.PointToClient(new PixelPoint(pt.X, pt.Y));
-        if (HitSurfaceAt(windowPos) is { } clicked)
+        if (SurfaceAtScreenPoint(pt) is { } clicked)
         {
             Grid.SelectedIndex = clicked.Index;
             UpdatePanelsForSelection();
@@ -2267,8 +2373,24 @@ public partial class MainWindow : Window
     }
 
     /// <summary>探针坐标：表面 DIP → 物理后台缓冲像素 → destination 矩形内 → 源视频像素。
-    /// 3FCompare M3：旧实现直接用源分辨率等比映射，既漏了 RenderScaling 也漏了 letterbox。</summary>
+    /// 3FCompare M3：旧实现直接用源分辨率等比映射，既漏了 RenderScaling 也漏了 letterbox。
+    /// <para>整数像素是 <see cref="MapPointerToVideoFraction"/> 的截断出口 —— 两者必须是同一个点，
+    /// 否则"放大镜钉住的像素"与"界面报的第几列"会各说一套。</para></summary>
     private (int X, int Y)? MapPointerToVideoPixel(PlayerSurface surface, IPlayerSession session, Point local)
+    {
+        var f = MapPointerToVideoFraction(surface, session, local);
+        if (f is not { } v) return null;
+        return (_3FCompare.Core.Display.VideoPixelMap.FractionToPixel(v.U, v.VideoWidth),
+                _3FCompare.Core.Display.VideoPixelMap.FractionToPixel(v.V, v.VideoHeight));
+    }
+
+    /// <summary>指针 → 光标下那一点的<b>源画面归一化坐标</b>（<c>U=u/videoW</c>、<c>V=v/videoH</c>）
+    /// 与源尺寸；光标落在黑边 / 表面未布局 / 会话不可用时返回 null。
+    ///
+    /// <para>放大锚点用这一条（要亚像素），探针读值用整数出口。<b>不做截断再乘回</b>：那会把
+    /// 像素内的亚像素位置丢掉，而锚点误差是同向累加的（每格滚轮最多偏一个显示后的像素）。</para></summary>
+    private (double U, double V, int VideoWidth, int VideoHeight)? MapPointerToVideoFraction(
+        PlayerSurface surface, IPlayerSession session, Point local)
     {
         var media = session.ReadMediaInfo();
         if (media is null || media.VideoWidth <= 0 || media.VideoHeight <= 0 ||
@@ -2278,23 +2400,26 @@ public partial class MainWindow : Window
         var scale = TopLevel.GetTopLevel(this)?.RenderScaling ?? 1.0;
         var physX = local.X * scale;
         var physY = local.Y * scale;
+
+        // 2) 表面 → 后台缓冲（ShowInBounds 使 chain 尺寸 == client 尺寸，直接可用）
+        // 3) 落在 destination 之外（letterbox 黑边）→ null（光标下没有源画面）
+        // 4) destination 内 → 源画面的归一化位置
+        //    ⚠ destination 是内核 zoom/pan **之后**的绘制矩形（见 PixelReadback A11 注释），
+        //      所以这里已经是 zoom-aware 的，绝不能再叠一次倍率。
         if (!session.ReadRenderTargetInfo(out var rt) || rt.SwapWidth == 0 || rt.SwapHeight == 0)
         {
             // 无诊断信息（演示模式 ReadRenderTargetInfo 恒返回 false、旧内核同样不支持）：
             // 退回整面等比映射（漏 letterbox，但不越界）。
-            return _3FCompare.Core.Display.VideoPixelMap.MapFallback(
-                physX, physY,
-                surface.Bounds.Width * scale, surface.Bounds.Height * scale,
-                media.VideoWidth, media.VideoHeight);
+            var frac = _3FCompare.Core.Display.VideoPixelMap.MapFallbackFraction(
+                physX, physY, surface.Bounds.Width * scale, surface.Bounds.Height * scale);
+            if (frac is not { } fb) return null;
+            return (fb.U, fb.V, media.VideoWidth, media.VideoHeight);
         }
 
-        // 2) 表面 → 后台缓冲（ShowInBounds 使 chain 尺寸 == client 尺寸，直接可用）
-        // 3) 落在 destination 之外（letterbox 黑边）由 MapToSource 判为 null
-        // 4) destination 内 → 源视频像素
-        return _3FCompare.Core.Display.VideoPixelMap.MapToSource(
-            physX, physY,
-            rt.DestX, rt.DestY, rt.DestWidth, rt.DestHeight,
-            media.VideoWidth, media.VideoHeight);
+        var mapped = _3FCompare.Core.Display.VideoPixelMap.MapToSourceFraction(
+            physX, physY, rt.DestX, rt.DestY, rt.DestWidth, rt.DestHeight);
+        if (mapped is not { } m) return null;
+        return (m.U, m.V, media.VideoWidth, media.VideoHeight);
     }
 
     private static int To8(float v) => Math.Clamp((int)Math.Round(v * 255f), 0, 255);
@@ -2650,6 +2775,9 @@ public partial class MainWindow : Window
             ComponentLog.Log(Comp.Settings, "Saved", -1, "src=settingsDialog");
             SettingsStore.Save(result);
             CopySettings(result);
+            // 小地图是 PlayerSurface 的静态开关（GDI 绘制路径读它），内存 _settings
+            // 更新不会自动传导 —— 必须在这里显式回写，否则改设置后本次会话无反应。
+            PlayerSurface.SharedMinimapEnabled = _settings.MinimapEnabled;
             UpdateStatus();
         }
         catch (Exception ex)
@@ -2679,6 +2807,13 @@ public partial class MainWindow : Window
         _settings.PreferredAdapterIndex = s.PreferredAdapterIndex;
         _settings.FfmpegDirectory = s.FfmpegDirectory;
         _settings.ColorMode = s.ColorMode;
+        // SDR scRGB 模式：会话级配置，这里只同步到内存中的 _settings（新会话读取它），
+        // 不对已开会话做热切换 —— 内核该字段在 CreateSession 时装配，运行中不重载。
+        _settings.SdrScRgbMode = s.SdrScRgbMode;
+        // 对齐模式：对比放大的锚点/crop 换算在运行时直接读 _settings.CompareAlign
+        // （MainWindow.CompareCrop 的 _compareAlign），漏拷 = 改设置后本次会话静默不生效
+        //（已落盘、重启才生效，且无任何报错）。
+        _settings.CompareAlign = s.CompareAlign;
         _settings.FrameStep = s.FrameStep;
         _settings.SecondsStep = s.SecondsStep;
         _settings.StartFullscreen = s.StartFullscreen;
@@ -2773,20 +2908,25 @@ public partial class MainWindow : Window
         if (ReferenceEquals(_sidebar.Active, _probe) && surface.Selected)
         {
             var slot = _sync.Slots.ElementAtOrDefault(surface.Index);
-            if (slot?.Session is { } session)
-            {
-                var mapped = MapPointerToVideoPixel(surface, session, local);
-                if (mapped is { } p)
-                    _probe.UpdatePoint(p.X, p.Y);
-                else
-                    _probe.UpdatePoint(-1, -1); // outside video content
-            }
-            else
-            {
-                _probe.UpdatePoint((int)local.X, (int)local.Y);
-            }
+            // 只有"会话在 **且** 这一点真的落在画面上"才可能拿到源坐标；其余一律哨兵 -1。
+            // 无会话与"光标落在黑边"合成同一条路径：原先这里是两个分支各写一份 -1，
+            // 而"报一个看似合法的坐标"这个缺陷恰好只可能从"另开一条分支"回来（#15 一直
+            // 判不了就是因为要伪造 Avalonia 指针事件才能跑到那条分支）—— 合成一条之后
+            // 非哨兵值只能来自 MapPointerToVideoPixel，它本身要求有会话。
+            var mapped = slot?.Session is { } session
+                ? MapPointerToVideoPixel(surface, session, local)
+                : null;
+            var (px, py) = ProbePointOrSentinel(mapped);
+            _probe.UpdatePoint(px, py);
         }
     }
+
+    /// <summary>探针该显示的<b>源像素</b>坐标；拿不到就报哨兵 <c>(-1,-1)</c>。
+    /// <para>为什么单独抽这一条：这是"探针读数是不是编出来的"唯一的分岔点。
+    /// 历史缺陷形状是把表面内的 DIP 坐标当像素下标显示 —— 数字随窗口尺寸变、与片源无关，
+    /// 看着完全合法却是错的（P1-5，2026-09-29）。哨兵与"光标在黑边"同一口径，
+    /// 面板会显示占位文案而不是坐标。</para></summary>
+    internal static (int X, int Y) ProbePointOrSentinel((int X, int Y)? mapped) => mapped ?? (-1, -1);
 
     // ---- 偏移校准（相对第 1 路） ----
 
@@ -3156,7 +3296,10 @@ public partial class MainWindow : Window
                 _sync.LoopEnabled = true;
                 _timeline.SetLoopRange(loopStart, loopEnd, true);
             }
-            SafeSeek(pos);
+            // 必须用同步 SeekNow（与 LoadSessionSnapshot 的修复同型）：会话就绪回调里
+            // "fire-and-forget Seek + 立即 Play" 没有 happens-before，实测 Play 先落地、
+            // Seek 后到，恢复出来从 0 开始跑。
+            SeekNow(pos);
             _sync.Play();
             // 组件日志：重建路径的就绪点（与 SessionReady 分开标记来源，便于区分
             // "首次打开"与"崩溃后重建"两类时序）

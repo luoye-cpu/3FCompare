@@ -6,7 +6,7 @@ using Avalonia.Media;
 using Avalonia.Styling;
 using Avalonia.Threading;
 
-namespace _3FCompare;
+namespace _3FCompare.Themes;
 
 /// <summary>主题切换入口（跟随系统 / 浅色 / 深色）。
 /// <para>机制：只改 <see cref="Application.RequestedThemeVariant"/>，由 Avalonia 重新解析

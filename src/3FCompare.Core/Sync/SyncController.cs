@@ -65,6 +65,13 @@ public sealed class SyncController
         public bool Failed { get; set; }
         public string? Error { get; set; }
 
+        /// <summary>这一次"要播"被内核状态守卫拒掉了，等轮询补发（#42）。
+        /// 只在 <see cref="SyncController.SetActiveRoutes"/> 的启用分支里置位，
+        /// 因此它<b>不会</b>把用户主动暂停的路叫醒 —— 那条语义仍由 multitest 依赖。</summary>
+        internal bool PlayPending { get; set; }
+        /// <summary>补发尝试次数，成功或放弃时清零（放弃要报运行错误，不能无限重试）。</summary>
+        internal int PlayRetryCount { get; set; }
+
         /// <summary>本路是否<b>启用</b>：当前视图模式下真正占格的路为 true，没占格的为 false。
         ///
         /// <para><b>为什么不能只靠"隐藏"</b>：对比模式常把 N 路收敛到更少的格子（ABCD 只显示前 4 路、
@@ -162,10 +169,21 @@ public sealed class SyncController
 
     public void AddSlot(IPlayerSession session, string path)
     {
+        (float Zoom, float PanX, float PanY) pending;
         lock (_gate)
         {
             _slots.Add(new SyncSlot { Session = session, Path = path });
             Volatile.Write(ref _fpsMismatchCache, -1);   // 路数变了，帧率差异需重算
+            pending = _lastViewTransform;                // 新会话停在"铺满窗口"，要补放最近一次广播
+        }
+        // 锁外调用：SetViewTransform 打到原生层，而原生事件回调可能回头取本控制器的锁。
+        // 本类契约是"所有公开成员均可从任意线程调用"——此刻该 session 已进入 _slots，
+        // 其它线程可能正并发 Clear/RemoveSlotAt 并 Dispose 它 ⇒ 补放必须像 ForEachSlot
+        // 一样有异常边界，否则 ObjectDisposedException 会直接从 AddSlot 逃逸。
+        if (pending != (1f, 0f, 0f))
+        {
+            try { session.SetViewTransform(pending.Zoom, pending.PanX, pending.PanY); }
+            catch (Exception ex) { ReportRuntimeError("新会话视图变换补放", ex); }
         }
         RaiseStateChanged();
     }
@@ -382,9 +400,18 @@ public sealed class SyncController
         RaiseStateChanged();
     }
 
-    /// <summary>向所有会话广播统一的视口变换（缩放 + 平移），保证多路看到同一区域。</summary>
+    /// <summary>最近一次广播的视口变换。<b>必须留档</b>：变换是各会话自己记的，新建的会话默认
+    /// "铺满窗口"，不重放就会让加进来的那一路与其余路看到不同区域（重放在 <see cref="AddSlot"/>）。
+    /// 只在 UI 线程读写（滚轮/拖动与补发定时器都在 UI 线程），故不加锁。</summary>
+    private (float Zoom, float PanX, float PanY) _lastViewTransform = (1f, 0f, 0f);
+
+    /// <summary>向所有会话广播统一的视口变换（缩放 + 平移），保证多路看到同一区域。
+    /// <para>广播过的值同时留档 —— 否则"保证多路看到同一区域"只对当时存在的会话成立。</para></summary>
     public void SetViewTransform(float zoom, float panX, float panY)
-        => ForEachSlot("视图变换", s => s.Session.SetViewTransform(zoom, panX, panY), notify: false);
+    {
+        _lastViewTransform = (zoom, panX, panY);
+        ForEachSlot("视图变换", s => s.Session.SetViewTransform(zoom, panX, panY), notify: false);
+    }
 
     public void Stop()
     {
@@ -496,7 +523,28 @@ public sealed class SyncController
                         // "该不该立刻播"由本类自己记账，不接受调用方传参：
                         // 传参的版本要读 UI 线程的 _isPlaying，异步下发时可能读到过期值
                         // （表现为切回来的那一路停在正确位置却不播）。
-                        if (WantPlaying) slot.Session.Play();
+                        if (WantPlaying)
+                        {
+                            // ⚠ #42 的机制就在这里：内核 `Play()` 的守卫读的是**调用那一刻**的 state，
+                            //   而动作是 Enqueue 给会话工作线程稍后才执行（PlayerSession.cpp：
+                            //   `Play(){ if (state ∉ {Ready,Paused,Ended}) return InvalidState; Enqueue(...); }`）。
+                            //   停用/再启用快速交错时（切模式→立刻切回），上面那次 `Pause()` 还排在队列里
+                            //   ⇒ 此刻状态仍是 Playing ⇒ Play 被拒 ⇒ 托管 `Check()` 抛 EngineException
+                            //   ⇒ 这一下"要播"**永久丢掉**；随后那条 Pause 才落地，于是该路
+                            //   Active=true、位置正确、却停在 Paused，而 `TickDriftCore` 刻意不校正 Paused
+                            //   ⇒ 没有任何机制会恢复它（用户看到的就是"还在播，但这一格冻在旧帧"）。
+                            //   2026-09-28 由自测单元 `sync.seek-parks` 相位 C 复现（B 也中过 1/5），
+                            //   读数与顺序见 docs/46 §11.11。
+                            // 处理方式：记账，交给轮询补发（<see cref="RetryPendingPlays"/>）。
+                            //   不去放宽"Paused 不被自动恢复"——那是 multitest 判别实验依赖的语义。
+                            try { slot.Session.Play(); }
+                            catch (EngineException ex)
+                            {
+                                slot.PlayPending = true;
+                                _3FCompare.Core.Diagnostics.AppLog.Debug("Sync",
+                                    $"第 {i} 路起播被状态守卫拒掉（{ex.Message}）⇒ 记 PlayPending，等轮询补发");
+                            }
+                        }
                     }
                     _3FCompare.Core.Diagnostics.AppLog.Debug("Sync", $"第 {i} 路{(want ? "启用" : "停用")}完成");
                     changed++;
@@ -506,6 +554,46 @@ public sealed class SyncController
         }
         if (changed > 0) RaiseStateChanged();
         return changed;
+    }
+
+    /// <summary>补发那些被内核状态守卫拒掉的"起播"（#42，见 <see cref="SetActiveRoutes"/> 启用分支）。</summary>
+    /// <para>由 UI 轮询每拍调用。只补 **同时满足**"仍启用、未失败、整组仍要播、且确实挂过一次被拒"的路，
+    /// 所以用户主动暂停的路不会被它叫醒（那条语义是 multitest 的判据所在）。
+    /// 连续 <see cref="MaxPlayRetries"/> 次仍补不上就放弃并报运行错误 —— 不静默吞，也不无限重试。</para>
+    public const int MaxPlayRetries = 20;
+
+    public int RetryPendingPlays()
+    {
+        var slots = SnapshotSlots();
+        var woke = 0;
+        for (var i = 1; i < slots.Length; i++)
+        {
+            var slot = slots[i];
+            if (!slot.PlayPending || !slot.Active || slot.Failed || !WantPlaying)
+            {
+                slot.PlayPending = false;   // 意图已经不作数了（停用/整组暂停），别留着下次误补
+                continue;
+            }
+            try
+            {
+                var waited = slot.PlayRetryCount + 1;
+                slot.Session.Play();
+                slot.PlayPending = false;
+                slot.PlayRetryCount = 0;
+                woke++;
+                _3FCompare.Core.Diagnostics.AppLog.Debug("Sync", $"第 {i} 路补发起播成功（第 {waited} 次尝试）");
+            }
+            catch (Exception ex)
+            {
+                if (++slot.PlayRetryCount >= MaxPlayRetries)
+                {
+                    slot.PlayPending = false;
+                    slot.PlayRetryCount = 0;
+                    ReportRuntimeError($"第 {i} 路补发起播（连续 {MaxPlayRetries} 次被拒）", ex);
+                }
+            }
+        }
+        return woke;
     }
 
     /// <summary>本路当前是否启用（供 UI 与自测读取，判据只有一份）。</summary>
@@ -1038,6 +1126,12 @@ public sealed class SyncController
                 // 位置对了却停着不动 ⇒ 下一拍又判为偏差 ⇒ 每秒一次 Seek 风暴且画面永久冻住。
                 // 顺序必须是"先 Seek 后 Play"：Play 只对 **Ended** 才走 DoSeek(0) 的重播分支，
                 // 而上面的 Seek 已把状态改成 Paused，所以这次 Play 从 expected 续播、不会回到 0。
+                // ⚠ #42 在查"从 **Playing** 进来的校正是否也会被 DoSeek 停住"：冻结现场里托管层
+                //   一条 Pause 都没有，而前 0.4 秒刚有一次 `漂移校正 路4 态=Playing → Seek`
+                //   （app 日志 04:59:34.541 + `pz_r1.log`）。把这里的条件放宽到 `Ended or Playing`
+                //   试过，但**16 轮交替 A/B 两臂都没再复现冻结**（各 0/8）⇒ 无法证明有用，
+                //   就不拿一个没验的语义改动去动同步逻辑（它会被 multitest 依赖的
+                //   "Paused 不被自动恢复"语义撞上）。要证它得先做单路受控实验，见 #42。
                 if (s.State == PlayerState.Ended) slots[i].Session.Play();
 
                 Diagnostics.AppLog.Debug("Sync",

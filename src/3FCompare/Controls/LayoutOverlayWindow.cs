@@ -1,4 +1,7 @@
 using System;
+
+using _3FCompare.Themes;
+using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Avalonia;

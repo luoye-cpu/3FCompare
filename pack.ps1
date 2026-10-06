@@ -638,6 +638,26 @@ function Invoke-Pack([string]$mode) {
   av*.dll / sw*.dll    — FFmpeg 编解码引擎（在 ffmpeg-full/ 子目录）/ FFmpeg decoding engine (in ffmpeg-full/ subdirectory)
   ass-9.dll            — 字幕渲染引擎 / Subtitle rendering engine
 
+🎨 画面呈现（内核 API 16）/ Display chain (kernel API 16)
+  ※ 本版程序要求随包内核为 API 16：随包内核仍是 API 15 时**所有会话都创建失败**
+    （表现为"未就绪"），不是少几个功能 ⇒ 内核与程序必须整包一起换。
+    This build needs the bundled FFF.Native to be API 16; with an API 15 kernel every
+    session fails to start ("not ready"), so kernel and app must ship as one unit.
+  • SDR 高保真呈现：设置 → "SDR 广色域/10bit 呈现" → 自动。10bit 或广色域的 SDR 内容在
+    Advanced Color（HDR）显示器上改走 16bit scRGB 链，不再被折回 8bit Rec.709；
+    白点按系统的"SDR 内容亮度"对齐，亮度与传统 SDR 链一致。显示器未开 HDR 时自动回退。
+    10-bit / wide-gamut SDR can take the 16-bit scRGB chain instead of being folded back
+    into 8-bit Rec.709; the white point follows Windows' SDR content brightness.
+  • P3 广色域换算：DCI/Display P3 源按 P3 矩阵换算（此前被当 Rec.2020 或 Rec.709 处理）。
+    P3 sources are converted with the P3 matrix instead of Rec.2020 / Rec.709.
+  • 放大态平移两个方向都跟手：向右下平移此前会被钳死（原点被当成无符号数）。
+    Panning now works in both directions; the down/right half of the range used to stick.
+  • 倍率可以小于 1.00×（画面真的缩小），此前 <1 被内核当无效值忽略。
+    Zoom below 1.00x actually shrinks the picture; the previous kernel ignored it.
+  • VRR 低延迟呈现：设置 → "VRR 低延迟呈现（G-SYNC/FreeSync，实验）"。仅在显示链确实支持
+    撕裂呈现时才改节奏，否则保持 VSync 锁定；逐帧对比建议关闭。
+    Opt-in low-latency present for VRR displays; stays vsync-locked when unsupported.
+
 ⌨️ 快捷键 / Shortcuts
   ※ 前三行的键位与步进量都能在「设置 → 快捷键 / 步进」里改；下面按**出厂默认**列出。
     The first three rows are rebindable in Settings → Shortcuts / Stepping; defaults shown.

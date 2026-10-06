@@ -171,6 +171,7 @@ internal sealed class StubSession : IPlayerSession
     public void SetColorMode(ColorMode mode, bool? contentIsHdr = null) { }
     public bool SetPresentConfig(bool tearing) => true;
     public void SetViewTransform(float zoom, float panX, float panY) { }
+    public void SetFitLimitToNative(bool enable) { }
     public EngineMediaInfo? ReadMediaInfo() => null;
     public bool TryReadPixel(int x, int y, out PixelSample sample)
     {

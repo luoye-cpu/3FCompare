@@ -19,16 +19,24 @@ $ForkRoot = Join-Path $ProjectRoot "third_party\fff_project"
 # 2026-09-27 基线迁移到 b661365：= 上游 a87046e 的合并提交 a8e437e
 #   + 方案A（RenderTargetInfo v2，destX/destY 改有符号；负原点对应放大平移时
 #     被推到 back buffer 之外的目的框，v1 的 uint32 会静默吃掉一半平移量程）
-#   + PATCHES.md 记账。归档 tag `3fcompare-kernel-2026.9.27.1`，
-#   随仓分发的 .3fc_kernel_baseline.bundle 已重建并 `bundle verify` 通过（含该 tag）。
+#   + PATCHES.md 记账。归档 tag `3fcompare-kernel-2026.9.27.1`。
 #   ⚠ 方案A **不改** PlayerApiVersion（仍是 15）：改的是输出结构的语义而非导出签名。
 #     因此"版本号相等"拦不住 ABI 变化 —— PATCHES.md 〇 节记着上游自己也干过这种事。
+#
+# 2026-09-30 基线迁移到 3940990：= 上一基线 b661365 + 分支 `3fcompare/api16-kernel` 上的
+#   两笔提交（f344c3c 落地 API 16 内核语义、3940990 把 D10 成员/探测/标识符记进 PATCHES.md §十三）。
+#   来源是待上游合并的内核 PR，用 `git apply --3way` 移植；8 处冲突与 5 处本树特有对账逐条裁决，
+#   重放件换为 tools/patches/0014-baseline-vs-a87046e-api16.patch（0013 退役入 history/）。
+#   ⚠ 这一笔**确实升版本**：`sdrScRgbMode` 是 FFF3FPConfiguration 的字段新增 ⇒
+#     PlayerApiVersion 15→16、结构体 80→84 B、导出面 86→87。上一基线那条"改布局不升版本"的教训
+#     正是这里要防的反面，所以 `check_kernel_pairing.py` 现在按"恰好相等"拦，不再只查下限。
+#     随仓分发的 .3fc_kernel_baseline.bundle 已重建并 `bundle verify` 通过（含新 tag）。
 #   ⚠ 本脚本只**记录**内核实况（HEAD/脏文件/DLL 哈希写进 .3fc_kernel_build.json），
 #     拦截由门禁 [1/11] 负责：脏内核可以照常构建（开发要能跑），但不能进发布包。
 $KernelRepo        = "https://github.com/Lake1059/FFF_Project.git"
-$KernelBaselineTag = "3fcompare-kernel-2026.9.27.1"
-$KernelBaselineSha = "b66136550a99f06c42c47e272c9eb21d01e09887"
-# 上一基线（回滚点）：3fcompare-kernel-2026.9.18.3 / b765a1f8d76619da8583f7ac512621fbfb55dfa5
+$KernelBaselineTag = "3fcompare-kernel-2026.9.30.1"
+$KernelBaselineSha = "394099019aaff37c4b6ce482c2e835527e5b124a"
+# 上一基线（回滚点）：3fcompare-kernel-2026.9.27.1 / b66136550a99f06c42c47e272c9eb21d01e09887
 # 3FCompare 扩展的云端归档：上游 Lake1059/FFF_Project **不含**这些扩展，
 # 且本机账号对它只有读权限，所以基线归档只能落在主仓库自己的仓库里。
 $KernelArchiveRepo   = "https://github.com/luoye-cpu/3FCompare.git"

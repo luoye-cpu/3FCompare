@@ -1,6 +1,6 @@
 using System.Text;
 using Avalonia.Input;
-using _3FCompare.App;
+using _3FCompare.Localization;
 using _3FCompare.Core.Settings;
 
 namespace _3FCompare.Services;

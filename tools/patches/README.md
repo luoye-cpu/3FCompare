@@ -4,11 +4,13 @@
 >
 > 本目录现在是**唯一权威补丁 + 历史归档**两层结构：
 >
-> - **顶层只保留 `0013-baseline-vs-a87046e.patch`**：内容就是
->   `git -C third_party/fff_project diff a87046e HEAD -- FFF.Native`，
->   即「已提交的内核分歧」全集（6 个文件，+578 / −115 行）。它是可重放的：
->   对 `a87046e` 的原始树正向应用后，6 个文件与 `HEAD` 的 blob **逐字节相同**。
-> - **旧 9 个补丁整体移入 `history/`**（未删除、未改写，SHA1 逐一核对一致）。
+> - **顶层只保留 `0014-baseline-vs-a87046e-api16.patch`**：内容就是
+>   `git diff a87046e HEAD -- FFF.Native`（HEAD = 分支 `3fcompare/api16-kernel` 上的 API 16 落地提交），
+>   即「已提交的内核分歧」全集（15 个文件，含 `ShaderBytecode.h` 生成物与 `tools/generate_shader_bytecode.py`）。
+>   它是可重放的，且**已按这条判据验过**：对 `a87046e` 的原始树 `git apply` 正向应用后，
+>   与内核 HEAD 的 15 个文件**逐字节相同**（实测 `applied-vs-HEAD differing files = 0`）。
+> - **`0013-baseline-vs-a87046e.patch` 已退役入 `history/`**：它只到方案 A 为止，API 16 落地后
+>   反向探测不再匹配（哨兵 C 项就是抓这个的）。旧 9 个补丁同样在 `history/`（未删除、未改写，SHA1 逐一核对一致）。
 >   `tools/构建全部.ps1` 的 `Get-ChildItem $PatchesDir -Filter *.patch` **不递归**，
 >   因此 `history/` 下的补丁不再参与重放。
 >
@@ -18,7 +20,8 @@
 ## 补丁状态表（机器可读）
 
 ```patch-status
-0013-baseline-vs-a87046e.patch | in-tree
+0014-baseline-vs-a87046e-api16.patch | in-tree
+0013-baseline-vs-a87046e.patch | superseded-by-0014
 0001-vrr-tearing-present-config.patch | absorbed-into-0013
 0002-zoom-stall-fixes.patch | absorbed-into-0013
 0003-0005-local-optimizations.patch | absorbed-into-0013
@@ -115,9 +118,11 @@ git -C third_party/fff_project push origin 3fcompare-kernel-2026.9.11.1
   ```powershell
   git -C third_party/fff_project diff > tools/patches/<名称>.patch
   ```
-- **0013 的再生成**（每次合并上游后重跑一次，然后更新上面的状态表）：
+- **顶层补丁的再生成**（每次合并/重移植上游后重跑一次，然后更新上面的状态表。
+  ⚠ 当前权威补丁是 **0014**——下文命令里出现的 `0013` 只是当年写示例时的编号形状，
+  照抄编号会让新旧补丁混淆；编号应顺延）：
   ```powershell
-  git -C third_party/fff_project diff <新上游锚点> HEAD -- FFF.Native > tools/patches/0013-baseline-vs-<短sha>.patch
+  git -C third_party/fff_project diff <新上游锚点> HEAD -- FFF.Native > tools/patches/<顺延编号>-baseline-vs-<短sha>.patch
   ```
   范围**只要 `FFF.Native`**：`PATCHES.md` 与宿主工程（`FFF.Player` / `FFF.Player.Tests`）
   不进补丁——宿主与上游逐字节相同，台账由另一条线维护。
@@ -134,7 +139,11 @@ git -C third_party/fff_project push origin 3fcompare-kernel-2026.9.11.1
 旧实现一旦有任一补丁失败就不刷新标记，下次重跑会把全部补丁再打一遍，
 已应用的必然再失败 —— 形成永久卡死。
 
-### 实测：`Invoke-KernelPatches` 会怎么对待 0013（2026-09-26）
+### 〔历史 · 2026-09-26〕实测：`Invoke-KernelPatches` 会怎么对待 0013
+
+> ⚠ 本节的基线/SHA 读数（`b765a1f`、`-AllowKernelDrift` 等）是**写作当时**的实况，
+> 保留作故障形状的记录；现行基线见 `tools/README.md` 的「内核基线」一节。
+> （`-AllowKernelDrift` 参数早已不存在，见 `tools/README.md` 参数表。）
 
 对顶层现存的唯一补丁，三步探测在内核仓库里实测：
 
@@ -157,6 +166,40 @@ git -C third_party/fff_project push origin 3fcompare-kernel-2026.9.11.1
 按铁律（只判读、不改用户脚本）这里只报告，不代改：需要把 `$KernelBaselineSha`/`$KernelBaselineTag`
 同步到新归档提交后，重放链路才真正可用。
 
+
+## API 16 内核进出货树：实测代价（2026-09-30）
+
+> ✅ **【已解决 · 2026-09-30】** 下面记录的"API 16 只在 `3fp/kernel`、fork 树还是 API 15"的困局
+> 已按文末"该走的路"**走完**：人工重移植落地为 fork 树 `3fcompare/api16-kernel` 分支的两笔提交
+> （f344c3c 落 API 16 语义、3940990 记账），基线推进到
+> `3fcompare-kernel-2026.9.30.1 / 3940990`，重放件换为 `0014-baseline-vs-a87046e-api16.patch`
+> （0013 退役入 `history/`），门禁 `[2/11]` 配对检查转绿。以下过程记录保留，供下次重移植参考。
+
+当时现状：托管侧要求 API 16（`Fff3FpEngine.cs` 的 `ConfigVersion = 16`、`FFF3FP_SetFitLimitToNative` 等 26 个入口），
+而 `KernelDllPath` 指向的 `third_party/fff_project/FFF.Native/x64/Release/FFF.Native.dll` 是
+**HEAD `b661365` 编出来的 API 15**，缺 `SetFitLimitToNative` ⇒ 门禁 `[2/11]` 判红（配对守卫打
+`kernel=15 / managed=16`）。API 16 的全部实现只存在于 PR 工作树 `3fp/kernel`（HEAD `33ac900`）。
+
+**两条捷径都试过、都不成立**（读数在 `tests/output/prcheck/`）：
+
+| 捷径 | 实测 | 结论 |
+|---|---|---|
+| 把 `KernelDllPath` / 部署根指向 `3fp/kernel` | 两树文件级差异：`VideoRenderer.cpp` 有 **487 行是 fork 独有**、`PlayerSession.cpp` 54 行、`FFF.Player.Api.h` 18 行、`PlayerApi.cpp` 7 行（`3FR/Core/Session.cpp` 为 0） | ❌ 换树 = 静默丢 fork 侧内容（已知例证：泵线程 present 观测 `NotePumpOwnedPresent*` 这组函数在 `3fp/kernel` 里根本不存在）；且 `构建全部.ps1` 的补丁/ffmpeg/vcpkg/runtime 全都挂在 `$ForkRoot` 上，只改两处会让"校验的"与"进包的"不是同一份 |
+| 把 PR 补丁直接落到 fork 树 | `git apply --check -p1 --ignore-whitespace` 逐文件：**8 个冲突 / 6 个干净**（冲突：`FFF.Player.Api.h`、`PlayerApi.cpp`、`PlayerSession.h/.cpp`、`VideoRenderer.h/.cpp`、两个 `FFF.Player` VB；干净：`ShaderBytecode.h`、`HdrProcessor.h`、`WasapiCapture.cpp`、`VideoMuxer.cpp`、`FFF.Native.rc`、`KernelTimelineTests.vb`） | ❌ 不是机械步骤，是**手工重移植**（下面第 1 步），且必须把 6 个干净文件的语义与 8 个冲突文件的移植一起再验一轮真机 |
+| 把 `3fp/kernel` 编好的 DLL 拷进 `third_party/.../x64/Release/` | 能做到"绿" | ❌ **禁止**：树不能再生产自己的产物，下次 `构建全部.ps1` 就把它覆盖回 15；这正是本目录铁律要防的形状（产物与源码脱钩） |
+
+**该走的路（就是本目录既有流程）**：按 `third_party/fff_project/PATCHES.md` 做人工重移植 —— 在 fork 的分支上
+把 API 16 的 9 组改动逐组落地（`sdrScRgbMode` + `WantsScRgbPresentationPath`、纸白锚定与 DISPLAYCONFIG 兜底、
+gamut 三态 + `ShaderBytecode.h` 重生成、有符号 dest/对称钳位/`z<1`、`SetFitLimitToNative`、present 能力位与偏好分离、
+日志汇、3FR 两处、并发与生命周期三处），提交 → 更新 `PATCHES.md` 分类清单 → 打新归档 tag →
+同步 `tools/构建全部.ps1` 的 `$KernelBaselineSha`/`$KernelBaselineTag` → `tools/构建全部.ps1` 重建 →
+`[2/11]` 应转为绿。**注意版本语义**：`sdrScRgbMode` 是配置字段新增 ⇒ `PlayerApiVersion 15→16` 与
+`FFF3FPConfiguration` 尺寸（80→84 B）必须一起进，否则重演 09-27 那条"上游改布局不升版本"的教训。
+PR 正文/提交信息见 `3fp/patches/combined-pr-body.md`、`combined-commit-message.txt`。
+
+⚠ 上面那段"`$KernelBaselineSha` 仍是 `b765a1f8…`、构建会在到达补丁重放前中断"的陈述**已过期**：
+2026-09-30 实测 `tools/构建全部.ps1:31` 为 `b661365…`，与 fork HEAD 相同，门禁 `[1/11]` 打
+`✅ 内核基线 head=b66136550a99 tag=3fcompare-kernel-2026.9.27.1`。原文保留是因为它记的是当时的真实故障形状。
 
 ## 工作流
 

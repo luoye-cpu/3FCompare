@@ -8,7 +8,9 @@
 ## 一、为什么要有这个独立区域
 
 3FP 的内核源码同时是 3FC 的构建依赖（`third_party/fff_project/`），而 `tools/构建全部.ps1`
-会**钉死基线 SHA 并拒绝 dirty 工作区**（`-AllowKernelDrift` 才能绕过）。
+会**钉死基线 SHA**（`$KernelBaselineSha`）并把内核实况记进 `.3fc_kernel_build.json`。
+（⚠ 早期文档说的「拒绝 dirty、`-AllowKernelDrift` 才能绕过」**已不成立**：该参数不存在，
+脏树**可以照常构建**——拦截发生在 `tools/发布门禁.ps1`，脏内核不进发布包。）
 如果把图片模式的试验性改动直接写进 `third_party/fff_project/`：
 
 - 3FC 的每次构建都会带上未定稿的内核改动，发布门禁（`.3fc_kernel_sha`）会失真
@@ -26,13 +28,15 @@
 3fp/
 ├── README.md              ← 本文件：区域说明与铁律（进入前必读）
 ├── STATUS.md              ← 交接状态：进度 / 下一步 / 阻塞（其他 agent 的第一个入口）
-├── docs/
+├── docs/                  ← 本区域全部文档（00~28，**缺 18**：该号未使用，不是遗失）
 │   ├── 00-图片模式设计规格.zh.md   ← 模式隔离架构、API 草案、交互映射、状态机
 │   ├── 01-可行性分析.zh.md         ← 能不能做、值不值得做（含实测数据）
-│   └── 02-实现规划.zh.md           ← 怎么做、按什么顺序做（分期与验收）
-├── kernel/                ← ★ 内核 + 宿主工作副本（git 仓，分支 feature/image-mode）
+│   ├── 02-实现规划.zh.md           ← 怎么做、按什么顺序做（分期与验收）
+│   └── 03~28 …                     ← 按日期推进的验证/交接/PR 记录（不再在此逐个枚举，会过期）
+├── kernel/                ← ★ 内核 + 宿主工作副本（嵌套 git 仓，**按任务切分支**）
 │   ├── FFF.Native/        ← C++ 内核（C API + PlayerSession + 渲染/色彩）
 │   └── FFF.Player/        ← VB.NET 宿主外壳
+├── tools/                 ← 本区域专用探针/验证脚本（入库）
 ├── samples/
 │   ├── README.md          ← 样张集清单与生成方法
 │   ├── tools/             ← 样张生成脚本（入库）
@@ -72,10 +76,13 @@
 # 1) 内核工作副本（若 3fp/kernel 缺失；2 MB，秒级完成）
 cd c:/PLAN/3FCompare
 git clone .3fc_kernel_baseline.bundle 3fp/kernel
-git -C 3fp/kernel checkout -b feature/image-mode
 
-# 2) 确认起点正确（必须输出 b765a1f）
+# 2) 按**本次任务**切分支——不要假设还叫 feature/image-mode
+#    分支随任务漂移（图片模式 / api16-scrgb / mks-subtitle …），开工前先确认：
+git -C 3fp/kernel branch --show-current
 git -C 3fp/kernel log --oneline -1
+#    ⚠ 早期文档要求「必须输出 b765a1f」——那是 2026-09 的图片模式基线，
+#    3FC 出货基线此后已推进到 b661365 → 3940990，本区域也不再固定在该 SHA。
 
 # 3) Shared FFmpeg DLL：本区域复用主仓库的 runtime/（不复制）
 #    内核通过延迟加载在运行时查找 avcodec-63.dll 等，见下方"编译与运行"

@@ -20,7 +20,7 @@
          门禁与开发的 plain build 产出 "0.2.5-BETA"，与发布包（pack.ps1 传 -p:VersionSuffix=
          清空后为 "0.2.5"）不一致 ⇒ 同一份代码两个版本叙事。需要预发布时再加回来，
          并且必须同时让 pack.ps1 与门禁保持一致。 -->
-    <Version>0.3.1-beta</Version>
+    <Version>0.3.2-beta</Version>
   </PropertyGroup>
 
   <ItemGroup>
