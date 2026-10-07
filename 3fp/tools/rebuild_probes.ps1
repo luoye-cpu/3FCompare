@@ -36,7 +36,7 @@ $simple = @('decode_profile','block_scale_probe','image_zoom_probe','scale_polic
             # These were missing from the list and so kept failing with a stale struct
             # long after the header changed -- the same trap the delete-first fix above
             # exists to prevent, one level up.
-            'frame_pool_probe','backend_probe','loop_stutter_probe','apng_seek_repro',
+            'frame_pool_probe','backend_probe','loop_stutter_probe','apng_seek_repro','audio_buffer_probe',
             'vsr_pixel_probe','vsr_scrgb_probe','pan_direction_probe','zoom_anchor_probe')
 $iamf = @('iamf_layout_regression','iamf_playback_probe','iamf_probe','iamf_channel_order_probe')
 
