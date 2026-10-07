@@ -10,7 +10,13 @@
 $ErrorActionPreference = 'Continue'
 $root = 'C:\PLAN\3FCompare\3fp'
 $kernel = Join-Path $root 'kernel\FFF.Native'
-$lib = Join-Path $kernel 'x64\Release_anim\FFF.Native.lib'
+# 统一使用 x64\Release —— 这是唯一真实的出货配置，也是发布脚本使用的配置。
+# 此前指向 Release_anim，那是 MSBuild 被安全策略判为 LOLBin 时、由
+# tools/build_kernel_manual.py 复放 tlog 产生的**旁路产物**，需要人工拷回 Release。
+# 那个人工步骤正是版本漂移的来源（探针跑 Release_anim、出货用 Release，
+# 两者曾长期不一致，Release|x64 一度缺少 FFF_WITH_LIBIAMF 而无人察觉）。
+# MSBuild 现已可用（连续多次干净重建通过），旁路不再需要。
+$lib = Join-Path $kernel 'x64\Release\FFF.Native.lib'
 $out = Join-Path $root 'build\vsr'
 $tools = Join-Path $root 'tools'
 $libiamfInclude = Join-Path $kernel '..\third_party\libiamf\include'
