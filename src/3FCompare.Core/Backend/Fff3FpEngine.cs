@@ -14,9 +14,10 @@ public sealed class Fff3FpEngine : IPlayerEngine
     //   14 = 内核 2026.9.11 合并（f25c28f）起
     //   15 = 3FCompare A11 扩展：新增 FFF3FPConfiguration.preferredAdapterIndex（2026-09-16）
     //   16 = 3FCompare 扩展：新增 FFF3FPConfiguration.sdrScRgbMode（2026-09-29）
+    //   17 = 新增 FFF3FPSnapshot 尾部的 ST 2094 动态元数据诊断字段（HDR10+）
     // internal：EngineFactory 的版本门必须与这里同源（内核对 version 严格相等），
     // 两处各写一个字面量迟早会漂移（docs/45 P1-1）。
-    internal const uint ConfigVersion = 16;
+    internal const uint ConfigVersion = 17;
 
     public IReadOnlyList<AdapterInfo> EnumerateAdapters()
     {

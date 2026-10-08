@@ -139,6 +139,15 @@ internal struct Fff3FpSnapshot
     public uint DisplayPeakNits;
     public uint DisplayFullFramePeakNits;
     public uint EffectiveTargetPeakNits;
+    // API v17：ST 2094 动态元数据诊断（逐帧 HDR10+ / HDR Vivid 解析结果）。
+    // ⚠ 必须与内核 FFF3FPSnapshot 尾部逐字段对齐：内核按
+    // `size < sizeof(FFF3FPSnapshot)` 判据拒绝过小的调用方，字段少一个
+    // 就会让 GetSnapshot 整体失效（本类型少长 32 字节即触发）。
+    public uint DynamicMetadataWindows;
+    public uint DynamicMetadataDegrade;
+    public ulong DynamicMetadataSerial;
+    public ulong DynamicMetadataHeldFrames;
+    public uint DynamicMetadataTargetedNits;
 }
 
 /// <summary>FFF3FPVideoPixelProbe 前置关键字段（ReadPixel 用）。</summary>

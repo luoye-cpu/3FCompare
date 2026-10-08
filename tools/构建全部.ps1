@@ -1,4 +1,4 @@
-﻿# 3FCompare 构建与部署脚本
+# 3FCompare 构建与部署脚本
 # 用法: powershell -ExecutionPolicy Bypass -File tools/构建全部.ps1 [-SkipTests]
 # 前置: Visual Studio 2022+ (C++ 桌面负载), Git, （vcpkg 首次联网）
 
@@ -33,10 +33,17 @@ $ForkRoot = Join-Path $ProjectRoot "third_party\fff_project"
 #     随仓分发的 .3fc_kernel_baseline.bundle 已重建并 `bundle verify` 通过（含新 tag）。
 #   ⚠ 本脚本只**记录**内核实况（HEAD/脏文件/DLL 哈希写进 .3fc_kernel_build.json），
 #     拦截由门禁 [1/11] 负责：脏内核可以照常构建（开发要能跑），但不能进发布包。
+#
+# 2026-10-08 基线推进到 API 17（HDR10+ 动态元数据）：
+#   PlayerApiVersion 16→17 的原因与上面那条不同 —— 这次**没有**改 FFF3FPConfiguration，
+#   而是给 FFF3FPSnapshot **尾部追加**了 5 个 ST 2094 诊断字段（+动态元数据注入 API 的 3 个导出）。
+#   GetSnapshot 的判据是 `size < sizeof(FFF3FPSnapshot)` 就拒绝，所以托管侧必须同批加长；
+#   两侧实测均为 368 B（见 docs/58 §11.5）。导出面 87→90。
+#   回滚点：3fcompare-kernel-2026.9.30.1 / 394099019aaff37c4b6ce482c2e835527e5b124a
 $KernelRepo        = "https://github.com/Lake1059/FFF_Project.git"
-$KernelBaselineTag = "3fcompare-kernel-2026.9.30.1"
-$KernelBaselineSha = "394099019aaff37c4b6ce482c2e835527e5b124a"
-# 上一基线（回滚点）：3fcompare-kernel-2026.9.27.1 / b66136550a99f06c42c47e272c9eb21d01e09887
+$KernelBaselineTag = "3fcompare-kernel-2026.10.8.1"
+$KernelBaselineSha = "f1d3ce5b26e5892c50a60dddbe7a0dcdded7295f"
+# 上一基线（回滚点）：3fcompare-kernel-2026.9.30.1 / 394099019aaff37c4b6ce482c2e835527e5b124a
 # 3FCompare 扩展的云端归档：上游 Lake1059/FFF_Project **不含**这些扩展，
 # 且本机账号对它只有读权限，所以基线归档只能落在主仓库自己的仓库里。
 $KernelArchiveRepo   = "https://github.com/luoye-cpu/3FCompare.git"
