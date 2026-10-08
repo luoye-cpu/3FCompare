@@ -45,7 +45,7 @@ $simple = @('decode_profile','block_scale_probe','image_zoom_probe','scale_polic
             'frame_pool_probe','backend_probe','loop_stutter_probe','apng_seek_repro','audio_buffer_probe',
             'audio_drift_probe','audio_health_probe','image_reopen_probe','image_load_probe','host_compat_probe',
             'vsr_pixel_probe','vsr_scrgb_probe','pan_direction_probe','zoom_anchor_probe')
-$iamf = @('iamf_layout_regression','iamf_playback_probe','iamf_probe','iamf_channel_order_probe')
+$iamf = @('iamf_layout_regression','iamf_playback_probe','iamf_probe','iamf_channel_order_probe','iamf_layout_audit','iamf_seek_probe')
 
 function Invoke-Build([string]$name, [string]$extra) {
     $src = Join-Path $tools ($name + '.cpp')

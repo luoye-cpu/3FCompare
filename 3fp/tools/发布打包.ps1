@@ -61,6 +61,28 @@ if ($kernelVersion -ne $projectVersion -or $hostConst -ne $projectVersion) {
 }
 Write-Ok "版本一致（API $projectVersion）"
 
+# ── 0b. 快照结构体布局 ──────────────────────────────────────────────────────
+# 版本号一致并不代表布局一致：字段顺序错**不会**编译报错，只会静默读出错位的值。
+# 2026-10-07 实际发生过 —— 宿主把 IAMF 三字段追加到末尾，而 C 侧它们在第 26-28 位，
+# 于是其后约 30 个字段全部偏移。此检查把"顺序错"变成发布阶段的硬失败。
+Write-Step '快照结构体布局'
+$layoutTool = Join-Path $root 'tools\校验快照布局.py'
+if (Test-Path $layoutTool) {
+    $layoutOutput = & python $layoutTool 2>&1 | Out-String
+    foreach ($line in ($layoutOutput -split "`r?`n")) {
+        if ($line -match '字段|sizeof|布局') { Write-Host "  $line" }
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail '快照布局与 C 侧不一致，发布中止（详见上方列表）'
+        Write-Host '  字段顺序错不会编译报错，只会静默读到错位的值。' -ForegroundColor DarkGray
+        Write-Host '  请按 C 侧顺序重排 原生播放器快照。' -ForegroundColor DarkGray
+        exit 1
+    }
+    Write-Ok '快照布局一致'
+} else {
+    Write-Host '  [--] 未找到布局校验脚本，跳过'
+}
+
 # ── 1. 构建内核 ─────────────────────────────────────────────────────────────
 Write-Step "构建内核（$Configuration / x64）"
 $msbuild = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\*\*\MSBuild\Current\Bin\MSBuild.exe' -ErrorAction SilentlyContinue |
