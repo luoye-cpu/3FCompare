@@ -67,20 +67,40 @@ Write-Ok "版本一致（API $projectVersion）"
 # 于是其后约 30 个字段全部偏移。此检查把"顺序错"变成发布阶段的硬失败。
 Write-Step '快照结构体布局'
 $layoutTool = Join-Path $root 'tools\校验快照布局.py'
-if (Test-Path $layoutTool) {
-    $layoutOutput = & python $layoutTool 2>&1 | Out-String
+# 解析 Python：PATH 上未必有 `python`（本机就没装到 PATH），显式找已知位置再兜底。
+function Resolve-Python {
+    $candidates = @(
+        'C:\Users\20210\AppData\Local\Programs\Python\Python312\python.exe',
+        'python', 'python3', 'py'
+    )
+    foreach ($c in $candidates) {
+        if ($c -match '\\' ) { if (Test-Path $c) { return $c } }
+        else { $cmd = Get-Command $c -ErrorAction SilentlyContinue; if ($cmd) { return $cmd.Source } }
+    }
+    return $null
+}
+
+$python = Resolve-Python
+if (-not (Test-Path $layoutTool)) {
+    Write-Host '  [--] 未找到布局校验脚本，跳过'
+} elseif (-not $python) {
+    # 宁可显式失败也不静默跳过：跳过等于这次发布没有经过布局校验。
+    Write-Fail '找不到 Python，无法执行快照布局校验'
+    Write-Host '  该项不能跳过：字段顺序错不会编译报错，只会静默读到错位的值。' -ForegroundColor DarkGray
+    exit 1
+} else {
+    $layoutOutput = & $python $layoutTool 2>&1 | Out-String
+    $layoutExit = $LASTEXITCODE
     foreach ($line in ($layoutOutput -split "`r?`n")) {
         if ($line -match '字段|sizeof|布局') { Write-Host "  $line" }
     }
-    if ($LASTEXITCODE -ne 0) {
+    if ($layoutExit -ne 0) {
         Write-Fail '快照布局与 C 侧不一致，发布中止（详见上方列表）'
         Write-Host '  字段顺序错不会编译报错，只会静默读到错位的值。' -ForegroundColor DarkGray
         Write-Host '  请按 C 侧顺序重排 原生播放器快照。' -ForegroundColor DarkGray
         exit 1
     }
     Write-Ok '快照布局一致'
-} else {
-    Write-Host '  [--] 未找到布局校验脚本，跳过'
 }
 
 # ── 1. 构建内核 ─────────────────────────────────────────────────────────────
