@@ -1,0 +1,167 @@
+RTX Video FAQ | NVIDIA
+Skip Navigation
+Your browser either does not have JavaScript enabled or does not appear to support enough features of JavaScript to be used well on this site.
+NVIDIA SUPPORT
+NVIDIA Home > Support Home Page > Knowledgebase Home Page > RTX Video FAQ
+Log In | Sign Up
+RTX Video FAQ
+Updated 01/30/2025 12:10 AM
+WHAT IS RTX VIDEO?
+Q. What is RTX Video?
+A. RTX Video is a collection of real time AI based video enhancements that GeForce RTX GPU owners can use to improve the quality of video played on their PC - either on a browser like Chrome or a video player like VLC. The two technologies currently under RTX Video include:
+RTX Video Super Resolution
+*NEW* RTX Video HDR
+NVIDIA has also released RTX Video as an SDK to allow developers to integrate it into their apps. For example, some video editing apps like DaVinci Resolve or Wondershare Filmora have exposed these technologies to allow users to enhance their videos.
+Q: What is RTX Video Super Resolution?
+A: RTX Video Super Resolution is a video upscaling technology that uses AI and RTX Tensor Cores to improve the quality of video by removing blocky compression artifacts and upscaling video resolution. This improves video sharpness and clarity, and lets people watch local and online content – for example from Twitch or YouTube – in their native display resolution, even if they are on a 4K high-resolution display.
+Q: What is RTX Video HDR?
+A: RTX Video HDR uses AI and RTX Tensor Cores to dynamically remap Standard Dynamic Range (SDR) video content to High Dynamic Range (HDR10) quality video, improving visibility, details, and vibrance of streamed video. Note that you will need an HDR compatible display to be able to use this feature.
+Q: How does RTX Video Super Resolution improve video quality?
+A: When video is upscaled, each frame is analyzed against a deep learning network trained on a wide variety of content. The result is edges and features enhanced and even recovered and displayed at the output resolution. Additionally, compression artifacts are detected and removed, producing an even cleaner, crisper image than the original video.
+Q: Does RTX Video Super Resolution leverage DLSS in any way? Are there any learnings from DLSS that you were able to apply to RTX Video Super Resolution?
+A: They are two completely different technologies with different training and data inputs. It does not leverage DLSS technology and is a completely new algorithm. RTX Video Super Resolution infers higher resolution frames based purely on the input / lower resolution video frame. It only works on video content. DLSS uses game engine data (motion vectors, depth buffers, etc) to do Super Resolution and Frame Generation for games. It doesn’t work on streamed video.. DLSS 3 offers DLSS Super Resolution, DLSS Frame Generation, and NVIDIA Reflex low latency and uses motion vectors, optical flow, temporal and other game engine data.
+Q: What’s new with the RTX Video Super Resolution 1.5 update (Oct 2023)?
+A: The 1.5 update includes the following features
+Support for Turing based RTX GPUs (Professional and RTX 20-Series GPUs)
+Updated AI model weights to improve detail and sharpness when upscaling
+De-artifacts video played at native resolution (e.g. output resolution matches video source)
+Q. What's new with the RTX Video Super Resolution January 2025 update?
+A. In the new NVIDIA app update, VSR has been updated to a more efficient AI model, using up to 30% fewer GPU resources at its highest quality setting, allowing more GeForce RTX GPUs to enable it.
+VSR now also upscales HDR video, so if you are watching any HDR video below your monitor’s resolution in your browser, it will automatically get upscaled to your native panel resolution.
+We’ve also added a GPU Utilization feature for RTX Video when Quality is set to “Auto”. Setting your GPU Utilization to “High” will use as much GPU as needed to provide the best quality Super Resolution available on your GPU.
+Setting the GPU Utilization to lower levels will reserve more GPU for games or creative apps by applying lower quality settings. Or alternatively, switch to Manual mode and set a fixed quality level to use at all times.
+Finally, we’ve added optional on-screen indicators to show when Video Super Resolution and Video HDR are active.
+Q: What’s new with the Jan 2024 RTX Video update?
+A: The Jan 2024 update includes the following updates
+RTX Video HDR
+RTX Video Super Resolution: Auto quality selection
+Status indicators
+COMPATIBILITY & BEHAVIOR
+Q: What GPUs support RTX Video?
+A: RTX Video supports all RTX GPUs on consumer notebook and desktops. RTX Video Super resolution originally launched on NVIDIA RTX Ampere and Ada generation GPUs.
+Q: Are RTX (professional/enterprise) GPUs supported? If not, will they be?
+A: Yes, RTX Video is supported on NVIDIA RTX Ampere and Ada generation desktop and professional laptop GPUs from the 1000 class and up.
+Q: What else is needed to support RTX Video?
+A: RTX Video HDR requires an HDR10 compatible display connected to the RTX PC.
+Q: What operating systems are supported?
+A: RTX Video is supported on 64-bit versions of Windows 10 and 11 at this time.
+Q: What apps will RTX Video support?
+A: RTX Video is available in the NVIDIA Control Panel and NVIDIA App. If turned on, the AI effects will be applied to video played on VLC as well as latest Chrome, Edge, and Firefox browsers.
+RTX Video SDK can also be integrated by applications to offer the effects natively in their application. Some example applications that have integrated RTX Video are DaVinci Resolve and Wondershare Filmora.
+Q: Does RTX Video support XXXX browser?
+A: RTX Video has been implemented on the Chromium framework and should work with any up-to-date Chromium-based browser. RTX Video has been verified on Edge and Chrome (both Chromium based). NVIDIA has not verified other Chromium based browsers.
+Q: What video will RTX Video Super Resolution enhance?
+A: Most video played in supported browsers can be enhanced by RTX Video Super Resolution. RTX Video Super Resolution supports video input resolutions from 360p to 1440p. Video we have identified as not supported includes some DRM protected content and YouTube shorts.
+Q: What video will RTX Video HDR enhance?
+A: Most SDR video played in supported browsers can be enhanced by RTX Video HDR. Video we have identified as not supported includes some DRM protected content, and HDR content.
+Q: What content will benefit from RTX Video?
+A: Over 90% of all internet video is 1080p or less. Customers with 1440p or 4k panels will see a benefit for almost all internet video. Subscription services like Prime Video, Disney+, Hulu, HBO MAX mostly max out at 1080p video on PCs and can be enhanced with RTX Video Super Resolution. Most internet video, particularly premium streamed content (Prime Video, Disney+, etc) are not available in HDR on PC. Customers with HDR10 compatible displays can play SDR source content in vibrant HDR.
+Q: What output resolutions does RTX Video support?
+A: RTX Video will support most displays including 5K displays.
+Q: Is there an indicator that RTX Video is operating?
+A: Yes, with the January 2024 update, a status indicator is now visible in the NVIDIA Control Panel to give users an indicator if Super Resolution or HDR are active.
+Q: Does video need to be played at full screen for RTX Video to work properly?
+A: No. As long as video is played at its native resolutionor higher, RTX Video will enhance video in a window. RTX Video HDR will run in windowed video as well.
+Q: Will RTX Video Super Resolution be enabled if video is displayed at native/lower resolution? Does RTX Video Super Resolution enhance downscaling?
+A: No, RTX Video Super Resolution will only be enabled if the video requires upscaling.
+Q: Is RTX Video active if my video is minimized/hidden behind a window?
+A: RTX Video will only become active if the video is displayed on the desktop.
+Q: What happens if I have 2 videos playing at the same time.
+A: RTX Video will enhance the video most recently put in focus. This is true for single or multiple monitor setups.
+Q: Is RTX Video active if my video is playing on a secondary monitor, while on my primary I’m browsing the web or playing a game?
+A: Yes.
+Q: Will RTX Video be active if I pause the video?
+A: RTX Video is still active but with no new frames to process, RTX Video will not use GPU resources.
+Q: Does RTX Video use GPU resources?
+A: Yes. RTX Video uses the Tensor cores on your RTX GPU. You may experience a slight reduction in performance if playing a game or using GPU intensive creative apps in parallel.
+Q: Why doesn't RTX Video work when I’m playing certain games?
+A: RTX Video Super Resolution will not be active when a game is using NVIDIA Image Scaling (NIS), Dynamic Super Resolution (DSR) or Deep Learning Dynamic Super Resolution (DLDSR).
+Q: What additional limitations should I know about?
+A: Multiplane Overlay (MPO) support – MPO is automatically disabled when RTX Video Super Resolution or HDR are enabled.
+SETUP: DESKTOP
+Q: What do I need before I enable RTX Video Super Resolution?
+A: You will need the following
+1. GeForce RTX GPUs
+2. The latest Chrome, Edge or Firefox browser or VLC
+Q: What do I need before I enable RTX Video HDR?
+A: You will need the following
+1. GeForce RTX GPUs
+2. HDR10 compatible display
+3. The latest Chrome, Edge or Firefox browser or VLC
+4. Enable “HDR” in the windows display settings
+5. [STRONGLY RECOMMENDED] Download and run the Windows HDR calibration tool from the Microsoft Store
+Q: How do I update to the latest Chrome, Edge, and Firefox browser?
+A: Review the following articles for instructions on how to update your browser to the latest.
+Updating Google Chrome
+Updating Microsoft Edge
+Updating Mozilla Firefox
+Q: How do get VLC with RTX Video Super Resolution Support
+A: This version is available on the VLC download page
+Download VLC with RTX Super Resolution
+Q: How do I enable RTX Video enhancements in the NVIDIA app beta?
+A: In our August 2024 NVIDIA app beta update, the app’s System tab now includes a new Video section that adds RTX Video Enhancements and customization sliders for RTX Video HDR.
+On the System > Video tab in the NVIDIA app, you can easily activate these options, and see in real-time if they’re active when watching video or streams.
+Clicking the icons next to each feature will open configuration panels. The latest NVIDIA app update adds new sliders for RTX HDR, enabling you to adjust peak brightness, middle grey brightness, contrast, and saturation in real-time as your video plays, making for easy adjustments. For Video Super Resolution, you can manually set the quality level, although we recommend using Auto as it dynamically adjusts quality based on GPU utilization.
+Q: How do I enable RTX Video enhancements in the NVIDIA Control Panel?
+A: If you’re not using the NVIDIA app beta to enable RTX Video enhancements, you can also do it in the NVIDIA Control Panel, though we do recommend using NVIDIA app as it contains additional options and features.
+In your NVIDIA Control Panel, under Adjust Video Image Settings -> RTX Video enhancements, enable Super Resolution or HDR.
+Q: What quality setting should I set?
+A: We recommend setting this to Auto. This will automatically set the quality level based on your system’s profile and source content. If the quality is set to a specific level, RTX Video Super Resolution will use that setting. This may cause stuttering on lower end systems if the quality level is higher than the system can support.
+Q: How do the quality levels scale with GPU/visuals?
+A: Quality level scales in GPU resources used. Quality improves with GPU performance, but overall enhancement varies with content. Users are encouraged to tune the quality level based on their own preference.
+SETUP: NOTEBOOK
+Q: What do I need before I enable RTX Video Super Resolution?
+A: You will need the following
+1. RTX notebook with supported GPU
+2. The latest Chrome, Edge, or Firefox browser or VLC
+Q: What do I need before I enable RTX Video HDR?
+A: You will need the following
+1. GeForce RTX GPUs
+2. HDR10 compatible display
+3. The latest Chrome, Edge, or Firefox browser or VLC
+4. Enable “HDR” in the windows display settings
+5. [STRONGLY RECOMMENDED] Download and run the Windows HDR calibration tool from the Microsoft Store
+Q: How do I enable RTX Video enhancements in the NVIDIA app beta?
+In our August 2024 NVIDIA app beta update, the app’s System tab now includes a new Video section that adds RTX Video Enhancements and customization sliders for RTX Video HDR.
+On the System > Video tab in the NVIDIA app, you can easily activate these options, and see in real-time if they’re active when watching video or streams.
+Clicking the icons next to each feature will open configuration panels. The latest NVIDIA app update adds new sliders for RTX HDR, enabling you to adjust peak brightness, middle grey brightness, contrast, and saturation in real-time as your video plays, making for easy adjustments. For Video Super Resolution, you can manually set the quality level, although we recommend using Auto as it dynamically adjusts quality based on GPU utilization.
+Q: How do I enable RTX Video enhancements in the NVIDIA Control Panel?
+A: If you’re not using the NVIDIA app beta to enable RTX Video enhancements, you can also do it in the NVIDIA Control Panel, though we do recommend using NVIDIA app as it contains additional options and features.
+To enable RTX Video on a RTX GeForce laptop with Optimus technology, you will need to set 2 things.
+1. In your NVIDIA Control Panel, under Adjust Video Image Settings -> RTX Video Enhancements , enable Super Resolution or HDR.
+2. Windows “Graphics settings”: Under Custom options for apps, add the path to your Chrome or Edge browser. Right click on the browser icon under your list of customized apps, select Options and set for “High Performance”.
+Q: Why do I need to enable High Performance on Chrome/Edge/Firefox?
+A: RTX Video requires that your browser access your RTX GPU to enhance video playback
+Q: How will enabling High Performance on my browser affect battery life?
+A: When your browser is configured to use High Performance graphics, your GPU will become active when the application has been launched and draw additional power. This may affect your battery life, even if RTX Video is not active.
+Q: How can I enjoy RTX Video when I need it, and long battery life when I don’t?
+A: We find most users prefer either Chrome, Edge or Firefox. We recommend using your less commonly used browser for playing video, and leaving your preferred browser on low power mode. This way your GPU will not use extra power for web browsing activities.
+Q: If I have a laptop with Optimus technology, will RTX Video work on my native laptop display? If I have a laptop with Optimus technology, will RTX Video work on my external display if that display is connected to the iGPU?
+A: Yes.
+Q: RTX Video doesn’t enhance my video when I’m on battery, even though my browser is set for “High Performance”
+A: Browsers will automatically use the lower power native upscaler if on battery power is detected. This is to ensure longer life while on battery.
+Q: On my RTX Powered laptop with Optimus Technology, why are some settings disabled in the NVIDIA Control Panel under Image Enhancement?
+A: These settings are only available if your display is connected directly to the NVIDIA GPU. If your laptop as a output display that is connected to the dGPU, these settings will become available as soon as a display is connected.
+Additional information on using RTX Video on NVIDIA App
+RTX Video Super Resolution Tips
+This feature works if your video playback window size is smaller than your video playback.
+Video has to be playing for the feature to work.
+For multiple displays, the feature works on the first active video.
+RTX Video HDR Tips
+For multiple displays, the feature works on the first active video.
+Is this answer helpful?
+Yes
+No
+Answers others found helpful
+NVIDIA GPU UEFI Firmware Update Tool
+How to enable Dynamic Super Resolution in games.
+How to Enable NVIDIA Image Scaling
+NVIDIA Resizable BAR Firmware Update Tool
+Deep Learning Dynamic Super Resolution (DLDSR) / Dynamic Super Resolution (DSR) Support Reference Chart
+Live Chat
+Chat online with one of our support agents
+CHAT NOW
+ASK US A QUESTION
+Contact Support for assistance
+800.797.6530
+Ask a Question

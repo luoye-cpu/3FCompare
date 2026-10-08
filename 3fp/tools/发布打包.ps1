@@ -103,6 +103,31 @@ if (-not (Test-Path $layoutTool)) {
     Write-Ok '快照布局一致'
 }
 
+# ── 0c. 文档行号引用 ────────────────────────────────────────────────────────
+# 文档里的 `Foo.cpp:245` 在代码改动后**不会报错**，只会静默让读者跳到错误的行、
+# 读到无关代码并据此形成错误判断。2026-10-08 实际发生：docs/61 的 20 处引用
+# 有 17 处整体漂移 +17 行，而后续实现者把它当成了当前事实。
+# 这里只拦"硬失败"（源文件找不到、行号越界）；"指向无语义行"仅告警，
+# 因为改一行注释就可能让某个合法引用落在空行上。
+Write-Step '文档行号引用'
+$refTool = Join-Path $root 'tools\校验文档行号引用.py'
+if ((Test-Path $refTool) -and $python) {
+    $refOutput = & $python $refTool 2>&1 | Out-String
+    $refExit = $LASTEXITCODE
+    foreach ($line in ($refOutput -split "`r?`n")) {
+        if ($line -match '引用总数|可定位|找不到|越界|仓外|无语义') { Write-Host "  $line" }
+    }
+    if ($refExit -ne 0) {
+        Write-Fail '文档行号引用有硬失败（源文件找不到或行号越界），发布中止'
+        Write-Host '  这些引用不会导致编译失败，只会误导读者。' -ForegroundColor DarkGray
+        Write-Host '  建议改为"符号名 + 行号"形式，重构后仍可定位。' -ForegroundColor DarkGray
+        exit 1
+    }
+    Write-Ok '文档行号引用无硬失败'
+} else {
+    Write-Host '  [--] 跳过（缺脚本或 Python）'
+}
+
 # ── 1. 构建内核 ─────────────────────────────────────────────────────────────
 Write-Step "构建内核（$Configuration / x64）"
 $msbuild = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\*\*\MSBuild\Current\Bin\MSBuild.exe' -ErrorAction SilentlyContinue |

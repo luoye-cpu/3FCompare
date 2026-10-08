@@ -77,7 +77,7 @@ Windows HDR Calibration 的 `.jxr` 用 `IMAGE_HEADER.headerSize=8`（**不内嵌
 
 ### 3.2 有意**不**改的地方：文件关联清单
 
-`文件关联管理器.vb` 的图片清单**刻意不加** `.jxr` —— 该清单的承诺是**"双击即看"**，入选判据是「随包内核实测能呈现≥1帧」（`FFF.Player.Tests/Program.vb:632` 注释断言 + `tools/cover_probe.sh` 逐条实测背书）。JXR 目前 `presented=0`，加进去会**破坏该项目既有承诺**。
+`文件关联管理器.vb` 的图片清单**刻意不加** `.jxr` —— 该清单的承诺是**"双击即看"**，入选判据是「随包内核实测能呈现≥1帧」（`FFF.Player.Tests/Program.vb`（原 632 行注释；**该测试套件已被上游删除**，见下方注） 注释断言 + `tools/cover_probe.sh` 逐条实测背书）。JXR 目前 `presented=0`，加进去会**破坏该项目既有承诺**。
 
 > ⇒ **上游修好后的收尾动作之一**：把 `.jxr/.wdp/.hdp` 加进 `文件关联管理器.vb` 的 `不常见图片` 组（见 §6 检查清单）。
 
