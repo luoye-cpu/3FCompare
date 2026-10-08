@@ -50,26 +50,54 @@ static void Check(int condition, const char* what) {
     if (!condition) ++g_failures;
 }
 
+/* Fill one processing window. `level` scales the curve so three side-by-side
+ * windows can be told apart: window 0 gets a dark curve, 2 a bright one. */
+static void FillWindow(FFF3FPHdrMetadataWindow& window, float left, float right,
+    float level) {
+    int i;
+    memset(&window, 0, sizeof(window));
+    window.upperLeftX = left;
+    window.upperLeftY = 0.0f;
+    window.lowerRightX = right;
+    window.lowerRightY = 1.0f;
+    window.maxScl[0] = window.maxScl[1] = window.maxScl[2] = level;
+    window.averageMaxRgb = level * 0.25f;
+    window.fractionBrightPixels = 0.01f;
+    window.toneMappingFlag = 1;
+    window.kneePointX = 0.30f;
+    window.kneePointY = 0.15f;
+    window.numCurveAnchors = 5;
+    for (i = 0; i < 5; ++i)
+        window.curveAnchors[i] = 0.30f + 0.10f * (float)i;
+}
+
 static FFF3FPHdrDynamicMetadataEntry MakeEntry(long long frameIndex) {
     FFF3FPHdrDynamicMetadataEntry entry;
-    int i;
     memset(&entry, 0, sizeof(entry));
     entry.size = sizeof(entry);
     entry.version = 1;
     entry.frameIndex = frameIndex;
     /* A clearly non-identity curve so the injection is observable: the anchors
      * pull mid-tones well below where the identity would put them. */
-    entry.maxScl[0] = 0.40f;
-    entry.maxScl[1] = 0.30f;
-    entry.maxScl[2] = 0.20f;
-    entry.averageMaxRgb = 0.10f;
-    entry.fractionBrightPixels = 0.01f;
-    entry.toneMappingFlag = 1;
-    entry.kneePointX = 0.30f;
-    entry.kneePointY = 0.15f;
-    entry.numCurveAnchors = 5;
-    for (i = 0; i < 5; ++i)
-        entry.curveAnchors[i] = 0.30f + 0.10f * (float)i;
+    entry.numWindows = 1;
+    FillWindow(entry.windows[0], 0.0f, 1.0f, 0.40f);
+    entry.targetedDisplayNits = 500.0f;
+    return entry;
+}
+
+/* Three side-by-side windows, each with its own curve: the shape ST 2094-40
+ * uses for regionally graded content, and the one the injected API previously
+ * could not express at all. */
+static FFF3FPHdrDynamicMetadataEntry MakeThreeWindowEntry(long long frameIndex) {
+    FFF3FPHdrDynamicMetadataEntry entry;
+    memset(&entry, 0, sizeof(entry));
+    entry.size = sizeof(entry);
+    entry.version = 1;
+    entry.frameIndex = frameIndex;
+    entry.numWindows = 3;
+    FillWindow(entry.windows[0], 0.0f, 0.3333f, 0.05f);
+    FillWindow(entry.windows[1], 0.3333f, 0.6667f, 0.25f);
+    FillWindow(entry.windows[2], 0.6667f, 1.0f, 0.60f);
     entry.targetedDisplayNits = 500.0f;
     return entry;
 }
@@ -154,21 +182,42 @@ int main(int argc, char** argv) {
     Check(FFF3FP_SetHdrDynamicMetadata(g_player, &bad, 1) == FFFResult::InvalidArgument,
         "undersized entry rejected");
     bad = entry;
-    bad.maxScl[0] = 2.0f;
+    bad.windows[0].maxScl[0] = 2.0f;
     Check(FFF3FP_SetHdrDynamicMetadata(g_player, &bad, 1) == FFFResult::InvalidArgument,
         "out-of-range maxScl rejected");
     bad = entry;
-    bad.curveAnchors[3] = 0.05f;   /* below the previous anchor */
+    bad.windows[0].curveAnchors[3] = 0.05f;   /* below the previous anchor */
     Check(FFF3FP_SetHdrDynamicMetadata(g_player, &bad, 1) == FFFResult::InvalidArgument,
         "non-ascending anchors rejected");
     bad = entry;
-    bad.kneePointY = 0.90f;        /* above the identity line */
+    bad.windows[0].kneePointY = 0.90f;        /* above the identity line */
     Check(FFF3FP_SetHdrDynamicMetadata(g_player, &bad, 1) == FFFResult::InvalidArgument,
         "knee above identity rejected");
     bad = entry;
-    bad.numCurveAnchors = 99;
+    bad.windows[0].numCurveAnchors = 99;
     Check(FFF3FP_SetHdrDynamicMetadata(g_player, &bad, 1) == FFFResult::InvalidArgument,
         "anchor count above the spec maximum rejected");
+    /* Multi-window specific validation. */
+    bad = MakeThreeWindowEntry(0);
+    bad.numWindows = 0;
+    Check(FFF3FP_SetHdrDynamicMetadata(g_player, &bad, 1) == FFFResult::InvalidArgument,
+        "numWindows == 0 rejected");
+    bad = MakeThreeWindowEntry(0);
+    bad.numWindows = 4;
+    Check(FFF3FP_SetHdrDynamicMetadata(g_player, &bad, 1) == FFFResult::InvalidArgument,
+        "numWindows == 4 rejected (spec range is 1..3)");
+    bad = MakeThreeWindowEntry(0);
+    bad.windows[1].lowerRightX = bad.windows[1].upperLeftX;  /* empty rectangle */
+    Check(FFF3FP_SetHdrDynamicMetadata(g_player, &bad, 1) == FFFResult::InvalidArgument,
+        "degenerate window rectangle rejected");
+    bad = MakeThreeWindowEntry(0);
+    bad.windows[2].kneePointY = 0.80f;        /* bad third window only */
+    Check(FFF3FP_SetHdrDynamicMetadata(g_player, &bad, 1) == FFFResult::InvalidArgument,
+        "a malformed later window rejects the whole entry");
+    bad = MakeThreeWindowEntry(0);
+    bad.windows[1].upperLeftY = -0.5f;
+    Check(FFF3FP_SetHdrDynamicMetadata(g_player, &bad, 1) == FFFResult::InvalidArgument,
+        "out-of-frame window rejected");
     Check(ActiveSource() == (unsigned)FFF3FPHdrMetadataSource::Bitstream,
         "rejected calls left the previous table untouched");
 
@@ -204,6 +253,56 @@ int main(int argc, char** argv) {
     printf("\n-- injection overrides bitstream SEI --\n");
     Check(ActiveSource() == (unsigned)FFF3FPHdrMetadataSource::Injected,
         "injected source still wins on a stream that carries HDR10+ SEI");
+
+    /* 7. Multi-window: the shape the format uses for regionally graded content.
+     * This path could not be expressed through the injection API at all before
+     * windows carried geometry, so it is the reason the struct grew one. */
+    printf("\n-- three processing windows --\n");
+    entry = MakeThreeWindowEntry(0);
+    Check(FFF3FP_SetHdrDynamicMetadata(g_player, &entry, 1) == FFFResult::Success,
+        "3-window entry accepted");
+    Pump(600);
+    Check(ActiveSource() == (unsigned)FFF3FPHdrMetadataSource::Injected,
+        "3-window entry drives the mapping");
+    {
+        FFF3FPSnapshot snapshot;
+        memset(&snapshot, 0, sizeof(snapshot));
+        snapshot.size = sizeof(snapshot);
+        snapshot.version = 8;
+        if (FFF3FP_GetSnapshot(g_player, &snapshot) == FFFResult::Success) {
+            printf("  snapshot: windows=%u degrade=%u peak=%u\n",
+                snapshot.dynamicMetadataWindows, snapshot.dynamicMetadataDegrade,
+                snapshot.sourcePeakNits);
+            Check(snapshot.dynamicMetadataWindows == 3,
+                "snapshot reports 3 windows");
+            Check(snapshot.dynamicMetadataDegrade == 0,
+                "3-window entry degrades nothing");
+        } else {
+            Check(0, "snapshot read failed");
+        }
+    }
+
+    /* A window with no curve block makes the entry unusable as a whole: mapping
+     * only part of the frame would look worse than the static path. The peak is
+     * still bounded, so this must not be rejected -- it must degrade. */
+    printf("\n-- 3 windows, one without a curve --\n");
+    entry = MakeThreeWindowEntry(0);
+    entry.windows[1].toneMappingFlag = 0;
+    Check(FFF3FP_SetHdrDynamicMetadata(g_player, &entry, 1) == FFFResult::Success,
+        "entry with one curve-less window is accepted (peak-only window)");
+    Pump(600);
+    {
+        FFF3FPSnapshot snapshot;
+        memset(&snapshot, 0, sizeof(snapshot));
+        snapshot.size = sizeof(snapshot);
+        snapshot.version = 8;
+        if (FFF3FP_GetSnapshot(g_player, &snapshot) == FFFResult::Success) {
+            printf("  snapshot: windows=%u degrade=%u (4 = ToneMappingAbsent)\n",
+                snapshot.dynamicMetadataWindows, snapshot.dynamicMetadataDegrade);
+            Check(snapshot.dynamicMetadataDegrade == 4,
+                "curve-less window reports ToneMappingAbsent");
+        }
+    }
 
     Check(FFF3FP_ClearHdrDynamicMetadata(g_player) == FFFResult::Success, "final clear");
 

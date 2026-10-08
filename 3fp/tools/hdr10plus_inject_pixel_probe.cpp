@@ -116,26 +116,32 @@ int main(int argc, char** argv) {
     DumpPixels("A bitstream ");
 
     /* A deliberately strong, non-identity curve so the effect cannot be
-     * mistaken for noise: mid-tones are pushed well down. */
+     * mistaken for noise: the knee sits below the identity line and the anchors
+     * stay well under it, so mid-tones are pushed down. */
     memset(&entry, 0, sizeof(entry));
     entry.size = sizeof(entry);
     entry.version = 1;
     entry.frameIndex = 0;
-    entry.maxScl[0] = 0.05f;
-    entry.maxScl[1] = 0.05f;
-    entry.maxScl[2] = 0.05f;
-    entry.averageMaxRgb = 0.02f;
-    entry.fractionBrightPixels = 0.001f;
-    entry.toneMappingFlag = 1;
-    entry.kneePointX = 0.40f;
-    entry.kneePointY = 0.10f;
-    entry.numCurveAnchors = 6;
-    entry.curveAnchors[0] = 0.20f;
-    entry.curveAnchors[1] = 0.35f;
-    entry.curveAnchors[2] = 0.50f;
-    entry.curveAnchors[3] = 0.65f;
-    entry.curveAnchors[4] = 0.80f;
-    entry.curveAnchors[5] = 0.92f;
+    entry.numWindows = 1;
+    entry.windows[0].upperLeftX = 0.0f;
+    entry.windows[0].upperLeftY = 0.0f;
+    entry.windows[0].lowerRightX = 1.0f;
+    entry.windows[0].lowerRightY = 1.0f;
+    entry.windows[0].maxScl[0] = 0.05f;
+    entry.windows[0].maxScl[1] = 0.05f;
+    entry.windows[0].maxScl[2] = 0.05f;
+    entry.windows[0].averageMaxRgb = 0.02f;
+    entry.windows[0].fractionBrightPixels = 0.001f;
+    entry.windows[0].toneMappingFlag = 1;
+    entry.windows[0].kneePointX = 0.40f;
+    entry.windows[0].kneePointY = 0.10f;
+    entry.windows[0].numCurveAnchors = 6;
+    entry.windows[0].curveAnchors[0] = 0.20f;
+    entry.windows[0].curveAnchors[1] = 0.35f;
+    entry.windows[0].curveAnchors[2] = 0.50f;
+    entry.windows[0].curveAnchors[3] = 0.65f;
+    entry.windows[0].curveAnchors[4] = 0.80f;
+    entry.windows[0].curveAnchors[5] = 0.92f;
     entry.targetedDisplayNits = 200.0f;
 
     if (FFF3FP_SetHdrDynamicMetadata(g_player, &entry, 1) != FFFResult::Success) {

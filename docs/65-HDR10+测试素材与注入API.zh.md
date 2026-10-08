@@ -127,10 +127,12 @@ py tools/build_kernel_3fp.py            # 注意：这个脚本构建的是 3fp/
 
 1. **生成时长有限**（6–10s）。长片段的场景切换、seek 行为、`hold` 上界（60 帧）
    仍未在真实影视素材上验证。
-2. **均为单窗口**（`num_windows=1`）。**多窗口（`num_windows=3`）仍未验证** ——
-   FFmpeg 的 `hdr10plus` 滤镜只产出单窗口统计。多窗口需要专门的编码工具
-   （x265 with HDR10+，或 Dolby/Ateme 等商业工具）。过渡带宽度 `kDynamicWindowBlend=0.05`
-   因此仍只有代码路径覆盖，无观感确认。
+2. **素材均为单窗口**（`num_windows=1`）—— FFmpeg 的 `hdr10plus` 滤镜只产出单窗口统计。
+   **但多窗口路径已可通过 §八 的注入 API 验证**（已做：三窗口正确作用于三个区域、
+   边界交叉淡入、5 项多窗口专属校验；见 §8.8/§8.9）。
+   **仍未做**的是多窗口**真实素材**（需要 x265 with HDR10+ 或商业工具），
+   以及多窗口边界的**人眼观感**确认 —— `kDynamicWindowBlend=0.05` 目前只有像素级
+   证据（九级平滑过渡），无实机视觉确认。
 3. 素材由**画面统计合成**元数据，不是片方原始调色元数据。对"解析与映射是否正确"
    完全有效；对"是否还原了某部影片的创作意图"不适用。
 4. 本目录素材**不入库**（体积，`.gitignore:76` 忽略 `testmedia/media/`），
@@ -178,28 +180,46 @@ FFFResult FFF3FP_GetHdrMetadataSource(FFF3FPHandle player, uint32_t* source);
 ### 8.3 数据结构与单位
 
 ```c
-struct FFF3FPHdrDynamicMetadataEntry {
-    uint32_t size;        // sizeof(...)
-    uint32_t version;     // 必须为 1
-    int64_t  frameIndex;  // 起始帧（含），见 8.4 匹配规则
+// 一个 ST 2094-40 处理窗口。坐标归一化到画面（0,0=左上，1,1=右下），与比特流一致。
+struct FFF3FPHdrMetadataWindow {
+    float upperLeftX, upperLeftY;      // 0..1
+    float lowerRightX, lowerRightY;    // 0..1，须 > 左上
 
     float maxScl[3];            // 线性化 RGB 最大值，0..1（nits = 值 × 10000）
     float averageMaxRgb;        // 线性化 RGB 均值，0..1
     float fractionBrightPixels; // 0..1，仅信息性
 
-    uint32_t toneMappingFlag;   // 0 = 只有峰值，无曲线
+    uint32_t toneMappingFlag;   // 0 = 该窗只有峰值，无曲线
     float kneePointX;           // 0..1；0 表示"无线性段"
-    float kneePointY;           // 0..1
+    float kneePointY;           // 0..1，**不得大于 kneePointX**
     uint32_t numCurveAnchors;   // 0..15
     float curveAnchors[15];     // **递增**，0..1
+};
 
-    float targetedDisplayNits;  // 内容的目标显示峰值（cd/m²），0 = 由 maxScl 推导
+struct FFF3FPHdrDynamicMetadataEntry {
+    uint32_t size;        // sizeof(...)
+    uint32_t version;     // 必须为 1
+    int64_t  frameIndex;  // 起始帧（含），见 8.4 匹配规则
+
+    uint32_t numWindows;  // 1..3（ST 2094-40 的 num_windows 范围）
+    uint32_t reserved;
+    FFF3FPHdrMetadataWindow windows[3];
+
+    float targetedDisplayNits;  // 内容的目标显示峰值（cd/m²），0 = 由窗口峰值推导
 };
 ```
 
 ⚠ **单位与解析侧完全一致**，两处易错点已在解析层踩过（见 `3fp/docs/58` §11）：
 - `maxScl` 是**已线性化**的量，`nits = 值 × 10000`，**不要**再套 PQ 反 EOTF
 - `targetedDisplayNits` **直接就是 cd/m²**，**不要**再乘 10000
+
+⚠ **`kneePointY > kneePointX` 会被拒绝**。knee 在恒等线上方意味着提亮暗部，
+没有母版意图如此编码。这条约束在实测中真实拦下过测试数据。
+
+⚠ **knee 远低于恒等线会把它下方的信号压到接近黑**。这是**正确行为**（曲线就该
+这样映射），但很容易被误读成缺陷 —— 实测中我的两个探针都先误判过一次。
+`hdr10plus_identity_probe` 用恒等曲线把第一段化为空操作（此时输出必须与静态路径
+一致，实测 `0.6420` vs `0.6075`）来判定这类疑问。
 
 ### 8.4 匹配规则
 
@@ -222,6 +242,10 @@ struct FFF3FPHdrDynamicMetadataEntry {
 | knee 在恒等线上方 | `kneePointY > kneePointX`（会提亮暗部，无母版意图如此） |
 | 锚点数超规范上限 | `numCurveAnchors > 15` |
 | 表过大 | `count > 4096` |
+| **窗口数越界** | `numWindows ∉ [1,3]` |
+| **窗口矩形退化** | `lowerRight <= upperLeft`（选不到像素） |
+| **窗口越出画面** | 角点 ∉ [0,1] |
+| **某个窗口非法** | **整条 entry 被拒**（不会只应用合法的那几个窗） |
 
 ### 8.6 优先级与可逆性
 
@@ -229,37 +253,57 @@ struct FFF3FPHdrDynamicMetadataEntry {
 - **可逆**：清空后行为与"该功能不存在"完全一致。
 - 未注入时渲染路径与改动前**逐位相同**（Vivid 回归已复验）。
 
-### 8.7 用法示例
+### 8.8 多窗口用法
 
 ```c
-/* 两个场景：第 0 帧起用暗场景曲线，第 60 帧起用亮场景曲线 */
-FFF3FPHdrDynamicMetadataEntry table[2];
-memset(table, 0, sizeof(table));
-for (int i = 0; i < 2; ++i) {
-    table[i].size = sizeof(table[i]);
-    table[i].version = 1;
-}
-table[0].frameIndex = 0;
-table[0].maxScl[0] = table[0].maxScl[1] = table[0].maxScl[2] = 0.10f;
-table[0].toneMappingFlag = 1;
-table[0].kneePointX = 0.40f;  table[0].kneePointY = 0.10f;
-table[0].numCurveAnchors = 5;
-table[0].curveAnchors[0] = 0.20f; /* ... 递增至 0.92f */
-table[0].targetedDisplayNits = 200.0f;
-/* table[1] 同构，frameIndex = 60 */
+/* 三个并排窗，各自一条曲线（ST 2094-40 区域分级内容的形态） */
+FFF3FPHdrDynamicMetadataEntry entry;
+memset(&entry, 0, sizeof(entry));
+entry.size = sizeof(entry);
+entry.version = 1;
+entry.frameIndex = 0;
+entry.numWindows = 3;
 
-FFF3FP_SetHdrDynamicMetadata(player, table, 2);
-/* ... 播放 ... */
-FFF3FP_ClearHdrDynamicMetadata(player);
+/* 左窗：低 knee（压暗部） */
+entry.windows[0].upperLeftX  = 0.0f;    entry.windows[0].lowerRightX = 0.3333f;
+entry.windows[0].upperLeftY  = 0.0f;    entry.windows[0].lowerRightY = 1.0f;
+entry.windows[0].maxScl[0] = entry.windows[0].maxScl[1] = entry.windows[0].maxScl[2] = 0.25f;
+entry.windows[0].toneMappingFlag = 1;
+entry.windows[0].kneePointX = 0.40f;  entry.windows[0].kneePointY = 0.02f;
+entry.windows[0].numCurveAnchors = 5;
+/* curveAnchors 从 knee 递增到 1.0 */
+/* 中窗 [0.3333, 0.6667]、右窗 [0.6667, 1.0] 同构，knee 分别为 0.20 / 0.39 */
+
+entry.targetedDisplayNits = 500.0f;
+FFF3FP_SetHdrDynamicMetadata(player, &entry, 1);
 ```
 
-### 8.8 验证证据
+**窗口边界会做交叉淡入**。相邻窗口各自独立调色，硬切换会画出一条可见的接缝，
+因此边界两侧各 `WindowBlend`（当前 0.05，归一化单位）宽度内对两条曲线做加权混合。
+
+> ⚠ 这里**曾经是错的**：早期实现让每个窗口的权重从**自己的边缘向内**上升，
+> 结果在边界处"出去的窗口已降到 0、进来的窗口还没升起来"，权重不重叠、
+> 合计趋 0，画面出现硬阶跃（实测相邻像素 `0.3329 → 0.5837`）。
+> 改为**向外**延伸后（`smoothstep(min-blend, min+blend, uv)`，上沿对称），
+> 权重在全程构成单位分解；同一条扫描线读数变为九级平滑过渡：
+> `0.154 0.165 0.205 0.265 0.335 0.426 0.515 0.559`。
+
+### 8.9 验证证据
 
 | 探针 | 检查 | 结果 |
 |---|---|---|
-| `3fp/tools/hdr10plus_inject_test.cpp` | 17 项：参数校验拒绝、接受、清空、场景列表匹配、**注入覆盖真实 SEI** | **17/17 通过** |
-| `3fp/tools/hdr10plus_inject_pixel_probe.cpp` | 注入是否**真的到达像素**（不只是上报值） | 同一时间点 比特流→注入→清空 得 `peak` 344→500→297，RGB 明显不同；清空后 `serial` 从 57 续到 83 |
+| `hdr10plus_inject_test.cpp` | **27 项**：参数校验拒绝（含 5 项多窗口专属）、接受、清空、场景列表匹配、**注入覆盖真实 SEI**、3 窗口上报 `windows=3 degrade=0`、缺曲线的窗口上报 `degrade=4` | **27/27 通过** |
+| `hdr10plus_inject_pixel_probe.cpp` | 注入是否**真的到达像素**（不只是上报值） | 同一时间点 比特流→注入→清空 得 `peak` 341→500→297，RGB 明显不同；清空后 `serial` 从 63 续到 90 |
+| `hdr10plus_window_pixel_probe.cpp` | 三个窗口**是否各自作用于自己的区域**，边界是否交叉淡入 | 三个区域在曲线改变时**全部变化**；边界带与单窗平铺曲线**不同**（即交叉淡入存在） |
 
-> 第二个探针是必要的：API 测试只证明"被接受"，不证明"被应用"。
-> 它跑在**真带 HDR10+ SEI** 的文件上，因此"注入赢过比特流"是有意义的结论。
+> 第二、三个探针是必要的：API 测试只证明"被接受"，不证明"被应用"或"被用到正确的区域"。
+> 两个都跑在**真带 HDR10+ SEI** 的文件上，因此"注入赢过比特流"是有意义的结论。
+>
+> `hdr10plus_window_pixel_probe` **采用差分测量**（同一条扫描线在"单窗平铺曲线"与
+> "三窗曲线"两个相位下对比）。原因：这段素材本身有真实黑区和真实边缘，
+> 绝对亮度比较会**因为画面内容而失败**，而不是因为映射错误 —— 早期版本正是这样误报的。
+>
+> `hdr10plus_identity_probe.cpp` 是判定"域/组合是否正确"的探针：把曲线设成**恒等**后
+> 第一段化为空操作，输出必须与静态路径一致（实测 `0.6420` vs `0.6075`）。
+> 当某个读数看着像 bug 时，用它把"曲线段的问题"和"压缩段的问题"分开。
 

@@ -42,7 +42,7 @@ $ForkRoot = Join-Path $ProjectRoot "third_party\fff_project"
 #   回滚点：3fcompare-kernel-2026.9.30.1 / 394099019aaff37c4b6ce482c2e835527e5b124a
 $KernelRepo        = "https://github.com/Lake1059/FFF_Project.git"
 $KernelBaselineTag = "3fcompare-kernel-2026.10.8.1"
-$KernelBaselineSha = "f1d3ce5b26e5892c50a60dddbe7a0dcdded7295f"
+$KernelBaselineSha = "d2f5826feccfc165a0ab66318ba80c6c665d27da"
 # 上一基线（回滚点）：3fcompare-kernel-2026.9.30.1 / 394099019aaff37c4b6ce482c2e835527e5b124a
 # 3FCompare 扩展的云端归档：上游 Lake1059/FFF_Project **不含**这些扩展，
 # 且本机账号对它只有读权限，所以基线归档只能落在主仓库自己的仓库里。
