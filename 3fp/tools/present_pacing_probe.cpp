@@ -265,6 +265,12 @@ int main(int argc, char** argv) {
         maxMeasuredHz, finalPacing.gridLocked, finalPacing.pacingBypass, sawLocked, sawUnlocked);
     std::printf("  呈现帧=%.0f（%.1f fps）翻帧=%.0f｜翻帧/呈现帧=%.3f\n",
         presented, presentedFps, flips, presented > 0 ? flips / presented : 0.0);
+    // 合并帧这一栏是为"屏幕停留带内比例"那条判据准备的：一次呈现跳过了 k 个更新过的
+    // 画面，被显示的那一帧就要多停 k 个源帧的时长，于是 ⌊r⌋/⌈r⌉ 带外必然出现——
+    // 这是管线合并，不是节律锁失守。两个数不并排列，就没法把这两种成因分开。
+    std::printf("  合并帧（呈现时跳过的更新次数）=%.0f｜解码帧=%.0f\n",
+        static_cast<double>(after.coalescedVideoFrames - baseline.coalescedVideoFrames),
+        static_cast<double>(after.decodedVideoFrames - baseline.decodedVideoFrames));
     // 两类丢弃并排列出，各自写明原因——它们含义不同，混在一个数里就会让人去查一个
     // 根本不存在的性能问题。原因那句只在条件真的成立时才印，否则就是在写一句假话
     // （上一版无条件印"面板 144 Hz < 片源 60 fps"，那个不等式本身是反的）。

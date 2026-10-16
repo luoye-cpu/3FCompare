@@ -1,0 +1,39 @@
+VFR: retract a probe-caused defect, and explain the hold-band spread
+
+Two of the things I recorded earlier this round were wrong, and both are now
+replaced by measurements.
+
+* "Bare Annex-B does not present frames" was my own probe. content_period_probe
+  called FFF3FP_Seek(player, 0) unconditionally before Play; a bare elementary
+  stream refuses the seek (event result=-5, whose own message says "playback
+  remained active") and the session then reaches Ended, so the snapshot showed
+  decodedVideoFrames=0 and I read that as a player capability gap. The same file
+  with that seek skipped (CPCP_NO_SEEK=1) presents: state=Playing, position 3.41 s,
+  88 frames decoded, one plateau at 25.0 Hz -- which is the correct outcome for a
+  source with no timing at all. The remaining real defect is smaller and
+  different: a failed seek ends the session while its own error text promises
+  playback continued, and SetState(Ended) exists in exactly one place (the
+  FlushAtEnd path). Added a guard so this cannot be misread again: a new
+  precondition fails the arm when seek failure and zero frames co-occur, and the
+  readout names the cause. The four normal arms still pass (9/9/7/7 judged).
+
+* The hold-band spread is now explained, and it is not the cadence lock. Three
+  isolated runs of the same 60 fps file: presented 42.1 / 38.5 / 57.7 fps gave
+  hold-within-band 66.5% / 48.7% / 91.3%, while submit accuracy tracked the same
+  direction (81.5 / 67.3 / 99.0%) and coalescedVideoFrames stayed 0 in all three.
+  My first explanation -- out-of-band holds come from pipeline coalescing -- is
+  therefore falsified by its own counter. Since the worst submit error is 2.2
+  refresh periods while the worst hold deviation is 10-11, the gap cannot be
+  "this flip was late"; it has to be flips that never reached the monitor at all.
+  PresentRefreshCount only advances when an image actually goes on screen, so a
+  superseded-but-never-composited flip does not advance it and the measured hold
+  spans two or three frames at once. That quantity is not counted anywhere in the
+  current exports, so this judge measures "did the pipeline keep up, plus how many
+  presents never reached the screen" and cannot confirm or refute the lock. Until
+  a never-composited counter exists, its red is not a defect and its green is not
+  a pass; docs/03 now says so, and this is consistent with A9 (4)'s own
+  "locked 98.5% vs unlocked 98.9%, indistinguishable".
+
+Also recorded: batch-running the windowed arms is itself a contaminant (the same
+60 fps arm reads 41.1 fps in a script and 59.5 fps alone), so A9/A12 now require
+one process per arm with a machine-load reading taken first.

@@ -32,6 +32,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <vector>
@@ -41,9 +42,17 @@
 namespace {
 
 std::atomic<bool> g_openCompleted{ false };
+// Seek 是排入命令队列的异步调用，FFF3FP_Seek 的返回值只说明"命令收下了"，定位真的失败
+// 只会出现在事件里（实测裸流：result=-5，消息自称 "playback remained active"，可紧接着
+// state=Ended）。所以这里把那条失败记下来，读数时如实打印，而不是让它的后果冒充内核读数。
+std::atomic<bool> g_seekFailed{ false };
 
-void __cdecl OnEvent(void*, FFF3FPEvent event, const char*) {
+void __cdecl OnEvent(void*, FFF3FPEvent event, const char* detail) {
     if (event == FFF3FPEvent::OpenCompleted) g_openCompleted.store(true);
+    if (detail != nullptr && std::strstr(detail, "could not seek") != nullptr)
+        g_seekFailed.store(true);
+    if (std::getenv("CPCP_EVENTS"))
+        std::fprintf(stderr, "EVENT %d %s\n", static_cast<int>(event), detail ? detail ? detail : "(空)" : "(null)");
 }
 
 std::int64_t Now100ns() {
@@ -175,7 +184,11 @@ int main(int argc, char** argv) {
         FFF3FP_Destroy(player); return 3;
     }
 
-    FFF3FP_Seek(player, 0);
+    // CPCP_NO_SEEK=1 跳过那次 Seek(0)。这条开关是被实测逼出来的：裸流上 Seek(0) 会失败
+    // （事件里 result=-5，消息自称 "playback remained active"），可紧接着会话就
+    // state=Ended／解码帧=0——上一轮我因此把"裸流不出帧"记成播放器缺陷，其实是**仪器自己
+    // 按下的那颗钮**。同一件裸流不 seek 时实测 state=Playing、解码 88 帧。
+    if (std::getenv("CPCP_NO_SEEK") == nullptr) FFF3FP_Seek(player, 0);
     FFF3FP_Play(player);
     Pump(400);   // 让首帧落地
 
@@ -234,6 +247,11 @@ int main(int argc, char** argv) {
         static_cast<unsigned long long>(after.decodedVideoFrames),
         static_cast<unsigned>(after.queuedVideoFrames),
         static_cast<int>(after.selectedVideoStream), static_cast<int>(after.selectedAudioStream));
+    // 定位失败与"零帧"同时出现时，成因是那句 Seek(0)，不是内容周期。不写这一行，读者就会
+    // 把仪器造成的 0 帧当成播放器缺陷——本轮就是这样误判过一次并已当面更正。
+    if (g_seekFailed.load())
+        std::printf("  ⚠ 内核在这扇窗里报过定位失败（事件 result=-5）。若上面是零帧，成因是\n"
+            "    探针自己的 Seek(0)，不是内容周期；用 CPCP_NO_SEEK=1 复跑同一件就能分开。\n");
     std::printf("  采样 %zu 个｜平台段 %zu 条：", series.size(), plateaus.size());
     for (const auto& p : plateaus)
         std::printf("[起 %.2fs 长 %.2fs @ %.1fHz] ", p.startS, p.durationS, p.meanHz);
@@ -252,6 +270,10 @@ int main(int argc, char** argv) {
     Judge(true, lateHz < 60, "前置：晚段速率低于无窗口默认面板值 60（否则 min() 分不清哪半赢）");
     // 前置二：会话没被饿住。媒体时钟不推进就等于没跑到后段，"晚段没换档"不是内核的账。
     Judge(mediaS > 0.0, mediaS >= seconds * 0.6, "前置：媒体时钟推进 ≥ 观察窗 60%");
+    // 零帧与定位失败同时出现 ⇒ 是探针的 Seek(0) 把会话送进 Ended，不是内核的内容周期。
+    // 这条必须排在下面那个提前 return 之前，否则零帧那趟根本走不到判据、只留下一句"未判"。
+    Judge(true, !(g_seekFailed.load() && presented == 0.0),
+        "前置：零帧不是被探针自己的 Seek(0) 弄出来的（定位失败＋零帧 ⇒ 本臂不适用）");
     if (mediaS < seconds * 0.6) {
         std::printf("\nCPCP RESULT: NOT-JUDGED（会话只推进 %.2fs，段判据没有操作数）\n", mediaS);
         FFF3FP_Destroy(player); return 3;
