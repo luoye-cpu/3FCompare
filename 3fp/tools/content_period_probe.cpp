@@ -268,6 +268,14 @@ int main(int argc, char** argv) {
             "Ⓒ 整窗只有一条平台段且落在该率上（取数来源换了、读数没换）");
         Judge(presented > 20, drops <= 2,
             "Ⓓ 没因为取数来源变化而丢帧（传统口径丢弃 ≤2）");
+        // ⓔ 吞吐这一条是**故意放在无窗口支里**的：§A9 那三条 CFR 臂走的是带窗口的
+        // present_pacing_probe，而那支读数要窗口真在被合成——本轮这台盒子上一个游戏客户端
+        // 长期占 300%+ CPU，同一文件三次跑出 19/132/156 帧，那种吞吐不能当判词。
+        // 无窗口支实测媒体时钟 4.50s 观察窗推进 4.51s、呈现计数复跑一致（12c 两容器都是
+        // 91 帧），所以这里的期望值可以直接由"率 × 秒"给出，与机器负载基本无关。
+        const auto expected = static_cast<double>(earlyHz) * mediaS;
+        Judge(earlyHz > 0 && mediaS > 0, expected > 0 && std::fabs(presented - expected) / expected <= 0.10,
+            "ⓔ CFR 呈现帧数 == 该率 × 媒体时钟实际推进秒数（±10%，负载无关的吞吐闸）");
     }
     const auto* early = FindPlateau(plateaus, static_cast<double>(earlyHz), 0.4);
     const auto* late = FindPlateau(plateaus, static_cast<double>(lateHz), 0.4);

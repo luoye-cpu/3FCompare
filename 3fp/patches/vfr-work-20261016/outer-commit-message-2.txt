@@ -1,0 +1,44 @@
+VFR: a load-independent CFR throughput gate, and the raw-stream gap found on the way
+
+Closing the items left open in e5938f1.
+
+* content_period_probe gains judge E for constant-rate content: presented frames
+  must equal the stream rate times the seconds the media clock actually advanced,
+  within 10%. It lives in the windowless probe on purpose. The three A9 CFR arms
+  run through present_pacing_probe, which needs a composited window, and this
+  afternoon a game client held 300%+ CPU, so the same file produced 19 / 132 / 156
+  presented frames across runs -- throughput numbers that cannot be cited. Under
+  that same load the pre- and post-change builds collapse alike (60 fps arm:
+  35.6-40.7 fps with 153-195 traditional drops versus 39.2 fps with 166 on the
+  ablated build) while their ceiling readings agree word for word
+  (60.00 / 24.00 / 144.0x), which is what actually supports "no CFR regression".
+  Judge E then measures the thing that change could plausibly break, and it is
+  repeatable: both 12c containers land 91 frames against 20 fps x 4.51 s = 90.2,
+  a 0.9% difference, four arms PASS.
+
+* A pre-existing gap surfaced and is recorded rather than gated: bare Annex-B
+  H.264 never presents a frame. Tested in four combinations (variable-rate and
+  constant-rate bare streams, windowed and windowless sessions) and all give
+  presented=0, media clock advanced 0.00 s, drops 0, while FFF3FP_Open reports
+  success. It is reasoned to sit upstream of this round's change -- the stall is
+  before the release gate, while PresentVideoFrame is after it -- but no HEAD~1
+  control build was made, so docs/03 records it as "reasoned out, not
+  excluded by measurement" per the repo's rule. Related: a constant-rate bare
+  stream reports frameRateMode "variable", because av_guess (20/1) differs from
+  r_frame_rate (40/1) there, so the container comparison path can also produce a
+  false positive, while the measured path cannot help (no frames were presented).
+  No gate was built for bare streams: that source genuinely carries no timing
+  (packet PTS output was empty), and the correct behaviour -- unknown content
+  rate, leaving only the panel bound -- was already observed landing on the 60 Hz
+  plateau.
+
+* STATUS.md gained nine rows of current facts but is deliberately NOT committed
+  here: its entire "current snapshot (2026-10-09)" section and the resequenced
+  to-do list are somebody else's uncommitted work, and my insert lands inside
+  that same hunk, so staging it would sweep their unpublished round into this
+  commit. The committed record of this round stays in docs/03 (A12 plus the new
+  supplement section).
+
+Verification on the committed state: seven fixture self-checks pass, the four
+windowless arms pass (8/8/6/6 judged, 0 red), all files LF as in HEAD, kernel
+build rc=0 with both DLL mirrors identical and newer than their sources.
