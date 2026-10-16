@@ -271,6 +271,17 @@ run "裸 Annex-B 20fps 恒定 6s（由 12c 转 annexb，包级 PTS 全空）" \
   "$FF" -hide_banner -loglevel error -i "$WOUT\\vfr\\12c_cfr_20.mp4" \
     -c copy -bsf:v h264_mp4toannexb -f h264 -y "$WOUT\\vfr\\12d_bare_20.264"
 
+# 12e：CFR 120fps 一件，专给"内容率≈面板率"那一档当操作数。
+#   为什么是 120：本机面板声明 144，上限=min(144,120)=120 ⇒ 每帧该占 144/120=1.200 个刷新周期，
+#   ⌊⌋/⌈⌉ 落在 {1,2} 之间交替。这正是"槽位分配"唯一可能有用的形状（60fps 那档 r=2.4 太宽松，
+#   怎么排都进带；24fps 那档 r=6.000 整除，带会塌成一个点）。上限改成 per-媒体 常数以后，
+#   这一件用来判"只留上限"有没有把 1/2 交替弄坏。
+run "CFR 640x360 @120fps 6s（.mp4，r≈1.2 交替操作数）" \
+  "$FF" -hide_banner -loglevel error \
+    -f lavfi -i "testsrc2=s=640x360:r=120:d=6" \
+    -fps_mode passthrough -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
+    -y "$WOUT\\vfr\\12e_cfr_120.mp4"
+
 echo ""
 echo "── 汇总：成功 $OK / 失败 $FAIL / 跳过 $SKIP ──"
 [ "$FAIL" -gt 0 ] && printf '  失败项：%s\n' "${FAILED_NAMES[@]}"
@@ -338,6 +349,9 @@ cfr_selfcheck() {              # cfr_selfcheck <相对路径> <率> <期望带 d
 }
 cfr_selfcheck "vfr/12c_cfr_20.mp4" 20 120
 cfr_selfcheck "vfr/12c_cfr_20.ts"  20 120
+# 12e 的自证判"单一间距 1/120 覆盖全部 719 个差分 + 每帧都带 duration"。它不验"1.2 个刷新周期"
+# 那件事——那是内核侧判带的操作数，夹具只管源里的节奏是纯净的 120。
+cfr_selfcheck "vfr/12e_cfr_120.mp4" 120 720
 # 裸流件自证：判的是"这源里到底有哪一种节奏信息"。包数必须齐（120）、包级 PTS 必须**全空**
 #   （没有定位基准），而包时长必须**齐全且统一**（解容器按它猜出的率给的）——这两条一起
 #   决定了裸流的正确读数是"合成一个恒定时钟"，而不是"什么都不知道"。哪天 FFmpeg 开始给
@@ -361,7 +375,7 @@ bare_selfcheck() {              # bare_selfcheck <相对路径> <包数>
 }
 bare_selfcheck "vfr/12d_bare_20.264" 120
 [ "$VFR_BAD" -gt 0 ] && echo "  ⇒ 合计 $VFR_BAD 条自证失败（VFR+CFR 对照件+裸流件）" \
-                     || echo "  ⇒ 全部八条自证全过（含 CFR 对照件与裸流件）"
+                     || echo "  ⇒ 全部九条自证全过（含 CFR 对照件、r≈1.2 那一件与裸流件）"
 
 shopt -s nullglob
 for f in basic/*.* meta/*.* anim/*.* edge/*.* hdr/*.* seq/img001.png vfr/*.*; do

@@ -1,6 +1,6 @@
 #!/bin/bash
 # 60fps 呈现节律臂，三次隔开通跑（计时判据不能被别的批次夹着跑）。
-# 每一趟都开 FPT_HOLD_TRACE=1：带外样本要逐条归因，聚合百分比分不开"节律锁失守"和
+# 每一趟都开 FPT_HOLD_TRACE=1：带外样本要逐条归因，聚合百分比分不开"上限没在岗"和
 # "管线跟不上"这两件事。
 set -u
 ROOT=/c/PLAN/3FCompare/3fp
@@ -16,6 +16,8 @@ for i in 1 2 3; do
   grep -o "呈现帧=[0-9]*（[0-9.]* fps）[^|]*" "$L/keep$i.out" | head -1
   grep -o "屏幕停留对账：[^|]*" "$L/keep$i.out" | head -1
   grep -o "计时判据前置：.*" "$L/keep$i.out" | head -1
+  grep -o "上限读数：.*" "$L/keep$i.out" | head -1
+  grep -o "实测呈现速率（.*" "$L/keep$i.out" | head -1
   grep -o "PACING RESULT.*" "$L/keep$i.out" | head -1
   [ "$i" != "3" ] && sleep 25
 done
