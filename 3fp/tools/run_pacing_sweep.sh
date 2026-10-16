@@ -33,6 +33,7 @@ K4='C:\PLAN\3FCompare\testmedia\media\real\real_4k_hevc10_60m.mp4'
 F24='C:\PLAN\3FCompare\testmedia\media\derived_24fps_fixture_20261015.mp4'
 F240='C:\PLAN\3FCompare\testmedia\media\derived_240fps_fixture_20261015.mp4'
 VFR='C:\PLAN\3FCompare\3fp\samples\media\vfr\12a_vfr_25then60.ts'
+F120='C:\PLAN\3FCompare\3fp\samples\media\vfr\12e_cfr_120.mp4'
 
 BAD=0
 arm() {   # arm <tag> <秒> <media> <env=值>...
@@ -61,6 +62,9 @@ want 4k  && arm 4k  8 "$K4" PCP_CONTENT_FPS=60
 # VFR 臂现在同时给两条判据当操作数：⑦"上限在窗口内恒定"（只有 VFR 文件能让
 # "逐段重算上限"这种旧实现露出跨度）、⑥"实测呈现速率逐段跟上内容率"。
 want vfr && arm vfr 4 "$VFR" PCP_VFR_EARLY_HZ=25 PCP_VFR_LATE_HZ=60
+# 120fps 那档是"内容率≈面板率"的操作数（r=144/120=1.200，判带 {1,2}），
+# 槽位瞄准删掉以后就是靠它证明 1/2 交替没坏。
+want 120 && arm 120 8 "$F120" PCP_CONTENT_FPS=120
 
 echo "不可判的臂 $BAD 支"
 [ "$BAD" -eq 0 ]

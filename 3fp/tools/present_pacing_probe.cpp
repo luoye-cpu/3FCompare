@@ -283,6 +283,7 @@ int main(int argc, char** argv) {
     const auto baselineDisplayDiscards = baselinePacing.displayRateDiscardedFrames;
     const auto start100ns = Now100ns();
     double maxMeasuredHz = 0.0;          // 实测面板周期（整窗峰值）——只是观测量，不是上限操作数
+    std::vector<double> measuredSeries;   // 逐轮实测周期；② 判一致性用中位，不用峰值
     double minBoundHz = 0.0, maxBoundHz = 0.0;   // 上限在窗口里的取值范围；恒定 ⇒ 两者相等
     std::uint32_t zeroBoundSamples = 0;          // 上限中途塌回 0 的次数（=上限掉岗）
     std::uint32_t sawLocked = 0, sawUnlocked = 0;
@@ -300,6 +301,8 @@ int main(int argc, char** argv) {
         const auto snap = ReadSnapshot(player);
         const auto tS = (Now100ns() - start100ns) / 10'000'000.0;
         maxMeasuredHz = std::max(maxMeasuredHz, static_cast<double>(pacing.measuredRefreshHz));
+        if (pacing.measuredRefreshHz > 0.0f)
+            measuredSeries.push_back(static_cast<double>(pacing.measuredRefreshHz));
         const auto bound = static_cast<double>(pacing.frameRateBoundHz);
         if (bound > 0.0) {
             if (minBoundHz == 0.0) minBoundHz = bound;
@@ -381,12 +384,16 @@ int main(int argc, char** argv) {
     const double panelHz = probeDeclaredHz > 0 ? static_cast<double>(probeDeclaredHz)
         : static_cast<double>(finalPacing.declaredRefreshHz);
 
+    // ② 用的统计量：中位而不是整窗峰值（峰值把一次坏样本当结论，理由写在判据旁边）。
+    const double medianMeasuredHz = measuredSeries.empty() ? 0.0 : Median(measuredSeries);
+
     std::printf("\n--- 读数 ---\n");
     std::printf("  内核报的声明刷新率=%.2f Hz｜探针量的=%d Hz\n",
         finalPacing.declaredRefreshHz, probeDeclaredHz);
-    std::printf("  实测面板周期（整窗峰值，只是观测量、不进上限）=%.2f Hz｜"
+    std::printf("  实测面板周期（峰值=%.2f｜中位=%.2f，只是观测量、不进上限）｜"
         "末次 gridLocked=%u（新语义：上限在岗）bypass=%u（轮询里 在岗=%u 次/不在岗=%u 次）\n",
-        maxMeasuredHz, finalPacing.gridLocked, finalPacing.pacingBypass, sawLocked, sawUnlocked);
+        maxMeasuredHz, medianMeasuredHz, finalPacing.gridLocked, finalPacing.pacingBypass,
+        sawLocked, sawUnlocked);
     std::printf("  上限读数：中位=%.2f Hz｜窗口内范围=[%.2f, %.2f] 跨度=%.2f Hz｜"
         "上抬台阶=%zu 次 下降=%zu 次（阈值 %.2f，判的是单调不减）｜"
         "塌回 0 的采样=%u 次｜bypass=2（上限不可用：无输出窗口或取不到声明刷新率）采样=%zu 次\n",
@@ -486,9 +493,14 @@ int main(int argc, char** argv) {
     // ② 实测面板周期与声明值一致性（±0.5%）。144.00 与 143.99 之差是面板自身振荡，
     //    超过 0.5% 说明我把别的东西当成了刷新周期。注意这条只证"观测量还是面板周期"，
     //    上限不使用它（VRR 一开实测周期就等于内容周期，min(面板,内容) 会自指）。
-    Judge(probeDeclaredHz > 0,
-        std::fabs(maxMeasuredHz - probeDeclaredHz) / probeDeclaredHz < 0.005,
-        "② 实测面板周期与声明刷新率相差 <0.5%（measuredRefreshHz 仅观测，不再是上限操作数）");
+    //    两处操作数修正是本轮实测逼出来的：
+    //      · 用**中位**而不是峰值。同一批里 24fps 臂峰值 144.78、VRR 臂 145.12，而
+    //        60/120/240 臂是 144.02~144.15 —— 那条红量的是统计量的尾巴，不是标定坏了。
+    //      · 撕裂／VRR 臂不判这条：该臂反解出来的是 DWM 的合成间隔（145.12 对 60fps 内容），
+    //        它本来就不是面板率，跟声明值比是问错问题。
+    Judge(probeDeclaredHz > 0 && !tearing && measuredSeries.size() >= 40,
+        std::fabs(medianMeasuredHz - probeDeclaredHz) / probeDeclaredHz < 0.005,
+        "② 实测面板周期（整窗中位）与声明刷新率相差 <0.5%；VRR 臂不判——那里量的是合成间隔");
 
     // ⑦ 上限是 **per-媒体** 的产物：open 时算一次，整个观察窗内必须只有一个值。
     //    这一条在 VFR 臂上也判，而且判的内容和旧版正好相反——旧版要求 frameRateBoundHz
