@@ -260,6 +260,17 @@ run "同上内容 remux 成 .ts" \
   "$FF" -hide_banner -loglevel error -i "$WOUT\\vfr\\12c_cfr_20.mp4" \
     -c copy -fps_mode passthrough -y "$WOUT\\vfr\\12c_cfr_20.ts"
 
+# 裸流件（从 12c 那件**恒定** 20fps 出 Annex-B）：它存在的理由有两个——
+#   ① 它是"包级 PTS 全空、只剩解容器猜出的统一包时长"那一档的唯一入口（实测：PTS 0/120、时长 120/120），
+#      内核只能走合成时钟，正确读数是一条 20.0Hz 平台段而不是两段换档；
+#   ② 它不接受定位，所以是"失败的 seek 会不会把会话判成结束"这条判据的现成操作数。
+# ⚠ 用 12c（恒定）而不是 12a/12b（可变）来做这一件：恒定裸流在 FFmpeg 那边
+#   av_guess=20/1 与 r_frame_rate=40/1 不相等，容器那条比较路会因此把恒定说成可变——
+#   于是这件同时是"实测优先于容器"这条修复的对照件（修好后必须读 constant）。
+run "裸 Annex-B 20fps 恒定 6s（由 12c 转 annexb，包级 PTS 全空）" \
+  "$FF" -hide_banner -loglevel error -i "$WOUT\\vfr\\12c_cfr_20.mp4" \
+    -c copy -bsf:v h264_mp4toannexb -f h264 -y "$WOUT\\vfr\\12d_bare_20.264"
+
 echo ""
 echo "── 汇总：成功 $OK / 失败 $FAIL / 跳过 $SKIP ──"
 [ "$FAIL" -gt 0 ] && printf '  失败项：%s\n' "${FAILED_NAMES[@]}"
@@ -327,8 +338,30 @@ cfr_selfcheck() {              # cfr_selfcheck <相对路径> <率> <期望带 d
 }
 cfr_selfcheck "vfr/12c_cfr_20.mp4" 20 120
 cfr_selfcheck "vfr/12c_cfr_20.ts"  20 120
-[ "$VFR_BAD" -gt 0 ] && echo "  ⇒ 合计 $VFR_BAD 条自证失败（VFR+CFR 对照件）" \
-                     || echo "  ⇒ 全部七条自证全过（含 CFR 对照件）"
+# 裸流件自证：判的是"这源里到底有哪一种节奏信息"。包数必须齐（120）、包级 PTS 必须**全空**
+#   （没有定位基准），而包时长必须**齐全且统一**（解容器按它猜出的率给的）——这两条一起
+#   决定了裸流的正确读数是"合成一个恒定时钟"，而不是"什么都不知道"。哪天 FFmpeg 开始给
+#   裸流写真时间戳，这条会先变红，届时"⑥/ⓔ 未判"的预期就得重估。
+bare_selfcheck() {              # bare_selfcheck <相对路径> <包数>
+  local rel="$1" want="$2" tot pts dur
+  [ -f "$rel" ] || { echo "  ✗ 缺 $rel"; VFR_BAD=$((VFR_BAD+1)); return 1; }
+  tot=$(probe "$rel" -select_streams v:0 -show_entries packet=pts_time -of csv=p=0 | wc -l)
+  pts=$(probe "$rel" -select_streams v:0 -show_entries packet=pts_time -of csv=p=0 \
+        | grep -cv -E '^N/A$|^$')
+  dur=$(probe "$rel" -select_streams v:0 -show_entries packet=duration_time -of csv=p=0 \
+        | grep -cv -E '^N/A$|^$')
+  printf "  %-24s 包=%s/%s 有PTS=%s 有统一时长=%s/%s\n" "$rel" "$tot" "$want" "$pts" "$dur" "$want"
+  # 实测把原本的假设改了一半：裸流的**包级 PTS 确实全空**，但解容器会按它猜出的率
+  # 给每个包一份**统一时长**（12d = 120/120 有 duration_time）。所以裸流的正确读数是
+  # "按猜出的恒定率合成时钟"，不是"完全没有节奏信息"——判据按实测写。
+  if [ "$tot" -ne "$want" ] || [ "$pts" -ne 0 ] || [ "$dur" -ne "$want" ]; then
+    echo "    ✗ 裸流件自证失败（要包数齐、PTS 全空、包时长齐全）"; VFR_BAD=$((VFR_BAD+1)); return 1
+  fi
+  return 0
+}
+bare_selfcheck "vfr/12d_bare_20.264" 120
+[ "$VFR_BAD" -gt 0 ] && echo "  ⇒ 合计 $VFR_BAD 条自证失败（VFR+CFR 对照件+裸流件）" \
+                     || echo "  ⇒ 全部八条自证全过（含 CFR 对照件与裸流件）"
 
 shopt -s nullglob
 for f in basic/*.* meta/*.* anim/*.* edge/*.* hdr/*.* seq/img001.png vfr/*.*; do

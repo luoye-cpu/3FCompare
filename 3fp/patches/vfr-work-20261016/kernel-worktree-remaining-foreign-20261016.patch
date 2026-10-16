@@ -1,5 +1,5 @@
 diff --git a/FFF.Native/3FP/Api/FFF.Player.Api.h b/FFF.Native/3FP/Api/FFF.Player.Api.h
-index d4b06fc..2b58374 100644
+index 2e5bc9e..685ed6f 100644
 --- a/FFF.Native/3FP/Api/FFF.Player.Api.h
 +++ b/FFF.Native/3FP/Api/FFF.Player.Api.h
 @@ -313,9 +313,9 @@ struct FFF3FPSnapshot {
@@ -15,7 +15,7 @@ index d4b06fc..2b58374 100644
      // a plain swr matrix downmix: energy preserved, placement lost. This is
      // 1 while the OBR HRTF renderer is feeding the stereo output instead, 0 when
      // the matrix downmix is in force (multichannel device, unsupported
-@@ -1154,7 +1154,7 @@ FFF3FP_API FFFResult FFF3FP_GetHdrMetadataSource(FFF3FPHandle player,
+@@ -1162,7 +1162,7 @@ FFF3FP_API FFFResult FFF3FP_GetHdrMetadataSource(FFF3FPHandle player,
  //   1. the entry's own peak -- max(maxScl) across windows[0]'s three channels,
  //      converted to nits as value * 10000 -- whenever that is a valid peak;
  //   2. otherwise the stream-level baseline -- the peak the processor derived from
@@ -53,10 +53,10 @@ index 1f05036..5b09ee0 100644
  // rendered channel against the source identity. It resolves to the same swap for
  // every layout that has both side and back speakers:
 diff --git a/FFF.Native/3FP/Core/PlayerSession.cpp b/FFF.Native/3FP/Core/PlayerSession.cpp
-index 776217b..a9f0d40 100644
+index b3413e9..c896e05 100644
 --- a/FFF.Native/3FP/Core/PlayerSession.cpp
 +++ b/FFF.Native/3FP/Core/PlayerSession.cpp
-@@ -4091,8 +4091,8 @@ void PlayerSession::UpdateInputAudioPeakLevels(const AVFrame* frame) noexcept {
+@@ -4103,8 +4103,8 @@ void PlayerSession::UpdateInputAudioPeakLevels(const AVFrame* frame) noexcept {
  
  bool PlayerSession::HandleInternalAudioDecodeFailure(const FFFResult result, std::string message) noexcept {
      // A stream switch seeks on the video timeline. MPEG-TS can land on a partial

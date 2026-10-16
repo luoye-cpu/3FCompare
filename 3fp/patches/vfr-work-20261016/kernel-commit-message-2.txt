@@ -1,0 +1,46 @@
+Player: seek to start on untimestamped streams, never-composited hold attribution
+
+Two things this round's measurements turned up.
+
+* A failed seek could end playback. Timestamp seeking a demuxer without read_seek
+  falls back to scanning the input for a timestamp pair; when that finds nothing it
+  returns failure but leaves the reader at end of file, so the next av_read_frame
+  returns EOF, pendingVideoPackets_ is empty, and FlushAtEnd marks the session Ended
+  with nothing decoded. Measured on bare Annex-B: "SEEK fail rc=-1 before=450560
+  after=1102103" (file size), and the same file plays fine when no seek is issued.
+  Seeking to position 0 needs no time-to-byte mapping, so it is no longer gated
+  behind timelineExtent > 0 -- which is exactly the condition untimestamped sources
+  fail. Rolling the AVIO back alone was tried and is not enough: avio_tell reports a
+  buffered logical position that can land inside an access unit, which reads packets
+  but decodes nothing. Seek() also no longer runs DecodeUntilSeekTarget() after a
+  failed DoSeek, and the failure message now says whether the reader was actually
+  rolled back instead of always promising that playback continued.
+
+* The hold accounting now settles against accumulated expectations. PresentRefreshCount
+  advances only when an image really reaches the monitor, so flips superseded before a
+  vblank do not advance it and two or three flips collapse into one long measured hold.
+  Banding that against a single flip's ratio reported it as a hitch of up to 11 refresh
+  periods, which is why the within-band ratio swung 48.7%-93.4% run to run. Holds are
+  now settled against the sum of the expected slot ratios since the last landing, and
+  when the lock is bypassed the expectation comes from the content period instead of the
+  zeroed aim ratio -- which also gives the variable-refresh path samples at all (it
+  previously reported holdSampled = 0, so the lock-off control arm A9 (4) asks for had
+  no operand). Exported as neverCompositedPresents, appended to FFF3FP_presentPacingStatus.
+
+  Honest scope: this removes part of the spread, not all of it. Three runs before: 66.5
+  / 48.7 / 91.3 percent with worst deviations 10 / 11 / 3. Three runs after: 72.0 / 88.6
+  / 95.6 percent with 8 / 3 / 2, and neverCompositedPresents measured at 88 / 95 / 58 per
+  eight seconds. The residue is periods with no flip at all -- nothing new to present --
+  which contribute wall time but no accumulated expectation, so the band is still too
+  tight. The remaining fix is to band holds by the displayed frame's content duration
+  rather than by flips, which needs media time passed into the renderer; not attempted
+  here rather than half-claimed.
+
+ABI: neverCompositedPresents is appended to a size-checked struct, so all three
+declarations have to move together -- this header (here), the VB interop struct (here)
+and the C# host's copy (in the companion outer-repo commit, because that file carries
+someone else's unpublished work and is staged hunk by hunk). The kernel and the hosts
+must ship as a pair: a host declaring the older size gets InvalidArgument rather than a
+short write. Both hosts were rebuilt against the new header and compile clean.
+FFF_SEEK_TRACE=1 prints the demux position around a failing seek for the same class of
+diagnosis.

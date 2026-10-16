@@ -286,11 +286,12 @@ int main(int argc, char** argv) {
     // 眼睛看到的节律在这一行：内核自己数的"这一帧在屏上真停了几个刷新周期"，
     // 对内容率/面板率算出的 ⌊r⌋~⌈r⌉ 带。提交精度只算半边，这条才是结果。
     const double holdSampled = static_cast<double>(finalPacing.holdSampled);
-    std::printf("  屏幕停留对账：可测=%llu 落在 ⌊r⌋/⌈r⌉ 带内=%llu（%.1f%%）带外最差偏=%llu 格\n",
-        static_cast<unsigned long long>(finalPacing.holdSampled),
-        static_cast<unsigned long long>(finalPacing.holdWithinRounding),
+    std::printf("  屏幕停留对账：可测=%.0f 落在 ⌊r⌋/⌈r⌉ 带内=%.0f（%.1f%%）带外最差偏=%llu 格｜"
+        "从未上屏翻帧=%llu（停留判带按累计 ratio 结算，这个数就是被并掉的那些翻帧）\n",
+        holdSampled, static_cast<double>(finalPacing.holdWithinRounding),
         holdSampled > 0 ? finalPacing.holdWithinRounding * 100.0 / holdSampled : 0.0,
-        static_cast<unsigned long long>(finalPacing.holdWorstDeviationRefreshes));
+        static_cast<unsigned long long>(finalPacing.holdWorstDeviationRefreshes),
+        static_cast<unsigned long long>(finalPacing.neverCompositedPresents));
     if (!slotErrorPeriods.empty()) {
         std::size_t withinOne = 0;
         double worst = 0.0, sumSigned = 0.0;
@@ -355,7 +356,14 @@ int main(int argc, char** argv) {
         for (const auto e : slotErrorPeriods) if (e <= 1.0) ++withinOne;
         const auto fraction = slotErrorPeriods.empty() ? 0.0 :
             withinOne * 1.0 / slotErrorPeriods.size();
-        Judge(slotErrorPeriods.size() >= 40, fraction >= 0.95,
+        // 这两条都要"管线跟得上"才有资格判。实测同一件 60fps 文件三趟：呈现 42.1／38.5／57.7
+        // fps 时瞄格一格内 81.5／67.3／99.0%、停留带内 66.5／48.7／91.3%——两个数跟的都是
+        // 吞吐而不是节律锁。跟不上还记红，就是让进程调度替内核背锅。
+        const bool keptUp = maxBoundHz > 0.0 && presentedFps >= 0.95 * maxBoundHz && presented > 200;
+        std::printf("  计时判据前置：呈现 %.1f fps 对上限 %.1f Hz 的 95%% ⇒ %s\n",
+            presentedFps, maxBoundHz, keptUp ? "管线跟得上，两条计时判据生效"
+                                             : "管线跟不上，两条计时判据记未判（这是吞吐的账）");
+        Judge(keptUp && slotErrorPeriods.size() >= 40, fraction >= 0.95,
             "② 瞄格误差：≥95% 的采样落在一个刷新周期内（对的是「该提交的时刻」，不是槽时刻）");
         // ③ 没有多次复制：翻帧数不该明显超过呈现帧数。144Hz 面板上若按"UI 跟面板"
         //    实现，这个比值会接近 2.4，正是要避免的性能浪费。
@@ -364,7 +372,7 @@ int main(int argc, char** argv) {
         // 结果那半边，取"与对齐无关"的口径：停留格数落在 ⌊r⌋ 或 ⌈r⌉ 之内就算稳。
         // 判"等于我瞄的那一格"试过两种对齐，都是 30~47%，而面板平均恰好 2.4 —— 那说
         // 明问题在两条计数序列的归属上，不在节律本身。带内判据不依赖归属。
-        Judge(finalPacing.holdSampled >= 100,
+        Judge(keptUp && finalPacing.holdSampled >= 100,
             finalPacing.holdWithinRounding * 1.0 / finalPacing.holdSampled >= 0.95 &&
             finalPacing.holdWorstDeviationRefreshes <= 1,
             "② 屏幕停留落在 ⌊r⌋/⌈r⌉ 带内：≥95% 且带外偏差 ≤1 格");
