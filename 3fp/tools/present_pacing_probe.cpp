@@ -257,14 +257,25 @@ int main(int argc, char** argv) {
     const double drops = static_cast<double>(after.droppedVideoFrames - baseline.droppedVideoFrames);
     const double displayDrops = static_cast<double>(finalPacing.displayRateDiscardedFrames -
         baselineDisplayDiscards);
+    // 显示侧真正到达率。`presentedFps` 数的是"带着新画面交给 Present 的次数"，而其中
+    // 被后来者取代、从未合成的那些翻帧根本不改变屏幕——4K60 臂就是被这个区别骗的：
+    // 呈现 59.4 fps、提交误差 100% 落在一个周期内，可 475 次翻帧里 193 次没上屏，
+    // 屏幕实际只换了 ~35 次/秒，于是"管线跟得上"这句前置把一条真红判成了判据的错。
+    const auto neverComposited = static_cast<double>(finalPacing.neverCompositedPresents -
+        baselinePacing.neverCompositedPresents);
+    const double displayed = flips - neverComposited;
+    const double displayedFps = displayed * 10'000'000.0 / wall100ns;
 
     std::printf("\n--- 读数 ---\n");
     std::printf("  内核报的声明刷新率=%.2f Hz｜探针量的=%d Hz\n",
         finalPacing.declaredRefreshHz, probeDeclaredHz);
     std::printf("  网格标定（整窗峰值）=%.2f Hz｜末次 gridLocked=%u bypass=%u（轮询里 锁=%u 次/未锁=%u 次）\n",
         maxMeasuredHz, finalPacing.gridLocked, finalPacing.pacingBypass, sawLocked, sawUnlocked);
-    std::printf("  呈现帧=%.0f（%.1f fps）翻帧=%.0f｜翻帧/呈现帧=%.3f\n",
-        presented, presentedFps, flips, presented > 0 ? flips / presented : 0.0);
+    std::printf("  呈现帧=%.0f（%.1f fps）翻帧=%.0f｜翻帧/呈现帧=%.3f｜"
+        "显示侧到达=%.0f 帧（%.1f fps，从未上屏=%.0f＝%.1f%%）\n",
+        presented, presentedFps, flips, presented > 0 ? flips / presented : 0.0,
+        displayed, displayedFps, neverComposited,
+        flips > 0 ? neverComposited * 100.0 / flips : 0.0);
     // 合并帧这一栏是为"屏幕停留带内比例"那条判据准备的：一次呈现跳过了 k 个更新过的
     // 画面，被显示的那一帧就要多停 k 个源帧的时长，于是 ⌊r⌋/⌈r⌉ 带外必然出现——
     // 这是管线合并，不是节律锁失守。两个数不并排列，就没法把这两种成因分开。
@@ -359,11 +370,33 @@ int main(int argc, char** argv) {
         // 这两条都要"管线跟得上"才有资格判。实测同一件 60fps 文件三趟：呈现 42.1／38.5／57.7
         // fps 时瞄格一格内 81.5／67.3／99.0%、停留带内 66.5／48.7／91.3%——两个数跟的都是
         // 吞吐而不是节律锁。跟不上还记红，就是让进程调度替内核背锅。
-        const bool keptUp = maxBoundHz > 0.0 && presentedFps >= 0.95 * maxBoundHz && presented > 200;
-        std::printf("  计时判据前置：呈现 %.1f fps 对上限 %.1f Hz 的 95%% ⇒ %s\n",
-            presentedFps, maxBoundHz, keptUp ? "管线跟得上，两条计时判据生效"
-                                             : "管线跟不上，两条计时判据记未判（这是吞吐的账）");
-        Judge(keptUp && slotErrorPeriods.size() >= 40, fraction >= 0.95,
+        // 操作数下限原来写死 `presented > 200`：那对 24fps 臂永远不成立（8s 窗口只可能有
+        // 192 帧），于是这支明明呈现 24.0fps 对上限 24.0Hz（一分不差）被记成"跟不上"。
+        // 改成按窗口算：至少交付"锁定时该有的帧数"的一半，既留下 60fps 臂的 discrimination
+        // （那三趟 337/462/460 帧对下限 240 仍然靠 fps 那一半判），又不让低内容率臂天生没有操作数。
+        const double operandFloor = 0.5 * maxBoundHz * seconds;
+        // 两半分开判，因为它们是两笔不同的账：
+        //   deliveringFlips —— 翻帧**生产**跟得上上限（跟不上就是解码/调度的账，整机忙也走这支）；
+        //   keptUp         —— **屏幕真到达**的速率跟得上，停留判带只有在这之下才有意义。
+        // 4K60 臂实测是"生产跟得上、到达跟不上"（475 次翻帧里 193 次没上屏，屏幕只换了
+        // ~35 次/秒），所以以前 keptUp 用呈现速率把它误放行，把该由到达率记的红包在停留判据上。
+        // 拆开之后那支的停留判据记未判，到达率自己记红——就是下面这条新判据。
+        const bool deliveringFlips = maxBoundHz > 0.0 && presentedFps >= 0.95 * maxBoundHz &&
+            presented >= operandFloor;
+        const bool keptUp = maxBoundHz > 0.0 && displayedFps >= 0.95 * maxBoundHz &&
+            displayed >= operandFloor;
+        std::printf("  计时判据前置：翻帧生产 %.1f fps、显示到达 %.1f fps 对上限 %.1f Hz 的 95%%"
+            "（操作数下限 %.0f 帧）⇒ %s\n",
+            presentedFps, displayedFps, maxBoundHz, operandFloor,
+            !deliveringFlips ? "生产就没跟上，计时判据记未判（这是吞吐的账）"
+                : (keptUp ? "显示侧也跟得上，计时判据生效"
+                          : "生产跟得上而显示侧没跟上：停留判据记未判，账由下面那条到达率判据记"));
+        Judge(deliveringFlips, keptUp,
+            "② 显示侧到达率（翻帧−从未上屏）≥ 95% 上限：生产跟得上时，没上屏的那些就不是调度的账");
+        // 瞄格误差量的是"我们这个线程有没有在该提交的时刻提交"，那是生产侧的事，
+        // 只要翻帧真的按上限在产就有资格判——显示侧到没到屏不改变这句。4K60 臂正是如此：
+        // 提交误差 100% 落在一个周期内（该判绿），而到达率 36.4/60（该由上面那条记红）。
+        Judge(deliveringFlips && slotErrorPeriods.size() >= 40, fraction >= 0.95,
             "② 瞄格误差：≥95% 的采样落在一个刷新周期内（对的是「该提交的时刻」，不是槽时刻）");
         // ③ 没有多次复制：翻帧数不该明显超过呈现帧数。144Hz 面板上若按"UI 跟面板"
         //    实现，这个比值会接近 2.4，正是要避免的性能浪费。
