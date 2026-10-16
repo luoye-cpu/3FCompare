@@ -1,0 +1,44 @@
+VFR: CFR baselines reproduced single-run, and two instrument findings
+
+Closing the last open items from 5a9b796, plus two findings about the
+instruments themselves that change what can be claimed.
+
+* CFR baselines are now measured, not inferred -- but only when each arm runs as
+  its own process. Batched in one script, the first arm (60 fps) read 41.1 fps
+  presented with 148 traditional drops; the same arm alone reads 59.5 fps with 1
+  drop. The difference is the previous window still tearing down and DWM still
+  settling while the next arm is already timing, i.e. my own runner script was
+  the contaminant. Isolated runs at 18.7-26.2% machine load reproduce the A9
+  records: 60 fps arm ceiling 60.00 Hz / 59.5 fps / 1 drop (A9: 59.7), 240 fps
+  arm 144.02 Hz / 131.2 fps / 528 display-rate discards with the traditional
+  counter at 0 (A9: 131.5 and 526), and judge 4 turned green there. 24 fps:
+  24.00 Hz / 23.9 fps / both discard columns 0. The only remaining red across
+  them is the "hold within floor/ceil band >= 95%" threshold (88.2% and 93.4%).
+
+* The "lock off" control arm that A9 (4) asks for cannot be built on this
+  instrument as it stands: with tearing requested the run reports
+  holdSampled = 0 for the whole window, because the hold counters only exist on
+  the grid-locked path (the bypass branches zero aimedSlotRatio_, so the band
+  precondition scoredSlotRatio_ >= 1.0 is never met). Comparing locked versus
+  unlocked holds would therefore compare a number against nothing. Settling that
+  needs the hold measurement to stop depending on the aimed ratio -- record the
+  hold distribution independently, then compare arms. Not done here and not
+  claimed. Useful side result from the same run: the ceiling still reads 60.00 Hz
+  and still presents 60.0 fps with the lock bypassed, so the content half of the
+  bound does not depend on the grid.
+
+* The bare-stream gap is now attributed by measurement instead of by reasoning.
+  The windowless probe gained a snapshot readback (state, position, duration,
+  decoded/queued frames, selected streams), and a bare Annex-B H.264 shows
+  state=Ended, duration=0.00s, decodedVideoFrames=0, queuedVideoFrames=0 with
+  selectedVideoStream=0 -- stream selection is fine, and zero frames were decoded
+  before the session declared itself ended. Since PresentVideoFrame runs after the
+  release gate, this round's change provably never executed on that input. What is
+  left (why the demux/decode path yields nothing, and who declares Ended on a
+  zero-duration bare stream) is outside this round and is recorded as such.
+
+* content_period_probe also prints those snapshot fields now, so a NOT-JUDGED
+  outcome carries the reason instead of just refusing.
+
+Verification on the committed state: seven fixture self-checks pass, four
+windowless arms pass (8/8/6/6 judged, 0 red, drops 0), files LF as in HEAD.

@@ -224,6 +224,16 @@ int main(int argc, char** argv) {
     std::printf("\n--- 读数 ---\n");
     std::printf("  媒体时钟推进=%.2fs（观察窗 %.2fs）｜呈现帧=%.0f｜传统口径丢弃=%.0f\n",
         mediaS, seconds, presented, drops);
+    // 会话状态与时长：裸流那类"一帧都不出"的形状，只有把 state／duration 打出来才分得清
+    // 是"停在预滚"还是"根本没解码"。缺这两个数时，NOT-JUDGED 就是一句没有信息量的话。
+    std::printf("  末次快照 state=%d｜position=%.2fs｜duration=%.2fs｜解码帧=%llu｜队列=%u"
+        "｜选中流 v=%d a=%d\n",
+        static_cast<int>(after.state),
+        static_cast<double>(after.position100ns) / 10'000'000.0,
+        static_cast<double>(after.duration100ns) / 10'000'000.0,
+        static_cast<unsigned long long>(after.decodedVideoFrames),
+        static_cast<unsigned>(after.queuedVideoFrames),
+        static_cast<int>(after.selectedVideoStream), static_cast<int>(after.selectedAudioStream));
     std::printf("  采样 %zu 个｜平台段 %zu 条：", series.size(), plateaus.size());
     for (const auto& p : plateaus)
         std::printf("[起 %.2fs 长 %.2fs @ %.1fHz] ", p.startS, p.durationS, p.meanHz);
