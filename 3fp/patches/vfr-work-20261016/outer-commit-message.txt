@@ -1,0 +1,56 @@
+VFR: fixtures, a windowless content-period probe, and the A12 record
+
+Instruments and documentation for the kernel change committed in the nested
+3fp/kernel repo as 7832e74. That commit is the behaviour change; this one is the
+reason it can be tested at all, which is what was missing: every fixture in the
+repo is constant-rate, and on CFR the wrong operand and the right one agree, so
+the frame-rate limiter had never had a live cell against variable frame rate.
+
+* tools/content_period_probe.cpp -- a windowless session. The existing
+  present_pacing_probe judges the refresh grid, so it needs a composited window,
+  and on this box it measured 19 / 132 / 156 presented frames across three runs
+  of the same file: reds that belong to the window manager, not the kernel. The
+  new probe creates no swap chain, so there is no composition, focus or
+  foreground dependency, and its four arms repeat within 0.01 s. It also reads
+  back the kernel's own media info twice, because the frameRateMode verdict is
+  published in two stages and a single read at open would always see the
+  provisional one.
+
+* samples/tools/generate_samples.sh section [12] -- seven fixtures in three
+  groups: 12a (25 then 60 fps, in mp4/mkv/ts), 12b (20 then 40, in mp4/ts) and
+  12c (a constant-rate 20 fps control, in mp4/ts). 12b and 12c exist because the
+  windowless probe's panel half falls back to 60, so any fixture segment at or
+  above 60 makes min(panel, content) unreadable. The [12] group is paired with
+  seven self-checks that run in both generate and --verify mode: they assert how
+  many packets carry a per-frame duration in each container, that every PTS gap
+  lands in one of the two declared rate bands, and that nothing falls outside
+  both. Those checks earned their keep twice, catching my own "exactly two
+  distinct spacings" (Matroska quantises to 1 ms, so 16.667 ms alternates 16/17)
+  and an awk mistake where -v does not evaluate expressions.
+
+* present_pacing_probe.cpp gains the plateau-based VFR arm, a starvation
+  precondition that declines to judge instead of reporting a red it cannot
+  attribute, and unbuffered stdout so a silent death can be located. This file
+  was created untracked during the 2026-10-15 round and referenced by docs/03 as
+  the acceptance instrument; committing it here is what makes that section
+  reproducible.
+
+* docs/03 gains A12: the readings, the repro commands, the ablation recipe that
+  proves the judges bite, and three instrument traps found on the way -- a
+  transient "No space left on device" build failure whose stderr was swallowed
+  by a `tail -2`, leaving the previous (ablated) DLL in place and producing a
+  red that looked like a kernel failure; a loaded machine collapsing presentation
+  throughput identically in both builds; and a display-timing judge that flips
+  red/green between runs of the same binary. A12 also supersedes A9 (6), which
+  had recorded the windowless session as reasoned-but-untested.
+
+patches/vfr-work-20261016/ holds a README assigning every hunk in the two shared
+files (the kernel tree carries other people's uncommitted work, and so does
+generate_samples.sh), both commit messages, and the pre/post diffs. The 21
+evidence logs live on disk in that directory and in 3fp/build but are not
+committed: .gitignore has a repo-wide `logs/` rule. The same applies to the
+pre-commit .cpp/.h copies, which are kept on disk as an emergency restore point
+but left out of git because they duplicate tracked sources and would rot.
+
+Partial staging: in generate_samples.sh only section [12] and the self-checks are
+committed here; the unrelated [9b] large-stripe section is left in the worktree.

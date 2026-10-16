@@ -51,7 +51,7 @@ probe() {                     # probe <相对路径> <ffprobe 参数...>
   "$FP" -hide_banner -v error "$@" "$f" 2>&1
 }
 
-mkdir -p "$OUT"/{basic,hdr,anim,edge,seq,meta} 2>/dev/null
+mkdir -p "$OUT"/{basic,hdr,anim,edge,seq,meta,vfr} 2>/dev/null
 mkdir -p "$TMPD" 2>/dev/null
 rm -rf "$OUT"/_* "$TMPD"/* 2>/dev/null
 cd "$OUT" || exit 1
@@ -198,6 +198,68 @@ else
   echo "  ! 缺 HDR 母版 ⇒ 跳过 HLG JXL"; SKIP=$((SKIP+1))
 fi
 
+# ── 12. 可变帧率节律夹具（present_pacing_probe 的 VFR 臂要用）──────────────────
+# 为什么要有：内核的翻帧上限恒取 min(面板率, 内容率)，而"内容率"这个操作数此前
+#   只在 CFR 片上量过（60/24/240 三臂，avg_frame_rate == r_frame_rate，
+#   所以那三条臂根本分不出实现用的是哪一个数）。这组建三段不同速率拼成的片子，
+#   让 avg / r / 逐帧时长三者两两不等，任何"内容率该取哪个"的改动都能被量出来。
+# 同一条内容写三种容器，差异全在容器有没有把节奏告诉 demuxer：
+#   mp4 —— 170/170 帧带 duration，avg=85/2(42.5)，r=25/1（**低于真峰 60**，
+#          因为把慢段放前面时 FFmpeg 只在流头采样；顺序对调 r 就变 60/1）
+#   mkv —— 170/170 帧带 duration，avg=r=85/2
+#   ts  —— **0/170 帧带 duration**，且 avg=0/0 无效、r=300/1
+#          ⇒ 这一支是整条判据的牙：既拿不到逐帧时长，容器率也全不可用，
+#            唯一还能还原 25↔60 变速的信息就是包级 PTS 差（实测间距集合 {0.0167,0.0400}）。
+# ⚠ 没做裸流（.264）那一档：实测 Annex-B 裸流连 packet pts 都是空的
+#   （-show_entries packet=pts_time 输出 0 行），节奏信息根本不存在，
+#   所以不能给它建判据——那种源正确行为就是退回"内容率未知"。
+echo "[12] vfr/ (可变帧率)"
+VFR_FILTER='[0:v][1:v]concat=n=2:v=1:a=0[v]'
+run "VFR 640x360：前 2s@25fps + 后 2s@60fps（真峰 60、均 42.5、r 报 25）" \
+  "$FF" -hide_banner -loglevel error \
+    -f lavfi -i "testsrc2=s=640x360:r=25:d=2" \
+    -f lavfi -i "testsrc2=s=640x360:r=60:d=2" \
+    -filter_complex "$VFR_FILTER" -map "[v]" \
+    -fps_mode passthrough -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
+    -y "$WOUT\\vfr\\12a_vfr_25then60.mp4"
+for c in mkv ts; do
+  run "同上内容 remux 成 .$c（-c copy，passthrough 不改 PTS）" \
+    "$FF" -hide_banner -loglevel error -i "$WOUT\\vfr\\12a_vfr_25then60.mp4" \
+      -c copy -fps_mode passthrough -y "$WOUT\\vfr\\12a_vfr_25then60.$c"
+done
+
+# 自证见文末"核验"段（--verify 也要跑，夹具坏了两种模式都得判红）。
+
+# 同一条内容再出一版**两段都低于 60**的（20 与 40）：无窗口的内容周期探针里
+# DisplayCadenceHz() 退到构造默认 60，于是 min(60, 40)=40 才是可判的读数；
+# 用 25/60 那对的话晚段会读成 60 == 面板默认值，分不清是内容率还是面板那一半赢。
+# 整片平均 = (20+40)/2 = 30，两档都不是 30 ⇒ "不许停在平均上"那条判据同样有操作数。
+# ⚠ 用 R1/R2 而不是 `for pair in "20 40"; do set -- $pair`：脚本开头靠 $1 判 --verify，
+#   在顶层 set -- 会把它覆盖掉，后面再读位置参数就是假话。
+R1=20; R2=40
+run "VFR 640x360：前 3s@${R1}fps + 后 3s@${R2}fps（真峰 $R2、均 $(( (R1+R2)/2 ))）" \
+  "$FF" -hide_banner -loglevel error \
+    -f lavfi -i "testsrc2=s=640x360:r=$R1:d=3" \
+    -f lavfi -i "testsrc2=s=640x360:r=$R2:d=3" \
+    -filter_complex "$VFR_FILTER" -map "[v]" \
+    -fps_mode passthrough -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
+    -y "$WOUT\\vfr\\12b_vfr_${R1}then${R2}.mp4"
+run "同上内容 remux 成 .ts" \
+  "$FF" -hide_banner -loglevel error -i "$WOUT\\vfr\\12b_vfr_${R1}then${R2}.mp4" \
+    -c copy -fps_mode passthrough -y "$WOUT\\vfr\\12b_vfr_${R1}then${R2}.ts"
+
+# CFR 对照（与 12b 第一段同率，20fps 恒定）：内容周期改成"先读队列里下一帧的 PTS 差"
+# 之后，CFR 这条路取数的**来源**变了（原来是 frame->duration，现在是 PTS 差），
+# 所以必须有一件恒定帧率夹具来量"读数和以前一样"，而不是靠推理说它一样。
+run "CFR 640x360 @20fps 6s（.mp4）" \
+  "$FF" -hide_banner -loglevel error \
+    -f lavfi -i "testsrc2=s=640x360:r=20:d=6" \
+    -fps_mode passthrough -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
+    -y "$WOUT\\vfr\\12c_cfr_20.mp4"
+run "同上内容 remux 成 .ts" \
+  "$FF" -hide_banner -loglevel error -i "$WOUT\\vfr\\12c_cfr_20.mp4" \
+    -c copy -fps_mode passthrough -y "$WOUT\\vfr\\12c_cfr_20.ts"
+
 echo ""
 echo "── 汇总：成功 $OK / 失败 $FAIL / 跳过 $SKIP ──"
 [ "$FAIL" -gt 0 ] && printf '  失败项：%s\n' "${FAILED_NAMES[@]}"
@@ -206,8 +268,70 @@ fi   # VERIFY_ONLY
 # ── 核验：逐项 ffprobe ───────────────────────────────────────────────────────
 echo ""
 echo "══ 核验（ffprobe）══"
+
+# VFR 夹具自证：这几条不成立，present_pacing_probe ⑥ 与 content_period_probe 就是在空转，
+# 所以生成模式和 --verify 模式都必须跑。判据两半：
+#   ① "带逐帧时长的帧数" —— 决定内核走的是 frame->duration 那一档还是必须退回 PTS 差；
+#   ② 包级 PTS 间距按**声明的两段速率**各开 ±15% 窗口去数，且两窗口之外的数量必须为 0
+#      （闭合：有余数就说明还有第三种没被解释的节奏）。
+# ⚠ 前两版都在这里栽过：先写成"不同间距恰好 2 种"，被 .mkv 否掉（Matroska 时间戳 1ms
+#   粒度，16.667ms 交替舍成 16/17 ⇒ 三种取值）；再写成固定"慢带 30–50ms"，那对 12b 的
+#   20fps（整 50ms）刚好落在开区间外。现在按段率算窗口，12a/12b 共用同一份判据。
+# ⚠ awk 的 -v 不求算式：`-v t=1.0/25` 会把 t 设成字符串"1.0/25"，数值化后停在 1.0，
+#   于是两档全数不到、余量=169 —— 上一版就是这样静默失效的。比率要在 BEGIN 里算。
+VFR_BAD=0
+vfr_pts() { probe "$1" -select_streams v:0 -show_entries packet=pts_time -of csv=p=0; }
+vfr_selfcheck() {   # vfr_selfcheck <相对路径> <期望带 duration 的帧数> <段1率> <段2率>
+  local rel="$1" want_dur="$2" r1="$3" r2="$4" tot has n1 n2 other rates
+  [ -f "$rel" ] || { echo "  ✗ 缺 $rel"; VFR_BAD=$((VFR_BAD+1)); return 1; }
+  tot=$(vfr_pts "$rel" | wc -l)
+  has=$(probe "$rel" -select_streams v:0 -show_entries frame=duration_time -of csv=p=0 \
+        | grep -cv -E '^N/A$|^$')
+  n1=$(vfr_pts "$rel" | awk -v r=$r1 'BEGIN{t=1.0/r} NR>1{d=$1-p; if(d>t*0.85&&d<t*1.15)++n}{p=$1}END{print n+0}')
+  n2=$(vfr_pts "$rel" | awk -v r=$r2 'BEGIN{t=1.0/r} NR>1{d=$1-p; if(d>t*0.85&&d<t*1.15)++n}{p=$1}END{print n+0}')
+  other=$((tot-1-n1-n2))
+  rates=$(probe "$rel" -select_streams v:0 \
+          -show_entries stream=avg_frame_rate,r_frame_rate -of csv=p=0)
+  printf "  %-24s 包=%s 带时长=%s/%s 间距[1/%s:%d 1/%s:%d 两档外:%d] 率[avg,r]=%s\n" \
+    "$rel" "$tot" "$has" "$tot" "$r1" "$n1" "$r2" "$n2" "$other" "$rates"
+  if [ "$has" -ne "$want_dur" ] || [ "$n1" -lt 10 ] || [ "$n2" -lt 10 ] || [ "$other" -ne 0 ]; then
+    echo "    ✗ 自证失败（要带时长 $want_dur/$tot、两档各 ≥10、两档外=0）"
+    VFR_BAD=$((VFR_BAD+1)); return 1
+  fi
+  return 0
+}
+echo ""
+echo "  ── vfr/ 夹具自证 ──"
+vfr_selfcheck "vfr/12a_vfr_25then60.mp4" 170 25 60
+vfr_selfcheck "vfr/12a_vfr_25then60.mkv" 170 25 60
+vfr_selfcheck "vfr/12a_vfr_25then60.ts"    0 25 60
+vfr_selfcheck "vfr/12b_vfr_20then40.mp4" 180 20 40
+vfr_selfcheck "vfr/12b_vfr_20then40.ts"     0 20 40
+[ "$VFR_BAD" -gt 0 ] && echo "  ⇒ VFR 夹具不可用：$VFR_BAD 条自证失败" \
+                     || echo "  ⇒ VFR 夹具五条自证全过"
+# CFR 对照件：只判"单一间距 + 两档都有逐帧时长"。
+# 值得记一笔的实测反差：同为 TS，**CFR 的 .ts 每包都带 duration，VFR 的 .ts 一个都不带**
+# —— 所以"退回容器那一档"这条路只在可变帧率上被踩到，这也正是旧实现从没红过的原因。
+cfr_selfcheck() {              # cfr_selfcheck <相对路径> <率> <期望带 duration 的帧数>
+  local rel="$1" r="$2" want_dur="$3" tot has one
+  [ -f "$rel" ] || { echo "  ✗ 缺 $rel"; VFR_BAD=$((VFR_BAD+1)); return 1; }
+  tot=$(vfr_pts "$rel" | wc -l)
+  has=$(probe "$rel" -select_streams v:0 -show_entries frame=duration_time -of csv=p=0 \
+        | grep -cv -E '^N/A$|^$')
+  one=$(vfr_pts "$rel" | awk -v r=$r 'BEGIN{t=1.0/r} NR>1{d=$1-p; if(d>t*0.85&&d<t*1.15)++n}{p=$1}END{print n+0}')
+  printf "  %-24s 包=%s 带时长=%s/%s 单一间距(1/%s)=%d/%d\n" "$rel" "$tot" "$has" "$tot" "$r" "$one" "$((tot-1))"
+  if [ "$has" -ne "$want_dur" ] || [ "$one" -ne $((tot-1)) ]; then
+    echo "    ✗ CFR 对照件自证失败"; VFR_BAD=$((VFR_BAD+1)); return 1
+  fi
+  return 0
+}
+cfr_selfcheck "vfr/12c_cfr_20.mp4" 20 120
+cfr_selfcheck "vfr/12c_cfr_20.ts"  20 120
+[ "$VFR_BAD" -gt 0 ] && echo "  ⇒ 合计 $VFR_BAD 条自证失败（VFR+CFR 对照件）" \
+                     || echo "  ⇒ 全部七条自证全过（含 CFR 对照件）"
+
 shopt -s nullglob
-for f in basic/*.* meta/*.* anim/*.* edge/*.* hdr/*.* seq/img001.png; do
+for f in basic/*.* meta/*.* anim/*.* edge/*.* hdr/*.* seq/img001.png vfr/*.*; do
   [ -f "$f" ] || continue
   sz=$(stat -c %s "$f")
   info=$(probe "$f" -select_streams v:0 \

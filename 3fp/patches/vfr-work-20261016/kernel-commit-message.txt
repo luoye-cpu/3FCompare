@@ -1,0 +1,69 @@
+Player: per-frame content period for variable frame rate, measured frameRateMode
+
+Two defects, both reachable only on variable-frame-rate sources, plus the
+acceptance instruments that were missing for them. Both were invisible before
+because every fixture in the repo is constant-rate, and on CFR the two wrong
+operands agree with the right one.
+
+* Content period. The flip bound min(panel rate, content rate) took its content
+  half from AVFrame.duration, falling back to a single stream-wide
+  avg_frame_rate. Measured on this box, a variable-rate MPEG-TS carries no
+  per-frame duration at all (0 of 180 packets) and the session's avg_frame_rate
+  is probed from the stream head, so the bound stayed at the first segment's
+  rate for the whole file: a 25+60 fixture was ceilinged at 25 Hz and dropped
+  68 frames in four seconds. Constant-rate TS is unaffected (240 of 240 packets
+  carry a duration), which is why this never showed up.
+
+  The period now comes from the interval actually being presented: the next
+  queued frame's PTS minus this one, then AVFrame.duration, then the container
+  rates, then 0 = unknown, which leaves only the panel half. The 0 tier is not
+  optional -- without it a frame that reaches none of the first three silently
+  keeps the previous media's period, the shape docs/03 A9 (5) tests for. Tier
+  one is restricted to the queue path, because the other call site presents a
+  single frame while the queue still holds pre-seek frames.
+
+* r_frame_rate is not a maximum frame rate. Swapping the two segments of the
+  same content flips it 25/1 -> 60/1 for one true peak of 60, and a 24+30 file
+  reports 120/1 against a peak of 30; its own header says "real base framerate
+  ... least common multiple of all framerates ... just a guess". So the container
+  cannot name the peak, and neither can avg_frame_rate.
+
+* frameRateMode is measured, not compared. It used av_guess_frame_rate() against
+  r_frame_rate, which reported "constant" for all three genuinely variable
+  fixtures (the .mkv case is unreachable from those fields because they are equal
+  there), and "constant" again whenever r_frame_rate was invalid, because
+  nominalFrameRate is then a copy of the value being compared with. It now reads
+  the spread of the per-frame intervals that were actually presented, with
+  container-rate fallbacks excluded as evidence, and reports "unknown" until
+  twelve frames have been seen. The verdict is published twice on purpose: at
+  frame 12 only the first segment has been observed, so "constant" is correct
+  then, and it is republished when the spread widens. FFF_CADENCE_TRACE=1 prints
+  the accumulation and each republish.
+
+* Presentation-hold attribution. The on-screen hold counts the *previous* flip's
+  hold but opened the floor/ceiling band with the ratio aimed by the current
+  flip. Equal under CFR, wrong at every rate change under VFR, where it charges a
+  25 fps frame's six-refresh hold against a 60 fps band of {2,3}. Scored against
+  the previous aim now.
+
+Acceptance. New windowless tools/content_period_probe.cpp: no swap chain, so no
+composition, focus or foreground dependency, and the four arms repeat to within
+0.01 s. Its operands come from new vfr/ fixtures in samples/tools/generate_samples.sh
+whose seven self-checks must pass first -- they assert how many packets carry a
+duration per container and that every PTS gap falls in one of the two declared
+rate bands with zero remainder. Ablating the content-period change collapses
+12b.ts to a single plateau while 12b.mp4 stays green, so the red is attributable
+to the container shape rather than to the probe. CFR ceilings are unchanged word
+for word (60.00 / 24.00 / 144.0x), read the same way on the pre- and post-change
+builds under identical machine load. The windowed probe gained the same four
+plateau judges, plus a starvation precondition that refuses to judge rather than
+reporting a red it cannot attribute.
+
+docs/03 gains A12 with the readings, the repro commands and the two instrument
+traps found on the way (a transient "No space left on device" build failure that
+left the previous, ablated DLL in place, and a loaded machine collapsing
+presentation throughput in both builds alike).
+
+Scope of this commit: only this round's hunks in PlayerSession.cpp are staged. An
+unrelated comment rewording near :4010 and four other in-flight files are left in
+the worktree untouched.

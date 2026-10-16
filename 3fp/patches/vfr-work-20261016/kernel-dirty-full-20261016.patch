@@ -1,0 +1,189 @@
+diff --git a/FFF.Native/3FP/Api/FFF.Player.Api.h b/FFF.Native/3FP/Api/FFF.Player.Api.h
+index d4b06fc..2b58374 100644
+--- a/FFF.Native/3FP/Api/FFF.Player.Api.h
++++ b/FFF.Native/3FP/Api/FFF.Player.Api.h
+@@ -313,9 +313,9 @@ struct FFF3FPSnapshot {
+     // count (stereo => binaural); reported so a host can say which one the
+     // user is actually hearing. Appended at the end for the offset reason above.
+     std::uint32_t iamfBinaural;
+-    // Generic bed binaural rendering for NON-IAMF multichannel tracks (Dolby
+-    // AC-3/E-AC-3/Atmos bed, TrueHD, DTS/DTS-HD/DTS:X bed, plain multichannel
+-    // PCM/FLAC/WAV): when the output device is stereo, those tracks got
++    // Generic bed binaural rendering for NON-IAMF multichannel tracks (legacy
++    // channel-based surround beds, plain multichannel PCM/FLAC/WAV): when the
++    // output device is stereo, those tracks got
+     // a plain swr matrix downmix: energy preserved, placement lost. This is
+     // 1 while the OBR HRTF renderer is feeding the stereo output instead, 0 when
+     // the matrix downmix is in force (multichannel device, unsupported
+@@ -1154,7 +1154,7 @@ FFF3FP_API FFFResult FFF3FP_GetHdrMetadataSource(FFF3FPHandle player,
+ //   1. the entry's own peak -- max(maxScl) across windows[0]'s three channels,
+ //      converted to nits as value * 10000 -- whenever that is a valid peak;
+ //   2. otherwise the stream-level baseline -- the peak the processor derived from
+-//      its codec parameters at open time (Dolby configuration, HDR10+ side data,
++//      its codec parameters at open time (stream configuration, HDR10+ side data,
+ //      color_trc) plus the stream's static mastering metadata. For real shipped
+ //      HDR10/HDR10+ material this is normally the static
+ //      targeted_system_display_maximum_luminance.
+diff --git a/FFF.Native/3FP/Audio/BedBinauralRenderer.h b/FFF.Native/3FP/Audio/BedBinauralRenderer.h
+index b9ea1c8..33153d5 100644
+--- a/FFF.Native/3FP/Audio/BedBinauralRenderer.h
++++ b/FFF.Native/3FP/Audio/BedBinauralRenderer.h
+@@ -7,8 +7,8 @@
+ 
+ // Generic channel-bed -> binaural renderer.
+ //
+-// Why this exists: spatial audio outside IAMF (Dolby AC-3/E-AC-3/Atmos beds,
+-// TrueHD, DTS/DTS-HD/DTS:X beds, any multichannel PCM/FLAC/WAV) only ever got an
++// Why this exists: spatial audio outside IAMF (channel-based surround beds
++// from legacy codecs, any multichannel PCM/FLAC/WAV) only ever got an
+ // swr matrix downmix on a stereo device: the energy survives, the placement
+ // does not, because a fixed-coefficient mix carries no azimuth. This class renders
+ // the bed through OBR instead (libiamf's own binaural renderer, Clear BSD plus
+diff --git a/FFF.Native/3FP/Audio/IamfAudioDecoder.cpp b/FFF.Native/3FP/Audio/IamfAudioDecoder.cpp
+index 1f05036..5b09ee0 100644
+--- a/FFF.Native/3FP/Audio/IamfAudioDecoder.cpp
++++ b/FFF.Native/3FP/Audio/IamfAudioDecoder.cpp
+@@ -98,7 +98,7 @@ int SoundSystemForChannels(const int wanted) {
+ // layout, so the interleaved PCM has to be permuted before it is handed on.
+ //
+ // Ground truth is the bed-order probe in
+-// an out-of-tree fixture set rendered from Atmos material, which muxed fixtures
++// an out-of-tree fixture set rendered from bed material, which muxed fixtures
+ // whose tracks are pairwise decorrelated (max |corr| 0.0141) and compared each
+ // rendered channel against the source identity. It resolves to the same swap for
+ // every layout that has both side and back speakers:
+diff --git a/FFF.Native/3FP/Core/PlayerSession.cpp b/FFF.Native/3FP/Core/PlayerSession.cpp
+index 4c046de..541cac1 100644
+--- a/FFF.Native/3FP/Core/PlayerSession.cpp
++++ b/FFF.Native/3FP/Core/PlayerSession.cpp
+@@ -3714,13 +3714,35 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
+     const auto pts = frame->best_effort_timestamp == AV_NOPTS_VALUE ? frame->pts : frame->best_effort_timestamp;
+     const auto position = pts == AV_NOPTS_VALUE ? snapshot_.position100ns :
+         StreamTimestampPosition100ns(owner, videoStream_, pts);
+-    if (frame->duration > 0) {
+-        lastVideoFrameDuration100ns_ = av_rescale_q(frame->duration, stream->time_base,
+-            AVRational{1, static_cast<int>(TicksPerSecond)});
+-    } else if (stream->avg_frame_rate.num > 0 && stream->avg_frame_rate.den > 0) {
+-        lastVideoFrameDuration100ns_ = av_rescale_q(1, av_inv_q(stream->avg_frame_rate),
++    // 内容周期 = 这一帧要在屏上占多久，是翻帧节律锁唯一的操作数（FrameRateBoundHz 的
++    // 内容那一半）。按"离呈现时钟最近"取，四级：
++    //   ① 队列里下一帧的 PTS − 本帧 PTS。释放闸比的就是这个 position，所以用同一个差
++    //      去定上限，两者不可能互相掐。可变帧率的间距只有这里是**测出来**的。
++    //   ② frame->duration —— 队列已空（片尾、静图）时没有 ① 可用。
++    //   ③ 容器率 avg→r —— 整片一个常数，可变帧率在这一档必然失真。实测形状：VFR 的 .ts
++    //      包级 duration 170/170 全是 N/A，而 avg 被 demuxer 按流头填成 25/1，于是
++    //      后 2 秒的 60fps 被上限掐到 25，4 秒里丢 68 帧（present_pacing_probe ⑥ 的晚段）。
++    //   ④ 0 = 未知 —— 渲染器的 min() 自动只剩面板那一半。这一档不是可选项：缺了它，
++    //      ①②③ 全落空时这里会静默留着**上一条媒体**的周期，正是 §A9 ⑤ 要抓的形状。
++    std::int64_t contentPeriod100ns = 0;
++    // ① 只认队列路（PresentVideoFrame 的另一个调用点 :3400 是暂停/seek 单帧路，那时队列里
++    //    还留着 seek 前的帧，front() 不是本帧的下一帧）。判据就用调用方自己那一条
++    //    Playing 谓词，不另立标准。
++    if (!videoFrameQueue_.empty() && state_.load() == FFF3FPState::Playing) {
++        const auto next = VideoFramePosition(videoFrameQueue_.front());
++        if (next > position) contentPeriod100ns = next - position;
++    }
++    if (contentPeriod100ns <= 0 && frame->duration > 0)
++        contentPeriod100ns = av_rescale_q(frame->duration, stream->time_base,
+             AVRational{1, static_cast<int>(TicksPerSecond)});
++    if (contentPeriod100ns <= 0) {
++        const auto frameRate = stream->avg_frame_rate.num > 0 && stream->avg_frame_rate.den > 0
++            ? stream->avg_frame_rate : stream->r_frame_rate;
++        if (frameRate.num > 0 && frameRate.den > 0)
++            contentPeriod100ns = av_rescale_q(1, av_inv_q(frameRate),
++                AVRational{1, static_cast<int>(TicksPerSecond)});
+     }
++    lastVideoFrameDuration100ns_ = contentPeriod100ns > 0 ? contentPeriod100ns : 0;
+     // Hand the source period to the cadence lock. It is what lets the presenter size each
+     // flip in refresh slots (2.4 slots for 60 fps on 144 Hz) instead of taking one slot per
+     // flip, which is how a display-synced loop ends up re-scanning-out the same frame.
+@@ -4008,8 +4030,8 @@ void PlayerSession::UpdateInputAudioPeakLevels(const AVFrame* frame) noexcept {
+ 
+ bool PlayerSession::HandleInternalAudioDecodeFailure(const FFFResult result, std::string message) noexcept {
+     // A stream switch seeks on the video timeline. MPEG-TS can land on a partial
+-    // DTS/AC-3 access unit before the next audio sync word; reject that boundary
+-    // packet and let the decoder lock onto subsequent complete packets.
++    // cinema-surround access unit before the next audio sync word; reject that
++    // boundary packet and let the decoder lock onto subsequent complete packets.
+     if (++internalAudioDecodeErrorCount_ < 32) {
+         if (audioDecoder_ != nullptr) avcodec_flush_buffers(audioDecoder_);
+         return false;
+diff --git a/FFF.Native/3FP/Render/VideoRenderer.cpp b/FFF.Native/3FP/Render/VideoRenderer.cpp
+index 9e2c0d1..92c7113 100644
+--- a/FFF.Native/3FP/Render/VideoRenderer.cpp
++++ b/FFF.Native/3FP/Render/VideoRenderer.cpp
+@@ -6460,6 +6460,7 @@ std::int64_t PlayerVideoRenderer::AdvancePacingDeadline(const std::int64_t nowQp
+         lastLandedRefresh_ = 0;
+         aimedSlots_ = 0;
+         aimedSlotRatio_ = 0.0;
++        scoredSlotRatio_ = 0.0;
+         measuredRefreshHz_.store(0.0, std::memory_order_release);
+     }
+ 
+@@ -6589,6 +6590,7 @@ void PlayerVideoRenderer::UpdatePresentGrid(const std::int64_t syncRefresh,
+         lastLandedRefresh_ = 0;
+         aimedSlots_ = 0;
+         aimedSlotRatio_ = 0.0;
++        scoredSlotRatio_ = 0.0;
+         measuredRefreshHz_.store(0.0, std::memory_order_release);
+         return;
+     }
+@@ -6635,7 +6637,12 @@ void PlayerVideoRenderer::UpdatePresentGrid(const std::int64_t syncRefresh,
+     // Presented only when the sequence is continuous (landedRefresh advancing by a plausible
+     // amount); a chain reconfiguration restarts these counts, and a delta across that break is
+     // not a hold.
+-    if (aimedSlotRatio_ >= 1.0 && landedRefresh > 0 && lastLandedRefresh_ > 0 &&
++    // 归属这一句要讲清楚：held = 这次落地刷新 − 上次落地刷新，那是**上一帧**的停留，
++    // 所以判带必须用上一帧那一次瞄准的 ratio（scoredSlotRatio_），不是本次的
++    // aimedSlotRatio_。恒定帧率下两个数相等，错位看不见；可变帧率下每次换档都会把边界
++    // 那一帧拿新档的 ⌊r⌋/⌈r⌉ 去判旧档的停留（25fps 段停 6 格的那一帧被 60fps 段的
++    // {2,3} 判 ⇒ 记偏差 3 格），于是 holdWithinRounding 会随换档次数往下掉。
++    if (scoredSlotRatio_ >= 1.0 && landedRefresh > 0 && lastLandedRefresh_ > 0 &&
+         landedRefresh > lastLandedRefresh_) {
+         const auto held = landedRefresh - lastLandedRefresh_;
+         if (held <= 16) {
+@@ -6643,8 +6650,8 @@ void PlayerVideoRenderer::UpdatePresentGrid(const std::int64_t syncRefresh,
+             // legitimately held 2 or 3 refreshes, and a steady alternation between those
+             // two is what "locked" looks like. A hold of 1, or of 4 and up, is what a viewer
+             // calls a hitch, and that is the quantity this counter is actually able to prove.
+-            const auto low = static_cast<std::int64_t>(std::floor(aimedSlotRatio_));
+-            const auto high = static_cast<std::int64_t>(std::ceil(aimedSlotRatio_));
++            const auto low = static_cast<std::int64_t>(std::floor(scoredSlotRatio_));
++            const auto high = static_cast<std::int64_t>(std::ceil(scoredSlotRatio_));
+             const bool within = (held == low || held == high);
+             ++holdSampled_;
+             if (within) ++holdWithinRounding_;
+@@ -6654,6 +6661,7 @@ void PlayerVideoRenderer::UpdatePresentGrid(const std::int64_t syncRefresh,
+                 holdWorstDeviation_.store(deviation, std::memory_order_release);
+         }
+     }
++    scoredSlotRatio_ = aimedSlotRatio_;
+     lastLandedRefresh_ = landedRefresh;
+ }
+ 
+diff --git a/FFF.Native/3FP/Render/VideoRenderer.h b/FFF.Native/3FP/Render/VideoRenderer.h
+index 8e6e9db..77260fa 100644
+--- a/FFF.Native/3FP/Render/VideoRenderer.h
++++ b/FFF.Native/3FP/Render/VideoRenderer.h
+@@ -771,6 +771,10 @@ private:
+     // average was exactly 2.4. A rounding band is the same judgement without depending on
+     // that alignment being right.
+     double aimedSlotRatio_ = 0.0;
++    // 上一次 UpdatePresentGrid 时的那条 ratio。停留判带要用它，不能用 aimedSlotRatio_：
++    // held 量的是"上一帧在屏上停了几格"，而归它归的那次瞄准是上一 flip 的 ratio。
++    // 恒定帧率下两者相等所以错位看不见；可变帧率换档那一刻会把边界那一帧记成带外。
++    double scoredSlotRatio_ = 0.0;
+     std::atomic<std::uint64_t> holdSampled_{ 0 };
+     std::atomic<std::uint64_t> holdWithinRounding_{ 0 };
+     std::atomic<std::uint64_t> holdWorstDeviation_{ 0 };
+diff --git a/README.md b/README.md
+index e3587ed..d27981a 100644
+--- a/README.md
++++ b/README.md
+@@ -48,5 +48,5 @@
+   - 真实 HDR 高亮：按源 HDR 规格映射到实际亮度范围，需要 HDR 屏幕
+ - HDR 多规格支持
+   - HDR10、HDR10+、HLG
+-  - 杜比视界：回退 HDR10
++  - HDRdp：回退 HDR10
+   - HDR Vivid
