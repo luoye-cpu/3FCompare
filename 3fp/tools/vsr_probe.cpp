@@ -124,7 +124,7 @@ void PrintStatus(const char* tag, const FFF3FPHandle player,
     const GetVideoSuperResolutionStatusFn getStatus) {
     FFF3FPVideoSuperResolutionStatus status{};
     status.size = sizeof(status);
-    status.version = 1;
+    status.version = 20;
     const auto result = getStatus(player, &status);
     if (result != FFFResult::Success) {
         printf("[%s] 状态查询失败 result=%d\n", tag, static_cast<int>(result));
@@ -269,7 +269,7 @@ int wmain(const int argc, wchar_t** argv) {
     FFF3FPSnapshot snapshot{};
     snapshot.size = sizeof(snapshot);
     // FFF3FPSnapshot carries its own revision, independent of PlayerApiVersion.
-    snapshot.version = 8;
+    snapshot.version = 20;
     if (FFF3FP_GetSnapshot(player, &snapshot) == FFFResult::Success) {
         printf("[snapshot] opening=%s videoScalingMode=%s video=%ux%u outBits=%u\n",
             g_openCompleted ? "done" : "pending",

@@ -30,6 +30,40 @@ TLOG = os.path.join(KERNEL, "obj", "x64", "Release", "FFF.Native.tlog")
 FFMPEG = os.path.join(ROOT, "kernel", "third_party", "ffmpeg")
 FFMPEG_INC = os.path.join(FFMPEG, "include")
 FFMPEG_LIB = os.path.join(FFMPEG, "lib", "x64")
+# libiamf / OAR（内核同款，走 3fp/kernel/third_party 这个 junction，与出货树共用同一份）
+LIBIAMF = os.path.join(ROOT, "kernel", "third_party", "libiamf")
+LIBIAMF_INC = os.path.join(LIBIAMF, "include")
+OAR_INC = os.path.join(LIBIAMF, "oar", "include")
+LIBIAMF_LIB = os.path.join(LIBIAMF, "lib", "x64")
+# FFmpeg 导入库（C++ 探针也要链：avformat/avcodec/avutil/swresample/swscale/avfilter）
+# 只写绝对路径、不依赖 LIB 环境变量，避免污染 C 探针那一路。
+FFMPEG_LIBS = [os.path.join(FFMPEG_LIB, n) for n in
+               ("avformat-63.lib", "avcodec-63.lib", "avutil-61.lib",
+                "swresample-7.lib", "swscale-10.lib", "avfilter-12.lib")]
+# libiamf / OAR 静态库：IAMF_decoder_* 与 oar_* 就在这两个 .lib 里
+# 顺序照抄内核 link.command.1.tlog（IAMF OAR OBR_CAPI OBR PFFFT FLAC OPUS）：
+# oar.lib 反过来引用 obr_*，所以 obr_capi/obr 必须排在 oar **后面**。
+LIBIAMF_LIBS = [os.path.join(LIBIAMF_LIB, n) for n in
+                ("iamf.lib", "oar.lib", "obr_capi.lib", "obr.lib",
+                 "pffft.lib", "FLAC.lib", "opus.lib", "fdk-aac.lib")]
+# absl：obr.lib / iamf.lib 用 absl::Status、absl::log_internal 等，缺一份就 LNK2001。
+# 顺序照抄内核 link.command.1.tlog（静态库互相引用，顺序错了照样解析不出来）。
+ABSL_LIBS = [os.path.join(LIBIAMF_LIB, "absl", "absl_" + n.lower() + ".lib") for n in (
+    "base", "city", "civil_time", "cord_internal", "cord", "cordz_functions",
+    "cordz_handle", "cordz_info", "crc_cord_state", "crc_cpu_detect",
+    "crc_internal", "crc32c", "debugging_internal", "decode_rust_punycode",
+    "demangle_internal", "demangle_rust", "die_if_null", "examine_stack",
+    "exponential_biased", "graphcycles_internal", "hash", "hashtablez_sampler",
+    "int128", "kernel_timeout_internal", "leak_check", "log_globals",
+    "log_internal_check_op", "log_internal_conditions", "log_internal_fnmatch",
+    "log_internal_format", "log_internal_globals", "log_internal_log_sink_set",
+    "log_internal_message", "log_internal_nullguard", "log_internal_proto",
+    "log_internal_structured_proto", "log_severity", "log_sink",
+    "low_level_hash", "malloc_internal", "raw_hash_set", "raw_logging_internal",
+    "spinlock_wait", "stacktrace", "status", "statusor", "str_format_internal",
+    "strerror", "string_view", "strings_internal", "strings", "symbolize",
+    "synchronization", "throw_delegate", "time_zone", "time", "tracing_internal",
+    "utf8_for_code_point", "vlog_config_internal")]
 
 
 def read_tlog(name):
@@ -81,9 +115,14 @@ def main():
     include = ";".join([
         KERNEL,          # 让 `#include "3FR/Api/FFF.Native.Api.h"` 能解析
         API_DIR,         # 让 `#include "FFF.Player.Api.h"` 能解析
+        LIBIAMF_INC,     # 让 `#include "IAMF_decoder.h"` 能解析
+        OAR_INC,         # 让 `#include "oar.h"` 能解析
         msvc_inc,
         os.path.join(sdk_inc, "ucrt"), os.path.join(sdk_inc, "shared"),
-        os.path.join(sdk_inc, "um"),
+        os.path.join(sdk_inc, "um"), os.path.join(sdk_inc, "winrt"),
+        os.path.join(sdk_inc, "cppwinrt"),
+        # winrt：wrl/client.h（WRL）与 roapi.h 都在这里，不在 um 下
+        # cppwinrt：C++/WinRT 投影头（winrt/Windows.Foundation.h 等）
     ])
     lib = ";".join([
         msvc_lib,
@@ -119,16 +158,34 @@ def main():
             cmd = [cl, "/nologo", "/O2", "/W3", "/DNDEBUG", "/D_CRT_SECURE_NO_WARNINGS",
                    "/I" + FFMPEG_INC,
                    src, "/Fe:" + exe, "/Fo:" + os.path.join(OUT, name + ".obj"),
-                   "/link", os.path.join(FFMPEG_LIB, "avformat-63.lib"),
-                   os.path.join(FFMPEG_LIB, "avcodec-63.lib"),
-                   os.path.join(FFMPEG_LIB, "avutil-61.lib"),
+                   "/link", FFMPEG_LIBS[0], FFMPEG_LIBS[1], FFMPEG_LIBS[2],
                    "ws2_32.lib", "secur32.lib", "bcrypt.lib", "user32.lib", "ole32.lib"]
         else:
-            cmd = [cl, "/nologo", "/std:c++17", "/O2", "/EHsc", "/W3", "/DNDEBUG",
+            # C++ 探针也能吃 bundled FFmpeg 头：sidedata_size_probe 只是 sizeof()
+            # 这些结构来量边数据尺寸，不链接任何 FFmpeg 库。
+            # 但确实有 7 个探针（avformat_layout_probe 等）**直接调** av_* / swr_*，
+            # 只链内核导入库必炸 LNK2019 ⇒ 把 FFmpeg 导入库一并链上。
+            # /MD：内核自己就是 /MD 编出来的，iamf.lib / oar.lib / FLAC.lib 里引用的是
+            # `__imp_realloc` 这类 **DLL 导入**符号（静态 CRT 的 libucrt.lib 没有它们）
+            # ⇒ 不显式 /MD 就会在链接阶段炸一堆 __imp_* LNK2019。
+            # _SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS：SDK 的 C++/WinRT 头
+            # （sdr_white_probe 用的 winrt/Windows.Foundation.h）会拖进
+            # <experimental/coroutine>，MSVC 14.5x 直接把它判成 C2338 硬错。
+            # /std:c++20：与内核 CL.command.1.tlog 一致（内核就是 /std:c++20）。
+            # 有探针（transfer_probe 的 concept HasSt2094Diagnostics、sdr_white_probe 的
+            # requires）**必须** C++20，停在 c++17 上它们恒编不过。
+            cmd = [cl, "/nologo", "/std:c++20", "/O2", "/EHsc", "/MD", "/W3", "/DNDEBUG",
                    "/D_CRT_SECURE_NO_WARNINGS",
+                   "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS",
+                   "/I" + FFMPEG_INC,
                    src, "/Fe:" + exe, "/Fo:" + os.path.join(OUT, name + ".obj"),
-                   "/link", kernel_lib,
-                   "user32.lib", "gdi32.lib", "ole32.lib", "shell32.lib", "advapi32.lib"]
+                   "/link", kernel_lib] + FFMPEG_LIBS + LIBIAMF_LIBS + ABSL_LIBS + [
+                   "user32.lib", "gdi32.lib", "ole32.lib", "shell32.lib", "advapi32.lib",
+                   # d3d11/dxgi：upload_* 要 D3D11CreateDevice、vsr_scrgb_probe 要 CreateDXGIFactory1
+                   "d3d11.lib", "dxgi.lib",
+                   # runtimeobject：RoInitialize / RoGetActivationFactory / WindowsCreateStringReference；
+                   # oleaut32：C++/WinRT 头文件里的 WINRT_IMPL_SetErrorInfo / SysFreeString 等
+                   "runtimeobject.lib", "oleaut32.lib"]
         print("\n[compile] %s%s" % (name, "  (C / FFmpeg SDK)" if is_c else ""))
         r = subprocess.run(cmd, env=env, capture_output=True, text=True)
         if r.returncode != 0:

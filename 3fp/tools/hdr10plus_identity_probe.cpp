@@ -49,7 +49,7 @@ static float ReadLuma(unsigned x, unsigned y) {
     FFF3FPVideoPixelProbe probe;
     memset(&probe, 0, sizeof(probe));
     probe.size = sizeof(probe);
-    probe.version = 1;
+    probe.version = 20;
     probe.x = x;
     probe.y = y;
     if (FFF3FP_ReadVideoPixel(g_player, &probe) != FFFResult::Success) return -1.0f;
@@ -142,7 +142,7 @@ int main(int argc, char** argv) {
 
     memset(&snapshot, 0, sizeof(snapshot));
     snapshot.size = sizeof(snapshot);
-    snapshot.version = 8;
+    snapshot.version = 20;
     FFF3FP_GetSnapshot(g_player, &snapshot);
     streamPeak = (float)snapshot.sourcePeakNits;
     staticLuma = ReadLuma(160, 170);

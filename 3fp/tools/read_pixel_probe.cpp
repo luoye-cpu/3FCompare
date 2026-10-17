@@ -77,7 +77,7 @@ int main(int argc, char** argv) {
 
     FFF3FPSnapshot snapshot{};
     snapshot.size = sizeof(snapshot);
-    snapshot.version = 8;
+    snapshot.version = 20;
     FFF3FP_GetSnapshot(g_player, &snapshot);
     std::printf("open: hdrFormat=%u hdrPath=%u dyn=%u peak=%u outBits=%u %ux%u\n",
         static_cast<unsigned>(snapshot.hdrFormat), static_cast<unsigned>(snapshot.hdrProcessingPath),
@@ -105,7 +105,7 @@ int main(int argc, char** argv) {
     for (const auto& point : points) {
         FFF3FPVideoPixelProbe probe{};
         probe.size = sizeof(probe);
-        probe.version = 1;
+        probe.version = 20;
         probe.x = point[0];
         probe.y = point[1];
         const auto result = FFF3FP_ReadVideoPixel(g_player, &probe);

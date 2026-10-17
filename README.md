@@ -13,7 +13,7 @@
 > 播放/解码后端复用 FFF 帝国（[FFF_Project](https://github.com/Lake1059/FFF_Project)）的 **3FP 播放器内核**。
 
 3FCompare 面向视频编码评测（VCB-Studio 等圈子）的场景：把多个编码版本的视频按帧对齐，
-提供**三种视图模式（标准网格 / A/B 可拖动分格 / 左右拉动揭示，视图菜单顶部一列互斥切换）**、
+提供**两种视图模式（网格对比：一路一格、分割线可拖 / 左右拉动揭示，视图菜单顶部一列互斥切换）**、
 **单屏切换 / 双步进（帧&秒）/ 像素探针 / 放大镜**等贴合“盯帧”工作流的操作，
 支持**硬件编解码开关与多显卡解码指定**与**窗口/全屏双模式**，
 （**多显卡指定 2026-09-16 真正接线生效**：此前该选项只保存不生效——内核配置无 adapter 字段；
@@ -42,9 +42,16 @@
   显示侧校色交给 DWM；本项目自行探测显示能力（DXGI 亮度读取）并计算智能色调映射参数，探针/截屏始终读取「颜色管理前」的原生缓冲，保证跨路对比一致。
 - **G-SYNC / FreeSync**：播放窗口为独立窗口，**不破坏桌面 VRR**。
   ~~是否全时刻生效取决于 3FP 交换链（Present 节奏 / `ALLOW_TEARING`），待专项实测~~
-  → **2026-09-16 已实测支持**：`SetPresentConfig`（撕裂呈现）「显示器链支持 ✓」、
-  `SetPacingConfig`（媒体率节奏）「已启用 ✓」，见 [docs/03](docs/03-后端接入与能力映射.zh.md) 的 **A8/A9**。
-- **2026-09-30 复核（上游 PR 树 `3fp/kernel`，内核 API 16）**：该树的 `FFF3FP_SetPresentConfig` 是本轮新建入口，
+  → **⚠ 2026-10-03 更正**：这里原来写的两条"已实测支持"，一条是**假绿形状**、一条**根本没那个 API**。
+  ① `SetPresentConfig` 存在，但它返回 true 只说明**交换链接受了撕裂请求**，不说明每次 Present 真没等
+  （旧 selftest 那句"显示器链支持 ✓"就只是打这个返回值）。现在自测改成量内核的两个计数：
+  `PresentWait100ns / SwapChainPresents` ⇒ 单次 Present 平均阻塞；本机 2026-10-03 实测
+  **19 次 Present 平均 1.06 ms**（VSync 锁定应是 ≈ 一个刷新周期），样本不足时明写"未验证"不打火。
+  ② `SetPacingConfig`（媒体率节奏）**内核未导出、托管也没有对应属性**
+  （`AppSettings.cs:203-205`、`IPlayerEngine.cs:53` 的注释都记着"从未实现"）⇒ 之前那行"已启用 ✓"是错的，已删。
+  是否彻底生效仍需在带 VRR 的显示器上复测。
+
+- **2026-09-30 复核（上游 PR 树 `3fp/kernel`，内核 API 16）**〔行号为当时读数；**2026-10-08 复算**：实验树 `3fp/build/FFF.Native.dll` 现为 **API 19 / 96 导出**，出货树 `third_party/fff_project` 为 **API 17 / 90 导出**，在包件 `publish/build/3FCompare-v0.3.2-beta-x64-full/FFF.Native.dll` 仍是 **API 16 / 87 导出** ⇒ 三棵树不是一个版本号〕：该树的 `FFF3FP_SetPresentConfig` 是本轮新建入口，
   第一版把「交换链是否带 `ALLOW_TEARING`」与「用户是否要撕裂」合用一个变量 ⇒ 关它会连带改掉 `ResizeBuffers` 的
   flag、开启时正常播放分支仍走 `Present(1, 0)`（等于 no-op）、设备重建后偏好丢失。已拆成
   `swapAllowTearing_`（能力）+ `tearingRequested_`（偏好）并在正常呈现分支生效。
@@ -56,12 +63,15 @@
 
 ## ⚖️ 依赖与许可提示 / License & Dependencies
 
-- `FFF.Native` 为 **MIT 许可（已确认）**，本项目**基于其源码二次开发**：内核以**独立 git 仓库**形式位于
+- `FFF.Native` 上游**自述**为 MIT，但**本仓内无可读回的凭据**（其 `LICENSE.txt:3` 是未填写的模板
+  `Copyright (c) [year] [fullname]`），故此处按实测登记为 **许可未经确认**；内核 251 个被跟踪文件里
+  212 个（84.5%）与上游根提交逐字节相同，归属见 `THIRD-PARTY-NOTICES.md` §7。本项目**基于其源码二次开发**：内核以**独立 git 仓库**形式位于
   `third_party/fff_project/`——**不是 submodule**（`.gitmodules` 已无条目，整目录被 `.gitignore` 忽略），
   基线由 `tools/构建全部.ps1` 的 SHA/tag 钉死。在其上追加自研扩展补丁（VRR 交换链 / 视口子区域 /
   全帧回读等，见 `docs/03 §6`），保持与上游可合并。
 - FFmpeg 公共 API：Shared FFmpeg DLL 组（`avcodec` 等）由 BtbN 构建，**不纳入本仓库**，仅在发布说明中指引获取。
-- 本项目的 UI、同步逻辑、对比工具均为独立实现；本仓库不包含任何第三方 DLL 二进制。
+- 本项目的 UI、同步逻辑、对比工具均为独立实现；本仓库的 git 集合里**不含第三方 DLL/EXE**（按 `git ls-tree -r HEAD` 的扩展名口径实测为 0）。
+  ⚠ **口径限定**：仓根 `.3fc_kernel_baseline.bundle`（实测 2 371 867 B，在 `HEAD` 与 `origin/main` 的树里）是**随仓分发的二进制 git 包**，内含整套内核仓库历史（含 `refs/stash`）；`3fp/patches/history/…/ShaderBytecode.h`（1 157 815 B）内嵌自产 DXBC 字节码。"零二进制入仓"这句话只对源码集合成立，别按磁盘口径读。逐件第三方许可见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
 
 > 详细依赖清单、构建步骤与风险见 [docs/06-风险与依赖.zh.md](docs/06-风险与依赖.zh.md)。
 
@@ -70,10 +80,16 @@
 > ⚠ 本节标题此前长期停留在 `0.2.0-BETA，2026-08-25`，与实际版本严重脱节，现已更正。
 > 版本唯一真源是 csproj 的 `<Version>`，改版本时记得同步此处。
 
-> **版本号唯一真源**：`src/3FCompare/3FCompare.csproj` 的 `<Version>`（预发布后缀直接写进
+> **版本号唯一真源**：`src/3FCompare/3FCompare.csproj:23` 的 `<Version>`（预发布后缀直接写进
 > `<Version>`，如 `0.3.2-beta`；独立的 `<VersionSuffix>` 已移除，见 docs/45 P1-12）。
 > `pack.ps1` 与 `tools/发布门禁.ps1` 不硬编码版本——不传 `-Version` 时自动从 csproj 派生，
 > 传入不一致会告警。详见 [PACKAGING_SPEC.md §5](docs/PACKAGING_SPEC.md)。
+> ⚠ **两条 2026-10-08 实测边界，别把这段读成"版本已经收口"**：
+> ① 真源不是"集中式"的——本仓**不存在** `Directory.Build.props`（`ls` 零命中），
+> `src/3FCompare.Core/3FCompare.Core.csproj:15` 是**手抄的同值副本**，
+> **没有任何门禁校验两份相等**（`.github/workflows/` 目录不存在，`tools/发布门禁.ps1` 只读 App 侧那一份）；
+> ② **版本 ≠ tag**：csproj 已是 `0.3.2-beta` 且 10-07 已用该号出包，但 `git describe --tags --abbrev=0`
+> 仍是 `v0.3.1-beta` ⇒ "版本号、tag、csproj 三者同步"这条本文件开头的纪律**当前没成立**，缺的是 tag。
 
 ```text
 src/
@@ -86,7 +102,7 @@ tests/
 ├── 3FCompare.Platform.Tests/   # 平台层单元测试（视图变换 / 放大镜 / 播放编排 / 抓帧路由 / 崩溃守卫 / 本地化键）
 ├── 3FCompare.SmokeTests/       # E3 冒烟（控制台，**始终走演示引擎**，合成画面全流程验证）
 third_party/
-└── fff_project/                # 3FP 内核独立 git 仓库（MIT，**非 submodule**，被 .gitignore 忽略）
+└── fff_project/                # 3FP 内核独立 git 仓库（许可未经确认，见 THIRD-PARTY-NOTICES.md §7；**非 submodule**，被 .gitignore 忽略）
     └── FFF.Native → x64/Release/FFF.Native.dll   # 已构建（Release x64）
     └── runtime/                 # Shared FFmpeg DLL 组（BtbN，已准备）
     └── third_party/vcpkg_installed/  # libass（vcpkg，已准备）
@@ -112,7 +128,7 @@ third_party/
 - **二级设置窗口**：硬件解码开关、GPU 选择（多显卡，按 DXGI 适配器列出，2026-09-16 起生效）、步进步长、色彩模式、默认布局、窗口/全屏行为（F25/F26） / **Settings dialog**: HW decode toggle, multi-GPU selection (DXGI adapters, effective since 2026-09-16), step sizes, color mode, layout, window/fullscreen behavior (F25/F26)
 - **全屏模式**（F11）+ 窗口模式，全屏可隐藏工具栏/时间轴 / **Fullscreen mode** (F11) + window mode, hide chrome in fullscreen
 - **会话保存/加载**（`.3fcs` JSON：文件列表/偏移/布局/位置/循环区间） / **Session save/load** (`.3fcs` JSON: file list, offsets, layout, position, loop range)
-- **快捷键** / **Keyboard shortcuts**: `空格` 播放/暂停 · `A`/`D` 逐帧 · `←`/`→` 逐秒 · `↑`/`↓` ±10 秒 · `G`/`V`/`S` 视图模式三态 · `C` 对比布局循环 · `F11` 全屏 · `R` 重置视图 · `O` 打开 · `P` 探针 · `Ctrl+H` 侧栏三态 · `Esc` 退出全屏 / Space play/pause, A/D frame step, ←/→ second step, ↑/↓ 10s step, G/V/S view modes, C cycle compare layouts, F11 fullscreen, R reset view, O open, P probe, Ctrl+H sidebar tri-state, Esc exit fullscreen（六项传输键全部可在设置里改 / all six transport keys rebindable in Settings）
+- **快捷键** / **Keyboard shortcuts**: `空格` 播放/暂停 · `A`/`D` 逐帧 · `←`/`→` 逐秒 · `↑`/`↓` ±10 秒 · `G`/`S` 视图模式两态（`V` 与 `G` 同态）· `C` 换分格朝向 · `F11` 全屏 · `R` 重置视图 · `O` 打开 · `P` 探针 · `Ctrl+H` 侧栏三态 · `Esc` 退出全屏 / Space play/pause, A/D frame step, ←/→ second step, ↑/↓ 10s step, G/S view modes (V aliases G), C cycles the split orientation, F11 fullscreen, R reset view, O open, P probe, Ctrl+H sidebar tri-state, Esc exit fullscreen（六项传输键全部可在设置里改 / all six transport keys rebindable in Settings）
 - **对比工具** / **Comparison tools**: 像素探针 pixel probe (F19)、放大镜 magnifier (F17)、书签 bookmarks (F22)、截图导出 screenshot export PNG (F21)、差异叠加 diff overlay heatmap (F20)、媒体信息 media info (F3)、音频面板 audio panel、时间轴 A/B 打点 timeline A/B markers (A/B keys)
 - **同步视图变换**：鼠标滚轮**缩放**（1~32×，以光标为锚点：光标下那个视频像素钉在光标下）+ 拖拽**平移**（画面 1:1 跟手，与倍率无关；多路同步），R 键重置。注意 ×1 = "恰好铺满窗口"的适配框，**不等于屏幕:视频 1:1**，真比值看状态栏（0.1.1 新增；2026-09-29 修正跟手增益与光标锚点） / **Sync view transform**: mouse wheel **zoom** (1–32×, cursor-anchored — the video pixel under the pointer stays under it) + drag **pan** (picture tracks the pointer 1:1 at any zoom; multi-way sync), R reset. Note ×1 is the fit box ("fills the window"), not 1:1 screen:video — the real ratio is in the status bar (added 0.1.1; tracking gain and cursor anchor corrected 2026-09-29)
 - **网格布局预设菜单**：视图 → 网格布局一键切换 2×1 / 2×2 / 3×3 预设或自动布局（0.1.2 新增） / **Grid layout presets**: View → Grid Layout 2×1/2×2/3×3 or auto (0.1.2)
@@ -145,20 +161,36 @@ The distinction is **what each cell shows**, not how many cells there are: **cla
 **whole** into its own cell; **seamless modes** zoom all routes **together onto the same source region** and then
 crop one cell out of that shared region for side-by-side inspection (new in 0.3.0-beta).
 
-- **传统模式 / Classic modes**（`CompareMode`：Ab 2 路左右、Abc 3 路左大+右上下、Abcd 4 路十字、AbVertical 2 路上下、
-  AbcColumns 3 路三列；另有视图 → 网格布局的 2×1 / 2×2 / 3×3 / 自动 预设）
-  / **Classic modes** (`CompareMode`: Ab 2-way side-by-side, Abc 3-way picture-in-picture, Abcd 4-way quadrant,
-  AbVertical 2-way stacked, AbcColumns 3-column; plus View → Grid Layout presets 2×1 / 2×2 / 3×3 / auto)
+- **传统模式 / Classic modes**（v0.3.1 合并后由 `GridPartition` 表达：**列数 × 行数**的网格 + 每条内部线的可拖权重，
+  形状候选 2×1 / 1×2 / 3×1 / 1×3 / 2×2 / 4×1 / 1×4 / 3×2 / 2×3 / 3×3；另有视图 → 网格布局的 2×1 / 2×2 / 3×3 / 自动 预设。
+  旧 `CompareMode`/`CompareLayout`/`SplitParams`（五个固定形状那套）已随合并**整模块删除**，
+  连同 `CompareLayoutTests`/`ModeVariantTests`/`ModeSystemTests` 三份单测；其中 4 条测的其实是活代码
+  `GridLayout`，已迁进 `GridLayoutTests`，其余不变量（无缝铺满、格数≡格表长度、手柄互不重合、
+  首项＝自动布局、容量 ≥ 路数、5% 下界、末格逐位贴边）在 `GridPartitionTests` 里有等价或更强的对应条）
+  / **Classic modes** (after the v0.3.1 merge these are expressed by `GridPartition`: a **cols × rows** grid whose interior
+  lines each carry a draggable weight — candidates 2×1 / 1×2 / 3×1 / 1×3 / 2×2 / 4×1 / 1×4 / 3×2 / 2×3 / 3×3, plus
+  View → Grid Layout presets 2×1 / 2×2 / 3×3 / auto). The old `CompareMode` / `CompareLayout` / `SplitParams` trio —
+  the five fixed shapes — has now been **deleted as a module**, together with `CompareLayoutTests`, `ModeVariantTests`
+  and `ModeSystemTests`; four of those cases actually tested live code (`GridLayout`) and moved into `GridLayoutTests`,
+  and the remaining invariants (seamless tiling, cell count ≡ cell table, non-coincident handles, first candidate =
+  auto layout, capacity ≥ routes, the 5% floor, last cell exactly flush with the container) have equivalents —
+  or stronger forms — in `GridPartitionTests`)
 - **现代模式 / Seamless modes**：滚轮**以光标为锚点**同步缩放（1× 起，缩小到底退出）、放大态可拖动平移且
   **松手时只提交一次**裁剪，避免逐帧 `SetWindowRgn` / **Wheel zoom anchored at the cursor** (from 1×; zooming back
   out to 1× exits), drag-to-pan while zoomed with the crop **committed once on release** instead of per frame
-- **视图模式：菜单顶部一列，三态互斥 / View modes: one mutually exclusive column at the top of the View menu**
-  入口 **视图 → 视图模式 → 标准模式 / A/B 可拖动对比 / 左右拉动对比**，右侧直接标着各自的快捷键；
-  三项做成单选（圆点）而不是复选，勾在哪一项就是当前处于哪一 mode。
-  - **标准模式（`G`）**：均匀网格，1~9 路全部显示（每格完整装下各路），可用「网格布局」预设 2×1 / 2×2 / 3×3 / 自动 与「单屏/多屏切换」细调。
-  - **A/B 可拖动对比（`V`）**：各路分格显示，**格与格之间的分割线可拖**（手柄在 `LayoutOverlayWindow` 上，鼠标穿透只让手柄可点）。按路数收敛：2 路→AB 左右、3 路→ABC、≥4 路→ABCD 且只显示前 4 路；细分排布（AB 上下、ABC 三列）用 `C` 键循环，循环到末项即退出对比模式。
-  - **左右拉动对比（`S`）**：**只对比两路**（≥3 路时取前两路，状态栏写明"显示前 2 / 共 N 路"，其余路在此模式下隐藏）：两路**都铺满同一区域**，各由 `SetWindowRgn` 裁成互补且不重叠的两半，于是**左右拖动分割线 = 在两路之间揭示 / 擦除**（对标 NVIDIA ICAT Single Screen）。**整条分割线从上到下都能抓**（不必瞄准线中间的圆点），光标移到线上即变成左右箭头。键是开关语义（再按一次回到 A/B 可拖动），菜单项是"进入"语义。此模式下无缝放大与左右互换被禁（三者都要改子窗口矩形或区域，语义互斥）。
-  - **没占格的路是"不启用"，不是"藏起来"**：任何模式下当前视图放不下的那几路会被 Pause 并从播放 / 步进 / Seek /
+- **视图模式：菜单顶部一列，两态互斥 / View modes: one mutually exclusive column at the top of the View menu**
+  入口 **视图 → 视图模式 → 网格对比（分割线可拖）/ 左右拉动对比**，右侧直接标着各自的快捷键；
+  两项做成单选（圆点）而不是复选，勾在哪一项就是当前处于哪一 mode；**都没勾 = 均匀网格**（未进入对比）。
+  - **网格对比（`G` 开关 / `V` 进入）**：合并了旧的「标准网格」与「A/B 可拖动分格」——基准取**网格的渲染覆盖**
+    （一路一格，2~9 路**全部显示、全部启用**，5~9 路不再被挤到格表之外），再挂上 A/B 的**可拖分割线**：
+    内部竖线 `列数-1` 条 + 横线 `行数-1` 条（3×3 即 4 条），每条**整条可抓**。拖动只改这条线**两侧**那两格的大小，
+    其余线一格都不位移（权重模型，见 `Core/Display/GridPartition`）；`C` 键换分格朝向（2 路左右↔上下、
+    3 路三列↔三行↔2×2、4 路 2×2↔四列↔四行、5~6 路 3×2↔2×3）。形状仍由「视图 → 网格布局」预设与路数共同解析，
+    换预设会改形状并把列宽退回均匀。
+  - **合并撤掉了什么**：旧 `CompareMode` 的五种固定形状里，AB 左右 / AB 上下 / ABC 三列 / ABCD 十字都变成了网格的
+    朝向候选；只有 **ABC「左大图 + 右侧上下两小图」**是 T 形交界的非整线形状，整线网格表达不了，随合并取消。
+  - **左右拉动对比（`S`）**：**只对比两路**（≥3 路时取前两路，状态栏写明"显示前 2 / 共 N 路"，其余路在此模式下隐藏）：两路**都铺满同一区域**，各由 `SetWindowRgn` 裁成互补且不重叠的两半，于是**左右拖动分割线 = 在两路之间揭示 / 擦除**（对标 NVIDIA ICAT Single Screen）。**整条分割线从上到下都能抓**（不必瞄准线中间的圆点），光标移到线上即变成左右箭头。键是开关语义（再按一次回到网格对比），菜单项是"进入"语义。此模式下无缝放大与左右互换被禁（三者都要改子窗口矩形或区域，语义互斥）。
+  - **没占格的路是"不启用"，不是"藏起来"**：当前视图放不下的那几路（合并后只有**左右拉动**会出现这种路数>格数的形态）会被 Pause 并从播放 / 步进 / Seek /
     漂移校正里整体移出（实测 5 路用 A/B 可拖动：未占格的第 5 路 1.2 秒 presented **+0**，改动前是 **+41**，
     与看得见的四路同速白烧解码与呈现线程）；重新占格时先 Seek 回规范时间、再按"要播放"的意图恢复，
     所以切回去不会停在旧帧。第 0 路例外，恒启用——它是规范时间轴的基准
@@ -167,7 +199,7 @@ crop one cell out of that shared region for side-by-side inspection (new in 0.3.
     **+0** frames in 1.2 s, versus **+41** before the fix — the same rate as the visible ones); when a route comes back
     it is seeked to the master position first, so it never shows a stale frame. Route 0 is always active — it *is* the timebase
   - 勾选状态在菜单展开时按真实状态刷新：`G`/`V`/`S`/`C` 这些快捷键改过模式后，菜单里不会留下陈旧圆点
-  / **View → View mode → Standard view / A/B draggable split / Left-right wipe**, each labelled with its shortcut and rendered as a radio column (the bullet sits on the mode actually in effect). **Standard (G)** = uniform grid, all 1–9 routes whole in their cells, with grid presets and single/multi toggle underneath. **A/B draggable (V)** = routes in separate cells whose shared divider you drag (2→AB, 3→ABC, ≥4→ABCD showing the first four; `C` cycles the sub-layouts). **Left-right wipe (S)** = exactly **two** routes (the first two when more are open, the rest hidden) covering the same area, `SetWindowRgn` trimming each to a complementary, non-overlapping half, so dragging the line wipes between them (NVIDIA ICAT's Single Screen) — **the whole line is grabbable top to bottom**, no need to aim for the grip dot, and the cursor turns into a resize arrow over it; the key toggles while the menu item enters, and seamless zoom / swap are disabled there by design. Checkmarks are re-read from real state on menu open, so keyboard-driven switches never leave a stale bullet
+  / **View → View mode → Grid compare (draggable dividers) / Left-right wipe**, each labelled with its shortcut and rendered as a radio column (the bullet sits on the mode actually in effect; **no bullet = the plain uniform grid**). **Grid compare (`G` toggles, `V` enters)** merges the old *Standard grid* and *A/B draggable split*: the base is the grid's rendering coverage — one cell per route, **all 1–9 routes visible and active** (routes 5–9 are no longer pushed outside the cell table) — with A/B's draggable dividers on top (`cols-1` vertical + `rows-1` horizontal interior lines, 3×3 ⇒ 4 lines, **each grabbable along its whole length**). A drag resizes only the two cells on either side of that line; every other line stays put (weights model, see `Core/Display/GridPartition`). `C` cycles the orientation (2-way side-by-side ↔ stacked, 3-way columns ↔ rows ↔ 2×2, 4-way 2×2 ↔ four columns/rows, 5–6 way 3×2 ↔ 2×3); the shape still resolves from View → Grid layout presets against the route count, and changing the preset evens the widths back out. What the merge drops: AB / AB stacked / ABC three-column / ABCD quadrant all became grid orientations, but **ABC "big left + two stacked right"** is a T-junction shape no full-line grid can express, so it goes away. **Left-right wipe (`S`)** = exactly **two** routes (the first two when more are open, the rest hidden) covering the same area, `SetWindowRgn` trimming each to a complementary, non-overlapping half, so dragging the line wipes between them (NVIDIA ICAT's Single Screen) — **the whole line is grabbable top to bottom**, no need to aim for the grip dot, and the cursor turns into a resize arrow over it; the key toggles while the menu item enters, and seamless zoom / swap are disabled there by design. Checkmarks are re-read from real state on menu open, so keyboard-driven switches never leave a stale bullet
 - **左右互换（AB）/ 轮换各格画面 / Swap left-right (AB) / Rotate sources across cells**：只换"格 ↔ 路"的映射，
   **不改变格数**；排版、命中测试、裁剪下发、放大源区间四处共用同一份映射，轮换按**路号**循环
   4 路用 AB 也能轮到第 3、4 路 / These remap cell↔route without changing the cell count; layout, hit-testing,
@@ -180,19 +212,21 @@ crop one cell out of that shared region for side-by-side inspection (new in 0.3.
   / setting `AutoEnterCompare`, **off by default**, applied on the all-opened callback (when the route count is finally
   correct) and it preserves a split position the user already dragged
 - **已撤下的两个重复入口 / Two duplicated entries retired**：「A-B 滑块视图」（含裸 `B` 键与 `AbSliderView`）
-  只画两块渐变占位、真机模式下会把真实画面整块遮住，与上面的 A/B 可拖动 / 左右拉动是同一概念的假版本；
+  只画两块渐变占位、真机模式下会把真实画面整块遮住，与上面的网格对比 / 左右拉动是同一概念的假版本；
   「显示 对比网格」的实际动作是折叠侧栏，与「视图 → 侧栏」三态重复
   / **A-B Slider View** (with its bare `B` key and `AbSliderView`) painted two gradient placeholders and covered the real picture in real mode — a fake twin of the two modes above; **Show Comparison Grid** actually collapsed the sidebar, duplicating View → Sidebar's tri-state
 - **双语 / Bilingual**：上述入口的中文与英文串都在 `Localization/LanguageManager.cs` 的两张表里
-  （`Menu_ViewMode`、`Menu_Mode_Standard|AbDrag|Wipe`、`Menu_CompareOptions`、`Menu_Mode_Swap|Rotate`、`Menu_AutoCompare`），切换语言即时生效
+  （`Menu_ViewMode`、`Menu_Mode_Standard|Wipe`、`Menu_CompareOptions`、`Menu_Mode_Swap|Rotate`、`Menu_AutoCompare`），切换语言即时生效
   / every entry above has both zh and en strings in the two tables of `Localization/LanguageManager.cs`
-  (`Menu_ViewMode`, `Menu_Mode_Standard|AbDrag|Wipe`, `Menu_CompareOptions`, `Menu_Mode_Swap|Rotate`, `Menu_AutoCompare`); switching language applies live
-- **怎么试 / How to try**：打开 2 个以上文件 → **视图 → 视图模式 → A/B 可拖动对比**（或按 `V`）→ 拖分割线换两路宽窄、
-  在画面上滚动滚轮放大、按住拖动平移、菜单 **对比选项 → 左右互换（AB）** 换源 →
-  再切 **左右拉动对比**（或按 `S`）左右拉动揭示 → 滚回 1× 退出放大、按 `G` 回标准模式
-  / open 2+ files → **View → View mode → A/B draggable split** (or press `V`) → drag the divider, wheel-zoom on the
-  picture, drag to pan, **Compare options → Swap left/right (AB)** to exchange sources → switch to **Left-right wipe**
-  (or press `S`) to reveal between the two → wheel back to 1× and press `G` for the standard view
+  (`Menu_ViewMode`, `Menu_Mode_Standard|Wipe`, `Menu_CompareOptions`, `Menu_Mode_Swap|Rotate`, `Menu_AutoCompare`); switching language applies live
+- **怎么试 / How to try**：打开 2 个以上文件 → **视图 → 视图模式 → 网格对比（分割线可拖）**（或按 `G`，`V` 是同义入口）
+  → 拖任意一条分割线换相邻两格宽窄、按 `C` 换朝向、在画面上滚动滚轮放大、按住拖动平移、
+  菜单 **对比选项 → 左右互换（AB）** 换源 → 再切 **左右拉动对比**（或按 `S`）左右拉动揭示 →
+  再按 `S` 回到网格、滚回 1× 退出放大、再按 `G` 回到无分割线的均匀网格
+  / open 2+ files → **View → View mode → Grid compare (draggable dividers)** (or press `G`; `V` is an alias) →
+  drag any divider to resize the two cells it separates, press `C` to cycle the orientation, wheel-zoom on the picture,
+  drag to pan, **Compare options → Swap left/right (AB)** to exchange sources → press `S` for the **left-right wipe** →
+  `S` again returns to the grid, wheel back to 1× exits the zoom, and `G` again drops to the plain divider-free grid
 
 ### 🚀 快速开始（仅需下载包） / Quick Start (prebuilt package)
 
@@ -219,11 +253,11 @@ _The app needs a set of shared FFmpeg DLLs. **The full package already bundles t
 | ② 同目录平铺 | DLL 与 exe 直接放同一目录 / DLLs directly beside the exe |
 | ③ 设置里手动指定 | 设置 → FFmpeg DLL 目录 → 浏览，选中 DLL 所在目录 / Settings → FFmpeg DLL folder → Browse |
 
-DLL 组来源：BtbN 的 FFmpeg-Builds（`ffmpeg-n8.x-*-win64-gpl-shared-*.7z`，取出 `bin/*.dll`；需含 `avcodec-63` / `avformat-63` / `avutil-61` / `swscale-10` / `swresample-7` / `avfilter-12` 及 `ass-9.dll`）。**本仓库不包含任何第三方 DLL。**
+DLL 组来源：BtbN 的 FFmpeg-Builds（取出 `bin/*.dll`；需含 `avcodec-63` / `avformat-63` / `avutil-61` / `swscale-10` / `swresample-7` / `avfilter-12` 及 `ass-9.dll`）。⚠ **变体口径实测有三处不一致**：本文原写 `ffmpeg-n8.x-*-win64-gpl-shared-*.7z`；`3fp/kernel/tools/准备FFmpeg.ps1:9` 的默认 URL 却是 `ffmpeg-master-latest-win64-lgpl-shared.zip`；而盘上真正发货的那套（`publish/PLAN/ffmpeg-full`，`git-2026-10-11-edadf711a9`）实测构建串含 `--enable-gpl --enable-nonfree --enable-version3 --enable-libx264 --enable-libx265 --enable-libfdk-aac` ⇒ 属 **nonfree** 变体，照 ps1 默认 URL 重新下载会**静默丢掉** x264/x265/fdk-aac/libplacebo 承接线。逐件许可与分发条件见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) §1。**本仓库的 git 集合不含第三方 DLL**（磁盘与发布载荷里有，别按磁盘口径读这句）。
 
-_DLLs come from BtbN's FFmpeg-Builds (`ffmpeg-n8.x-*-win64-gpl-shared-*.7z`, take `bin/*.dll`; needs `avcodec-63` / `avformat-63` / `avutil-61` / `swscale-10` / `swresample-7` / `avfilter-12` plus `ass-9.dll`). This repo ships no third-party DLLs._
+_DLLs come from BtbN's FFmpeg-Builds (take `bin/*.dll`; needs `avcodec-63` / `avformat-63` / `avutil-61` / `swscale-10` / `swresample-7` / `avfilter-12` plus `ass-9.dll`). ⚠ **The variant is stated three different ways, measured**: this file used to say `...-gpl-shared-...`; `3fp/kernel/tools/准备FFmpeg.ps1:9` defaults to `...-lgpl-shared.zip`; and the set actually shipped (`publish/PLAN/ffmpeg-full`, `git-2026-10-11-edadf711a9`) measures `--enable-gpl --enable-nonfree --enable-version3 --enable-libx264 --enable-libx265 --enable-libfdk-aac` — i.e. **nonfree**, so re-downloading via the script's default URL silently drops the x264/x265/fdk-aac/libplacebo chain. Per-component licences: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) §1. **The git set of this repo contains no third-party DLLs** (the disk and the release payload do — do not read this sentence as a disk claim)._
 
-> **找不到 FFmpeg 会怎样？** 程序**不会崩**，而是回退到**演示模式**（合成画面，可完整走通打开/播放/步进/分屏等操作），并在启动时弹窗说明原因、状态栏常驻显示降级原因。
+> **找不到 FFmpeg 会怎样？** 程序**不会崩**，而是回退到**演示模式**（合成画面，可完整走通打开/播放/步进/分格等操作），并在启动时弹窗说明原因、状态栏常驻显示降级原因。
 > _If FFmpeg is missing the app does **not** crash — it falls back to **demo mode** (synthetic frames) and tells you why in a startup dialog and the status bar._
 
 **3. 运行** / **Run**
@@ -234,13 +268,13 @@ _Double-click `3FCompare.exe`, then **drag video files into the window** (or Fil
 
 **4. 上手三招** / **Three things to try first**
 
-- **分屏盯帧**：拖入 2 个同源不同编码的文件 → 按 `V` 进 **A/B 可拖动对比** → `A`/`D` 逐帧、`←`/`→` 按秒，拖中间分割线调两路宽窄
+- **分格盯帧**：拖入 2 个同源不同编码的文件 → 按 `G` 进 **网格对比（分割线可拖）** → `A`/`D` 逐帧、`←`/`→` 按秒，拖中间分割线调两格宽窄
 - **左右拉动揭示**：按 `S` 切到 **左右拉动对比**，两路铺满同一区域，左右拉动分割线即在同一帧上揭示两个版本
 - **像素探针**：按 `P`，鼠标悬停读像素值（颜色管理前的原生缓冲，跨路可直接比）
 
-常用键：`空格` 播放/暂停 · `A`/`D` 逐帧 · `←`/`→` 逐秒 · `G`/`V`/`S` 视图模式 · `C` 对比布局循环 · `F11` 全屏 · `R` 重置视图 · `Esc` 退出全屏（前四项的键位在设置 → 快捷键里可改）。
+常用键：`空格` 播放/暂停 · `A`/`D` 逐帧 · `←`/`→` 逐秒 · `G`/`S` 视图模式（`V` 与 `G` 同态）· `C` 换分格朝向 · `F11` 全屏 · `R` 重置视图 · `Esc` 退出全屏（前四项的键位在设置 → 快捷键里可改）。
 
-_Key keys: `Space` play/pause · `A`/`D` frame step · `←`/`→` second step · `G`/`V`/`S` view modes · `C` cycle compare layout · `F11` fullscreen · `R` reset view · `Esc` exit fullscreen (the first four are rebindable in Settings → Shortcuts)._
+_Key keys: `Space` play/pause · `A`/`D` frame step · `←`/`→` second step · `G`/`S` view modes (`V` aliases `G`) · `C` cycles the split orientation · `F11` fullscreen · `R` reset view · `Esc` exit fullscreen (the first four are rebindable in Settings → Shortcuts)._
 
 **常见问题** / **Troubleshooting**
 
@@ -282,7 +316,8 @@ dotnet run --project tests/3FCompare.SmokeTests -- &lt;视频&gt; [更多视频.
 ## 📝 更新日志（Changelog）
 
 > ⚠ **本节只保留到 v0.2.0-BETA，是历史留档，已停止更新。**
-> 完整、最新的变更记录一律看 [`CHANGELOG.md`](CHANGELOG.md)（当前最新 `v0.3.1-beta`）——
+> 完整、最新的变更记录一律看 [`CHANGELOG.md`](CHANGELOG.md)（最新带号段是 `[0.3.2-beta] — 2026-09-30`，
+> 其上还有 `[未发布] — 2026-10-08` 与 `2026-10-07` 两段；**git tag 才仍停在 `v0.3.1-beta`**，0.3.2 的包已出但没打 tag）——
 > 曾经因为这里单独维护一份，结果长期停在 0.2.0 而与实际版本严重脱节。
 
 ### v0.2.0-BETA（2026-08-25）

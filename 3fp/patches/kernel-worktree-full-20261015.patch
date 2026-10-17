@@ -1,0 +1,1696 @@
+diff --git a/FFF.Native/3FP/Api/FFF.Player.Api.h b/FFF.Native/3FP/Api/FFF.Player.Api.h
+index 1377659..d4b06fc 100644
+--- a/FFF.Native/3FP/Api/FFF.Player.Api.h
++++ b/FFF.Native/3FP/Api/FFF.Player.Api.h
+@@ -171,6 +171,17 @@ struct FFF3FPConfiguration {
+     // cannot drive each other into oscillation.
+     std::uint32_t decoderGrowDropPercent = 10;
+     std::uint32_t decoderShrinkDropPercent = 2;
++    // Deliberately NOT extended here. The flip-rate bound is automatic (min of panel rate
++    // and content rate) and computed inside the renderer.
++    //
++    // A field appended to this struct grows sizeof it, and FFF3FP_Create rejects any host
++    // whose reported size is below sizeof(FFF3FPConfiguration) (PlayerApi.cpp:94) -- so a
++    // config-only knob would take down every host that has not been rebuilt in the same
++    // step, including the two managed ones in this repository. Measured, not assumed:
++    // the VB host's own comment on 原生播放器配置 records exactly that failure (host at
++    // 80 bytes against a 112-byte kernel => Create returns -1, the player cannot open
++    // anything). A setter carries no such coupling: a host that never calls it simply has
++    // no bound, which is the behaviour it has today.
+ };
+ 
+ struct FFF3FPSnapshot {
+@@ -740,6 +751,70 @@ FFF3FP_API FFFResult FFF3FP_SetColorMode(FFF3FPHandle player, FFF3FPColorMode mo
+ // (InvalidArgument); a successful call does not by itself prove tearing will happen.
+ FFF3FP_API FFFResult FFF3FP_SetPresentConfig(FFF3FPHandle player,
+     std::uint32_t enableTearing) noexcept;
++// The window's flip-rate bound is automatic and not configurable:
++//     bound = min(display refresh rate, video frame rate)
++// Expressed as a period that is the longer of the two, so 60 fps content on a 144 Hz panel
++// flips at most 60 times a second -- never 144 re-scan-outs of the same frame -- while
++// 240 fps content on the same panel flips at most 144 and the surplus is discarded upstream
++// by the session's existing lateness rule. There is deliberately no setter: a configurable
++// ceiling would be a switch for a behaviour that is always on.
++//
++// FFF3FP_GetPresentPacingStatus below is the read-only view of what the presenter actually
++// paces against. Read-only diagnostics matter here because the cadence lock is invisible to
++// the eye when it works and invisible when it does not; the two numbers that decide its
++// behaviour (the panel refresh rate, and whether the grid has been calibrated yet) were
++// previously only assertable from inside the renderer.
++struct FFF3FPPresentPacingStatus {
++    std::uint32_t size;
++    std::uint32_t version; // == PlayerApiVersion
++    // EnumDisplaySettings for the monitor that hosts the output window. Reported here
++    // un-clamped; the renderer used to clamp this to 120 before a 2026-10-15 fix, so a
++    // 144 Hz panel was described as 120 Hz to whatever consumed it.
++    float declaredRefreshHz;
++    // Panel period recovered from the swap chain's own frame statistics
++    // (IDXGISwapChain::GetFrameStatistics: SyncRefreshCount against SyncQPCTime).
++    // 0 until two samples have arrived, which is what "not locked yet" means here.
++    float measuredRefreshHz;
++    float frameRateBoundHz;   // the bound in force: min(panel rate, content rate)
++    std::uint32_t gridLocked;       // 1 = flips are snapped to the refresh grid
++    // Why the grid is not in charge when gridLocked is 0:
++    //   0 = locked, or there was nothing to pace against
++    //   1 = variable-refresh path requested (the display paces itself; snapping to a fixed
++    //       grid would only add latency)
++    //   2 = the grid is not calibrated yet (needs two frame-statistics samples)
++    //   3 = the native window-move loop owns the cadence for this flip
++    std::uint32_t pacingBypass;
++    // Signed error of the last flip's submit against the instant it was told to submit at
++    // (its slot minus the lead), in 100 ns units. Positive = submitted late.
++    // Scored against the slot itself instead, this reports the lead as though it were
++    // accuracy: measured that way it produced a suspiciously steady "worst 0.35 refresh
++    // periods", which is just the lead (0.35 x 6.94 ms), and it said nothing about how well
++    // the wait actually landed. Measured on this machine at 60 fps content: signed mean +0.12
++    // refresh periods, worst absolute 0.34 -- and the lead is 0.35, so the worst case spends
++    // the entire headroom and lands on the slot itself. The lead is therefore the thing to
++    // raise if a slipped slot is ever observed; this reading says the margin is thin, not that
++    // it is negative.
++    std::int64_t lastSlotError100ns;
++    // The displayed half, counted from PresentRefreshCount (the vblank on which the chain's
++    // image reached the monitor). holdSampled counts flips whose on-screen hold was
++    // observable, holdWithinRounding those held for either rounding (floor or ceiling) of the
++    // refresh count the cadence asked for -- 2 or 3 for 60 fps on 144 Hz -- and
++    // holdWorstDeviationRefreshes the largest miss outside that band. A hold inside the band
++    // is what a steady cadence looks like; one outside it (1 refresh, or 4 and up) is what
++    // the eye calls a hitch. Submit accuracy alone does not prove either.
++    std::uint64_t holdSampled;
++    std::uint64_t holdWithinRounding;
++    std::uint64_t holdWorstDeviationRefreshes;
++    // Frames discarded because the source delivers faster than the panel can scan out
++    // (240 fps content on a 144 Hz panel). Deliberately NOT folded into the snapshot's
++    // droppedVideoFrames: that reading means "the pipeline fell behind the media clock" and
++    // drives the adaptive-downscale policy, and a panel-limited discard is neither of those
++    // things -- no amount of resampling lets a 144 Hz panel show 240 frames a second.
++    // Report the two numbers side by side; the total is their sum.
++    std::uint64_t displayRateDiscardedFrames;
++};
++FFF3FP_API FFFResult FFF3FP_GetPresentPacingStatus(FFF3FPHandle player,
++    FFF3FPPresentPacingStatus* status) noexcept;
+ FFF3FP_API FFFResult FFF3FP_SetOutputWindow(FFF3FPHandle player, void* outputWindow) noexcept;
+ FFF3FP_API FFFResult FFF3FP_SetInteractiveMove(FFF3FPHandle player, std::uint32_t enabled) noexcept;
+ // View transform for frame inspection: zoom scales the fitted video box
+diff --git a/FFF.Native/3FP/Api/PlayerApi.cpp b/FFF.Native/3FP/Api/PlayerApi.cpp
+index e780605..b64bb0a 100644
+--- a/FFF.Native/3FP/Api/PlayerApi.cpp
++++ b/FFF.Native/3FP/Api/PlayerApi.cpp
+@@ -144,6 +144,16 @@ FFFResult FFF3FP_SetPresentConfig(const FFF3FPHandle player, const std::uint32_t
+         static_cast<PlayerSession*>(player)->SetPresentConfig(enableTearing != 0) :
+         FFFResult::InvalidArgument;
+ }
++// Presentation cadence lock. Appended after the v20 surface like the readback and VSR
++// entries: additive, so PlayerApiVersion is unchanged and a host built against an older
++// header keeps loading this DLL. There is deliberately no setter -- the window's flip-rate
++// bound is always min(panel rate, content rate) and is not configurable.
++FFFResult FFF3FP_GetPresentPacingStatus(const FFF3FPHandle player,
++    FFF3FPPresentPacingStatus* status) noexcept {
++    return player && status
++        ? static_cast<PlayerSession*>(player)->GetPresentPacingStatus(*status)
++        : FFFResult::InvalidArgument;
++}
+ FFFResult FFF3FP_SetOutputWindow(const FFF3FPHandle player, void* window) noexcept { return player ? static_cast<PlayerSession*>(player)->SetOutputWindow(window) : FFFResult::InvalidArgument; }
+ FFFResult FFF3FP_SetInteractiveMove(const FFF3FPHandle player, const std::uint32_t enabled) noexcept {
+     return player && enabled <= 1 ? static_cast<PlayerSession*>(player)->SetInteractiveMove(enabled != 0)
+diff --git a/FFF.Native/3FP/Core/PlayerSession.cpp b/FFF.Native/3FP/Core/PlayerSession.cpp
+index 7cca360..5294b66 100644
+--- a/FFF.Native/3FP/Core/PlayerSession.cpp
++++ b/FFF.Native/3FP/Core/PlayerSession.cpp
+@@ -579,7 +579,7 @@ std::string HardwareAccelerationName(const AVCodecContext* decoder) {
+ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
+     : decodeMode_(configuration.decodeMode), callback_(configuration.eventCallback),
+       callbackContext_(configuration.eventCallbackContext), terminate_(false), format_(nullptr),
+-      playbackPacket_(nullptr), externalAudioPacket_(nullptr), videoDecodeFrame_(nullptr),
++      playbackPacket_(nullptr), stillImagePacket_(nullptr), externalAudioPacket_(nullptr), videoDecodeFrame_(nullptr),
+       videoTransferFrame_(nullptr), audioDecodeFrame_(nullptr), externalAudioDecodeFrame_(nullptr),
+       videoDecoder_(nullptr), videoStream_(-1),
+       audioStream_(-1), coverArtStream_(-1), coverArtFrame_(nullptr), stillImageFrame_(nullptr),
+@@ -635,6 +635,10 @@ PlayerSession::PlayerSession(const FFF3FPConfiguration& configuration)
+         threadLadderMax_ = std::clamp(configuration.maxSoftwareDecoderThreads, 1u, 64u);
+         if (threadLadderMax_ < threadLadderMin_) std::swap(threadLadderMax_, threadLadderMin_);
+     }
++    // No cadence bound is read from the configuration: see the note on
++    // FFF3FPConfiguration's tail -- reading a field that is not there would require
++    // widening sizeof, and FFF3FP_Create rejects any host that has not been rebuilt
++    // alongside this struct. The bound is therefore computed in the renderer instead.
+     // Applied before the colour mode: SetColorMode evaluates the scRGB gate and
+     // must already know the SDR presentation policy.
+     videoRenderer_.SetSdrScRgbMode(configuration.sdrScRgbMode);
+@@ -1361,6 +1365,27 @@ FFFResult PlayerSession::SetPresentConfig(const bool enableTearing) noexcept {
+     Enqueue([this, enableTearing] { videoRenderer_.SetPresentConfig(enableTearing); });
+     return FFFResult::Success;
+ }
++FFFResult PlayerSession::GetPresentPacingStatus(
++    FFF3FPPresentPacingStatus& status) noexcept {
++    // Same contract as GetRenderTargetInfo: the caller declares the layout it allocated by
++    // size and version, and nothing is written past it.
++    if (status.size < sizeof(FFF3FPPresentPacingStatus) || status.version != 20)
++        return FFFResult::InvalidArgument;
++    const auto pacing = videoRenderer_.QueryPresentPacing();
++    status.size = sizeof(status);
++    status.version = 20;
++    status.declaredRefreshHz = pacing.declaredRefreshHz;
++    status.measuredRefreshHz = pacing.measuredRefreshHz;
++    status.frameRateBoundHz = pacing.frameRateBoundHz;
++    status.gridLocked = pacing.gridLocked;
++    status.pacingBypass = pacing.pacingBypass;
++    status.lastSlotError100ns = pacing.lastSlotError100ns;
++    status.holdSampled = pacing.holdSampled;
++    status.holdWithinRounding = pacing.holdWithinRounding;
++    status.holdWorstDeviationRefreshes = pacing.holdWorstDeviationRefreshes;
++    status.displayRateDiscardedFrames = displayRateDiscardedFrames_.load(std::memory_order_relaxed);
++    return FFFResult::Success;
++}
+ FFFResult PlayerSession::SetColorMode(const FFF3FPColorMode mode, const float sdr, const float hdr,
+     const float paper, const bool forceHdrOutput) noexcept {
+     if (mode > FFF3FPColorMode::MapToHdr || !std::isfinite(sdr) || sdr <= 0 ||
+@@ -1703,7 +1728,7 @@ bool PlayerSession::RecoverVideoDevice() noexcept {
+     bool hardwareFallback = false;
+     std::string hardwareFailureReason;
+     if (format_ != nullptr && videoStream_ >= 0) {
+-        if (decodeMode_ == FFF3FPDecodeMode::D3D11 && !staticImage_) {
++        if (decodeMode_ == FFF3FPDecodeMode::D3D11) {
+             result = OpenHardwareVideoDecoder(format_, videoStream_, &videoDecoder_,
+                 &hardwareFailureReason);
+             if (result != FFFResult::Success) {
+@@ -1720,10 +1745,25 @@ bool PlayerSession::RecoverVideoDevice() noexcept {
+                 "video-device-recovery");
+             return true;
+         }
+-        snapshot_.decodeMode = decodeMode_ == FFF3FPDecodeMode::D3D11 &&
+-            !staticImage_ && !hardwareFallback
++        snapshot_.decodeMode = decodeMode_ == FFF3FPDecodeMode::D3D11 && !hardwareFallback
+             ? FFF3FPDecodeMode::Gpu : FFF3FPDecodeMode::Cpu;
+-        if (staticImage_ && stillImageFrame_ != nullptr) {
++        if (staticImage_ && stillImageFrame_ != nullptr && IsHardwareFrame(stillImageFrame_)) {
++            // The retained still names surfaces owned by the device that was just lost,
++            // so it cannot be redrawn. Drop it and decode the picture again below.
++            av_frame_unref(stillImageFrame_);
++        }
++        if (staticImage_ && stillImageFrame_ == nullptr) {
++            const auto* stream = format_->streams[videoStream_];
++            const auto start = stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
++            if (av_seek_frame(format_, videoStream_, start, AVSEEK_FLAG_BACKWARD) >= 0)
++                avcodec_flush_buffers(videoDecoder_);
++            const auto decodeResult = DecodeInitialFrame();
++            if (decodeResult != FFFResult::Success) {
++                Fail(decodeResult, "Could not re-decode the still image after rebuilding the graphics device.",
++                    "video-device-recovery");
++                return true;
++            }
++        } else if (staticImage_ && stillImageFrame_ != nullptr) {
+             // imageMode selects the still-image scaling policy: enlarge by pixel
+             // blocks, which keeps a picture's own pixel grid crisp, instead of the
+             // smooth interpolation video wants.
+@@ -2511,8 +2551,23 @@ FFFResult PlayerSession::OpenHardwareVideoDecoder(AVFormatContext* owner, const
+         AV_HWDEVICE_TYPE_D3D11VA,
+         AV_HWDEVICE_TYPE_CUDA,
+     };
++    // A still image is presented one frame and then kept, so a backend whose surfaces
++    // the renderer cannot sample directly has to be consumed through a frame transfer
++    // into semi-planar CPU memory. That route measured two things against the CPU arm
++    // and neither is worth paying at still sizes:
++    //   - it is not bit-exact: the CUDA JPEG decode differs from libjpeg by 1/255 at a
++    //     stripe edge (09h) and by 4/255 on a 4:4:4 sample, and a 4:2:0 surface loses
++    //     the chroma detail of a 4:4:4 source outright;
++    //   - it is slower: +64 ms to +196 ms measured, because the decoder is built for
++    //     one frame that never amortises it.
++    // So stills stay on the renderer's own device, where the decoded surface is sampled
++    // as-is and every sampled file measures bit-exact. Video keeps the full list: there
++    // a CUDA or QSV frame is transferred every frame anyway, and the semi-planar upload
++    // in VideoRenderer is what carries it.
++    const std::size_t backendCount = staticImage_ ? 1u : std::size(Backends);
+     std::string lastFailure = "No compatible hardware decoder was found.";
+-    for (const auto backend : Backends) {
++    for (std::size_t backendIndex = 0; backendIndex < backendCount; ++backendIndex) {
++        const auto backend = Backends[backendIndex];
+         // A backend can expose both a dedicated wrapper and the native FFmpeg
+         // decoder. Try both: profiles accepted by one parser are not always
+         // accepted by the other, notably 4:2:2/4:4:4 and some AV1 streams.
+@@ -2605,10 +2660,17 @@ void PlayerSession::DoOpen(std::string path) noexcept {
+     bool hardwareFallback = false;
+     std::string hardwareFailureReason;
+     if (videoStream_ >= 0) {
+-        auto result = decodeMode_ == FFF3FPDecodeMode::D3D11 && !staticImage_
++        // Still images are included here on purpose: the hardware decoder is tried
++        // first for every media type and the retry below takes the CPU decoder when the
++        // GPU refuses. Formats with no hardware path (PNG, WebP, TIFF, JPEG XL, JXR) are
++        // refused inside the hardware open before any device is created, so probing them
++        // costs nothing.
++        auto result = decodeMode_ == FFF3FPDecodeMode::D3D11
+             ? OpenHardwareVideoDecoder(format_, videoStream_, &videoDecoder_, &hardwareFailureReason)
+             : OpenDecoder(format_, videoStream_, true, &videoDecoder_);
+         if (result != FFFResult::Success && decodeMode_ == FFF3FPDecodeMode::D3D11) {
++            // OpenDecoder's default consults decodeMode_, so the retry has to ask for
++            // the software decoder explicitly or it fails the same way.
+             result = OpenDecoder(format_, videoStream_, true, &videoDecoder_, -1, nullptr, false);
+             if (result == FFFResult::Success) {
+                 snapshot_.decodeMode = FFF3FPDecodeMode::Cpu;
+@@ -2616,8 +2678,6 @@ void PlayerSession::DoOpen(std::string path) noexcept {
+             }
+         }
+         if (result != FFFResult::Success) { Fail(result, "Could not open a hardware or software video decoder.", "open"); return; }
+-        if (staticImage_ && decodeMode_ == FFF3FPDecodeMode::D3D11)
+-            snapshot_.decodeMode = FFF3FPDecodeMode::Cpu;
+     }
+     if (audioStream_ >= 0) {
+         // IAMF first: FFmpeg cannot mix an IAMF element's substreams, so its
+@@ -2699,10 +2759,7 @@ void PlayerSession::DoOpen(std::string path) noexcept {
+     }
+     PublishDisc();
+     Emit(FFF3FPEvent::OpenCompleted, "{\"success\":true}");
+-    if (staticImage_ && decodeMode_ == FFF3FPDecodeMode::D3D11)
+-        Emit(FFF3FPEvent::DeviceChanged,
+-            "{\"decodeMode\":1,\"reason\":\"Still images use CPU decoding for immediate, device-independent loading.\"}");
+-    else if (hardwareFallback)
++    if (hardwareFallback)
+         Emit(FFF3FPEvent::DeviceChanged,
+             "{\"type\":\"video\",\"decodeMode\":1,\"fallback\":true,\"reason\":\"" +
+             EscapeJson(hardwareFailureReason.empty()
+@@ -2724,11 +2781,18 @@ FFFResult PlayerSession::DecodeInitialFrame() noexcept {
+     if (!staticImage_ && !animatedImage_) return FFFResult::InvalidState;
+     if (playbackPacket_ == nullptr) playbackPacket_ = av_packet_alloc();
+     if (playbackPacket_ == nullptr) return FFFResult::NativeFailure;
++    if (stillImagePacket_ == nullptr) stillImagePacket_ = av_packet_alloc();
++    if (stillImagePacket_ == nullptr) return FFFResult::NativeFailure;
++    av_packet_unref(stillImagePacket_);
+     const auto before = videoRenderer_.PresentedVideoFrames();
+     int readResult = 0;
+     while (videoRenderer_.PresentedVideoFrames() == before &&
+         (readResult = av_read_frame(format_, playbackPacket_)) >= 0) {
+         if (playbackPacket_->stream_index == videoStream_) {
++            if (staticImage_) {
++                av_packet_unref(stillImagePacket_);
++                if (av_packet_ref(stillImagePacket_, playbackPacket_) < 0) return FFFResult::NativeFailure;
++            }
+             const auto decodeResult = DecodePacket(videoDecoder_, playbackPacket_, true, format_);
+             av_packet_unref(playbackPacket_);
+             if (decodeResult != FFFResult::Success) return decodeResult;
+@@ -2740,6 +2804,21 @@ FFFResult PlayerSession::DecodeInitialFrame() noexcept {
+         const auto drainResult = DecodePacket(videoDecoder_, nullptr, true, format_);
+         if (drainResult != FFFResult::Success) return drainResult;
+     }
++    // Still-image retry after the GPU refused the packet: FallbackToSoftwareVideoDecoder
++    // has already swapped in the CPU decoder, but image2 and the *_pipe demuxers have no
++    // timeline to seek back to, so the packet cannot be re-read from the demuxer. Submit
++    // the retained copy instead of failing the open.
++    if (staticImage_ && videoRenderer_.PresentedVideoFrames() == before &&
++        stillImagePacket_->size > 0 && snapshot_.decodeMode == FFF3FPDecodeMode::Cpu) {
++        // The CPU decoder swapped in by the fallback has already been drained with an
++        // EOF packet above, so it refuses this one unless its buffers are reset first.
++        avcodec_flush_buffers(videoDecoder_);
++        const auto retryResult = DecodePacket(videoDecoder_, stillImagePacket_, true, format_);
++        av_packet_unref(stillImagePacket_);
++        if (retryResult != FFFResult::Success) return retryResult;
++        const auto retryDrain = DecodePacket(videoDecoder_, nullptr, true, format_);
++        if (retryDrain != FFFResult::Success) return retryDrain;
++    }
+     const auto* stream = format_->streams[videoStream_];
+     const auto start = stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
+     if (av_seek_frame(format_, videoStream_, start, AVSEEK_FLAG_BACKWARD) >= 0)
+@@ -2917,7 +2996,17 @@ FFFResult PlayerSession::FallbackToSoftwareVideoDecoder(const char* reason) noex
+     if (videoTransferFrame_ != nullptr) av_frame_unref(videoTransferFrame_);
+     ClearVideoQueue();
+     snapshot_.decodeMode = FFF3FPDecodeMode::Cpu;
+-    DoSeek(resumePosition);
++    if (staticImage_) {
++        // DoSeek is a deliberate no-op for a still image, and its single packet was
++        // already consumed by the failed hardware attempt, so rewind here or the CPU
++        // decoder is handed nothing and the open fails. Same seek as DecodeInitialFrame.
++        const auto* stream = format_->streams[videoStream_];
++        const auto start = stream->start_time == AV_NOPTS_VALUE ? 0 : stream->start_time;
++        if (av_seek_frame(format_, videoStream_, start, AVSEEK_FLAG_BACKWARD) >= 0)
++            avcodec_flush_buffers(videoDecoder_);
++    } else {
++        DoSeek(resumePosition);
++    }
+     RebuildMediaInfo();
+     Emit(FFF3FPEvent::DeviceChanged,
+         "{\"type\":\"video\",\"decodeMode\":1,\"fallback\":true,\"reason\":\"" + EscapeJson(reason == nullptr ?
+@@ -3611,6 +3700,10 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
+         lastVideoFrameDuration100ns_ = av_rescale_q(1, av_inv_q(stream->avg_frame_rate),
+             AVRational{1, static_cast<int>(TicksPerSecond)});
+     }
++    // Hand the source period to the cadence lock. It is what lets the presenter size each
++    // flip in refresh slots (2.4 slots for 60 fps on 144 Hz) instead of taking one slot per
++    // flip, which is how a display-synced loop ends up re-scanning-out the same frame.
++    videoRenderer_.SetContentFramePeriod100ns(lastVideoFrameDuration100ns_);
+     auto nextIndex = snapshot_.frameIndex + 1;
+     if (nextIndex < 0) nextIndex = 0;
+     if (pts != AV_NOPTS_VALUE) {
+@@ -3666,17 +3759,55 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
+         snapshot_.framePts != AV_NOPTS_VALUE &&
+         position + lateTolerance < ClockPosition()) {
+         snapshot_.frameIndex = nextIndex;
+-        ++snapshot_.droppedVideoFrames;
+-        // Feed the drop to the adaptive-downscale policy. Only software decoding can
+-        // benefit, because a hardware frame never crosses PCIe as CPU planes.
+-        if (!IsHardwareFrame(frame))
+-            videoRenderer_.ObserveFrameForAdaptiveDownscale(true);
++        // Two different reasons land at this one test, and they must not share a counter.
++        //
++        //   content rate > panel rate -- the frame is late because the display can only
++        //     scan out DisplayCadenceHz() frames per second while the source delivers more.
++        //     Nothing in the pipeline is failing: at 240 fps on a 144 Hz panel the queue
++        //     gains ~2.4 ms of lateness per frame and must overflow any tolerance. Counted as
++        //     display-rate discards.
++        //   otherwise -- the pipeline fell behind the media clock (decode, upload, a costly
++        //     frame). Counted as droppedVideoFrames, the traditional reading.
++        //
++        // The distinction is not cosmetic: the adaptive-downscale policy below exists to
++        // relieve a decode/upload bottleneck, and feeding it display-rate discards would make
++        // it resample 240 fps content down toward the window size to fix something a smaller
++        // picture cannot fix -- the panel is the binding constraint. So it is not fed here.
++        //
++        // Caveat kept honest: a genuine pipeline stall *during* such content is classified
++        // into the display-rate bucket too. The count therefore means "discarded while the
++        // panel was the binding constraint", which is what a caller acts on, and it is
++        // reported separately so the traditional reading stays clean.
++        const auto contentHz = frameDuration > 0 ? 10'000'000.0 / static_cast<double>(frameDuration) : 0.0;
++        const auto displayHz = videoRenderer_.DisplayCadenceHz();
++        // HasOutputWindow() is part of the test, not decoration: with no window the renderer
++        // never runs a display detection, so DisplayCadenceHz() falls back to its 60.0f
++        // construction default and headless/clip playback of anything faster than 60 fps would
++        // be labelled "the panel cannot keep up" when there is no panel in the session at all.
++        // Those drops stay in the traditional bucket, where they belong.
++        // The 0.5% margin is a deliberate trade-off, and one edge is knowingly on the wrong
++        // side of it: 60 fps content on a 59.94 Hz panel really is panel-limited, but 60 is
++        // not greater than 59.94 x 1.005, so those ~0.06 discards per second land in the
++        // traditional bucket. Without the margin the two buckets would flip back and forth
++        // every time the grid estimate moved by its own measurement noise, which is worse
++        // than a stable, documented 0.1% misattribution.
++        if (videoRenderer_.HasOutputWindow() && contentHz > displayHz * 1.005) {
++            displayRateDiscardedFrames_.fetch_add(1, std::memory_order_relaxed);
++        } else {
++            ++snapshot_.droppedVideoFrames;
++            // Feed the drop to the adaptive-downscale policy. Only software decoding can
++            // benefit, because a hardware frame never crosses PCIe as CPU planes.
++            if (!IsHardwareFrame(frame))
++                videoRenderer_.ObserveFrameForAdaptiveDownscale(true);
++        }
+         snapshot_.queuedVideoFrames = static_cast<std::uint32_t>(videoFrameQueue_.size());
+         PublishSnapshot();
+         return;
+     }
+ 
+     AVFrame* renderFrame = frame;
++    // Only a D3D11 surface can be handed to the renderer as-is. Anything else (the CUDA
++    // backend, or QSV) has to come back to CPU memory first as a semi-planar frame.
+     if (IsHardwareFrame(frame) && frame->format != AV_PIX_FMT_D3D11) {
+         if (videoTransferFrame_ == nullptr) videoTransferFrame_ = av_frame_alloc();
+         if (videoTransferFrame_ == nullptr) {
+@@ -3706,10 +3837,12 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
+     const auto firstFrameForMedia = snapshot_.framePts == AV_NOPTS_VALUE;
+     // P3 -> BT.2020 runs **before** the frame is cached and rendered, so the
+     // retained recovery frame is already converted and a device-loss redraw
+-    // does not lose the gamut again.
++    // does not lose the gamut again. It reads CPU planes, so a frame still held on
++    // the GPU is left to the renderer's own wide-gamut path instead.
+     const AVFrame* frameToRender = renderFrame;
+     AVFrame* gamutConverted = nullptr;
+-    if (staticImage_ && owner == format_ && NeedsPrimariesCarrier(renderFrame)) {
++    if (staticImage_ && owner == format_ && !IsHardwareFrame(renderFrame) &&
++        NeedsPrimariesCarrier(renderFrame)) {
+         if (ConvertPrimariesToBt2020(renderFrame, &gamutConverted) == FFFResult::Success &&
+             gamutConverted != nullptr) {
+             frameToRender = gamutConverted;
+@@ -4046,16 +4179,32 @@ void PlayerSession::BuildImageInfo(FFF3FPImageInfo& info) const noexcept {
+     // the frame carries none: a presented frame is unreffed afterwards, which
+     // resets its format to AV_PIX_FMT_NONE, and reading the flags off that would
+     // silently drop alpha (and misreport the bit depth).
+-    const auto frameFormat = frame != nullptr ?
++    //
++    // A hardware frame is the second unusable case, and for the same reason: its
++    // format names the GPU surface layout (AV_PIX_FMT_D3D11 and friends) rather
++    // than the source. Those descriptors declare no components at all, so
++    // reporting one misnames the source format AND leaves the bit depth on its
++    // 8-bit default -- a 10-bit still was reported as 8-bit. A retained still
++    // image frame is a hardware frame, so this is reachable; fall through to the
++    // container parameters (which avformat_find_stream_info fills from a software
++    // decode, hence independent of the decode path), then to the frame's own
++    // underlying software format.
++    const auto frameFormat = frame != nullptr && !IsHardwareFrame(frame) ?
+         static_cast<AVPixelFormat>(frame->format) : AV_PIX_FMT_NONE;
+-    const auto pixelFormat = frameFormat != AV_PIX_FMT_NONE ?
++    auto pixelFormat = frameFormat != AV_PIX_FMT_NONE ?
+         frameFormat : static_cast<AVPixelFormat>(parameters->format);
++    if (pixelFormat == AV_PIX_FMT_NONE && frame != nullptr && frame->hw_frames_ctx != nullptr) {
++        const auto* frames = reinterpret_cast<const AVHWFramesContext*>(frame->hw_frames_ctx->data);
++        if (frames != nullptr) pixelFormat = static_cast<AVPixelFormat>(frames->sw_format);
++    }
+     info.sourcePixelFormat = static_cast<std::int32_t>(pixelFormat);
+     info.sourceBitDepth = parameters->bits_per_raw_sample > 0 ?
+         static_cast<std::uint32_t>(parameters->bits_per_raw_sample) : 8u;
+     if (const auto* descriptor = av_pix_fmt_desc_get(pixelFormat)) {
+-        if (descriptor->comp[0].depth > 0) info.sourceBitDepth = descriptor->comp[0].depth;
+-        if ((descriptor->flags & AV_PIX_FMT_FLAG_ALPHA) != 0) flags |= FFF3FP_IMAGE_FLAG_HAS_ALPHA;
++        if (descriptor != nullptr && descriptor->nb_components > 0 &&
++            descriptor->comp[0].depth > 0) info.sourceBitDepth = descriptor->comp[0].depth;
++        if (descriptor != nullptr &&
++            (descriptor->flags & AV_PIX_FMT_FLAG_ALPHA) != 0) flags |= FFF3FP_IMAGE_FLAG_HAS_ALPHA;
+     }
+ 
+     // ICC profiles arrive as frame side data from the codecs that embed them.
+@@ -4457,6 +4606,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
+     if (audioDecodeFrame_) av_frame_free(&audioDecodeFrame_);
+     if (externalAudioDecodeFrame_) av_frame_free(&externalAudioDecodeFrame_);
+     if (playbackPacket_) av_packet_free(&playbackPacket_);
++    if (stillImagePacket_) av_packet_free(&stillImagePacket_);
+     if (externalAudioPacket_) av_packet_free(&externalAudioPacket_);
+     ClearVideoQueue();
+     for (auto*& frame : videoFramePool_) av_frame_free(&frame);
+@@ -4495,6 +4645,7 @@ void PlayerSession::DoClose(const FFF3FPState finalState, const bool preserveVid
+         snapshot_.videoWidth = snapshot_.videoHeight = 0; snapshot_.isHdrSource = 0;
+         snapshot_.isExternalAudio = 0; snapshot_.externalAudioOffset100ns = 0;
+         snapshot_.decodedVideoFrames = snapshot_.presentedVideoFrames = snapshot_.droppedVideoFrames = 0;
++        displayRateDiscardedFrames_.store(0, std::memory_order_relaxed);
+         snapshot_.decodedAudioFrames = snapshot_.audioUnderruns = 0;
+         snapshot_.audioPosition100ns = snapshot_.bufferedAudio100ns = 0;
+         snapshot_.audioTimestampJitterFrames = snapshot_.audioDiscontinuities = 0;
+diff --git a/FFF.Native/3FP/Core/PlayerSession.h b/FFF.Native/3FP/Core/PlayerSession.h
+index aa16c81..96c9e8c 100644
+--- a/FFF.Native/3FP/Core/PlayerSession.h
++++ b/FFF.Native/3FP/Core/PlayerSession.h
+@@ -81,6 +81,10 @@ public:
+     FFFResult SetColorMode(FFF3FPColorMode mode, float sdrPeakNits,
+         float hdrPeakNits, float paperWhiteNits, bool forceHdrOutput) noexcept;
+     FFFResult SetPresentConfig(bool enableTearing) noexcept;
++    // Cadence read-back (PlayerApi exports FFF3FP_GetPresentPacingStatus). Non-queueing:
++    // the renderer publishes these from atomics. The flip-rate bound itself is automatic
++    // (min of panel rate and content rate) and has no setter.
++    FFFResult GetPresentPacingStatus(FFF3FPPresentPacingStatus& status) noexcept;
+     FFFResult SetOutputWindow(void* outputWindow) noexcept;
+     FFFResult SetInteractiveMove(bool enabled) noexcept;
+     FFFResult SetViewTransform(float zoom, float panX, float panY) noexcept;
+@@ -308,6 +312,10 @@ private:
+     // reuse after av_packet_unref/av_frame_unref, avoiding per-packet heap churn
+     // on both the audio and video decode paths.
+     AVPacket* playbackPacket_;
++    // A still image's one packet, kept so a hardware decode that is rejected only at
++    // decode time can be retried on the CPU decoder: image2/*_pipe demuxers have no
++    // timeline to seek back to, so the packet would otherwise be gone.
++    AVPacket* stillImagePacket_;
+     AVPacket* externalAudioPacket_;
+     AVFrame* videoDecodeFrame_;
+     AVFrame* videoTransferFrame_;
+@@ -408,6 +416,10 @@ private:
+     std::int64_t seekTargetFrame_;
+     bool keyframeSeekPending_;
+     std::int64_t lastVideoFrameDuration100ns_;
++    // Frames discarded because the source delivers faster than the panel can scan out, kept
++    // apart from snapshot_.droppedVideoFrames (which means "the pipeline fell behind the
++    // media clock"). Read from the API thread, written on the worker thread.
++    std::atomic<std::uint64_t> displayRateDiscardedFrames_{ 0 };
+     std::int64_t nextUntimedVideoPosition100ns_;
+     std::deque<std::int64_t> framePtsIndex_;
+     std::int64_t framePtsIndexBase_;
+diff --git a/FFF.Native/3FP/Render/VideoRenderer.cpp b/FFF.Native/3FP/Render/VideoRenderer.cpp
+index d7ed896..9e2c0d1 100644
+--- a/FFF.Native/3FP/Render/VideoRenderer.cpp
++++ b/FFF.Native/3FP/Render/VideoRenderer.cpp
+@@ -4,6 +4,13 @@
+ #include "3FP/Render/SdrShaderBytecode.h"
+ #include "3FP/Render/NvidiaVideoExtensions.h"
+ 
++// Used only by the presenter thread, to put the refresh grid within reach of its waits.
++// Linked by pragma rather than in the .vcxproj: the project carries several
++// AdditionalDependencies lists and only some of them are the configuration actually
++// shipping, so a source-side reference is the one that cannot be missed.
++#include <mmsystem.h>
++#pragma comment(lib, "winmm.lib")
++
+ extern "C" {
+ #include <libavcodec/codec_par.h>
+ #include <libavutil/frame.h>
+@@ -44,10 +51,54 @@ template<class T> void ReleaseCom(T*& resource) noexcept {
+     if (resource != nullptr) { resource->Release(); resource = nullptr; }
+ }
+ 
++// QPC pair used by the presentation cadence lock. Declared here because the presenter
++// thread (TimedTextThread) is defined a few thousand lines before the lock itself.
++std::int64_t QpcTicks() noexcept {
++    static const std::int64_t frequency = [] {
++        LARGE_INTEGER value{};
++        QueryPerformanceFrequency(&value);
++        return value.QuadPart;
++    }();
++    return frequency;
++}
++
++std::int64_t QpcNowValue() noexcept {
++    LARGE_INTEGER value{};
++    QueryPerformanceCounter(&value);
++    return value.QuadPart;
++}
++
++// The grid the cadence lock aims at is 6.94 ms wide on a 144 Hz panel. This process runs at
++// the default system timer resolution, and the release cadence of 60 fps content measured at
++// a 15.7 ms median -- the quantisation is coarser than the thing it has to hit, so no
++// condition_variable::wait_for in this process can land on a slot. The presenter therefore
++// raises the resolution for as long as it owns the cadence and restores it on the way out.
++//
++// Deliberately scoped to the presenter thread rather than to a call site, because it is
++// process-wide and refcounted: the session's own Sleep(1)/wait_for release loop gets the
++// same correction, which is half the defect. The cost is a higher timer interrupt rate for
++// as long as something is playing.
++struct PresenterTimerResolution {
++    bool raised = false;
++    PresenterTimerResolution() noexcept { raised = timeBeginPeriod(1) == 0; }
++    ~PresenterTimerResolution() noexcept { if (raised) timeEndPeriod(1); }
++    PresenterTimerResolution(const PresenterTimerResolution&) = delete;
++    PresenterTimerResolution& operator=(const PresenterTimerResolution&) = delete;
++};
++
+ float DetectDisplayRefreshRate(const HWND window) noexcept {
+-    // Pace camera redraws to the monitor hosting the playback window.  A
+-    // 120 Hz ceiling keeps high-refresh displays responsive without creating
+-    // an unbounded presentation queue on faster panels.
++    // Report the refresh rate of the monitor hosting the playback window, un-corrected.
++    //
++    // This used to clamp to [60,120], whose stated purpose was to keep a high-refresh
++    // display from building an unbounded presentation queue. That bound is now the
++    // explicit job of the automatic flip-rate bound, and leaving it here meant every
++    // consumer of this
++    // number was handed a wrong fact: on a 144 Hz panel the caller was told 120, so any
++    // cadence derived from it was 20% off before it started. Measured on this machine:
++    // EnumDisplaySettings says 144, and the swap chain's own frame statistics recover
++    // 143.995-144.012 Hz run to run.
++    //
++    // The remaining guard only rejects garbage (a driver reporting 0 or 1 Hz), not panels.
+     if (window == nullptr) return 60.0f;
+     const auto monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+     if (monitor == nullptr) return 60.0f;
+@@ -58,7 +109,7 @@ float DetectDisplayRefreshRate(const HWND window) noexcept {
+     mode.dmSize = sizeof(mode);
+     if (!EnumDisplaySettingsExW(monitorInfo.szDevice, ENUM_CURRENT_SETTINGS, &mode, 0) ||
+         mode.dmDisplayFrequency < 2) return 60.0f;
+-    return std::clamp(static_cast<float>(mode.dmDisplayFrequency), 60.0f, 120.0f);
++    return std::clamp(static_cast<float>(mode.dmDisplayFrequency), 20.0f, 1000.0f);
+ }
+ 
+ // DISPLAYCONFIG SDR white = SDRWhiteLevel / 1000 * 80 nits.
+@@ -2957,6 +3008,11 @@ FFFResult PlayerVideoRenderer::CreateSwapChain(const std::uint32_t width,
+         std::lock_guard lock(timedTextMutex_);
+         presentationFrameRate_ = DetectDisplayRefreshRate(window_);
+     }
++    // A new chain restarts the frame-statistics sequence, so the grid must be re-derived
++    // from scratch. Requested here and cleared on the presenter thread: the grid state is
++    // presenter-thread-only, and the presenter is not inside presentMutex_ while it waits
++    // for a slot, so a reconfiguration can land between the deadline and the flip.
++    gridResetRequested_.store(true, std::memory_order_release);
+     return FFFResult::Success;
+ }
+ 
+@@ -4446,6 +4502,9 @@ FFFResult PlayerVideoRenderer::SetTimedTextLayer(TimedTextRenderLayer layer,
+ }
+ 
+ void PlayerVideoRenderer::TimedTextThread() noexcept {
++    // Held for the whole thread: this is the thread that owns the presentation cadence, and
++    // its waits are what have to reach the refresh grid.
++    PresenterTimerResolution timerResolution;
+     std::uint64_t observedPresentationGeneration = 0;
+     std::uint64_t observedVideoGeneration = 0;
+     auto nextPresentation = std::chrono::steady_clock::time_point::min();
+@@ -4497,7 +4556,25 @@ void PlayerVideoRenderer::TimedTextThread() noexcept {
+             RequestRecoveryIfDeviceLost();
+             continue;
+         }
++        // Cadence lock: hold the flip until the refresh slot it is aimed at, unless the
++        // pacing says this flip has no slot to wait for. Waiting here rather than inside
++        // PresentCurrentFrame keeps the deadline off presentMutex_, which is held across a
++        // blocking Present and must stay free for ResizeBuffers.
++        const auto deadlineQpc = AdvancePacingDeadline(QpcNowValue());
++        if (deadlineQpc != 0) {
++            const auto remainingQpc = deadlineQpc - QpcNowValue();
++            if (remainingQpc > 0) {
++                std::unique_lock waitLock(timedTextMutex_);
++                // Microseconds, not milliseconds: integer-millisecond rounding here would
++                // throw away a tenth of the panel period on every single flip.
++                timedTextCondition_.wait_for(waitLock,
++                    std::chrono::microseconds(remainingQpc * 1'000'000 / QpcTicks()),
++                    [this] { return timedTextThreadStop_; });
++                if (timedTextThreadStop_) return;
++            }
++        }
+         const auto presentationStart = std::chrono::steady_clock::now();
++        lastSubmitQpc_ = QpcNowValue();
+         const auto result = PresentTimedText();
+         if (result != FFFResult::Success) {
+             if (result == FFFResult::DeviceFailure && RequestRecoveryIfDeviceLost()) continue;
+@@ -5821,8 +5898,18 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
+                     const auto xShift = plane == 0 ? 0u : input.chromaWidthShift;
+                     const auto yShift = plane == 0 ? 0u : input.chromaHeightShift;
+                     const auto rows = (uploadHeight + (1u << yShift) - 1) >> yShift;
++                    // A row of the destination texture is (texels x samples-per-texel x
++                    // bytes-per-sample). Semi-planar chroma packs U and V into one R8G8 /
++                    // R16G16 texel, so it carries two samples per texel -- skipping that
++                    // factor copies half of every chroma row and leaves the rest at the
++                    // zeroed pages a freshly created texture starts with, which samples
++                    // as (U=0, V=0) and reads as a strong green cast. Planar formats
++                    // (and the luma plane) are one sample per texel, so they are
++                    // unaffected. The >= 4K arm above uses the real source stride via
++                    // UpdateSubresource and never had this problem.
++                    const auto samplesPerTexel = (input.layout == 2 && plane != 0) ? 2u : 1u;
+                     const auto rowBytes = ((uploadWidth + (1u << xShift) - 1) >> xShift) *
+-                        (input.bitDepth > 8 ? 2u : 1u);
++                        samplesPerTexel * (input.bitDepth > 8 ? 2u : 1u);
+                     for (unsigned row = 0; row < rows; ++row)
+                         std::memcpy(static_cast<std::uint8_t*>(mapped.pData) +
+                             static_cast<std::size_t>(row) * mapped.RowPitch,
+@@ -6300,6 +6387,276 @@ FFFResult PlayerVideoRenderer::SetPresentConfig(const bool enableTearing) noexce
+     return FFFResult::Success;
+ }
+ 
++// ---- Presentation cadence lock (exported as FFF3FP_GetPresentPacingStatus) ----
++//
++// The bound is not configurable, so there is no setter to call: it is always
++//     bound = min(panel refresh rate, content frame rate)
++// and it only ever holds the presenter back, never speeds it up. Both halves are needed:
++//   * content < panel (60 fps on 144 Hz) -- the panel would accept 144 flips, and flipping
++//     more often than the source changes picture only re-scan-outs the same frame, so the
++//     content rate is the useful limit;
++//   * content > panel (240 fps on 144 Hz) -- the panel cannot show more than its own rate,
++//     so the panel is the limit and the surplus is dropped upstream by the session's
++//     existing lateness rule.
++// Expressed as a period this is simply "the longer of the two periods", which is what
++// AdvancePacingDeadline uses to size each flip.
++double PlayerVideoRenderer::DisplayCadenceHz() const noexcept {
++    const auto measured = measuredRefreshHz_.load(std::memory_order_acquire);
++    // presentationFrameRate_ is written under timedTextMutex_; reading it unlocked here is
++    // the same benign race the diagnostics already accept -- it changes on chain creation
++    // and on timed-text layer changes, never mid-flip, and a one-frame-stale rate would
++    // only shift the classification threshold, not the presentation.
++    return measured > 0.0 ? measured : static_cast<double>(presentationFrameRate_);
++}
++
++double PlayerVideoRenderer::FrameRateBoundHz() const noexcept {
++    const auto panelHz = DisplayCadenceHz();
++    const auto content100ns = contentPeriod100ns_.load(std::memory_order_acquire);
++    if (content100ns <= 0) return panelHz;   // rate unknown: only the panel bound applies
++    return std::min(panelHz, 10'000'000.0 / static_cast<double>(content100ns));
++}
++
++void PlayerVideoRenderer::SetContentFramePeriod100ns(const std::int64_t period100ns) noexcept {
++    contentPeriod100ns_.store(period100ns > 0 ? period100ns : 0, std::memory_order_release);
++}
++
++PlayerVideoRenderer::PresentPacingStatus PlayerVideoRenderer::QueryPresentPacing() const noexcept {
++    PresentPacingStatus status;
++    status.declaredRefreshHz = static_cast<float>(declaredRefreshHz_.load(std::memory_order_acquire));
++    status.measuredRefreshHz = static_cast<float>(measuredRefreshHz_.load(std::memory_order_acquire));
++    // Derived here rather than stored, so the reading can never disagree with the rule:
++    // a cached bound would be one more thing that can go stale between a media change and
++    // the next flip.
++    status.frameRateBoundHz = static_cast<float>(FrameRateBoundHz());
++    status.gridLocked = gridLocked_.load(std::memory_order_acquire);
++    status.pacingBypass = pacingBypass_.load(std::memory_order_acquire);
++    status.lastSlotError100ns = lastSlotError100ns_.load(std::memory_order_acquire);
++    status.holdSampled = holdSampled_.load(std::memory_order_acquire);
++    status.holdWithinRounding = holdWithinRounding_.load(std::memory_order_acquire);
++    status.holdWorstDeviationRefreshes = holdWorstDeviation_.load(std::memory_order_acquire);
++    return status;
++}
++
++std::int64_t PlayerVideoRenderer::AdvancePacingDeadline(const std::int64_t nowQpc) noexcept {
++    // Published here rather than at the detection sites: this is the only place the value
++    // is acted on, it runs on the presenter thread, and presentationFrameRate_ is written
++    // under timedTextMutex_, which must not be taken to answer a diagnostics query.
++    declaredRefreshHz_.store(static_cast<double>(presentationFrameRate_), std::memory_order_release);
++    const auto frequency = QpcTicks();
++    const auto content100ns = contentPeriod100ns_.load(std::memory_order_acquire);
++    if (gridResetRequested_.exchange(false, std::memory_order_acq_rel)) {
++        // Chain recreated (or first flip): nothing is calibrated until a fresh sample pair
++        // arrives, so fall back to the un-paced path for one flip rather than aiming at a
++        // slot derived from the previous chain's counts.
++        lastSyncRefresh_ = 0;
++        lastSyncQpc_ = 0;
++        gridPeriodQpc_ = 0.0;
++        gridOriginQpc_ = 0;
++        nextSlotRefresh_ = 0;
++        slotCarry_ = 0.0;
++        aimedRefresh_ = 0;
++        aimedSlotQpc_ = 0;
++        aimedSubmitQpc_ = 0;
++        lastLandedRefresh_ = 0;
++        aimedSlots_ = 0;
++        aimedSlotRatio_ = 0.0;
++        measuredRefreshHz_.store(0.0, std::memory_order_release);
++    }
++
++    // Three ways out, each publishing why, so "not locked" is diagnosable instead of a
++    // silent fall-back to the free-running behaviour this replaced.
++    if (tearingRequested_.load(std::memory_order_acquire)) {
++        // Variable refresh (G-SYNC / FreeSync) requested: the panel paces itself to each
++        // flip, so snapping submits to a fixed grid would only add queueing latency.
++        gridLocked_.store(0, std::memory_order_release);
++        pacingBypass_.store(1, std::memory_order_release);
++        return 0;
++    }
++    if (interactiveMove_.load(std::memory_order_acquire)) {
++        // The native window-move loop owns the cadence and presents with DO_NOT_WAIT to
++        // avoid starving audio; waiting for a slot here would put the UI thread behind.
++        gridLocked_.store(0, std::memory_order_release);
++        pacingBypass_.store(3, std::memory_order_release);
++        return 0;
++    }
++    if (gridPeriodQpc_ <= 0.0 || gridOriginQpc_ == 0) {
++        gridLocked_.store(0, std::memory_order_release);
++        pacingBypass_.store(2, std::memory_order_release);
++        return 0;
++    }
++
++    // The interval a flip may not occupy less of. The bound is the window's own frame-rate
++    // ceiling, min(panel rate, content rate), and its reciprocal is simply the *longer* of
++    // the two periods -- so this line is the whole rule, with nothing to configure:
++    //   60 fps content on 144 Hz  -> content period wins -> 60 flips/s, never 144;
++    //   240 fps content on 144 Hz -> panel period wins    -> 144 flips/s, surplus dropped
++    //                                upstream by the session's existing lateness rule;
++    //   content rate unknown      -> panel period only.
++    // It applies to overlay-only flips too: re-flipping the same picture to push a subtitle
++    // change is exactly the duplicate scan-out the bound exists to prevent, so at 24 fps
++    // content an overlay update can wait up to one source frame (~41 ms). That is the stated
++    // rule's consequence, not an exception to smooth over.
++    double flipPeriodQpc = gridPeriodQpc_;
++    if (content100ns > 0)
++        flipPeriodQpc = std::max(flipPeriodQpc,
++            content100ns * static_cast<double>(frequency) / 10'000'000.0);
++
++    // Slots owned. The remainder is carried so a fractional ratio -- 2.4 slots for 60 fps
++    // content on a 144 Hz panel -- becomes an exact 2,2,3,2,3 cycle instead of rounding
++    // every frame the same way, which would drift a whole frame every few seconds.
++    std::uint64_t slots = 1;
++    if (flipPeriodQpc >= gridPeriodQpc_) {
++        slotCarry_ += flipPeriodQpc / gridPeriodQpc_;
++        slots = static_cast<std::uint64_t>(slotCarry_);
++        slotCarry_ -= static_cast<double>(slots);
++        if (slots < 1) slots = 1;
++    } else {
++        // Source faster than the panel: take the next slot every flip and let the session's
++        // lateness rule discard the surplus. Carrying a remainder here would make the
++        // presenter wait, which is the opposite of what a fast source needs.
++        slotCarry_ = 0.0;
++    }
++
++    const auto periodTicks = static_cast<std::int64_t>(gridPeriodQpc_);
++    // Lead scales with the panel but never drops below 1 ms: the flip has to be in the
++    // queue before the compositor samples it, and sampling happens at the slot itself.
++    const auto lead = std::max<std::int64_t>(periodTicks * 35 / 100, frequency / 1000);
++    auto slotIndex = nextSlotRefresh_;
++    auto slotQpc = gridOriginQpc_ +
++        static_cast<std::int64_t>(static_cast<double>(slotIndex - gridOriginRefresh_) * gridPeriodQpc_);
++    // Catch up all the way to a reachable slot, not just one step. A single step was a
++    // real defect found by measurement: after any late arrival the sequence stayed behind
++    // the clock, so every later flip aimed at a slot that had already passed and the
++    // "error against the aimed slot" wandered to several refresh periods instead of zero.
++    // The bound keeps a mis-calibrated origin from spinning here.
++    for (int catchUp = 0; catchUp < 16 && slotQpc - lead <= nowQpc; ++catchUp) {
++        ++slotIndex;
++        slotQpc += periodTicks;
++    }
++    const auto deadlineQpc = slotQpc - lead;
++    // Give-up bound. This has to scale with what was asked for, not with one panel period:
++    // 24 fps content on a 144 Hz panel legitimately owns 6 slots (and a 30 fps bound measured
++    // 4.8), so a two-period guard rejected those waits outright and the bound silently never
++    // engaged -- measured as gridLocked staying 0 for an entire run while the panel itself
++    // calibrated fine. Two of whatever cadence was asked for, floored at two refreshes, still
++    // cannot freeze playback on a bad calibration.
++    const auto bailBoundQpc = std::max<std::int64_t>(2 * periodTicks,
++        static_cast<std::int64_t>(flipPeriodQpc * 2.0));
++    if (deadlineQpc - nowQpc > bailBoundQpc) {
++        // A wild calibration must not be able to freeze playback: give up on the slot,
++        // keep the sequence moving, and say so.
++        nextSlotRefresh_ = slotIndex + slots;
++        aimedRefresh_ = 0;
++        // Cleared, not left standing: an accuracy reading from the previous aim would
++        // otherwise keep reporting the lock as precise while it is bypassed. Measured exactly
++        // this false green -- an arm whose give-up bound was mis-set read "100% within one
++        // refresh" for a whole run in which gridLocked never once went true (that run used the
++        // ceiling setter that has since been removed; the failure mode it exposed has not).
++        aimedSlotQpc_ = 0;
++        aimedSubmitQpc_ = 0;
++        lastSlotError100ns_.store(0, std::memory_order_release);
++        gridLocked_.store(0, std::memory_order_release);
++        pacingBypass_.store(0, std::memory_order_release);
++        return 0;
++    }
++    aimedRefresh_ = static_cast<std::int64_t>(slotIndex);
++    aimedSlotQpc_ = slotQpc;
++    aimedSubmitQpc_ = deadlineQpc;   // slot minus the lead, not the slot: see lastSlotError100ns
++    aimedSlots_ = static_cast<std::int64_t>(slots);
++    aimedSlotRatio_ = flipPeriodQpc / gridPeriodQpc_;
++    nextSlotRefresh_ = slotIndex + slots;
++    gridLocked_.store(1, std::memory_order_release);
++    pacingBypass_.store(0, std::memory_order_release);
++    return deadlineQpc;
++}
++
++void PlayerVideoRenderer::UpdatePresentGrid(const std::int64_t syncRefresh,
++    const std::int64_t syncQpc, const std::int64_t landedRefresh,
++    const bool sequenceDisjoint) noexcept {
++    const auto frequency = QpcTicks();
++    if (sequenceDisjoint || syncRefresh <= 0 || syncQpc <= 0) {
++        // The first sample, and every mode change, restart the sequence. Drop the
++        // calibration instead of trusting a delta taken across the break -- DXGI reports
++        // DXGI_ERROR_FRAME_STATISTICS_DISJOINT precisely because the counts no longer form
++        // one series, and an anchored grid built on that delta would misaim every slot.
++        lastSyncRefresh_ = 0;
++        lastSyncQpc_ = 0;
++        gridPeriodQpc_ = 0.0;
++        gridOriginQpc_ = 0;
++        aimedRefresh_ = 0;
++        aimedSlotQpc_ = 0;
++        aimedSubmitQpc_ = 0;
++        lastLandedRefresh_ = 0;
++        aimedSlots_ = 0;
++        aimedSlotRatio_ = 0.0;
++        measuredRefreshHz_.store(0.0, std::memory_order_release);
++        return;
++    }
++    if (lastSyncRefresh_ != 0 && syncRefresh > lastSyncRefresh_) {
++        const auto period = static_cast<double>(syncQpc - lastSyncQpc_) /
++            static_cast<double>(syncRefresh - lastSyncRefresh_);
++        // Plausibility band 10-1000 Hz. Outside it the sample is not a refresh interval,
++        // and adopting it would misaim the grid rather than merely miss it by a little.
++        if (period > frequency / 1000.0 && period < frequency / 10.0) {
++            const auto previous = gridPeriodQpc_;
++            // Re-anchor whenever the estimate moves by more than half a percent: a fixed
++            // origin plus a revised period accumulates phase error otherwise, and the whole
++            // point of the origin is that slots measured from it stay put.
++            if (previous <= 0.0 || std::fabs(period - previous) / previous > 0.005) {
++                gridOriginQpc_ = lastSyncQpc_;
++                gridOriginRefresh_ = static_cast<std::uint64_t>(lastSyncRefresh_);
++                nextSlotRefresh_ = static_cast<std::uint64_t>(syncRefresh) + 1;
++                slotCarry_ = 0.0;
++            }
++            gridPeriodQpc_ = period;
++            measuredRefreshHz_.store(static_cast<double>(frequency) / period,
++                std::memory_order_release);
++        }
++    }
++    lastSyncRefresh_ = syncRefresh;
++    lastSyncQpc_ = syncQpc;
++    // Scored in the grid's own space, against the instant this thread really handed the flip
++    // to Present. Two things it deliberately does NOT use:
++    //   * PresentRefreshCount -- that counter only advances on the vblanks where the chain's
++    //     image reached the monitor, so at 60 fps on 144 Hz it steps about 2.4 per flip while
++    //     the aim steps a full grid pitch. Comparing the two series was measured reporting a
++    //     "many refresh periods off" error that never existed on screen.
++    //   * SyncQPCTime -- it is the scheduler's sample instant, not ours, so it reports queue
++    //     depth as if it were aim error.
++    // What remains is exactly the lock's own job: did the submit happen when the grid asked.
++    // Whether the panel then held the frame an exact number of refreshes is scored separately
++    // by the standalone grid fixture.
++    if (aimedRefresh_ != 0 && aimedSubmitQpc_ != 0 && lastSubmitQpc_ != 0) {
++        const double errorQpc = static_cast<double>(lastSubmitQpc_ - aimedSubmitQpc_);
++        lastSlotError100ns_.store(static_cast<std::int64_t>(
++            errorQpc * 10'000'000.0 / frequency), std::memory_order_release);
++    }
++    // The other half of the job: how long the panel actually held the previous flip.
++    // Presented only when the sequence is continuous (landedRefresh advancing by a plausible
++    // amount); a chain reconfiguration restarts these counts, and a delta across that break is
++    // not a hold.
++    if (aimedSlotRatio_ >= 1.0 && landedRefresh > 0 && lastLandedRefresh_ > 0 &&
++        landedRefresh > lastLandedRefresh_) {
++        const auto held = landedRefresh - lastLandedRefresh_;
++        if (held <= 16) {
++            // Accept either rounding of the fractional slot count: 60 fps on 144 Hz is
++            // legitimately held 2 or 3 refreshes, and a steady alternation between those
++            // two is what "locked" looks like. A hold of 1, or of 4 and up, is what a viewer
++            // calls a hitch, and that is the quantity this counter is actually able to prove.
++            const auto low = static_cast<std::int64_t>(std::floor(aimedSlotRatio_));
++            const auto high = static_cast<std::int64_t>(std::ceil(aimedSlotRatio_));
++            const bool within = (held == low || held == high);
++            ++holdSampled_;
++            if (within) ++holdWithinRounding_;
++            const auto deviation = static_cast<std::uint64_t>(within ? 0 :
++                (held > high ? held - high : (held < low ? low - held : high - held)));
++            if (deviation > holdWorstDeviation_.load(std::memory_order_relaxed))
++                holdWorstDeviation_.store(deviation, std::memory_order_release);
++        }
++    }
++    lastLandedRefresh_ = landedRefresh;
++}
++
+ FFFResult PlayerVideoRenderer::GetRenderTargetInfo(RenderTargetInfo& info) noexcept {
+     std::lock_guard lock(deviceMutex_);
+     info = {};
+@@ -6684,6 +7041,16 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
+         return FFFResult::DeviceFailure;
+     }
+     ++swapChainPresents_;
++    // Feed the cadence lock. PresentRefreshCount says on which vblank this image actually
++    // reached the monitor, and the (SyncRefreshCount, SyncQPCTime) pair is the grid itself;
++    // together they are the only reading that distinguishes "held 2 refreshes" from
++    // "held 3", which is the thing the lock is supposed to make predictable.
++    DXGI_FRAME_STATISTICS frameStatistics{};
++    const auto statisticsResult = chain->GetFrameStatistics(&frameStatistics);
++    UpdatePresentGrid(static_cast<std::int64_t>(frameStatistics.SyncRefreshCount),
++        frameStatistics.SyncQPCTime.QuadPart,
++        static_cast<std::int64_t>(frameStatistics.PresentRefreshCount),
++        statisticsResult == DXGI_ERROR_FRAME_STATISTICS_DISJOINT || FAILED(statisticsResult));
+     presentedVideoGeneration_.store(renderedVideoGeneration);
+     const auto previous = countedVideoGeneration_.exchange(renderedVideoGeneration);
+     if (renderedVideoGeneration != 0 && renderedVideoGeneration != previous)
+diff --git a/FFF.Native/3FP/Render/VideoRenderer.h b/FFF.Native/3FP/Render/VideoRenderer.h
+index cdda076..8e6e9db 100644
+--- a/FFF.Native/3FP/Render/VideoRenderer.h
++++ b/FFF.Native/3FP/Render/VideoRenderer.h
+@@ -220,6 +220,37 @@ public:
+     FFFResult SetFitLimitToNative(bool enable) noexcept;
+     // Presentation policy toggle (PlayerApi exports FFF3FP_SetPresentConfig).
+     FFFResult SetPresentConfig(bool enableTearing) noexcept;
++    // Presentation cadence lock (PlayerApi exports FFF3FP_GetPresentPacingStatus). The
++    // presenter snaps each flip to the display's own refresh grid, recovered from the swap
++    // chain's frame statistics, so a 60 fps source on a 144 Hz panel is held 2,2,3,2,3
++    // refreshes in a predictable cycle instead of whichever integer the arrival phase
++    // happened to hand out. The window's flip rate is bounded by min(panel rate, content
++    // rate) -- always, with nothing to configure; see FrameRateBoundHz.
++    // The source frame period, in 100 ns, handed over by the session for each frame it
++    // releases. Zero means "unknown", which leaves the panel rate as the only bound.
++    void SetContentFramePeriod100ns(std::int64_t period100ns) noexcept;
++    // The bound currently in force, in Hz, derived on demand from the same two inputs the
++    // presenter uses so the reading cannot drift out of step with the rule.
++    double FrameRateBoundHz() const noexcept;
++    // The display side of that min(): the panel rate the presenter paces to (measured when
++    // calibrated, otherwise declared). The session needs this on its own, not folded into
++    // the bound, because "content is faster than the panel" is a *reason* for discarding a
++    // frame and it has to be told apart from "the pipeline fell behind the media clock".
++    double DisplayCadenceHz() const noexcept;
++    struct PresentPacingStatus {
++        float declaredRefreshHz = 0.0f;
++        float measuredRefreshHz = 0.0f;
++        float frameRateBoundHz = 0.0f;
++        std::uint32_t gridLocked = 0;
++        std::uint32_t pacingBypass = 0;
++        std::int64_t lastSlotError100ns = 0;
++        // Displayed outcome, counted off PresentRefreshCount: how many flips were held for
++        // either rounding (floor or ceiling) of the refresh count the cadence asked for.
++        std::uint64_t holdSampled = 0;
++        std::uint64_t holdWithinRounding = 0;
++        std::uint64_t holdWorstDeviationRefreshes = 0;
++    };
++    PresentPacingStatus QueryPresentPacing() const noexcept;
+     // Render-target diagnostics for the managed API surface
+     // (PlayerApi exports FFF3FP_GetRenderTargetInfo). Reports the current
+     // swap-chain / client / video-destination sizes so the App can position
+@@ -519,6 +550,15 @@ private:
+     }
+     FFFResult PresentCurrentFrame(IDXGISwapChain4* swapChain,
+         std::uint64_t renderedVideoGeneration) noexcept;
++    // Cadence lock, called on the presenter thread only. Returns the QPC instant by which
++    // the next flip must be submitted to land on its refresh slot, or 0 meaning
++    // "flip now".
++    std::int64_t AdvancePacingDeadline(std::int64_t nowQpc) noexcept;
++    // Feeds one swap-chain frame-statistics sample into the grid estimate and scores the
++    // last flip against the slot it was aimed at. Plain integers rather than the DXGI
++    // struct so this header stays free of the dxgi includes.
++    void UpdatePresentGrid(std::int64_t syncRefresh, std::int64_t syncQpc,
++        std::int64_t landedRefresh, bool sequenceDisjoint) noexcept;
+     FFFResult DrawTimedText(TimedTextLayerSlot slot) noexcept;
+     void TimedTextThread() noexcept;
+     void StopTimedTextThread() noexcept;
+@@ -693,6 +733,56 @@ private:
+     // every chain creation, so a merged variable would lose the request on re-creation.
+     // Atomic: written on the session worker thread, read on the presenter thread.
+     std::atomic<bool> tearingRequested_{ false };
++    // ---- Presentation cadence lock (see FrameRateBoundHz) ----
++    // Written on the session/API thread, read on the presenter thread.
++    std::atomic<std::int64_t> contentPeriod100ns_{ 0 };
++    // Set by every chain creation, consumed by the presenter thread: the grid counts
++    // restart with the chain, so a delta across the swap would misaim every slot.
++    std::atomic<bool> gridResetRequested_{ true };
++    // Grid state. Touched only on the presenter thread -- TimedTextThread is the sole
++    // caller of PresentTimedText, and PresentCurrentFrame runs inside it -- so these need
++    // no lock against each other. The four below are mirrored into atomics after each
++    // flip so the API thread can read them without taking presentMutex_, which the
++    // presenter holds across a blocking Present.
++    std::int64_t gridOriginQpc_ = 0;         // QPC sample paired with gridOriginRefresh_
++    std::uint64_t gridOriginRefresh_ = 0;    // SyncRefreshCount at that sample
++    double gridPeriodQpc_ = 0.0;             // QPC ticks per refresh; 0 = not calibrated
++    std::uint64_t nextSlotRefresh_ = 0;      // grid slot the next flip should land on
++    std::int64_t aimedRefresh_ = 0;          // slot the flip in flight was aimed at
++    std::int64_t aimedSlotQpc_ = 0;          // that slot's own grid instant, in QPC ticks
++    std::int64_t aimedSubmitQpc_ = 0;        // slot minus the lead: when the submit should happen
++    // The instant this thread actually handed the flip to Present, recorded immediately
++    // before the call. Scored against aimedSlotQpc_ because that is the only quantity the
++    // lock controls; DXGI's SyncQPCTime is when the scheduler sampled, not when we submitted.
++    std::int64_t lastSubmitQpc_ = 0;
++    // Displayed-outcome accounting. Submitting on the aimed slot is only the lock's half of
++    // the job; whether the panel then held the frame for the number of refreshes asked for is
++    // the half the eye actually sees, and it is read from PresentRefreshCount -- the vblank on
++    // which the chain's last image reached the monitor. Two consecutive reads of it differ by
++    // the refreshes the earlier flip was on screen for.
++    std::int64_t lastLandedRefresh_ = 0;
++    std::int64_t aimedSlots_ = 0;              // slots the flip in flight was meant to own
++    // The fractional number of refreshes the flip in flight was *supposed* to occupy
++    // (content period / panel period, e.g. 2.4 for 60 fps on 144 Hz). Its floor and ceiling
++    // bound every hold the eye can accept as steady, and that band is what the hold counter
++    // is scored against -- deliberately not "equal to the aim": deciding which flip a given
++    // PresentRefreshCount delta belongs to needs an alignment between two counter series,
++    // and two different alignments were tried and both stayed near 30-47% while the panel
++    // average was exactly 2.4. A rounding band is the same judgement without depending on
++    // that alignment being right.
++    double aimedSlotRatio_ = 0.0;
++    std::atomic<std::uint64_t> holdSampled_{ 0 };
++    std::atomic<std::uint64_t> holdWithinRounding_{ 0 };
++    std::atomic<std::uint64_t> holdWorstDeviation_{ 0 };
++    std::int64_t lastSyncRefresh_ = 0;       // previous frame-statistics sample pair
++    std::int64_t lastSyncQpc_ = 0;
++    double slotCarry_ = 0.0;                 // Bresenham remainder, in refresh units
++    std::int64_t lastTargetQpc_ = 0;
++    std::atomic<double> measuredRefreshHz_{ 0.0 };
++    std::atomic<double> declaredRefreshHz_{ 0.0 };
++    std::atomic<std::uint32_t> gridLocked_{ 0 };
++    std::atomic<std::uint32_t> pacingBypass_{ 2 };   // starts "not calibrated yet"
++    std::atomic<std::int64_t> lastSlotError100ns_{ 0 };
+     std::atomic<std::uint32_t> swapOutputBits_;
+     // Last drawn video destination rect (diagnostics),
+     // recorded by DrawCachedVideo after each successful shader draw.
+diff --git a/FFF.Native/FFF.Native.rc b/FFF.Native/FFF.Native.rc
+index c90fb4a..b5c570e 100644
+--- a/FFF.Native/FFF.Native.rc
++++ b/FFF.Native/FFF.Native.rc
+@@ -3,12 +3,15 @@
+ // 更新内核 API 时须同步递增此处主版本号。
+ #include <winver.h>
+ 
+-// 18 = PlayerApiVersion（FFF.Player.Api.h）。17 已被 #16 占用（FFF3FPSnapshot 尾部新增
+-// ST 2094 诊断字段）；本支为 18 = FFF3FPConfiguration 新增 adaptiveDownscaleBeforeUpload /
++// 以下是版本号历史：v18 那次 bump 的内容（17 已被 #16 占用 —— FFF3FPSnapshot 尾部新增
++// ST 2094 诊断字段）；18 = FFF3FPConfiguration 新增 adaptiveDownscaleBeforeUpload /
+ // adaptiveDownscaleDropPercent / adaptiveDecoderThreads / min・maxSoftwareDecoderThreads /
+ // decoderGrow・ShrinkDropPercent，且 FFF3FPSnapshot 尾部新增 iamfActive / iamfChannels /
+-// iamfSoundSystem / videoUpload100ns / iamfContentChannels。
+-// 三处必须同值：PlayerApi.cpp 的常量、本文件、FFF.Player.vbproj 的 <PlayerApiVersion>。
++// iamfSoundSystem / videoUpload100ns / iamfContentChannels。v19/v20 的清单在 PlayerApi.cpp
++// 与提交记录里，不在这里重复。当前生效值就是下一行的 VER_API。
++// 同值约束（由 FFF.Player.vbproj 的 VerifyPlayerApiVersion 逐条比对，任一处不同即构建失败）：
++// PlayerApi.cpp 的 PlayerApiVersion、播放器会话.vb 的 期望API版本、FFF.Player.vbproj 的
++// <PlayerApiVersion>、本文件的 VER_API 与下面 FileVersion / ApiVersion / "(api NN)" 三段字符串。
+ #define VER_API 20
+ 
+ VS_VERSION_INFO VERSIONINFO
+diff --git a/FFF.Native/FFF.Native.vcxproj b/FFF.Native/FFF.Native.vcxproj
+index 533ef28..d33886a 100644
+--- a/FFF.Native/FFF.Native.vcxproj
++++ b/FFF.Native/FFF.Native.vcxproj
+@@ -117,7 +117,7 @@
+     </ClCompile>
+     <Link>
+       <AdditionalLibraryDirectories>$(LibiamfRoot)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+-      <AdditionalDependencies>iamf.lib;oar.lib;obr_capi.lib;obr.lib;pffft.lib;FLAC.lib;opus.lib;fdk-aac.lib;absl\absl_base.lib;absl\absl_city.lib;absl\absl_civil_time.lib;absl\absl_cord_internal.lib;absl\absl_cord.lib;absl\absl_cordz_functions.lib;absl\absl_cordz_handle.lib;absl\absl_cordz_info.lib;absl\absl_crc_cord_state.lib;absl\absl_crc_cpu_detect.lib;absl\absl_crc_internal.lib;absl\absl_crc32c.lib;absl\absl_debugging_internal.lib;absl\absl_decode_rust_punycode.lib;absl\absl_demangle_internal.lib;absl\absl_demangle_rust.lib;absl\absl_die_if_null.lib;absl\absl_examine_stack.lib;absl\absl_exponential_biased.lib;absl\absl_graphcycles_internal.lib;absl\absl_hash.lib;absl\absl_hashtablez_sampler.lib;absl\absl_int128.lib;absl\absl_kernel_timeout_internal.lib;absl\absl_leak_check.lib;absl\absl_log_globals.lib;absl\absl_log_internal_check_op.lib;absl\absl_log_internal_conditions.lib;absl\absl_log_internal_fnmatch.lib;absl\absl_log_internal_format.lib;absl\absl_log_internal_globals.lib;absl\absl_log_internal_log_sink_set.lib;absl\absl_log_internal_message.lib;absl\absl_log_internal_nullguard.lib;absl\absl_log_internal_proto.lib;absl\absl_log_internal_structured_proto.lib;absl\absl_log_severity.lib;absl\absl_log_sink.lib;absl\absl_low_level_hash.lib;absl\absl_malloc_internal.lib;absl\absl_raw_hash_set.lib;absl\absl_raw_logging_internal.lib;absl\absl_spinlock_wait.lib;absl\absl_stacktrace.lib;absl\absl_status.lib;absl\absl_statusor.lib;absl\absl_str_format_internal.lib;absl\absl_strerror.lib;absl\absl_string_view.lib;absl\absl_strings_internal.lib;absl\absl_strings.lib;absl\absl_symbolize.lib;absl\absl_synchronization.lib;absl\absl_throw_delegate.lib;absl\absl_time_zone.lib;absl\absl_time.lib;absl\absl_tracing_internal.lib;absl\absl_utf8_for_code_point.lib;absl\absl_vlog_config_internal.lib;%(AdditionalDependencies)</AdditionalDependencies>
++      <AdditionalDependencies>iamf.lib;oar.lib;obr_capi.lib;obr.lib;pffft.lib;FLAC.lib;opus.lib;absl\absl_base.lib;absl\absl_city.lib;absl\absl_civil_time.lib;absl\absl_cord_internal.lib;absl\absl_cord.lib;absl\absl_cordz_functions.lib;absl\absl_cordz_handle.lib;absl\absl_cordz_info.lib;absl\absl_crc_cord_state.lib;absl\absl_crc_cpu_detect.lib;absl\absl_crc_internal.lib;absl\absl_crc32c.lib;absl\absl_debugging_internal.lib;absl\absl_decode_rust_punycode.lib;absl\absl_demangle_internal.lib;absl\absl_demangle_rust.lib;absl\absl_die_if_null.lib;absl\absl_examine_stack.lib;absl\absl_exponential_biased.lib;absl\absl_graphcycles_internal.lib;absl\absl_hash.lib;absl\absl_hashtablez_sampler.lib;absl\absl_int128.lib;absl\absl_kernel_timeout_internal.lib;absl\absl_leak_check.lib;absl\absl_log_globals.lib;absl\absl_log_internal_check_op.lib;absl\absl_log_internal_conditions.lib;absl\absl_log_internal_fnmatch.lib;absl\absl_log_internal_format.lib;absl\absl_log_internal_globals.lib;absl\absl_log_internal_log_sink_set.lib;absl\absl_log_internal_message.lib;absl\absl_log_internal_nullguard.lib;absl\absl_log_internal_proto.lib;absl\absl_log_internal_structured_proto.lib;absl\absl_log_severity.lib;absl\absl_log_sink.lib;absl\absl_low_level_hash.lib;absl\absl_malloc_internal.lib;absl\absl_raw_hash_set.lib;absl\absl_raw_logging_internal.lib;absl\absl_spinlock_wait.lib;absl\absl_stacktrace.lib;absl\absl_status.lib;absl\absl_statusor.lib;absl\absl_str_format_internal.lib;absl\absl_strerror.lib;absl\absl_string_view.lib;absl\absl_strings_internal.lib;absl\absl_strings.lib;absl\absl_symbolize.lib;absl\absl_synchronization.lib;absl\absl_throw_delegate.lib;absl\absl_time_zone.lib;absl\absl_time.lib;absl\absl_tracing_internal.lib;absl\absl_utf8_for_code_point.lib;absl\absl_vlog_config_internal.lib;%(AdditionalDependencies)</AdditionalDependencies>
+     </Link>
+   </ItemDefinitionGroup>
+   <ItemGroup>
+diff --git a/FFF.Player.Tests/ImageZoomLiveRegression.vb b/FFF.Player.Tests/ImageZoomLiveRegression.vb
+index 0820722..6c3e83c 100644
+--- a/FFF.Player.Tests/ImageZoomLiveRegression.vb
++++ b/FFF.Player.Tests/ImageZoomLiveRegression.vb
+@@ -46,6 +46,10 @@ Friend Module ImageZoomLiveRegression
+     Private 假内核缩放 As Single = 1.0F
+     Private Const 假内核下钳 As Single = 0.05F
+     Private Const 假内核上钳 As Single = 64.0F
++    ' 绝对提交（SetViewTransform）在图片模式是**另一套**界：见 VideoRenderer.cpp:2327-2328。
++    ' 与上面那对（滚轮 ZoomViewAt，:2377）刻意不同值，假内核才能重现真内核的分叉。
++    Private Const 假内核绝对下钳 As Single = 1.0F
++    Private Const 假内核绝对上钳 As Single = 32.0F
+ 
+     Private 锚定下发 As Integer
+     Private 全局窗体 As Form
+@@ -66,6 +70,18 @@ Friend Module ImageZoomLiveRegression
+         Console.WriteLine($"       {文本}")
+     End Sub
+ 
++    ''' <summary>绝对提交（SetViewTransform）的落点记录：用来钉住一条不变量 ——
++    ''' 图片模式下宿主**只**用它回适应 (1,0,0)。内核这条路径在图片模式是
++    ''' [1.0, 32]（VideoRenderer.cpp:2327-2328），与滚轮那条 ZoomViewAt 的
++    ''' [0.05, 64]（:2377）**不是一套数**；只要有人开始用它做绝对缩放，
++    ''' 这个记录就会先红，而不是等到用户看见"设 48 却停在 32"。</summary>
++    Private Class 绝对提交
++        Public 缩放 As Single
++        Public 水平 As Single
++        Public 垂直 As Single
++    End Class
++    Private ReadOnly 绝对提交记录 As New List(Of 绝对提交)
++
+     Private Sub 下发(缩放 As Single, 水平 As Single, 垂直 As Single)
+         下发次数 += 1
+         绝对下发 += 1
+@@ -73,10 +89,15 @@ Friend Module ImageZoomLiveRegression
+         轨迹.Add(缩放)
+         水平记录.Add(水平)
+         垂直记录.Add(垂直)
+-        ' 假内核必须跟绝对下发同步：真内核的 SetViewTransform 会把绝对值夹进 [0.05,64]
+-        ' 并存下（VideoRenderer.cpp:2120）。不跟的话，宿主每次收尾的绝对写都会让下一拍的
+-        ' 乘法回读"变小"，被产品判成"内核把我们夹低"⇒ 目标被拉回现值（S11 停在 25.2 就是它）。
+-        假内核缩放 = Math.Min(假内核上钳, Math.Max(假内核下钳, 缩放))
++        Dim 记为 As New 绝对提交 With {.缩放 = 缩放, .水平 = 水平, .垂直 = 垂直}
++        绝对提交记录.Add(记为)
++        ' 假内核必须跟绝对下发同步：真内核的 SetViewTransform 会把绝对值**存下来**。
++        ' 不跟的话，宿主每次收尾的绝对写都会让下一拍的乘法回读"变小"，被产品判成
++        ' "内核把我们夹低"⇒ 目标被拉回现值（S11 停在 25.2 就是它）。
++        ' ⚠ 钳位用的是**图片模式绝对路径那一套** [1.0, 32]（:2227-2328），不是
++        ' 滚轮 ZoomViewAt 的 [0.05, 64]。旧注释把两者混为一谈、还引用了 DirectWrite
++        ' 的 :2120 行；分开建模才能真的暴露"有人拿绝对路径做缩放"这件事。
++        假内核缩放 = Math.Min(假内核绝对上钳, Math.Max(假内核绝对下钳, 缩放))
+     End Sub
+ 
+     Private Sub 提示(文本 As String)
+@@ -216,6 +237,30 @@ Friend Module ImageZoomLiveRegression
+             RunS11_small_image()
+             RunS12_doubleclick_small_image()
+ 
++            ' ── S13 绝对提交不变量：把"两套钳位分叉"从隐患变成有人看着的判据 ──────
++            ' 内核图片模式下两条入口的界**不是同一套**：绝对路径 [1.0, 32]
++            ' （VideoRenderer.cpp:2327-2328），滚轮路径 [0.05, 64]（:2377）。
++            ' 目前宿主只用绝对路径回适应（播放器图片浏览控制器.vb:157 唯一调用点，
++            ' 值恒为 (1,0,0)），所以分叉**不可达**——"不可达"这个结论必须由判据守着，
++            ' 而不是靠注释。变异证明：把 :157 的 1.0F 改成 48.0F ⇒ 本组立刻红。
++            Dim 绝对次数 = 0
++            Dim 越界次数 = 0
++            Dim 非回适应次数 = 0
++            For Each a In 绝对提交记录
++                绝对次数 += 1
++                If a.缩放 < 假内核绝对下钳 OrElse a.缩放 > 假内核绝对上钳 Then 越界次数 += 1
++                If a.缩放 <> 1.0F OrElse a.水平 <> 0.0F OrElse a.垂直 <> 0.0F Then 非回适应次数 += 1
++            Next
++            检查(绝对次数 > 0, "S13 绝对提交路径确实被走过（为 0 则本组判据是空的）", $"{绝对次数} 次")
++            检查(越界次数 = 0, "S13 绝对提交全部落在图片模式绝对界 [1.0,32] 内",
++                 $"越界 {越界次数} / 共 {绝对次数}")
++            检查(非回适应次数 = 0, "S13 绝对提交只有回适应 (1,0,0) —— 不再唯一即两套界分叉可达",
++                 $"非回适应 {非回适应次数} / 共 {绝对次数}")
++            ' 读数必须跟着判据走：这里一度硬印"全部为回适应"，变异跑里明明 14 次越界
++            ' 却照样这么写 —— 判据红了而日志说没事，那是另一种假绿。
++            记($"S13 绝对提交 {绝对次数} 次：越界 {越界次数}、非回适应 {非回适应次数}" &
++                $"（两套界 [1.0,32] vs [0.05,64] 的分叉当前{(If(非回适应次数 = 0, "不可达", "已可达"))}）")
++
+             Console.WriteLine($"通过 {通过} 条，失败 {失败} 条")
+             If 失败 > 0 Then Return 1
+             Return 0
+@@ -244,7 +289,21 @@ Friend Module ImageZoomLiveRegression
+         Dim 静止时次数 = 下发次数
+         泵(0.4)
+         Dim 期望 = Math.Min(1.25F, 上限)
+-        检查(下发次数 >= 6 AndAlso 下发次数 <= 30, "S1 单格滚轮的下发次数落在 6~30",
++        ' ── 下发次数窗口：按临界阻尼解析式独立手算，不抄实测值 ──────────────────
++        ' 控制器用的是 ω = 8/τ，τ = 300ms ⇒ ω = 26.667 s⁻¹。一格滚轮：
++        '   目标 = ln(1.25) = 0.223144，d₀ = −0.223144，v₀ = 0
++        '   |x−目标| = |d₀|(1+u)e^{−u}，|v| = ω|d₀|·u·e^{−u}，u ≡ ωt
++        ' 停表双阈值（几何层 已静止，按目标幅度缩放并各留下限）：
++        '   位移 ε = max(0.0002, 0.223144×0.004) = 0.000893 ⇒ (1+u)e^{−u}=0.004 ⇒ u≈7.6
++        '   速度 ε = max(0.0005, 0.223144×0.02)  = 0.004463 ⇒ u·e^{−u}=7.5e−4     ⇒ u≈9.45
++        ' 取更慢的那个 ⇒ t = 9.45/26.667 = 0.354 s。计时器请求 1ms、实跑约 7.7~8.2ms
++        ' ⇒ 期望落点 43~46 次；把 tick 容许范围放宽到 6.4~11.8ms ⇒ **30~55**。
++        ' 交叉核对：同一次运行里"末次下发 80~500ms"那条独立地卡住 354ms，两者一致。
++        ' ⚠ 双向变异实测过（改的就是上面那个 τ）：τ 300→3000 ⇒ 实跑 **124 次**、17 条红；
++        ' τ 300→30 ⇒ 实跑 **4 次**、2 条红。两个方向都跳出窗口，说明这条判据确实咬住
++        ' 阻尼常数，不是照实测结果放宽出来的带。（解析式在 τ×10 时给的 430 是高估：
++        ' 其它判据先崩、动画被提前停掉，真值 124。以实测为准。）
++        检查(下发次数 >= 30 AndAlso 下发次数 <= 55, "S1 单格滚轮的下发次数落在 30~55（解析 43~46）",
+              $"{下发次数} 次（锚定 {锚定下发} + 绝对 {绝对下发}）")
+         检查(Math.Abs(末值() - 期望) < 0.002, "S1 终值就是目标（钳位后）", $"末={末值():F4} 期望={期望:F4}")
+         检查(峰值() <= 期望 + 0.0005F, "S1 临界阻尼不过冲", $"峰={峰值():F4}")
+@@ -418,13 +477,20 @@ Friend Module ImageZoomLiveRegression
+             检查(False, "S10 真鼠标拖动没走到视图层（分流或门控没通）", "零下发")
+             Return
+         End If
+-        Dim pan = 水平记录(水平记录.Count - 1)
++        ' 宿主每拍提交的是**像素增量**（画面控件_图片平移拖动 累加 e.水平位移，
++        ' 提交 值-已提交），内核 PanView 做 pan += delta/travel、呈现做 offset = pan·travel
++        ' ⇒ 净位移恒等于 Σdelta。所以这里必须：①累加而不是取最后一拍，②**不再乘**
++        ' 内核余量 —— 旧写法把像素又乘了一次像素，量纲就是错的，读数才会恒等于 0。
++        Dim 累加平移 As Single = 0.0F
++        For Each v In 水平记录
++            累加平移 += v
++        Next
+         Dim 适配盒宽 = 12000.0F * 图片缩放几何.适应比(视口宽(), 视口高(), 12000UI, 9000UI)
+         Dim 内核余量 = 适配盒宽 * Math.Abs(z - 1.0F) / 2.0F
+-        Dim 实际位移 = pan * 内核余量
++        Dim 实际位移 = 累加平移
+         Dim 比值 = 实际位移 / dx
+-        检查(True, "S10 真鼠标拖动确实走到视图层", $"{下发次数} 次下发, pan={pan:F6}")
+-        记($"z={z:F4} 适配盒宽={适配盒宽:F1} 控件宽={视口宽()} 内核余量={内核余量:F1} 位移={实际位移:F1} 期望={dx} 比值={比值:F4}")
++        检查(True, "S10 真鼠标拖动确实走到视图层", $"{下发次数} 次下发, Σ平移={累加平移:F3}px 末拍={水平记录(水平记录.Count - 1):F6}")
++        记($"z={z:F4} 适配盒宽={适配盒宽:F1} 控件宽={视口宽()} 内核余量={内核余量:F1} Σ下发={实际位移:F1}px 期望={dx} 比值={比值:F4}")
+         检查(Math.Abs(比值 - 1.0F) < 0.02F, "S10 拖 120px 画面就走 120px（跟手）", $"比值={比值:F4}")
+     End Sub
+ 
+@@ -482,14 +548,19 @@ Friend Module ImageZoomLiveRegression
+             检查(False, "S11 小图顶格后真鼠标拖动没走到视图层", "零下发")
+             Return
+         End If
+-        Dim pan = 水平记录(水平记录.Count - 1)
++        ' 顶格后 z 很大 ⇒ 200px 的图显示成 200·z px，远超视口 ⇒ 确有平移余量，
++        ' 宿主会提交。判据同 S10：累加每拍的**像素**增量，不再乘内核余量（乘了就变 px²）。
++        Dim 累加平移11 As Single = 0.0F
++        For Each v In 水平记录
++            累加平移11 += v
++        Next
+         Dim 内核fitted宽 = 200.0F
+         Dim 内核余量 = 内核fitted宽 * Math.Abs(顶格z - 1.0F) / 2.0F
+-        Dim 比值 = pan * 内核余量 / dx
+-        检查(True, "S11 小图顶格后真鼠标拖动走到视图层", $"{下发次数} 次下发, pan={pan:F6}")
+-        记($"z={顶格z:F4} 内核 fitted宽={内核fitted宽:F0} 控件宽={视口宽()} 拖 {dx}px ⇒ 画面走 {pan * 内核余量:F1}px 比值={比值:F4}")
+-        检查(Math.Abs(比值 - 1.0F) < 0.02F, "S11 小图拖 120px 画面就走 120px（分母是原生 200）",
+-             $"比值={比值:F4}（拿未封顶的 681 当分母就是 200/681=0.2937）")
++        Dim 比值 = 累加平移11 / dx
++        检查(True, "S11 小图顶格后真鼠标拖动走到视图层", $"{下发次数} 次下发, Σ平移={累加平移11:F3}px 末拍={水平记录(水平记录.Count - 1):F6}")
++        记($"z={顶格z:F4} 内核 fitted宽={内核fitted宽:F0} 控件宽={视口宽()} 内核余量={内核余量:F1} Σ下发={累加平移11:F1}px 期望={dx} 比值={比值:F4}")
++        检查(Math.Abs(比值 - 1.0F) < 0.02F, "S11 小图顶格后拖 120px 画面就走 120px（提交量即像素，与 fitted 无关）",
++             $"比值={比值:F4}（旧写法取末拍再乘余量，读数恒为 0）")
+     End Sub
+ 
+     ' ── S12：小图双击 —— 适应就是 1:1，得"说清楚"而不是闷着不动（D4）────────
+diff --git a/FFF.Player.Tests/ImageZoomRegression.vb b/FFF.Player.Tests/ImageZoomRegression.vb
+index 1ca7f97..20dcf10 100644
+--- a/FFF.Player.Tests/ImageZoomRegression.vb
++++ b/FFF.Player.Tests/ImageZoomRegression.vb
+@@ -6,7 +6,7 @@
+ '
+ ' 期望值一律手算并把算式写在注释里（改前有两处拿 图片缩放几何 自己的常数当期望值，
+ ' 那是同义反复，永远红不了）。内核的两条钳位 [0.05, 64] 是**被测模块之外**的权威数
+-' （VideoRenderer.cpp:2120/:2153），所以这里写成字面量并注明出处，不引用模块常数。
++' （钳位在 VideoRenderer.cpp:2327-2328 与 :2377，两个入口两套界；旧注释引用的 2120/2153 实为 DirectWrite 与构造函数，已订正），所以这里写成字面量并注明出处，不引用模块常数。
+ '
+ ' 小图档（源边长 < 视口边长）是本轮加的牙：内核把适配盒恒封顶在源原生尺寸
+ ' （PlayerSession.cpp:3708/1642 → VideoRenderer.cpp:967-970 ⇒ f = Min(1, 适应比)），
+@@ -124,13 +124,19 @@ Friend Module ImageZoomRegression
+ 
+         ' ── 3. 上界：每像素 64 屏幕像素 与内核 64 取更紧者 ───────────────────
+         ' 手算：64/0.0756667 = 845.8 ⇒ 被内核上钳 64 夹住 ⇒ 64.0（这个 64 出自
+-        ' VideoRenderer.cpp:2153，不是引用被测模块的常数）。
++        ' VideoRenderer.cpp:2377，不是引用被测模块的常数；图片模式绝对路径 :2327-2328 是 [1.0,32]）。
+         检查(相近(图片缩放几何.最大缩放(大图f), 64.0F, 0.0001),
+              "大图上界被内核 64 夹住（够不到 64px/px）",
+              $"{图片缩放几何.最大缩放(大图f):F2}（64/f=845.8 被夹）")
+         ' 手算：64/1.0 = 64 ⇒ 不被夹，就是 64px/px。
+         检查(相近(图片缩放几何.最大缩放(1.0F), 64.0F, 0.0001), "1:1 基准时上界=64px/px", "64.00")
+-        检查(相近(图片缩放几何.最小缩放(), 1.0F, 0.0001), "下界恒为 1.0（整图入窗）", "1.00")
++        ' ⚠ 这不是判据，是契约记录，别把它读成"下界被测过"：最小缩放() 的实现是
++        ' 一句 Return 1.0F（图片缩放几何.vb:72-74），而全仓只有两个测试引用它
++        ' （本行与 ImageZoomLiveRegression.vb:296），**出货路径的钳位不经过这个函数**。
++        ' 所以这条断言除了改常量永远不会红，也不能证明真机上画面不会缩到 1.0 以下。
++        ' 真正管住下界的是 钳制缩放/内核 0.05 下钳那条线，它不在本档覆盖内——已入账。
++        检查(相近(图片缩放几何.最小缩放(), 1.0F, 0.0001),
++             "下界契约值 = 1.0（记录，非判据：该函数无出货调用点）", "1.00")
+ 
+         ' ── 4. 1:1 够不够得着：源边长 > 64×视口边长 就够不着 ─────────────────
+         ' 手算：256/16384 = 0.015625 = 1/64 ⇒ 1/f = 64 ⇒ 刚好够（边界含等号）。
+@@ -174,12 +180,19 @@ Friend Module ImageZoomRegression
+         ' ── 6b. 坏回读：内核 disc 分支返回 Success 却不写 out-param（D3）───────
+         ' 宿主把内核回读当"当前值/上界"接着用（控制器 :303），回读是 0/-1/NaN 时以前没人管，
+         ' 于是能在 UI 线程上抛 ArgumentOutOfRangeException。这一档只钉 钳制缩放 的底线：
+-        ' 输出恒落在内核那两条界内 —— 界取字面量 0.05 / 64.0（VideoRenderer.cpp:2120/:2153）。
++        ' 输出恒落在内核那两条界内 —— 界取字面量 0.05 / 64.0（VideoRenderer.cpp:2377，ZoomViewAt；绝对路径另有一套 :2327-2328）。
+         Dim 坏值() As Single = {0.0F, -1.0F, Single.NaN, Single.PositiveInfinity, Single.MaxValue, 0.5F}
+         Dim 坏名() As String = {"0（disc 分支没写出参）", "-1", "NaN", "+Inf",
+                                 "Single.MaxValue", "0.5（低于宿主下界）"}
+-        Const 内核下钳 As Single = 0.05F   ' 权威出处：VideoRenderer.cpp:2120
+-        Const 内核上钳 As Single = 64.0F   ' 权威出处：VideoRenderer.cpp:2153
++        ' ⚠ 出处订正（2026-10-14 实测）：原先注的 VideoRenderer.cpp:2120/:2153 是
++        ' DirectWrite 的 SetMaxWidth 与构造函数初始化，**与本钳位无关**。
++        ' 内核真实的两条线互不相同：
++        '   SetViewTransform  :2327-2328 → 图片模式下 clamp 到 [1.0, 32.0]
++        '   ZoomViewAt        :2377      → clamp 到 [0.05, 64.0]
++        ' 本档沿用 0.05/64 是 ZoomViewAt 那一支；图片模式最终走哪条**尚未判定**
++        ' （取决于宿主实际调哪个入口），已入账待裁。
++        Const 内核下钳 As Single = 0.05F   ' 出处：VideoRenderer.cpp:2377（ZoomViewAt）
++        Const 内核上钳 As Single = 64.0F   ' 出处：VideoRenderer.cpp:2377；图片模式入口 :2328 为 32.0
+         For i = 0 To 坏值.Length - 1
+             ' 正常界 [1.0, 64.0]：任何输入出来都必须在 [0.05, 64] 内、有限、且严格大于 0。
+             Dim r = 图片缩放几何.钳制缩放(坏值(i), 1.0F, 64.0F)
+diff --git a/FFF.Player.Tests/LyricsKitRegression.vb b/FFF.Player.Tests/LyricsKitRegression.vb
+index 3c7bc9a..dc27d9b 100644
+--- a/FFF.Player.Tests/LyricsKitRegression.vb
++++ b/FFF.Player.Tests/LyricsKitRegression.vb
+@@ -66,6 +66,9 @@ Friend Module LyricsKitRegression
+                     参数(0), 默认套件目录)
+         If String.IsNullOrWhiteSpace(目录) Then
+             Console.Error.WriteLine("SKIP：未指定歌词套件目录（位置参数或环境变量 FFF_LYRICS_KIT_DIR）。")
++            ' 这里退 0 是设计（干净检出不该因别人机器上的素材而判红），但"退 0"不等于"判绿"：
++            ' 本档一条断言都没跑。先前调用方只看退出码，就把"素材缺失"读成"歌词回归通过"。
++            Console.Error.WriteLine("NOT JUDGED：0 条断言被执行 —— 这不是通过，只是未判。")
+             Return 0
+         End If
+         If Not Directory.Exists(目录) Then
+@@ -105,6 +108,11 @@ Friend Module LyricsKitRegression
+ 
+         Console.WriteLine()
+         Console.WriteLine($"通过 {通过} / 失败 {失败}（共 {通过 + 失败}）")
++        ' 分母是"已执行的断言数"，所以素材全缺时会印成「共 0」——那既不是通过也不是失败，
++        ' 而调用方只看退出码就会读成绿灯。这里把它点名，别让 0 条断言冒充一次成功。
++        If 通过 + 失败 = 0 Then
++            Console.WriteLine("本档 **0 条断言被执行**（素材全部缺席 ⇒ 整体 SKIP）。这不是通过。")
++        End If
+         If 失败 > 0 Then Return 1
+ 
+         ' 边车 LRC 的 BOM 是 MANIFEST 点名的坑之一：ffmpeg 系会静默丢首行（12→11）。
+diff --git "a/FFF.Player/Core/\346\222\255\346\224\276\345\231\250\344\274\232\350\257\235.vb" "b/FFF.Player/Core/\346\222\255\346\224\276\345\231\250\344\274\232\350\257\235.vb"
+index e2bbce4..2035782 100644
+--- "a/FFF.Player/Core/\346\222\255\346\224\276\345\231\250\344\274\232\350\257\235.vb"
++++ "b/FFF.Player/Core/\346\222\255\346\224\276\345\231\250\344\274\232\350\257\235.vb"
+@@ -27,6 +27,9 @@ Public NotInheritable Class 播放器会话
+     ' RTX VSR 状态：内核要求 size >= sizeof(44) 且 version = PlayerApiVersion，两者缺一即拒。
+     Private Shared ReadOnly 原生视频超分辨率状态大小 As UInteger =
+         CUInt(Marshal.SizeOf(Of 原生视频超分辨率状态)())
++    ' 呈现节律状态：内核同样按 size >= sizeof 且 version = PlayerApiVersion 校验。
++    Private Shared ReadOnly 原生呈现节律状态大小 As UInteger =
++        CUInt(Marshal.SizeOf(Of 原生呈现节律状态)())
+     Private ReadOnly 定时文字提交锁 As New Object()
+     Private ReadOnly 定时文字UTF8缓存 As New Dictionary(Of String, IntPtr)(StringComparer.Ordinal)
+     Private ReadOnly 定时文字临时指针 As New List(Of IntPtr)()
+@@ -218,6 +221,14 @@ Public NotInheritable Class 播放器会话
+                                                   HDR峰值尼特, SDR纸白尼特,
+                                                   If(强制HDR输出, 1UI, 0UI)))
+     End Sub
++    ''' <summary>读回呈现器实际在按什么配速：面板声明值/网格标定值/生效上限/是否锁上/
++    ''' 没锁的原因/提交精度，以及屏幕停留格数的带内对账。诊断用，不改变任何行为。
++    ''' 窗口翻帧上限本身不可调：内核恒取 min(面板率, 视频率)。</summary>
++    Friend Function 读取呈现节律状态() As 原生呈现节律状态
++        Dim 值 As New 原生呈现节律状态 With {.大小 = 原生呈现节律状态大小, .版本 = 期望API版本}
++        检查结果(播放器原生接口.FFF3FP_GetPresentPacingStatus(取得句柄(), 值))
++        Return 值
++    End Function
+     Public Sub 设置输出窗口(窗口句柄 As IntPtr)
+         检查结果(播放器原生接口.FFF3FP_SetOutputWindow(取得句柄(), 窗口句柄))
+     End Sub
+diff --git a/FFF.Player/FFF.Player.vbproj b/FFF.Player/FFF.Player.vbproj
+index f17851a..854614c 100644
+--- a/FFF.Player/FFF.Player.vbproj
++++ b/FFF.Player/FFF.Player.vbproj
+@@ -27,12 +27,14 @@
+       <ApplicationIcon>ICO.ico</ApplicationIcon>
+       <!-- 3FP native API version this host is built against.
+            Single source of truth for the release check below: it is compared against the
+-           kernel's PlayerApiVersion and against the constant the host actually sends in
+-           FFF3FPConfiguration.version, so the three cannot drift apart silently.
+-           Bump ALL THREE together when the configuration struct changes:
++           kernel's PlayerApiVersion, against the constant the host actually sends in
++           FFF3FPConfiguration.version, and against the native DLL's own version resource,
++           so none of them can drift apart silently.
++           Bump ALL FOUR together when the configuration struct changes:
+              1. kernel/FFF.Native/3FP/Api/PlayerApi.cpp   PlayerApiVersion
+              2. FFF.Player/Core/播放器会话.vb              <> NNUI  (and .版本 = NNUI)
+-             3. this property                                            -->
++             3. FFF.Native/FFF.Native.rc                  VER_API + 三段 VALUE 字符串
++             4. this property                                             -->
+       <PlayerApiVersion>20</PlayerApiVersion>
+   </PropertyGroup>
+ 
+@@ -121,10 +123,11 @@
+        "播放器起不来"。这属于**发布事故**，必须在打包阶段拦下，
+        而不是等用户运行时才发现（那时只能给出一个含义不明的失败）。
+ 
+-       三处必须一致，本 target 把三者都读出来比对：
++       四处必须一致，本 target 把四者都读出来比对：
+          ① 内核  PlayerApi.cpp          PlayerApiVersion
+          ② 宿主  播放器会话.vb            <> NNUI / .版本 = NNUI
+          ③ 本工程 <PlayerApiVersion>
++         ④ 原生  FFF.Native.rc           VER_API 与 FileVersion/ApiVersion/(api NN) 三段字符串
+        ════════════════════════════════════════════════════════════════════════════ -->
+   <Target Name="VerifyPlayerApiVersion" BeforeTargets="Build;Publish">
+     <PropertyGroup>
+@@ -174,6 +177,43 @@
+     <!-- 宿主必须用常量而不是另一个字面量，否则三处声明就会各自漂移。 -->
+     <Error Condition="'$(_HostSentVersion)' != '期望API版本'"
+            Text="发布中止：配置里的版本写法为 '$(_HostSentVersion)'，应为常量 '期望API版本'。字面量会让版本号出现第四份副本。" />
++
++    <!-- ④ 原生 DLL 自己的版本资源。rc 里 `#define VER_API` 和三段 VALUE 字符串都是
++         字面量，不随 PlayerApi.cpp 走；部署现场偏偏就拿 FileVersion 核对"这个 DLL 是
++         哪个 API 编出来的"。此前没人比对第四份 ⇒ 前三处同水、盘上件仍报旧号。 -->
++    <PropertyGroup>
++      <_NativeResourceRc>$(MSBuildThisFileDirectory)..\FFF.Native\FFF.Native.rc</_NativeResourceRc>
++    </PropertyGroup>
++    <Error Condition="!Exists('$(_NativeResourceRc)')"
++           Text="版本校验找不到原生版本资源：$(_NativeResourceRc)" />
++    <PropertyGroup>
++      <_RcVerApi>$([System.Text.RegularExpressions.Regex]::Match(
++        $([System.IO.File]::ReadAllText('$(_NativeResourceRc)')),
++        '\#define\s+VER_API\s+(\d+)').Groups[1].Value)</_RcVerApi>
++      <_RcFileVersion>$([System.Text.RegularExpressions.Regex]::Match(
++        $([System.IO.File]::ReadAllText('$(_NativeResourceRc)')),
++        '"FileVersion",\s*"(\d+)').Groups[1].Value)</_RcFileVersion>
++      <_RcApiVersion>$([System.Text.RegularExpressions.Regex]::Match(
++        $([System.IO.File]::ReadAllText('$(_NativeResourceRc)')),
++        '"ApiVersion",\s*"(\d+)').Groups[1].Value)</_RcApiVersion>
++      <_RcProductApi>$([System.Text.RegularExpressions.Regex]::Match(
++        $([System.IO.File]::ReadAllText('$(_NativeResourceRc)')),
++        '\(api (\d+)\)').Groups[1].Value)</_RcProductApi>
++    </PropertyGroup>
++    <!-- 解析不出就必须拦：少一段字符串的话，这个门会退化成"只比 VER_API"的半瞎门。 -->
++    <Error Condition="'$(_RcVerApi)' == '' Or '$(_RcFileVersion)' == '' Or
++                     '$(_RcApiVersion)' == '' Or '$(_RcProductApi)' == ''"
++           Text="无法从 FFF.Native.rc 解析版本号（应同时找到 VER_API、FileVersion、ApiVersion 与 &quot;(api NN)&quot;）。版本校验无法进行。" />
++    <Message Importance="high"
++             Text="3FP API 版本（第四份：原生版本资源）：VER_API=$(_RcVerApi) FileVersion=$(_RcFileVersion) ApiVersion=$(_RcApiVersion) ProductVersion 内 api=$(_RcProductApi)" />
++    <Error Condition="'$(_RcVerApi)' != '$(PlayerApiVersion)'"
++           Text="发布中止：FFF.Native.rc 的 VER_API ($(_RcVerApi)) 与 API 版本 ($(PlayerApiVersion)) 不一致。改 rc 主版本号后必须重新构建 FFF.Native。" />
++    <Error Condition="'$(_RcFileVersion)' != '$(PlayerApiVersion)'"
++           Text="发布中止：FFF.Native.rc 的 FileVersion 字符串 ($(_RcFileVersion)) 与 API 版本 ($(PlayerApiVersion)) 不一致 —— 部署现场读的就是这一段。" />
++    <Error Condition="'$(_RcApiVersion)' != '$(PlayerApiVersion)'"
++           Text="发布中止：FFF.Native.rc 的 ApiVersion 字符串 ($(_RcApiVersion)) 与 API 版本 ($(PlayerApiVersion)) 不一致。" />
++    <Error Condition="'$(_RcProductApi)' != '$(PlayerApiVersion)'"
++           Text="发布中止：FFF.Native.rc 的 ProductVersion &quot;(api NN)&quot; ($(_RcProductApi)) 与 API 版本 ($(PlayerApiVersion)) 不一致。" />
+   </Target>
+ 
+   <!-- 打包前确认内核结构体大小与宿主一致：仅比对版本号不够，内核还会校验 size。 -->
+diff --git "a/FFF.Player/Interop/\346\222\255\346\224\276\345\231\250\345\216\237\347\224\237\346\216\245\345\217\243.vb" "b/FFF.Player/Interop/\346\222\255\346\224\276\345\231\250\345\216\237\347\224\237\346\216\245\345\217\243.vb"
+index 18f4a8a..3545f1b 100644
+--- "a/FFF.Player/Interop/\346\222\255\346\224\276\345\231\250\345\216\237\347\224\237\346\216\245\345\217\243.vb"
++++ "b/FFF.Player/Interop/\346\222\255\346\224\276\345\231\250\345\216\237\347\224\237\346\216\245\345\217\243.vb"
+@@ -54,6 +54,36 @@ Friend Structure 原生播放器配置
+     Public 解码降档丢帧百分比 As UInteger
+ End Structure
+ 
++<StructLayout(LayoutKind.Sequential)>
++Friend Structure 原生呈现节律状态
++    ' 字段类型与顺序须与内核 FFF3FPPresentPacingStatus 一致；内核按 size/version 校验，
++    ' 少写字段会被判 InvalidArgument（与 原生播放器配置 同一类坑）。
++    Public 大小 As UInteger
++    Public 版本 As UInteger
++    ' EnumDisplaySettings 报给内核的面板刷新率。内核过去先把它夹到 120，于是 144Hz
++    ' 面板被报成 120；这里是不再修正后的原值。
++    Public 声明刷新率 As Single
++    ' 由交换链自身的帧统计（SyncRefreshCount 对 SyncQPCTime）反解出的面板周期。
++    ' 0 = 还没标定出来，也就是锁还没上岗。
++    Public 标定刷新率 As Single
++    Public 帧率上限 As Single        ' 生效中的自动上限 = min(面板率, 视频率)，非可调
++    Public 网格锁定 As UInteger      ' 1 = 每次翻帧都对齐到刷新网格
++    ' 0 = 已锁或本无可对节律；1 = 走可变刷新路（G-SYNC/FreeSync 自己配速）；
++    ' 2 = 网格未标定；3 = 这次翻帧由原生窗口移动循环接管。
++    Public 让位原因 As UInteger
++    ' 上次翻帧的**提交时刻**相对它瞄准那一格的偏差，单位 100ns，正=提交晚了。
++    Public 瞄格误差100纳秒 As Long
++    ' 结果那半边：屏幕实际停留格数落在 ⌊r⌋/⌈r⌉ 带内（60fps 配 144Hz 就是 2 或 3 格）的
++    ' 对账。带内=看着稳；带外（1 格、或 4 格以上）=眼睛说的卡顿。
++    Public 停留采样数 As UInt64
++    Public 停留带内数 As UInt64
++    Public 停留最差偏差格数 As UInt64
++    ' 因"片源比面板快"被丢弃的帧（240fps 片配 144Hz 面板）。刻意不并进快照的丢弃计数：
++    ' 那个数含义是"管线跟不上媒体时钟"，还会驱动自适应降采样，而面板限死的丢弃不是这回事。
++    ' 两个数要并排列出，相加才是总丢弃。
++    Public 显示速率丢弃数 As UInt64
++End Structure
++
+ <StructLayout(LayoutKind.Sequential)>
+ Friend Structure 原生播放器快照
+     ' ⚠ 字段顺序**必须与 C 侧 FFF3FPSnapshot 逐字段一致**。顺序错了不会报错，
+@@ -574,6 +604,11 @@ Friend Module 播放器原生接口
+     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+     Friend Function FFF3FP_SetColorMode(播放器 As 播放器原生句柄, 模式 As UInteger, SDR峰值 As Single, HDR峰值 As Single, SDR纸白 As Single, 强制HDR输出 As UInteger) As 原生播放器结果
+     End Function
++    ' 呈现器实际按什么在配速（声明值/标定值/生效上限/是否锁上/没锁的原因/提交精度/屏幕停留对账）。
++    ' 只有读、没有写：窗口翻帧上限是自动的 min(面板率, 视频率)，不是可调开关。
++    <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
++    Friend Function FFF3FP_GetPresentPacingStatus(播放器 As 播放器原生句柄, ByRef 状态 As 原生呈现节律状态) As 原生播放器结果
++    End Function
+     <DllImport(动态库名称, CallingConvention:=CallingConvention.Cdecl, ExactSpelling:=True)>
+     Friend Function FFF3FP_SetOutputWindow(播放器 As 播放器原生句柄, 窗口 As IntPtr) As 原生播放器结果
+     End Function
+diff --git "a/FFF.Player/UI/\345\233\276\347\211\207\347\274\251\346\224\276\345\207\240\344\275\225.vb" "b/FFF.Player/UI/\345\233\276\347\211\207\347\274\251\346\224\276\345\207\240\344\275\225.vb"
+index 7ff41a8..139159f 100644
+--- "a/FFF.Player/UI/\345\233\276\347\211\207\347\274\251\346\224\276\345\207\240\344\275\225.vb"
++++ "b/FFF.Player/UI/\345\233\276\347\211\207\347\274\251\346\224\276\345\207\240\344\275\225.vb"
+@@ -14,7 +14,7 @@
+ Imports System.Math
+ 
+ Public Module 图片缩放几何
+-    ''' <summary>内核 VideoRenderer.cpp:2120/:2153 的两条钳位。宿主必须与之一致：
++    ''' <summary>内核滚轮入口 VideoRenderer.cpp:2377 的钳位（绝对入口 :2327-2328 在图片模式是 [1.0,32]，另一套数）。宿主必须与之一致：
+     ''' 此前宿主用 [0.1, 32]、内核用 [0.05, 64]，两套数会把对方的合法值当边界。</summary>
+     Public Const 内核最小缩放 As Single = 0.05F
+     Public Const 内核最大缩放 As Single = 64.0F
+diff --git "a/FFF.Player/UI/\346\222\255\346\224\276\345\231\250\345\233\276\347\211\207\346\265\217\350\247\210\346\216\247\345\210\266\345\231\250.vb" "b/FFF.Player/UI/\346\222\255\346\224\276\345\231\250\345\233\276\347\211\207\346\265\217\350\247\210\346\216\247\345\210\266\345\231\250.vb"
+index d5e2226..7e11c4c 100644
+--- "a/FFF.Player/UI/\346\222\255\346\224\276\345\231\250\345\233\276\347\211\207\346\265\217\350\247\210\346\216\247\345\210\266\345\231\250.vb"
++++ "b/FFF.Player/UI/\346\222\255\346\224\276\345\231\250\345\233\276\347\211\207\346\265\217\350\247\210\346\216\247\345\210\266\345\231\250.vb"
+@@ -29,7 +29,13 @@ Friend NotInheritable Class 播放器图片浏览控制器
+             Dim 衰减 = Math.Exp(-角频率 * 间隔秒)
+             值 = 目标 + (差值 + 系数 * 间隔秒) * 衰减
+             速度 = (速度 - 角频率 * 系数 * 间隔秒) * 衰减
+-            If Math.Abs(值 - 目标) < 0.0000001 AndAlso Math.Abs(速度) < 0.000001 Then
++            ' 停表判据必须用几何层的**相对**阈值，不能留在这里的绝对 1e-7/1e-6：
++            ' 临界阻尼的尾部是渐近的，绝对阈值在 z=1（对数空间目标为 0）附近永远
++            ' 差一点点 —— 实测真计时器下单格滚轮要发 78 次、末次 596 ms，且判定
++            ' 静止后再等 0.4 s 仍在涨。几何层的 已静止 把位移/速度按目标幅度缩放并
++            ' 各留一个下限，正是为这两种失败写的。阻尼常数与积分保持本控制器自己的
++            ' 一套（0.3 s），不借用 阻尼步进 —— 那会顺手改掉手感。
++            If 图片缩放几何.已静止(CSng(值), CSng(目标), CSng(速度)) Then
+                 重置(目标)
+                 Return False
+             End If
+@@ -256,6 +262,16 @@ Friend NotInheritable Class 播放器图片浏览控制器
+     Private Sub 画面控件_图片平移拖动(sender As Object, e As 播放器图片平移拖动事件参数)
+         If 已释放 OrElse Not 图片模式已启用 OrElse Not 准备视图() Then Return
+         推进至当前时刻()
++        ' 没有可平移余量时**根本不累加目标**：内核 PanView 在 zoom<=1 时是
++        ' "返回 Success 但什么都不做"（VideoRenderer.cpp:2453-2454），宿主照提
++        ' 就等于把一次注定被丢弃的平移写进弹簧目标 —— 目标与实位从此错开，
++        ' 动画也就永远不会真正停表。余量判据用现成的纯函数，它已经把
++        ' "原生尺寸封顶下 z=1 并不铺满窗口"这一层算进去了。
++        Dim 单位屏幕比 = 图片缩放几何.单位屏幕比(画面控件.Width, 画面控件.Height, 源宽, 源高)
++        If Not 图片缩放几何.有平移余量(实际倍率, 单位屏幕比, 源宽, 源高,
++                                       画面控件.Width, 画面控件.Height) Then
++            Return
++        End If
+         水平运动.目标 += e.水平位移
+         垂直运动.目标 += e.垂直位移
+         启动动画()
+diff --git "a/tools/\345\217\221\345\270\2033FP.ps1" "b/tools/\345\217\221\345\270\2033FP.ps1"
+index 97be890..6e4a3a3 100644
+--- "a/tools/\345\217\221\345\270\2033FP.ps1"
++++ "b/tools/\345\217\221\345\270\2033FP.ps1"
+@@ -68,6 +68,112 @@ try {
+         throw "侵权护栏：staging 目录出现旧商标私有 DLL FFF.DolbyVision.Test.dll（$($ForbiddenLegacy.FullName -join ', ')）——必须移除；中性模块请使用 FFF.HDRdp.Test.dll。"
+     }
+ 
++    # ── 许可随包步骤（与主仓 pack.ps1 的 F4b/F10/F4a 同一口径）──
++    # 分发第三方件却不附清单与许可全文 = 义务没落地。这一步把"有没有"变成有牙的门：
++    # 缺哪件、为什么缺，逐件点名，不许静默少收；放行必须显式设环境变量。
++    $NoticesCandidates = @(
++        (Join-Path $ProjectRoot "THIRD-PARTY-NOTICES.md"),
++        (Join-Path ([IO.Path]::GetFullPath((Join-Path $ProjectRoot "..\.."))) "THIRD-PARTY-NOTICES.md"))
++    $NoticesSrc = @($NoticesCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
++    if ($NoticesSrc.Count -eq 0) {
++        throw ("没有 THIRD-PARTY-NOTICES.md（找过：$($NoticesCandidates -join '；')）—— " +
++               "本包自带 FFmpeg/libass 一族/LakeUI 等第三方件，清单缺席即不发。")
++    }
++    Copy-Item -LiteralPath $NoticesSrc[0] -Destination $StagingDirectory -Force
++    $NoticesText = [IO.File]::ReadAllText($NoticesSrc[0])
++    if ($NoticesText.Length -lt 400 -or -not $NoticesText.Contains('--enable-nonfree')) {
++        throw "包内清单不像实测文件（$($NoticesText.Length) 字符 / 未登记 nonfree 构建串）：$($NoticesSrc[0])"
++    }
++    Write-Host "   ✅ 第三方清单已入包：$($NoticesSrc[0])" -ForegroundColor Green
++
++    $LicPorts = @('libass','libbluray','libudfread','libiconv','fribidi','freetype',
++                  'harfbuzz','brotli','bzip2','libpng','zlib','libxml2')
++    $vcpkgShare = Join-Path $ProjectRoot "third_party\vcpkg_installed\x64-windows\share"
++    $LicStage = Join-Path $StagingDirectory "licenses"
++    New-Item -ItemType Directory -Force -Path $LicStage | Out-Null
++    $licCopied = @(); $licMissing = @()
++    foreach ($p in $LicPorts) {
++        $s = Join-Path $vcpkgShare "$p\copyright"
++        if (Test-Path -LiteralPath $s -PathType Leaf) {
++            Copy-Item -LiteralPath $s -Destination (Join-Path $LicStage "vcpkg-$p.txt") -Force
++            $licCopied += "vcpkg-$p"
++        } else { $licMissing += "vcpkg-$p" }
++    }
++    # 每条许可文本给多个候选位置（本仓是独立 git 树，LakeUI 与 ffmpeg 既可能挂在本仓
++    # third_party 下、也可能只在主仓那一侧），并把"找过哪些路径"写进失败消息 ——
++    # 缺件要能说清是"没有"还是"我找错地方"。
++    $MainRoot = [IO.Path]::GetFullPath((Join-Path $ProjectRoot "..\.."))
++    $LicExtra = @(
++        [pscustomobject]@{ Name = 'ffmpeg-COPYING.LGPLv2.1';
++                           Cands = @((Join-Path $ProjectRoot "third_party\ffmpeg\COPYING.LGPLv2.1"),
++                                     (Join-Path $MainRoot "third_party\ffmpeg\COPYING.LGPLv2.1")) },
++        [pscustomobject]@{ Name = 'ffmpeg-COPYING.LGPLv3';
++                           Cands = @((Join-Path $ProjectRoot "third_party\ffmpeg\COPYING.LGPLv3"),
++                                     (Join-Path $MainRoot "third_party\ffmpeg\COPYING.LGPLv3")) },
++        [pscustomobject]@{ Name = 'LakeUI-GPL-3.0';
++                           Cands = @((Join-Path $ProjectRoot "third_party\LakeUI\LICENSE.txt"),
++                                     (Join-Path $MainRoot "third_party\LakeUI\LICENSE.txt"),
++                                     (Join-Path $ProjectRoot "..\LakeUI\LICENSE.txt")) })
++    foreach ($e in $LicExtra) {
++        $hit = @($e.Cands | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
++        if ($hit.Count -gt 0) {
++            Copy-Item -LiteralPath $hit[0] -Destination (Join-Path $LicStage "$($e.Name).txt") -Force
++            $licCopied += $e.Name
++        } else { $licMissing += "$($e.Name)（找过：$($e.Cands -join '；')）" }
++    }
++    $licWant = $LicPorts.Count + 3
++    if ($licMissing.Count -gt 0) {
++        $msg = "许可文本缺 $($licMissing.Count)/$licWant 件：$($licMissing -join '；')"
++        if ($env:FFF_ALLOW_MISSING_LICENSES -eq '1') {
++            Write-Host "   ⚠ 已放行：$msg" -ForegroundColor Yellow
++        } else { throw "$msg —— 分发第三方件却不附许可全文；确认可接受后再设 FFF_ALLOW_MISSING_LICENSES=1" }
++    }
++    $licEmpty = @(Get-ChildItem -LiteralPath $LicStage -Filter *.txt -File | Where-Object { $_.Length -eq 0 })
++    if ($licEmpty.Count -gt 0) { throw "licenses\ 里有 $($licEmpty.Count) 个 0 字节文件：$(($licEmpty | ForEach-Object { $_.Name }) -join ', ')" }
++    if ($licMissing.Count -eq 0) {
++        Write-Host "   ✅ 许可文本已入包 licenses/（$($licCopied.Count)/$licWant 件）" -ForegroundColor Green
++    } else {
++        Write-Host "   ⚠ 许可文本只入包 $($licCopied.Count)/$licWant 件（放行缺 $($licMissing.Count) 件）" -ForegroundColor Yellow
++    }
++
++    # FFmpeg 变体判定：件数对≠变体对。判据脚本住在主仓 tools\ 下（本仓独立使用时可能没有），
++    # 拿不到判据就明说"未执行"，绝不把"没跑"写成"通过"。判红同主仓：默认中止，显式放行才继续。
++    $variantCandidates = @(
++        (Join-Path ([IO.Path]::GetFullPath((Join-Path $ProjectRoot "..\.."))) "tools\check_ffmpeg_variant.py"),
++        (Join-Path $ScriptDirectory "check_ffmpeg_variant.py"))
++    $variantPy = @($variantCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
++    $pyExe = $null
++    foreach ($cand in @('py', 'python')) {
++        $g = Get-Command $cand -CommandType Application -ErrorAction SilentlyContinue
++        if ($g -and $g.Source -and ($g.Source -notmatch '(?i)[\\/]WindowsApps[\\/]')) { $pyExe = $g.Source; break }
++    }
++    if ($variantPy.Count -eq 0) {
++        Write-Host "   ⚠ FFmpeg 变体判定**未执行**：找不到 tools\check_ffmpeg_variant.py（找过：$($variantCandidates -join '；')）——别把“发布完成”当“分发条件已核”" -ForegroundColor Yellow
++    } elseif (-not $pyExe) {
++        Write-Host "   ⚠ FFmpeg 变体判定**未执行**：本机没有可用的 python（py/python 都不在 PATH 或只有应用执行别名占位桩）" -ForegroundColor Yellow
++    } else {
++        $prevEAP = $ErrorActionPreference
++        $ErrorActionPreference = 'Continue'
++        $global:LASTEXITCODE = $null
++        & $pyExe $variantPy[0] '--self-test' | Out-Null
++        $stRc = if ($null -eq $LASTEXITCODE) { -1 } else { $LASTEXITCODE }
++        $ErrorActionPreference = $prevEAP
++        if ($stRc -ne 0) { throw "FFmpeg 变体自检失败（rc=$stRc）：探针扫不出合成件里的 nonfree ⇒ 判据本身不可信" }
++        $prevEAP = $ErrorActionPreference
++        $ErrorActionPreference = 'Continue'
++        $global:LASTEXITCODE = $null
++        $varOut = @(& $pyExe $variantPy[0] '--dir' $StagingDirectory '--quiet' 2>&1 | ForEach-Object { $_.ToString() })
++        $varRc = if ($null -eq $LASTEXITCODE) { -1 } else { $LASTEXITCODE }
++        $ErrorActionPreference = $prevEAP
++        $tail = ($varOut | Select-Object -Last 3) -join ' / '
++        if ($varRc -eq 0) { Write-Host "   ✅ FFmpeg 变体已核：无 --enable-nonfree。$tail" -ForegroundColor Green }
++        elseif ($varRc -eq 2) { Write-Host "   ⚠ FFmpeg 变体**未判定**：进包件里一个构建串都没读到 —— 判定未执行，不是通过。$tail" -ForegroundColor Yellow }
++        elseif ($varRc -eq 1) {
++            if ($env:FFF_ALLOW_NONFREE -eq '1') { Write-Host "   ⚠ 已放行 nonfree 构建（FFF_ALLOW_NONFREE=1）：分发条件最严的一档，清单 §1 的 GPL 文本/源码要约必须按此补齐。$tail" -ForegroundColor Yellow }
++            else { throw "FFmpeg 变体判红：进包的 DLL 含 --enable-nonfree。换无 nonfree 的构建，或明确承担后果后设 FFF_ALLOW_NONFREE=1 再发布。$tail" }
++        } else { throw "FFmpeg 变体门禁退出码异常（rc=$varRc）⇒ 守卫不成立，中止：$tail" }
++    }
++
+     if (Test-Path -LiteralPath $OutputDirectory) {
+         Remove-Item -LiteralPath $OutputDirectory -Recurse -Force
+     }
+diff --git "a/tools/\346\236\204\345\273\2723FP.ps1" "b/tools/\346\236\204\345\273\2723FP.ps1"
+index 5d1205b..a97fa31 100644
+--- "a/tools/\346\236\204\345\273\2723FP.ps1"
++++ "b/tools/\346\236\204\345\273\2723FP.ps1"
+@@ -89,7 +89,14 @@ if (-not $SkipTests) {
+             0 { Write-Host "缩放体感回归通过。" }
+             1 { throw "缩放体感回归判红（exit 1）——产品缺陷，不是环境问题。" }
+             2 { Write-Host "警告：体感档判定环境不具备（exit 2，多半是无桌面会话）。本轮未判。" -ForegroundColor Yellow }
+-            default { Write-Host "警告：体感档退出码 $LASTEXITCODE，本轮未判。" -ForegroundColor Yellow }
++            # default 以前只打警告，然后照样走到下面那句 "build completed" ——
++            # 那就是假绿：exit 3 的含义是 Program.vb 自报"这个入口本树没实现"，
++            # 也就是这道门**根本没跑**；负数（如 -1073741819 = 0xC0000005）是测件
++            # 自己崩了。两者都不能当成"跑过了、只是没判"。白名单只留 0/1/2，
++            # 其余一律失败并要求点名解释。
++            default {
++                throw "体感档退出码 $LASTEXITCODE 不在白名单 (0/1/2) 内 —— 3 表示入口未实现（门没跑），负数表示测件崩溃（0xC0000005 型）。这两种都不是「本轮未判」，而是这道门失效，必须查。"
++            }
+         }
+     } else {
+         Write-Host "提示：未跑真控件体感档（-StrictZoomGate）。它才覆盖计时器/停表/真消息分流/拖动跟手。" -ForegroundColor DarkGray

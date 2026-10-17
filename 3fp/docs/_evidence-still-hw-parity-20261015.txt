@@ -1,0 +1,714 @@
+# 静图硬件解码 证据包（2026-10-15，主循环实跑原始输出）
+# 探针 = 3fp/tools/still_hw_probe.exe（源 3fp/tools/still_hw_probe.cpp），内核 = 3fp/build/FFF.Native.dll
+# API 20；两臂在进程内交错 A/B/A；像素判据 = FFF3FP_ReadVideoPixelRegion 采视频区中心
+
+## 1 适配器枚举（IDXGIFactory1::EnumAdapters1，与 preferredAdapterIndex 同序）
+  [0] vendor=0x10DE device=0x28E0 vram=7956MB flags=0x0 NVIDIA GeForce RTX 4060 Laptop GPU
+  [1] vendor=0x8086 device=0xA78B vram=128MB flags=0x0 Intel(R) UHD Graphics
+  [2] vendor=0x10DE device=0x28E0 vram=7956MB flags=0x0 NVIDIA GeForce RTX 4060 Laptop GPU
+  [3] vendor=0x1414 device=0x008C vram=0MB flags=0x2 Microsoft Basic Render Driver
+
+## 2 定形后逐位等价：adapter 0 = NVIDIA RTX 4060
+can't open file for write !
+
+PlayerApiVersion: 20  reps=1  adapter=0  interleaved A/B/A  capture=64
+
+01d_heic_1280x720.heic
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] pixels=439,218 891x501 bit=8 211.5ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] pixels=439,218 891x501 bit=8 246.1ms
+      median cpu=211.5ms gpu=246.1ms delta=+34.6ms over 1/1 completed
+      cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.3529,0.3647,0.3255) gpu=(0.3529,0.3647,0.3255)
+
+04_pq_10bit.avif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] pixels=439,218 891x501 bit=10 217.1ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] pixels=439,218 891x501 bit=10 242.4ms
+      median cpu=217.1ms gpu=242.4ms delta=+25.3ms over 1/1 completed
+      cpu-vs-gpu presented pixels: 64 x 64 bit=10/10 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.8700,0.4702,1.0000) gpu=(0.8700,0.4702,1.0000)
+
+m_3840x2160.avif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] pixels=439,218 891x501 bit=8 219.4ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] pixels=439,218 891x501 bit=8 241.8ms
+      median cpu=219.4ms gpu=241.8ms delta=+22.4ms over 1/1 completed
+      cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(1.0000,0.9412,0.0000) gpu=(1.0000,0.9412,0.0000)
+
+01c_srgb_1920x1080.jpg
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] pixels=439,218 891x501 bit=8 210.2ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} pixels=439,218 891x501 bit=8 212.2ms
+      median cpu=210.2ms gpu=212.2ms delta=+2.0ms over 1/1 completed
+      cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.9961,1.0000,0.0000) gpu=(0.9961,1.0000,0.0000)
+
+01_srgb_alpha_1920x1080.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] pixels=439,218 891x501 bit=8 212.7ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} pixels=439,218 891x501 bit=8 243.5ms
+      median cpu=212.7ms gpu=243.5ms delta=+30.8ms over 1/1 completed
+      cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.9922,0.9922,0.0000) gpu=(0.9922,0.9922,0.0000)
+
+03_exif_orientation6.jpg
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=3[has_rot] pixels=439,218 891x501 bit=8 186.3ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=3[has_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} pixels=439,218 891x501 bit=8 181.6ms
+      median cpu=186.3ms gpu=181.6ms delta=-4.6ms over 1/1 completed
+      cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.9961,1.0000,0.0000) gpu=(0.9961,1.0000,0.0000)
+
+## 3 定形后逐位等价：adapter 1 = Intel UHD Graphics
+can't open file for write !
+
+PlayerApiVersion: 20  reps=1  adapter=1  interleaved A/B/A  capture=64
+
+01d_heic_1280x720.heic
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] pixels=439,218 891x501 bit=8 239.0ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] pixels=439,218 891x501 bit=8 276.3ms
+      median cpu=239.0ms gpu=276.3ms delta=+37.2ms over 1/1 completed
+      cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.3529,0.3647,0.3255) gpu=(0.3529,0.3647,0.3255)
+
+04_pq_10bit.avif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] pixels=439,218 891x501 bit=10 249.9ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] pixels=439,218 891x501 bit=10 273.8ms
+      median cpu=249.9ms gpu=273.8ms delta=+23.9ms over 1/1 completed
+      cpu-vs-gpu presented pixels: 64 x 64 bit=10/10 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.8710,0.4721,1.0000) gpu=(0.8710,0.4721,1.0000)
+
+m_3840x2160.avif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] pixels=439,218 891x501 bit=8 270.7ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] pixels=439,218 891x501 bit=8 306.2ms
+      median cpu=270.7ms gpu=306.2ms delta=+35.6ms over 1/1 completed
+      cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(1.0000,0.9412,0.0000) gpu=(1.0000,0.9412,0.0000)
+
+01c_srgb_1920x1080.jpg
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] pixels=439,218 891x501 bit=8 216.1ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} pixels=439,218 891x501 bit=8 240.9ms
+      median cpu=216.1ms gpu=240.9ms delta=+24.8ms over 1/1 completed
+      cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.9961,1.0000,0.0000) gpu=(0.9961,1.0000,0.0000)
+
+01_srgb_alpha_1920x1080.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] pixels=439,218 891x501 bit=8 271.5ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} pixels=439,218 891x501 bit=8 248.8ms
+      median cpu=271.5ms gpu=248.8ms delta=-22.6ms over 1/1 completed
+      cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.9922,0.9922,0.0000) gpu=(0.9922,0.9922,0.0000)
+
+03_exif_orientation6.jpg
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=3[has_rot] pixels=439,218 891x501 bit=8 238.8ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=3[has_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} pixels=439,218 891x501 bit=8 242.8ms
+      median cpu=238.8ms gpu=242.8ms delta=+3.9ms over 1/1 completed
+      cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.9961,1.0000,0.0000) gpu=(0.9961,1.0000,0.0000)
+
+## 4 全量 46 张 × 两臂：NVIDIA
+[diags] hw picked decoder=av1 backend=7 hwfmt=171
+[diags] hw picked decoder=av1 backend=7 hwfmt=171
+[diags] hw picked decoder=hevc backend=7 hwfmt=171
+[diags] hw picked decoder=hevc backend=7 hwfmt=171
+PlayerApiVersion: 20  reps=1  adapter=0  interleaved A/B/A  capture=off 64
+
+07a_anim.webp
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] 181.8ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 185.7ms
+      median cpu=181.8ms gpu=185.7ms delta=+3.9ms over 1/1 completed
+
+07b_anim.gif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot][alpha] 180.1ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot][alpha] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 179.7ms
+      median cpu=180.1ms gpu=179.7ms delta=-0.4ms over 1/1 completed
+
+07c_anim.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 180.6ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 181.3ms
+      median cpu=180.6ms gpu=181.3ms delta=+0.7ms over 1/1 completed
+
+07d_anim.avif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot] 86.9ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot] 244.1ms
+      median cpu=86.9ms gpu=244.1ms delta=+157.2ms over 1/1 completed
+
+07e_anim.heic
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=8 rot=4294967295[no_rot] 186.9ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=8 rot=4294967295[no_rot] 213.2ms
+      median cpu=186.9ms gpu=213.2ms delta=+26.3ms over 1/1 completed
+
+10a_dirtyrect_640x480.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 179.6ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 181.9ms
+      median cpu=179.6ms gpu=181.9ms delta=+2.3ms over 1/1 completed
+
+10b_dirtyrect_1920x1080.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 212.2ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 211.8ms
+      median cpu=212.2ms gpu=211.8ms delta=-0.3ms over 1/1 completed
+
+10c_dirtyrect_3840x2160.png
+      cpu  open=1 mode=Cpu  presented=3 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 354.9ms
+      gpu  open=1 mode=Cpu  presented=3 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 350.9ms
+      median cpu=354.9ms gpu=350.9ms delta=-4.1ms over 1/1 completed
+
+10d_dirtyrect_640x480.gif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot][alpha] 182.5ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot][alpha] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 180.8ms
+      median cpu=182.5ms gpu=180.8ms delta=-1.7ms over 1/1 completed
+
+10e_dirtyrect_1920x1080.gif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot][alpha] 184.2ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot][alpha] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 181.4ms
+      median cpu=184.2ms gpu=181.4ms delta=-2.8ms over 1/1 completed
+
+10f_dirtyrect_3840x2160.gif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot][alpha] 216.3ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot][alpha] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatibl[diags] hw picked decoder=av1 backend=7 hwfmt=171
+[diags] hw picked decoder=av1 backend=7 hwfmt=171
+[diags] hw picked decoder=av1 backend=7 hwfmt=171
+[diags] hw picked decoder=av1 backend=7 hwfmt=171
+[diags] hw picked decoder=hevc backend=7 hwfmt=171
+[diags] hw picked decoder=hevc backend=7 hwfmt=171
+e hardware decoder was found."} 216.7ms
+      median cpu=216.3ms gpu=216.7ms delta=+0.5ms over 1/1 completed
+
+10g_bitdepth_8bit_640x480.avif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot] 179.6ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot] 214.4ms
+      median cpu=179.6ms gpu=214.4ms delta=+34.8ms over 1/1 completed
+
+10h_bitdepth_10bit_640x480.avif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot] 183.3ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot] 218.4ms
+      median cpu=183.3ms gpu=218.4ms delta=+35.1ms over 1/1 completed
+
+01b_srgb_1920x1080.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 212.5ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 213.1ms
+      median cpu=212.5ms gpu=213.1ms delta=+0.5ms over 1/1 completed
+
+01c_srgb_1920x1080.jpg
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 182.7ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 182.3ms
+      median cpu=182.7ms gpu=182.3ms delta=-0.5ms over 1/1 completed
+
+01d_heic_1280x720.heic
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] 88.6ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] 213.9ms
+      median cpu=88.6ms gpu=213.9ms delta=+125.3ms over 1/1 completed
+
+01_srgb_alpha_1920x1080.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] 236.0ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 217.5ms
+      median cpu=236.0ms gpu=217.5ms delta=-18.5ms over 1/1 completed
+
+09b_boundary_16384x64.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 184.3ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 210.8ms
+      median cpu=184.3ms gpu=210.8ms delta=+26.5ms over 1/1 completed
+
+09c_stripe_12000x9000.jpg
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 709.9ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 655.2ms
+      median cpu=709.9ms gpu=655.2ms delta=-54.6ms over 1/1 completed
+
+09d_stripe_huge_17000x4000.jpg
+      cpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_info=n/a error={"result":-7,"message":"The still image is too large to display: 17000x4000 exceeds the limit of 16384 pixels per side.","operation":"open-image-size"} 7484.9ms
+      gpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_info=n/a error={"result":-7,"message":"The still image is too large to display: 17000x4000 exceeds the limit of 16384 pixels per side.","operation":"open-image-size"} 7480.0ms
+      median cpu=-1.0ms gpu=-1.0ms delta=+0.0ms over 0/0 completed
+
+09e_stripe_huge_anim_17000x300.gif
+      cpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_info=n/a error={"result":-6,"message":"Could not decode or render the first frame of the animation during open.","operation":"open-animation"} 7496.8ms
+      gpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_info=n/a error={"result":-6,"message":"Could not decode or render the first frame of the animation during open.","operation":"open-animation"} 7474.6ms
+      median cpu=-1.0ms gpu=-1.0ms delta=+0.0ms over 0/0 completed
+
+09f_blocks_12000x9000.jpg
+      cpu  open=1 mode=Cpu  presented=[diags] hw picked decoder=av1 backend=7 hwfmt=171
+[diags] hw picked decoder=av1 backend=7 hwfmt=171
+1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 366.1ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 364.3ms
+      median cpu=366.1ms gpu=364.3ms delta=-1.7ms over 1/1 completed
+
+09g_bigblocks_12000x9000.jpg
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 367.0ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 368.0ms
+      median cpu=367.0ms gpu=368.0ms delta=+1.1ms over 1/1 completed
+
+09h_stripe_small_1600x1200.jpg
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 211.6ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 212.0ms
+      median cpu=211.6ms gpu=212.0ms delta=+0.4ms over 1/1 completed
+
+09i_blocks_4000x3000.jpg
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 213.7ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 241.3ms
+      median cpu=213.7ms gpu=241.3ms delta=+27.5ms over 1/1 completed
+
+09_huge_17000x64.png
+      cpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_info=n/a error={"result":-7,"message":"The still image is too large to display: 17000x64 exceeds the limit of 16384 pixels per side.","operation":"open-image-size"} 7480.9ms
+      gpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_info=n/a error={"result":-7,"message":"The still image is too large to display: 17000x64 exceeds the limit of 16384 pixels per side.","operation":"open-image-size"} 7471.0ms
+      median cpu=-1.0ms gpu=-1.0ms delta=+0.0ms over 0/0 completed
+
+11a_16bit_rgb48.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 244.0ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 217.3ms
+      median cpu=244.0ms gpu=217.3ms delta=-26.7ms over 1/1 completed
+
+04_pq_10bit.avif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] 213.3ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] 243.1ms
+      median cpu=213.3ms gpu=243.1ms delta=+29.9ms over 1/1 completed
+
+06_hlg.jxl
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 249.5ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 240.8ms
+      median cpu=249.5ms gpu=240.8ms delta=-8.7ms over 1/1 completed
+
+DHR-CoJ1002.jxr
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] 867.0ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 1083.5ms
+      median cpu=867.0ms gpu=1083.5ms delta=+216.5ms over 1/1 completed
+
+fh2_fp16.jxr
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] 335.7ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 367.0ms
+      median cpu=335.7ms gpu=367.0ms delta=+31.2ms over 1/1 completed
+
+FH4-HDR.jxr
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] 586.9ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=42949[libjxr @ 000001fa8b273ac0] jxrlib JPEG XR decode failed (error=-1)\njxrlib JPEG XR decode failed (error=-1)\njxrlib JPEG XR decode failed (error=-1)\njxrlib JPEG XR decode failed (error=-1)\njxrlib JPEG XR decode failed (error=-1)\njxrlib JPEG XR decode failed (error=-1)\njxrlib JPEG XR decode failed (error=-1)\njxrlib JPEG XR decode failed (error=-1)\njxrlib JPEG XR decode failed (error=-1)\njxrlib JPEG XR decode failed (error=-1)\njxrlib JPEG XR decode failed (error=-1)\njxrlib JPEG XR decode failed (error=-1)\nChanging video frame properties on the fly is not supported by all filters.
+[in @ 000001fb0fda4b80] filter context - w: 1920 h: 1080 fmt: 2 csp: unknown range: unknown alpha: unspecified chroma_loc: unspecified, incoming frame - w: 1920 h: 1080 fmt: 2 csp: gbr range: pc alpha: unspecified chroma_loc: unspecified pts_time: 0
+[in @ 000001fb0fda3980] Changing video frame properties on the fly is not supported by all filters.
+[in @ 000001fb0fda3980] filter context - w: 1920 h: 1080 fmt: 2 csp: unknown range: unknown alpha: unspecified chroma_loc: unspecified, incoming frame - w: 1920 h: 1080 fmt: 2 csp: gbr range: pc alpha: unspecified chroma_loc: unspecified pts_time: 0
+[in @ 000001fb0fda3980] Changing video frame properties on the fly is not supported by all filters.
+[in @ 000001fb0fda3980] filter context - w: 1920 h: 1080 fmt: 2 csp: unknown range: unknown alpha: unspecified chroma_loc: unspecified, incoming frame - w: 1920 h: 1080 fmt: 2 csp: gbr range: pc alpha: unspecified chroma_loc: unspecified pts_time: 0
+[in @ 000001fb0fda4a80] Changing video frame properties on the fly is not supported by all filters.
+[in @ 000001fb0fda4a80] filter context - w: 1920 h: 1080 fmt: 2 csp: unknown range: unknown alpha: unspecified chroma_loc: unspecified, incoming frame - w: 1920 h: 1080 fmt: 2 csp: gbr range: pc alpha: unspecified chroma_loc: unspecified pts_time: 0
+67295[no_rot][alpha] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 587.6ms
+      median cpu=586.9ms gpu=587.6ms delta=+0.7ms over 1/1 completed
+
+HDColorHDRCalibration.jxr
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] 214.1ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 212.6ms
+      median cpu=214.1ms gpu=212.6ms delta=-1.5ms over 1/1 completed
+
+12a_srgb_1920x1080.jxr
+      cpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_info=n/a error={"result":-5,"message":"Could not decode or render the still image during open.","operation":"open-image"} 7523.3ms
+      gpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_info=n/a error={"result":-5,"message":"Could not decode or render the still image during open.","operation":"open-image"} 7494.8ms
+      median cpu=-1.0ms gpu=-1.0ms delta=+0.0ms over 0/0 completed
+
+02_display_p3_1920x1080.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 242.2ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 246.7ms
+      median cpu=242.2ms gpu=246.7ms delta=+4.5ms over 1/1 completed
+
+03_exif_orientation6.jpg
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=3[has_rot] 84.2ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=3[has_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 211.2ms
+      median cpu=84.2ms gpu=211.2ms delta=+127.0ms over 1/1 completed
+
+img001.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 184.2ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 188.8ms
+      median cpu=184.2ms gpu=188.8ms delta=+4.6ms over 1/1 completed
+
+img002.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 242.2ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 190.0ms
+      median cpu=242.2ms gpu=190.0ms delta=-52.2ms over 1/1 completed
+
+img003.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 220.2ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 186.5ms
+      median cpu=220.2ms gpu=186.5ms delta=-33.7ms over 1/1 completed
+
+img004.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 243.6ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 212.9ms
+      median cpu=243.6ms gpu=212.9ms delta=-30.7ms over 1/1 completed
+
+img005.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 213.4ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 214.5ms
+      median cpu=213.4ms gpu=214.5ms delta=+1.1ms over 1/1 completed
+
+img006.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 214.7ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 56.9ms
+      median cpu=214.7ms gpu=56.9ms delta=-157.8ms over 1/1 completed
+
+img007.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 182.6ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 183.7ms
+      median cpu=182.6ms gpu=183.7ms delta=+1.1ms over 1/1 completed
+
+img008.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 183.5ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 212.6ms
+      median cpu=183.5ms gpu=212.6ms delta=+29.1ms over 1/1 completed
+
+img009.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 279.2ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 182.3ms
+      median cpu=279.2ms gpu=182.3ms delta=-96.8ms over 1/1 completed
+
+img010.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 211.5ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 212.1ms
+      median cpu=211.5ms gpu=212.1ms delta=+0.6ms over 1/1 completed
+
+## 5 全量 46 张 × 两臂：Intel
+[diags] hw picked decoder=av1 backend=7 hwfmt=171
+[diags] hw picked decoder=av1 backend=7 hwfmt=171
+[diags] hw picked decoder=hevc backend=7 hwfmt=171
+[diags] hw picked decoder=hevc backend=7 hwfmt=171
+PlayerApiVersion: 20  reps=1  adapter=1  interleaved A/B/A  capture=off 64
+
+07a_anim.webp
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] 212.0ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 243.7ms
+      median cpu=212.0ms gpu=243.7ms delta=+31.6ms over 1/1 completed
+
+07b_anim.gif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot][alpha] 210.9ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot][alpha] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 218.3ms
+      median cpu=210.9ms gpu=218.3ms delta=+7.3ms over 1/1 completed
+
+07c_anim.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 214.9ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 212.0ms
+      median cpu=214.9ms gpu=212.0ms delta=-2.8ms over 1/1 completed
+
+07d_anim.avif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot] 274.7ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot] 303.7ms
+      median cpu=274.7ms gpu=303.7ms delta=+29.0ms over 1/1 completed
+
+07e_anim.heic
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=8 rot=4294967295[no_rot] 241.2ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=8 rot=4294967295[no_rot] 277.1ms
+      median cpu=241.2ms gpu=277.1ms delta=+35.8ms over 1/1 completed
+
+10a_dirtyrect_640x480.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 214.0ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 239.1ms
+      median cpu=214.0ms gpu=239.1ms delta=+25.0ms over 1/1 completed
+
+10b_dirtyrect_1920x1080.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 773.7ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 243.4ms
+      median cpu=773.7ms gpu=243.4ms delta=-530.3ms over 1/1 completed
+
+10c_dirtyrect_3840x2160.png
+      cpu  open=1 mode=Cpu  presented=5 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 493.1ms
+      gpu  open=1 mode=Cpu  presented=5 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 494.8ms
+      median cpu=493.1ms gpu=494.8ms delta=+1.7ms over 1/1 completed
+
+10d_dirtyrect_640x480.gif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot][alpha] 242.6ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot][alpha] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 741.0ms
+      median cpu=242.6ms gpu=741.0ms delta=+498.4ms over 1/1 completed
+
+10e_dirtyrect_1920x1080.gif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot][alpha] 217.7ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot][alpha] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 241.3ms
+      median cpu=217.7ms gpu=241.3ms delta=+23.6ms over 1/1 completed
+
+10f_dirtyrect_3840x2160.gif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot][alpha] 283.7ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot][alpha] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No c[diags] hw picked decoder=av1 backend=7 hwfmt=171
+[diags] hw picked decoder=av1 backend=7 hwfmt=171
+[diags] hw picked decoder=av1 backend=7 hwfmt=171
+[diags] hw picked decoder=av1 backend=7 hwfmt=171
+[diags] hw picked decoder=hevc backend=7 hwfmt=171
+[diags] hw picked decoder=hevc backend=7 hwfmt=171
+ompatible hardware decoder was found."} 274.9ms
+      median cpu=283.7ms gpu=274.9ms delta=-8.8ms over 1/1 completed
+
+10g_bitdepth_8bit_640x480.avif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot] 240.3ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot] 278.2ms
+      median cpu=240.3ms gpu=278.2ms delta=+37.9ms over 1/1 completed
+
+10h_bitdepth_10bit_640x480.avif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot] 242.5ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=10 rot=4294967295[no_rot] 307.7ms
+      median cpu=242.5ms gpu=307.7ms delta=+65.2ms over 1/1 completed
+
+01b_srgb_1920x1080.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 778.1ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 280.0ms
+      median cpu=778.1ms gpu=280.0ms delta=-498.1ms over 1/1 completed
+
+01c_srgb_1920x1080.jpg
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 210.6ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 219.8ms
+      median cpu=210.6ms gpu=219.8ms delta=+9.2ms over 1/1 completed
+
+01d_heic_1280x720.heic
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] 243.1ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] 305.3ms
+      median cpu=243.1ms gpu=305.3ms delta=+62.1ms over 1/1 completed
+
+01_srgb_alpha_1920x1080.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] 306.6ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 244.9ms
+      median cpu=306.6ms gpu=244.9ms delta=-61.8ms over 1/1 completed
+
+09b_boundary_16384x64.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 244.8ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 241.8ms
+      median cpu=244.8ms gpu=241.8ms delta=-3.1ms over 1/1 completed
+
+09c_stripe_12000x9000.jpg
+      cpu  open=0 mode=Cpu  presented=1 xfer=0.0ms image_info=n/a error={"result":-6,"message":"Could not decode or render the still image during open.","operation":"open-image"} 6267.0ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 1117.5ms
+      median cpu=-1.0ms gpu=1117.5ms delta=+1118.5ms over 1/0 completed
+      NOTE: arms completed different counts
+
+09d_stripe_huge_17000x4000.jpg
+      cpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_info=n/a error={"result":-7,"message":"The still image is too large to display: 17000x4000 exceeds the limit of 16384 pixels per side.","operation":"open-image-size"} 7479.6ms
+      gpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_info=n/a error={"result":-7,"message":"The still image is too large to display: 17000x4000 exceeds the limit of 16384 pixels per side.","operation":"open-image-size"} 7498.9ms
+      median cpu=-1.0ms gpu=-1.0ms delta=+0.0ms over 0/0 completed
+
+09e_stripe_huge_anim_17000x300.gif
+      cpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_info=n/a error={"result":-6,"message":"Could not decode or render the first frame of the animation during open.","operation":"open-animation"} 7498.0ms
+      gpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_info=n/a error={"result":-6,"message":"Could not decode or render the first frame of the animation during open.","operation":"open-[diags] hw picked decoder=av1 backend=7 hwfmt=171
+[diags] hw picked decoder=av1 backend=7 hwfmt=171
+animation"} 7498.1ms
+      median cpu=-1.0ms gpu=-1.0ms delta=+0.0ms over 0/0 completed
+
+09f_blocks_12000x9000.jpg
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 426.1ms
+      gpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_info=n/a error={"result":-6,"message":"Could not decode or render the still image during open.","operation":"open-image"} 7382.8ms
+      median cpu=426.1ms gpu=-1.0ms delta=-427.1ms over 0/1 completed
+      NOTE: arms completed different counts
+
+09g_bigblocks_12000x9000.jpg
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 395.0ms
+      gpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_info=n/a error={"result":-6,"message":"Could not decode or render the still image during open.","operation":"open-image"} 7381.0ms
+      median cpu=395.0ms gpu=-1.0ms delta=-396.0ms over 0/1 completed
+      NOTE: arms completed different counts
+
+09h_stripe_small_1600x1200.jpg
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 747.6ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 243.6ms
+      median cpu=747.6ms gpu=243.6ms delta=-504.0ms over 1/1 completed
+
+09i_blocks_4000x3000.jpg
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 127.8ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 279.3ms
+      median cpu=127.8ms gpu=279.3ms delta=+151.5ms over 1/1 completed
+
+09_huge_17000x64.png
+      cpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_info=n/a error={"result":-7,"message":"The still image is too large to display: 17000x64 exceeds the limit of 16384 pixels per side.","operation":"open-image-size"} 7467.3ms
+      gpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_info=n/a error={"result":-7,"message":"The still image is too large to display: 17000x64 exceeds the limit of 16384 pixels per side.","operation":"open-image-size"} 7479.9ms
+      median cpu=-1.0ms gpu=-1.0ms delta=+0.0ms over 0/0 completed
+
+11a_16bit_rgb48.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 244.0ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 245.0ms
+      median cpu=244.0ms gpu=245.0ms delta=+1.0ms over 1/1 completed
+
+04_pq_10bit.avif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] 243.4ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] 304.8ms
+      median cpu=243.4ms gpu=304.8ms delta=+61.3ms over 1/1 completed
+
+06_hlg.jxl
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 276.3ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 771.1ms
+      median cpu=276.3ms gpu=771.1ms delta=+494.8ms over 1/1 completed
+
+DHR-CoJ1002.jxr
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] 739.7ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 775.2ms
+      median cpu=739.7ms gpu=775.2ms delta=+35.4ms over 1/1 completed
+
+fh2_fp16.jxr
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] 865.4ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 358.7ms
+      median cpu=865.4ms gpu=358.7ms delta=-50[libjxr @ 00000248d556ac80] jxrlib JPEG XR decode failed (error=-1)\njxrlib JPEG XR decode failed (error=-1)\njxrlib JPEG XR decode failed (error=-1)\njxrlib JPEG XR decode failed (error=-1)\njxrlib JPEG XR decode failed (error=-1)\njxrlib JPEG XR decode failed (error=-1)\njxrlib JPEG XR decode failed (error=-1)\njxrlib JPEG XR decode failed (error=-1)\njxrlib JPEG XR decode failed (error=-1)\njxrlib JPEG XR decode failed (error=-1)\njxrlib JPEG XR decode failed (error=-1)\njxrlib JPEG XR decode failed (error=-1)\nChanging video frame properties on the fly is not supported by all filters.
+[in @ 00000248d5848bc0] filter context - w: 1920 h: 1080 fmt: 2 csp: unknown range: unknown alpha: unspecified chroma_loc: unspecified, incoming frame - w: 1920 h: 1080 fmt: 2 csp: gbr range: pc alpha: unspecified chroma_loc: unspecified pts_time: 0
+[in @ 00000248d58455c0] Changing video frame properties on the fly is not supported by all filters.
+[in @ 00000248d58455c0] filter context - w: 1920 h: 1080 fmt: 2 csp: unknown range: unknown alpha: unspecified chroma_loc: unspecified, incoming frame - w: 1920 h: 1080 fmt: 2 csp: gbr range: pc alpha: unspecified chroma_loc: unspecified pts_time: 0
+[in @ 00000248d58461c0] Changing video frame properties on the fly is not supported by all filters.
+[in @ 00000248d58461c0] filter context - w: 1920 h: 1080 fmt: 2 csp: unknown range: unknown alpha: unspecified chroma_loc: unspecified, incoming frame - w: 1920 h: 1080 fmt: 2 csp: gbr range: pc alpha: unspecified chroma_loc: unspecified pts_time: 0
+[in @ 00000248d5846ac0] Changing video frame properties on the fly is not supported by all filters.
+[in @ 00000248d5846ac0] filter context - w: 1920 h: 1080 fmt: 2 csp: unknown range: unknown alpha: unspecified chroma_loc: unspecified, incoming frame - w: 1920 h: 1080 fmt: 2 csp: gbr range: pc alpha: unspecified chroma_loc: unspecified pts_time: 0
+6.7ms over 1/1 completed
+
+FH4-HDR.jxr
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] 617.6ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 616.7ms
+      median cpu=617.6ms gpu=616.7ms delta=-0.9ms over 1/1 completed
+
+HDColorHDRCalibration.jxr
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] 245.4ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 245.4ms
+      median cpu=245.4ms gpu=245.4ms delta=-0.0ms over 1/1 completed
+
+12a_srgb_1920x1080.jxr
+      cpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_info=n/a error={"result":-5,"message":"Could not decode or render the still image during open.","operation":"open-image"} 7502.5ms
+      gpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_info=n/a error={"result":-5,"message":"Could not decode or render the still image during open.","operation":"open-image"} 7505.7ms
+      median cpu=-1.0ms gpu=-1.0ms delta=+0.0ms over 0/0 completed
+
+02_display_p3_1920x1080.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 994.3ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 468.6ms
+      median cpu=994.3ms gpu=468.6ms delta=-525.7ms over 1/1 completed
+
+03_exif_orientation6.jpg
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=3[has_rot] 861.8ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=3[has_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 376.9ms
+      median cpu=861.8ms gpu=376.9ms delta=-484.8ms over 1/1 completed
+
+img001.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 405.0ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 370.9ms
+      median cpu=405.0ms gpu=370.9ms delta=-34.1ms over 1/1 completed
+
+img002.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 873.1ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 378.2ms
+      median cpu=873.1ms gpu=378.2ms delta=-494.8ms over 1/1 completed
+
+img003.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 405.2ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 407.3ms
+      median cpu=405.2ms gpu=407.3ms delta=+2.1ms over 1/1 completed
+
+img004.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 404.2ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 373.7ms
+      median cpu=404.2ms gpu=373.7ms delta=-30.5ms over 1/1 completed
+
+img005.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 399.9ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 847.9ms
+      median cpu=399.9ms gpu=847.9ms delta=+448.0ms over 1/1 completed
+
+img006.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 750.5ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 372.7ms
+      median cpu=750.5ms gpu=372.7ms delta=-377.8ms over 1/1 completed
+
+img007.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 869.1ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 400.4ms
+      median cpu=869.1ms gpu=400.4ms delta=-468.7ms over 1/1 completed
+
+img008.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 374.0ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 373.6ms
+      median cpu=374.0ms gpu=373.6ms delta=-0.4ms over 1/1 completed
+
+img009.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 837.6ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 746.0ms
+      median cpu=837.6ms gpu=746.0ms delta=-91.6ms over 1/1 completed
+
+img010.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] 373.9ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 372.7ms
+      median cpu=373.9ms gpu=372.7ms delta=-1.2ms over 1/1 completed
+
+## 6 中途定形的关键读数（保留以证因果链，非最终形态）
+### 6a 下载版静图：4:2:2 JPEG 回退修复前 = 0/3 完成（open=0）
+[mjpeg @ 00000194ce1209c0] decoder->cvdl->cuvidCreateDecoder(&decoder->decoder, params) failed -> CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+[mjpeg @ 00000194ce1209c0] Failed setup for format cuda: hwaccel initialisation returned error.
+[mjpeg @ 00000194364fbbc0] decoder->cvdl->cuvidCreateDecoder(&decoder->decoder, params) failed -> CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+[mjpeg @ 00000194364fbbc0] Failed setup for format cuda: hwaccel initialisation returned error.
+[mjpeg @ 00000194364fb800] decoder->cvdl->cuvidCreateDecoder(&decoder->decoder, params) failed -> CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+[mjpeg @ 00000194364fb800] Failed setup for format cuda: hwaccel initialisation returned error.
+[mjpeg @ 00000194ce333980] decoder->cvdl->cuvidCreateDecoder(&decoder->decoder, params) failed -> CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+[mjpeg @ 00000194ce333980] Failed setup for format cuda: hwaccel initialisation returned error.
+can't open file for write !
+
+PlayerApiVersion: 20  reps=3  interleaved A/B/A
+
+j_yuvj444p.jpg
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms 214.8ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=1.4ms 275.5ms
+      median cpu=209.6ms gpu=298.6ms delta=+89.1ms over 3/3 completed
+
+j_yuvj422p.jpg
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms 180.9ms
+      gpu  open=0 mode=Cpu  presented=0 xfer=0.0ms deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"The GPU rejected a video packet: Invalid argument; playback continued with CPU decoding."} error={"result":-5,"message":"Could not decode or render the still image during open.","operation":"open-image"} 7450.2ms
+      median cpu=212.5ms gpu=-1.0ms delta=-213.5ms over 0/3 completed
+      NOTE: arms completed different counts
+
+### 6b 缓存包重投 + flush 之后：3/3 完成
+[mjpeg @ 000002d996382b00] decoder->cvdl->cuvidCreateDecoder(&decoder->decoder, params) failed -> CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+[mjpeg @ 000002d996382b00] Failed setup for format cuda: hwaccel initialisation returned error.
+[mjpeg @ 000002d998d42ac0] decoder->cvdl->cuvidCreateDecoder(&decoder->decoder, params) failed -> CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+[mjpeg @ 000002d998d42ac0] Failed setup for format cuda: hwaccel initialisation returned error.
+[mjpeg @ 000002d992c153c0] decoder->cvdl->cuvidCreateDecoder(&decoder->decoder, params) failed -> CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+[mjpeg @ 000002d992c153c0] Failed setup for format cuda: hwaccel initialisation returned error.
+[mjpeg @ 000002d992c153c0] decoder->cvdl->cuvidCreateDecoder(&decoder->decoder, params) failed -> CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected
+[mjpeg @ 000002d992c153c0] Failed setup for format cuda: hwaccel initialisation returned error.
+can't open file for write !
+PlayerApiVersion: 20  reps=3  interleaved A/B/A
+
+j_yuvj422p.jpg
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms 204.7ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"The GPU rejected a video packet: Invalid argument; playback continued with CPU decoding."} 274.0ms
+      median cpu=182.4ms gpu=274.0ms delta=+91.6ms over 3/3 completed
+
+j_yuvj444p.jpg
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms 186.2ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=1.3ms 276.3ms
+      median cpu=207.9ms gpu=276.3ms delta=+68.4ms over 3/3 completed
+
+01c_srgb_1920x1080.jpg
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms 187.8ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=1.4ms 276.6ms
+      median cpu=207.5ms gpu=276.6ms delta=+69.1ms over 3/3 completed
+
+### 6c 缺陷定位：两臂送进渲染器的帧逐平面 max diff = 0（Y/U/V），呈现却 mean≈0.21
+[diags] still decoded fmt=yuv420p hw=0 cs=2 rng=1 prf=2 trc=2 -> render fmt=yuv420p cs=2 rng=1
+[diags] hw picked decoder=hevc backend=7 hwfmt=171
+[diags] still decoded fmt=d3d11 hw=1 cs=2 rng=1 prf=2 trc=2 -> render fmt=nv12 cs=2 rng=1
+[diags] still decoded fmt=yuv420p hw=0 cs=2 rng=1 prf=2 trc=2 -> render fmt=yuv420p cs=2 rng=1
+[diags] hw picked decoder=hevc backend=7 hwfmt=171
+[diags] still decoded fmt=d3d11 hw=1 cs=2 rng=1 prf=2 trc=2 -> render fmt=nv12 cs=2 rng=1
+PlayerApiVersion: 20  reps=1  adapter=0  interleaved A/B/A  capture=4
+
+01d_heic_1280x720.heic
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] pixels=469,248 891x501 bit=8 209.1ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=3.8ms frames=1 rot=4294967295[no_rot] pixels=469,248 891x501 bit=8 217.8ms
+      median cpu=209.1ms gpu=217.8ms delta=+8.7ms over 1/1 completed
+      cpu-vs-gpu presented pixels: 4 x 4 bit=8/8 max|d|=0.960784 (B) mean=0.2104167  cpu=(1.0000,1.0000,0.9608) gpu=(0.0980,1.0000,0.0000)
+01d_heic_1280x720.heic
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] pixels=447,226 891x501 bit=8 206.6ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] pixels=447,226 891x501 bit=8 210.6ms
+      cpu-vs-gpu presented pixels: 48 x 48 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.5294,0.4941,0.4353) gpu=(0.5294,0.4941,0.4353)
+h_7680x4320.mp4
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] pixels=447,226 891x501 bit=8 311.0ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] pixels=447,226 891x501 bit=8 274.3ms
+
+### 6d 外部真值：ffmpeg -hwaccel d3d11va + hwdownload 与软解中心均色相同
+[diags] still decoded fmt=yuv420p hw=0 cs=2 rng=1 prf=2 trc=2 -> render fmt=yuv420p cs=2 rng=1 1280x720 ls=1280,640,640 site=1 icc=0 md=0 sd0=0 sar=0/1
+[diags] still decoded fmt=d3d11 hw=1 cs=2 rng=1 prf=2 trc=2 -> render fmt=nv12 cs=2 rng=1 1280x720 ls=1280,1280,0 site=1 icc=0 md=0 sd0=0 sar=0/1
+[diags] still decoded fmt=yuv420p hw=0 cs=2 rng=1 prf=2 trc=2 -> render fmt=yuv420p cs=2 rng=1 1280x720 ls=1280,640,640 site=1 icc=0 md=0 sd0=0 sar=0/1
+[diags] still decoded fmt=d3d11 hw=1 cs=2 rng=1 prf=2 trc=2 -> render fmt=nv12 cs=2 rng=1 1280x720 ls=1280,1280,0 site=1 icc=0 md=0 sd0=0 sar=0/1
+[diags] still decoded fmt=yuv420p hw=0 cs=2 rng=1 prf=2 trc=2 -> render fmt=yuv420p cs=2 rng=1 7680x4320 ls=7680,3840,3840 site=1 icc=0 md=0 sd0=1 sar=1/1
+[diags] still decoded fmt=d3d11 hw=1 cs=2 rng=1 prf=2 trc=2 -> render fmt=nv12 cs=2 rng=1 7680x4320 ls=7680,7680,0 site=1 icc=0 md=0 sd0=1 sar=1/1
+[diags] still decoded fmt=yuv420p hw=0 cs=2 rng=1 prf=2 trc=2 -> render fmt=yuv420p cs=2 rng=1 7680x4320 ls=7680,3840,3840 site=1 icc=0 md=0 sd0=1 sar=1/1
+[diags] still decoded fmt=d3d11 hw=1 cs=2 rng=1 prf=2 trc=2 -> render fmt=nv12 cs=2 rng=1 7680x4320 ls=7680,7680,0 site=1 icc=0 md=0 sd0=1 sar=1/1
+[diags] still decoded fmt=yuv420p10le hw=0 cs=9 rng=1 prf=9 trc=16 -> render fmt=yuv420p10le cs=9 rng=1 1920x1080 ls=3840,1920,1920 site=0 icc=0 md=0 sd0=0 sar=1/1
+[diags] still decoded fmt=d3d11 hw=1 cs=9 rng=1 prf=9 trc=16 -> render fmt=p010le cs=9 rng=1 1920x1080 ls=3840,3840,0 site=0 icc=0 md=0 sd0=0 sar=1/1
+[diags] still decoded fmt=yuv420p10le hw=0 cs=9 rng=1 prf=9 trc=16 -> render fmt=yuv420p10le cs=9 rng=1 1920x1080 ls=3840,1920,1920 site=0 icc=0 md=0 sd0=0 sar=1/1
+[diags] still decoded fmt=d3d11 hw=1 cs=9 rng=1 prf=9 trc=16 -> render fmt=p010le cs=9 rng=1 1920x1080 ls=3840,3840,0 site=0 icc=0 md=0 sd0=0 sar=1/1
+[diags] still decoded fmt=yuv420p hw=0 cs=2 rng=1 prf=2 trc=2 -> render fmt=yuv420p cs=2 rng=1 3840x2160 ls=3840,1920,1920 site=0 icc=0 md=0 sd0=0 sar=1/1
+[diags] still decoded fmt=d3d11 hw=1 cs=2 rng=1 prf=2 trc=2 -> render fmt=nv12 cs=2 rng=1 3840x2160 ls=3840,3840,0 site=0 icc=0 md=0 sd0=0 sar=1/1
+[diags] still decoded fmt=yuv420p hw=0 cs=2 rng=1 prf=2 trc=2 -> render fmt=yuv420p cs=2 rng=1 3840x2160 ls=3840,1920,1920 site=0 icc=0 md=0 sd0=0 sar=1/1
+[diags] still decoded fmt=d3d11 hw=1 cs=2 rng=1 prf=2 trc=2 -> render fmt=nv12 cs=2 rng=1 3840x2160 ls=3840,3840,0 site=0 icc=0 md=0 sd0=0 sar=1/1
+01d_heic_1280x720.heic
+      cpu-vs-gpu presented pixels: 8 x 8 bit=8/8 max|d|=1.000000 (R) mean=0.2168199  cpu=(1.0000,0.8902,0.6549) gpu=(0.0000,1.0000,0.0000)
+h_7680x4320.mp4
+      cpu-vs-gpu presented pixels: 8 x 8 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(1.0000,0.9412,0.0000) gpu=(1.0000,0.9412,0.0000)
+04_pq_10bit.avif
+      cpu-vs-gpu presented pixels: 8 x 8 bit=10/10 max|d|=0.852395 (G) mean=0.0730465  cpu=(0.0000,0.0000,0.0000) gpu=(0.0000,0.8524,0.0000)
+m_3840x2160.avif
+      cpu-vs-gpu presented pixels: 8 x 8 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(1.0000,0.9412,0.0000) gpu=(1.0000,0.9412,0.0000)
+
+## 7 §7 元数据回归读数（GetImageInfo 源格式）
+01d_heic_1280x720.heic
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=0 srcbitdepth=8 213.3ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=171 srcbitdepth=8 241.5ms
+04_pq_10bit.avif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=62 srcbitdepth=10 238.6ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=171 srcbitdepth=8 244.1ms
+01_srgb_alpha_1920x1080.png
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] srcpixfmt=26 srcbitdepth=8 244.7ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] srcpixfmt=26 srcbitdepth=8 deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 245.5ms
+01c_srgb_1920x1080.jpg
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] srcpixfmt=12 srcbitdepth=8 212.9ms
+      gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] srcpixfmt=12 srcbitdepth=8 deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} 212.6ms

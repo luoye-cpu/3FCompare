@@ -100,13 +100,36 @@ internal static partial class DxgiOutputInfo
     private const int SltGetDesc = 8;         // IDXGIAdapter::GetDesc（IUnknown 0..2 + Object 3..6 + EnumOutputs 7）
     private const int SltGetDesc1 = 27;       // IDXGIOutput6::GetDesc1（实测确认，见上方说明）
 
-    /// <summary>DXGI_ADAPTER_DESC 大小（字节）：WCHAR[128] 描述 + 4 个 UINT + 3 个 SIZE_T + LUID。</summary>
-    private const int AdapterDescSize = 256 + 4 * 4 + 3 * 8 + 8;
-    /// <summary>DXGI_ADAPTER_DESC 内各字段的字节偏移（256 描述 + 4×UINT + 3×SIZE_T + LUID）。</summary>
+    /// <summary>DXGI_ADAPTER_DESC 大小（字节）：WCHAR[128] 描述 + 4 个 UINT + 3 个 SIZE_T + LUID。
+    ///
+    /// <para><b>为什么不再写死 <c>3 * 8</c>（ARM 前瞻准备，docs/51 §三）</b>：原实现把
+    /// <c>sizeof(SIZE_T)</c> 手算成 8 并烘进 <c>const</c>（注释里也直说是"3 个 SIZE_T"）。
+    /// 这在 x64 与 ARM64 上都恰好正确（两者指针都是 8 字节），**属于"靠巧合正确"**：
+    /// 它把一个**随指针宽度变化**的量表达成了**架构无关的常量**，一旦将来出现 32 位目标
+    /// 或结构体调整，就会静默读到错位的字段（`Marshal.ReadInt64` 读一个 4 字节字段）。
+    /// 现改为由 <see cref="IntPtr.Size"/> 推导 —— 语义与原生布局一一对应，且不再依赖巧合。</para>
+    ///
+    /// <para><b>⚠ 光有偏移同源还不够</b>：读点的<b>宽度</b>也必须同源，否则 32 位目标上"偏移对、
+    /// 读宽错"（8 字节读一个 4 字节的 <c>SIZE_T</c>）会以另一种形态静默读错位。
+    /// <see cref="ReadAdapterDesc"/> 里 <c>DedicatedVideoMemory</c> 走
+    /// <c>Marshal.ReadIntPtr</c>（宽度 ≡ <c>IntPtr.Size</c>），单测
+    /// <c>DxgiAdapterDescLayoutTests</c> 拿 SDK 头的镜像结构把这两条一起钉住。</para>
+    ///
+    /// <para>其余各字段偏移同样以 <c>IntPtr.Size</c> 表达；<c>OffVendorId</c>/<c>OffDeviceId</c>
+    /// 位于 3 个 SIZE_T **之前**，与指针宽度无关，故仍为字面量（并在下方标注依据）。</para></summary>
+    private static readonly int SizeOfSizeT = IntPtr.Size;
+
+    /// <summary>DXGI_ADAPTER_DESC 总大小（用于 <c>Marshal.AllocHGlobal</c>）。</summary>
+    private static readonly int AdapterDescSize = 256 + 4 * 4 + 3 * SizeOfSizeT + 8;
+
+    /// <summary>Description 之后的第一个 UINT（VendorId）：WCHAR[128] = 256 字节，与指针宽度无关。</summary>
     private const int OffVendorId = 256;
+    /// <summary>DeviceId 紧跟 VendorId。</summary>
     private const int OffDeviceId = 260;
-    private const int OffDedicatedVideoMemory = 256 + 16;
-    private const int OffAdapterLuid = 256 + 16 + 3 * 8;
+    /// <summary>DedicatedVideoMemory：紧随 4 个 UINT（VendorId/DeviceId/SubSysId/Revision）之后。</summary>
+    private static readonly int OffDedicatedVideoMemory = 256 + 4 * 4;
+    /// <summary>AdapterLuid：3 个 SIZE_T 之后（Dedicated/Shared SystemMemory 各占一个 SIZE_T）。</summary>
+    private static readonly int OffAdapterLuid = 256 + 4 * 4 + 3 * SizeOfSizeT;
 
     /// <summary>枚举硬上限 = 16，与内核 `preferredAdapterIndex` 的合法区间 **-1..15** 对齐
     /// （`PlayerApi.cpp` 只收 -1..15，越界即 InvalidArgument）。
@@ -324,22 +347,7 @@ internal static partial class DxgiOutputInfo
                     try
                     {
                         if (Vt<GetAdapterDescD>(adapter, SltGetDesc)(adapter, pDesc) < 0) continue;
-                        // Description 为 WCHAR[128]，不保证以 '\0' 结尾 ⇒ 手工截断
-                        var raw = Marshal.PtrToStringUni(pDesc, 128) ?? string.Empty;
-                        var nul = raw.IndexOf('\0');
-                        var name = (nul >= 0 ? raw[..nul] : raw).Trim();
-                        var dedicated = (ulong)Marshal.ReadInt64(pDesc, OffDedicatedVideoMemory);
-                        var luidLow = (uint)Marshal.ReadInt32(pDesc, OffAdapterLuid);
-                        var luidHigh = Marshal.ReadInt32(pDesc, OffAdapterLuid + 4);
-                        result.Add(new AdapterDescriptor
-                        {
-                            Index = (int)ai,
-                            Description = name,
-                            DedicatedVideoMemory = dedicated,
-                            VendorId = (uint)Marshal.ReadInt32(pDesc, OffVendorId),
-                            DeviceId = (uint)Marshal.ReadInt32(pDesc, OffDeviceId),
-                            AdapterLuid = ((long)luidHigh << 32) | luidLow,
-                        });
+                        result.Add(ReadAdapterDesc(pDesc, (int)ai));
                     }
                     finally
                     {
@@ -363,6 +371,39 @@ internal static partial class DxgiOutputInfo
         }
 
         return result;
+    }
+
+    /// <summary>将 <c>GetDesc</c> 写进 <paramref name="pDesc"/> 的 <c>DXGI_ADAPTER_DESC</c> 解成托管形态。
+    /// 从 <see cref="EnumerateAdapters"/> 里抽出来，是为了让"偏移 + 读宽"这一对能被单测直接驱动
+    /// （见 <c>DxgiAdapterDescLayoutTests</c>：拿一份由 CLR 布局引擎摆出来的镜像结构灌进非托管缓冲区，
+    /// 再逐项比回来）。</summary>
+    ///
+    /// <para><b>RA-05：SIZE_T 字段的读宽跟 <c>IntPtr.Size</c> 走</b>。上面那组偏移早已改成由
+    /// <see cref="SizeOfSizeT"/> 推导，但读点本身还写死 <c>Marshal.ReadInt64</c>（8 字节）
+    /// ——偏移对、读宽错，正是 <see cref="AdapterDescSize"/> 的注释点名的"静默读到错位的字段"
+    /// （32 位目标下 <c>DedicatedVideoMemory</c> 只占 4 字节，8 字节读会把高 4 字节当成下一个
+    /// <c>SIZE_T</c> 的低半读进来）。这里用 <see cref="Marshal.ReadIntPtr(nint, int)"/>，
+    /// 它的宽度恒等于 <c>IntPtr.Size</c> ≡ <c>sizeof(SIZE_T)</c> ⇒ 读宽与偏移同源，
+    /// 不再依赖"x64/ARM64 上恰好是 8"这个巧合；与本文件 <see cref="DXGI_OUTPUT_DESC1_RAW"/>
+    /// 用 <c>nint Monitor</c> 表达原生指针成员的做法一致。</para></summary>
+    internal static AdapterDescriptor ReadAdapterDesc(nint pDesc, int index)
+    {
+        // Description 为 WCHAR[128]，不保证以 '\0' 结尾 ⇒ 手工截断
+        var raw = Marshal.PtrToStringUni(pDesc, 128) ?? string.Empty;
+        var nul = raw.IndexOf('\0');
+        var name = (nul >= 0 ? raw[..nul] : raw).Trim();
+        var dedicated = unchecked((ulong)Marshal.ReadIntPtr(pDesc, OffDedicatedVideoMemory));
+        var luidLow = (uint)Marshal.ReadInt32(pDesc, OffAdapterLuid);
+        var luidHigh = Marshal.ReadInt32(pDesc, OffAdapterLuid + 4);
+        return new AdapterDescriptor
+        {
+            Index = index,
+            Description = name,
+            DedicatedVideoMemory = dedicated,
+            VendorId = (uint)Marshal.ReadInt32(pDesc, OffVendorId),
+            DeviceId = (uint)Marshal.ReadInt32(pDesc, OffDeviceId),
+            AdapterLuid = ((long)luidHigh << 32) | luidLow,
+        };
     }
 }
 

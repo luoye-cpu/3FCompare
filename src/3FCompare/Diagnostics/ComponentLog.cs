@@ -34,6 +34,10 @@ public static class Comp
     public const string Env = "Env";
     /// <summary>崩溃钩子自身（仅由本类写入）。</summary>
     public const string Crash = "Crash";
+    /// <summary>自动化验收点边界（<c>UnitBegin</c>/<c>UnitDone</c>/<c>UnitFail</c>），
+    /// 只在 <c>--selftest</c> / <c>--comparemodetest</c> 这类验收档里写；产品交互路径不产生该组件的事件。
+    /// 加它的理由见 <c>MainWindow.SelfTest.StepAsync</c>：崩溃带要能换算成"哪个验收点"。</summary>
+    public const string Test = "Test";
 }
 
 /// <summary>
@@ -231,7 +235,7 @@ public static class ComponentLog
                                 $"PID={Environment.ProcessId} ══════════", flush: true);
                 WriteLineLocked($"文件={Path.GetFileName(_path)} 组件词表=" +
                                 $"{Comp.Engine}/{Comp.Surface}/{Comp.Render}/{Comp.Sync}/" +
-                                $"{Comp.Overlay}/{Comp.Capture}/{Comp.Theme}/{Comp.Settings}/{Comp.Env}",
+                                $"{Comp.Overlay}/{Comp.Capture}/{Comp.Theme}/{Comp.Settings}/{Comp.Env}/{Comp.Test}",
                                 flush: true);
             }
             catch

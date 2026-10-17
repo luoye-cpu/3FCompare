@@ -49,6 +49,21 @@ public static partial class NativeRuntime
                         ? "FFF.Native.dll 与内嵌资源一致，保留磁盘版本（不写盘）"
                         : "FFF.Native.dll 与内嵌资源不一致；按约定保留磁盘版本（内核由构建脚本管理，" +
                           "内嵌资源仅作缺失兜底）。若需更新内核请重跑 构建全部.ps1");
+                // 架构守卫（docs/51 §二）：上面的"保留磁盘版本"策略在**跨架构**场景下会失效 ——
+                // 磁盘上那份可能是**另一个架构**的包留下的残留，既不缺也不报错，只在 Delay-Load
+                // 或首次会话创建时失败。此处显式核对 PE 机器类型，错配就留下**可归因**的日志。
+                // 注意：这里**不抛**（与 Program.ExtractEmbedded 的 4 个托管原生库不同）——
+                // 内核缺失/错配已有既定的降级路径（EngineFactory 回落演示模式，见 EngineFactory.cs），
+                // 在此抛出会把"可降级"变成"启动失败"。留痕交给 引擎探测 + 下方 Warn。
+                var kernelMachine = NativeArchGuard.ReadMachineFromFile(targetPath);
+                if (!NativeArchGuard.IsLoadableByCurrentProcess(kernelMachine))
+                {
+                    Diagnostics.AppLog.Error("NativeRuntime",
+                        $"FFF.Native.dll 架构不匹配：磁盘上是 {NativeArchGuard.Describe(kernelMachine)}，" +
+                        $"当前进程是 {NativeArchGuard.DescribeProcess()}（{targetPath}）。" +
+                        "真实内核将不可用；请删除该文件后重启，或改用与当前架构一致的发布包。" +
+                        "（这是**跨架构残留**的典型症状，docs/51 §二）");
+                }
                 return;
             }
 
@@ -490,11 +505,26 @@ public static partial class NativeRuntime
         }
     }
 
-    /// <summary>目录中是否含 avcodec 核心 DLL。</summary>
+    /// <summary>目录中是否含 avcodec 核心 DLL。
+    /// <para><b>架构守卫（docs/51 §二）</b>：过去只按文件名匹配，于是 ARM64 进程会把一个
+    /// **x64 的 FFmpeg 目录**判定为"可用"，然后在 Delay-Load 时以
+    /// <c>BadImageFormatException</c> / 加载失败告终（表现为静默回落演示模式，原因指向错误的方向）。
+    /// 现在额外要求**至少一个</b> <c>avcodec*.dll</c> 的 PE 机器类型与当前进程相容；
+    /// 一个都读不出（加壳等非常规产出）时按旧行为放行，避免误伤。</para></summary>
     private static bool HasAvcodec(string dir)
-        => Directory.Exists(dir) &&
-           (Directory.GetFiles(dir, "avcodec-*.dll").Length > 0
-            || Directory.GetFiles(dir, "avcodec*.dll").Length > 0);
+    {
+        if (!Directory.Exists(dir)) return false;
+        var candidates = Directory.GetFiles(dir, "avcodec-*.dll")
+            .Concat(Directory.GetFiles(dir, "avcodec*.dll"))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (candidates.Length == 0) return false;
+        // 只要有一个是**本架构可加载**的，就算这个目录可用：
+        // 目录里同时躺着两种架构时，内核的 Delay-Load 会各自命中自己那份（见 docs/51 §4 的整改建议），
+        // 这里不因为"存在错配的那份"就整体否掉一个本来能用的目录。
+        return candidates.Any(path =>
+            NativeArchGuard.IsLoadableByCurrentProcess(NativeArchGuard.ReadMachineFromFile(path)));
+    }
 
     /// <summary>子目录存在且含 avcodec 时，把该子目录加入 DLL 搜索路径（SetDllDirectory），
     /// 返回 true 并输出子目录绝对路径；否则返回 false。</summary>
@@ -507,17 +537,35 @@ public static partial class NativeRuntime
         return true;
     }
 
-    /// <summary>验证目录是否包含 FFmpeg 核心 DLL（avcodec-*.dll）。</summary>
+    /// <summary>验证目录是否包含 FFmpeg 核心 DLL（avcodec-*.dll）。
+    /// <para><b>架构守卫（docs/51 §二）</b>：目录里有 avcodec 但**架构不对**时，过去会返回"有效"，
+    /// 于是用户在设置里看到绿灯、实际打开视频却回落演示模式——原因完全不指向"位数不对"。
+    /// 现在把这种情况作为一条明确的拒绝理由返回（措辞里直接给出"该用什么架构"）。</para></summary>
     public static string? ValidateFfmpegDirectory(string? directory)
     {
         if (string.IsNullOrWhiteSpace(directory)) return "目录为空";
         var dir = directory.Trim();
         if (!Directory.Exists(dir)) return "目录不存在";
-        var match = Directory.GetFiles(dir, "avcodec-*.dll").FirstOrDefault()
-            ?? Directory.GetFiles(dir, "avcodec*.dll").FirstOrDefault();
-        if (match is null)
+        var candidates = Directory.GetFiles(dir, "avcodec-*.dll")
+            .Concat(Directory.GetFiles(dir, "avcodec*.dll"))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (candidates.Length == 0)
             return "目录中未找到 avcodec DLL（请选择包含 bin 的 FFmpeg 目录）";
-        return null; // 有效
+
+        if (candidates.Any(path =>
+                NativeArchGuard.IsLoadableByCurrentProcess(NativeArchGuard.ReadMachineFromFile(path))))
+        {
+            return null; // 有效
+        }
+
+        // 一个能用的都没有 ⇒ 全部错配。把实际读到的架构写进提示，避免用户反复换目录却换汤不换药。
+        var found = string.Join("、", candidates
+            .Select(path => NativeArchGuard.Describe(NativeArchGuard.ReadMachineFromFile(path)))
+            .Distinct());
+        return $"目录中的 avcodec DLL 架构为 {found}，当前进程是 " +
+               $"{NativeArchGuard.DescribeProcess()} —— 需要与程序架构一致的一组 FFmpeg DLL" +
+               $"（Windows on Arm 请取 winarm64 构建，见 docs/51）";
     }
 
     /// <summary>探测：设置目录后是否能让 FFF.Native 加载成功。</summary>

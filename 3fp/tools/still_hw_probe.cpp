@@ -1,0 +1,432 @@
+// 静图硬解探针：配对量"打开一张静态图"在 Cpu / Gpu 两种配置下的耗时与解码模式读数。
+//
+// 为什么需要：进程外的 ffmpeg -benchmark 量的是"新进程 + 新建 D3D11 设备"，而内核
+// 复用渲染器已有的设备（VideoRenderer::CreateD3D11HardwareDeviceContext），两者不可比。
+// 两臂必须**交错**跑：先跑完一整轮 Cpu 再跑 Gpu，会把"第二个臂更慢"的进程内漂移
+// 误读成硬解成本（实测这样能把同一分支的差值抬到 +150ms）。
+//
+// 用法：still_hw_probe [--reps N] <媒体路径> [<媒体路径> ...]
+// 构建：python tools/build_probe.py still_hw_probe
+// 运行：3fp/build/still_hw_probe.exe（FFF.Native.dll 与 FFmpeg DLL 须在同目录）
+
+#include <windows.h>
+
+#include <dxgi1_2.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+
+#include "3FP/Api/FFF.Player.Api.h"
+
+namespace {
+
+// Adapter enumeration must match the kernel's own policy: it documents
+// preferredAdapterIndex against IDXGIFactory1::EnumAdapters1, so the probe enumerates
+// through the same call and never through WMI/PCI ordering.
+void ListAdapters() {
+    IDXGIFactory1* factory = nullptr;
+    if (CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory)) != S_OK ||
+        factory == nullptr) {
+        std::printf("CreateDXGIFactory1 failed\n");
+        return;
+    }
+    for (UINT index = 0;; ++index) {
+        IDXGIAdapter1* adapter = nullptr;
+        if (factory->EnumAdapters1(index, &adapter) == DXGI_ERROR_NOT_FOUND) break;
+        DXGI_ADAPTER_DESC1 desc{};
+        adapter->GetDesc1(&desc);
+        std::printf("  [%u] vendor=0x%04X device=0x%04X vram=%lluMB flags=0x%X %ls\n", index,
+            desc.VendorId, desc.DeviceId,
+            static_cast<unsigned long long>(desc.DedicatedVideoMemory / (1024ull * 1024)),
+            desc.Flags, desc.Description);
+        adapter->Release();
+    }
+    factory->Release();
+}
+
+struct ArmState {
+    bool openCompleted = false;
+    char deviceChanged[512] = {};
+    char error[512] = {};
+};
+ArmState g_arm;
+
+void __cdecl OnEvent(void*, FFF3FPEvent type, const char* detail) {
+    if (type == FFF3FPEvent::OpenCompleted) g_arm.openCompleted = true;
+    if (type == FFF3FPEvent::DeviceChanged && detail != nullptr) {
+        std::strncpy(g_arm.deviceChanged, detail, sizeof(g_arm.deviceChanged) - 1);
+    }
+    if (type == FFF3FPEvent::Error && detail != nullptr) {
+        std::strncpy(g_arm.error, detail, sizeof(g_arm.error) - 1);
+    }
+}
+
+LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    return DefWindowProcW(window, message, wparam, lparam);
+}
+
+void PumpMessages(const int milliseconds) {
+    const auto start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(milliseconds)) {
+        MSG msg{};
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(1);
+    }
+}
+
+const char* ModeName(const FFF3FPDecodeMode mode) {
+    switch (mode) {
+    case FFF3FPDecodeMode::Cpu: return "Cpu";
+    case FFF3FPDecodeMode::Gpu: return "Gpu";
+    case FFF3FPDecodeMode::Unspecified: return "Unspecified";
+    default: return "?";
+    }
+}
+
+int g_adapterIndex = -1;
+bool g_capturePixels = false;
+bool g_playVideo = false;
+std::uint32_t g_captureSize = 64;
+std::string g_outDir;
+std::string g_captureTag;
+
+struct OpenResult {
+    bool completed = false;
+    double ms = 0.0;
+    FFF3FPDecodeMode mode = FFF3FPDecodeMode::Unspecified;
+    std::uint64_t presented = 0;
+    std::uint64_t transfer100ns = 0;
+    std::uint32_t rotation = 0xFFFFFFFFu;
+    std::uint32_t flags = 0;
+    std::int32_t frameCount = -1;
+    std::int32_t infoPixelFormat = -1;
+    std::uint32_t infoBitDepth = 0;
+    bool hasImageInfo = false;
+    bool hasPixels = false;
+    std::uint32_t destX = 0, destY = 0, destW = 0, destH = 0, bitDepth = 0;
+    std::vector<float> pixels;
+    char deviceChanged[512] = {};
+    char error[512] = {};
+};
+
+OpenResult OpenOnce(FFF3FPHandle player, const std::string& path) {
+    g_arm = ArmState{};
+    const auto start = std::chrono::steady_clock::now();
+    const auto result = FFF3FP_Open(player, path.c_str());
+    OpenResult outcome;
+    if (result != FFFResult::Success) {
+        std::snprintf(outcome.error, sizeof(outcome.error), "FFF3FP_Open=%d", static_cast<int>(result));
+        return outcome;
+    }
+    for (int i = 0; i < 240 && !g_arm.openCompleted; ++i) PumpMessages(25);
+    outcome.ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+    outcome.completed = g_arm.openCompleted;
+    // A video presents nothing at open time, so the pixel comparison would read an
+    // empty target. With --play, start it, wait for the first presented frame and
+    // pause again; the snapshot below is then re-read so presented/transfer reflect
+    // the frame actually captured.
+    if (g_playVideo) {
+        FFF3FPSnapshot pre{};
+        pre.size = sizeof(pre);
+        pre.version = FFF3FP_GetApiVersion();
+        auto needsPlay = false;
+        if (FFF3FP_GetSnapshot(player, &pre) == FFFResult::Success)
+            needsPlay = pre.presentedVideoFrames == 0;
+        if (needsPlay) {
+            FFF3FP_Play(player);
+            for (int i = 0; i < 200; ++i) {
+                PumpMessages(20);
+                FFF3FPSnapshot tick{};
+                tick.size = sizeof(tick);
+                tick.version = FFF3FP_GetApiVersion();
+                if (FFF3FP_GetSnapshot(player, &tick) == FFFResult::Success &&
+                    tick.presentedVideoFrames > 0) break;
+            }
+            FFF3FP_Pause(player);
+            PumpMessages(80);
+        }
+    }
+    FFF3FPSnapshot snapshot{};
+    snapshot.size = sizeof(snapshot);
+    snapshot.version = FFF3FP_GetApiVersion();
+    if (FFF3FP_GetSnapshot(player, &snapshot) == FFFResult::Success) {
+        outcome.mode = snapshot.decodeMode;
+        outcome.presented = snapshot.presentedVideoFrames;
+        outcome.transfer100ns = snapshot.hardwareTransfer100ns;
+    }
+    std::strncpy(outcome.deviceChanged, g_arm.deviceChanged, sizeof(outcome.deviceChanged) - 1);
+    std::strncpy(outcome.error, g_arm.error, sizeof(outcome.error) - 1);
+    FFF3FPImageInfo info{};
+    info.size = sizeof(info);
+    info.version = FFF3FP_GetApiVersion();
+    if (FFF3FP_GetImageInfo(player, &info) == FFFResult::Success) {
+        outcome.hasImageInfo = true;
+        outcome.rotation = info.rotationQuarterTurns;
+        outcome.flags = info.flags;
+        outcome.frameCount = info.frameCount;
+        outcome.infoPixelFormat = info.sourcePixelFormat;
+        outcome.infoBitDepth = info.sourceBitDepth;
+    }
+    if (g_capturePixels && outcome.completed) {
+        FFF3FPRenderTargetInfo target{};
+        target.size = sizeof(target);
+        target.version = FFF3FP_GetApiVersion();
+        const auto targetResult = FFF3FP_GetRenderTargetInfo(player, &target);
+        if (targetResult != FFFResult::Success) {
+            std::printf("      render target info unavailable (%d)\n", static_cast<int>(targetResult));
+        } else if (target.destWidth < g_captureSize || target.destHeight < g_captureSize) {
+            std::printf("      pixel capture skipped (dest=%ux%u)\n",
+                target.destWidth, target.destHeight);
+        } else {
+            // Centre of the drawn video rect only: everything outside it is letterbox and
+            // would match trivially, hiding a decode or colour-order error.
+            const auto x = target.destX + (target.destWidth - g_captureSize) / 2;
+            const auto y = target.destY + (target.destHeight - g_captureSize) / 2;
+            outcome.destX = x; outcome.destY = y;
+            outcome.destW = target.destWidth; outcome.destH = target.destHeight;
+            outcome.pixels.assign(static_cast<std::size_t>(g_captureSize) * g_captureSize * 4, 0.0f);
+            std::uint32_t bitDepth = 0;
+            const auto read = FFF3FP_ReadVideoPixelRegion(player, x, y, g_captureSize, g_captureSize,
+                outcome.pixels.data(), static_cast<std::uint32_t>(outcome.pixels.size()), &bitDepth);
+            outcome.hasPixels = read == FFFResult::Success;
+            outcome.bitDepth = bitDepth != 0 ? bitDepth : target.outputBitDepth;
+            if (!outcome.hasPixels) {
+                std::printf("      ReadVideoPixelRegion failed (%d)\n", static_cast<int>(read));
+                outcome.pixels.clear();
+            }
+        }
+    }
+    FFF3FP_Close(player);
+    PumpMessages(20);
+    return outcome;
+}
+
+FFF3FPHandle CreatePlayer(HWND window, const FFF3FPDecodeMode mode) {
+    FFF3FPConfiguration configuration{};
+    configuration.size = sizeof(configuration);
+    configuration.version = FFF3FP_GetApiVersion();
+    configuration.outputWindow = window;
+    configuration.decodeMode = mode;
+    configuration.colorMode = FFF3FPColorMode::MapToSdr;
+    configuration.sdrPeakNits = 100.0f;
+    configuration.hdrPeakNits = 0.0f;
+    configuration.sdrPaperWhiteNits = 203.0f;
+    configuration.videoScalingQuality = FFF3FPVideoScalingQuality::HighQuality;
+    configuration.forceHdrOutput = 0u;
+    configuration.preferredAdapterIndex = g_adapterIndex;
+    configuration.eventCallback = &OnEvent;
+    FFF3FPHandle player = nullptr;
+    if (FFF3FP_Create(&configuration, &player) != FFFResult::Success) return nullptr;
+    return player;
+}
+
+double Median(std::vector<double> values) {
+    if (values.empty()) return -1.0;
+    std::sort(values.begin(), values.end());
+    return values[values.size() / 2];
+}
+
+const char* BaseName(const std::string& path) {
+    const auto slash = path.find_last_of("/\\");
+    return slash == std::string::npos ? path.c_str() : path.c_str() + slash + 1;
+}
+
+void Report(const char* label, const OpenResult& result) {
+    std::printf("      %-4s open=%d mode=%-4s presented=%llu xfer=%.1fms", label,
+        result.completed ? 1 : 0, ModeName(result.mode),
+        static_cast<unsigned long long>(result.presented),
+        static_cast<double>(result.transfer100ns) / 10000.0);
+    if (result.hasImageInfo) {
+        std::printf(" frames=%d rot=%u%s%s srcpixfmt=%d srcbitdepth=%u", result.frameCount, result.rotation,
+            (result.flags & FFF3FP_IMAGE_FLAG_HAS_ROTATION) ? "[has_rot]" : "[no_rot]",
+            (result.flags & FFF3FP_IMAGE_FLAG_HAS_ALPHA) ? "[alpha]" : "",
+            result.infoPixelFormat, result.infoBitDepth);
+    } else {
+        std::printf(" image_info=n/a");
+    }
+    if (result.deviceChanged[0] != '\0') std::printf(" deviceChanged=%s", result.deviceChanged);
+    if (result.error[0] != '\0') std::printf(" error=%s", result.error);
+    if (result.hasPixels) {
+        std::printf(" pixels=%u,%u %ux%u bit=%u", result.destX, result.destY,
+            result.destW, result.destH, result.bitDepth);
+    }
+    std::printf(" %.1fms\n", result.ms);
+}
+
+void DumpPixels(const std::string& name, const OpenResult& result) {
+    if (!result.hasPixels || g_outDir.empty()) return;
+    const auto path = g_outDir + "/" + name + ".bin";
+    FILE* file = std::fopen(path.c_str(), "wb");
+    if (file == nullptr) { std::printf("      dump failed: %s\n", path.c_str()); return; }
+    // Header carries the geometry so a cross-run comparison can prove it sampled the
+    // same rect at the same bit depth before treating a delta as a decode difference.
+    const std::uint32_t header[6] = { g_captureSize, result.destX, result.destY,
+        result.destW, result.destH, result.bitDepth };
+    std::fwrite(header, sizeof(std::uint32_t), 6, file);
+    std::fwrite(result.pixels.data(), sizeof(float), result.pixels.size(), file);
+    std::fclose(file);
+}
+
+// Both arms draw the same file into the same window, so the drawn rect must agree;
+// if it does not, a pixel delta would be measuring layout rather than decoding.
+void ComparePixels(const char* label, const OpenResult& cpu, const OpenResult& gpu) {
+    if (!cpu.hasPixels || !gpu.hasPixels) {
+        std::printf("      %s: one arm has no capture, not compared\n", label);
+        return;
+    }
+    if (cpu.destX != gpu.destX || cpu.destY != gpu.destY ||
+        cpu.destW != gpu.destW || cpu.destH != gpu.destH ||
+        cpu.pixels.size() != gpu.pixels.size()) {
+        std::printf("      %s: geometry mismatch cpu=%u,%u %ux%u gpu=%u,%u %ux%u\n", label,
+            cpu.destX, cpu.destY, cpu.destW, cpu.destH,
+            gpu.destX, gpu.destY, gpu.destW, gpu.destH);
+        return;
+    }
+    double maxAbs = 0.0;
+    double sum = 0.0;
+    std::size_t worst = 0;
+    for (std::size_t i = 0; i < cpu.pixels.size(); ++i) {
+        const double d = std::fabs(static_cast<double>(cpu.pixels[i]) -
+            static_cast<double>(gpu.pixels[i]));
+        sum += d;
+        if (d > maxAbs) { maxAbs = d; worst = i; }
+    }
+    const char* channel = "A";
+    switch (worst % 4) {
+    case 0: channel = "R"; break;
+    case 1: channel = "G"; break;
+    case 2: channel = "B"; break;
+    default: break;
+    }
+    const std::size_t base = worst - (worst % 4);
+    std::printf("      %s: %u x %u bit=%u/%u max|d|=%.6f (%s) mean=%.7f  cpu=(%.4f,%.4f,%.4f) gpu=(%.4f,%.4f,%.4f)\n",
+        label, g_captureSize, g_captureSize, cpu.bitDepth, gpu.bitDepth, maxAbs, channel,
+        sum / static_cast<double>(cpu.pixels.size()),
+        cpu.pixels[base], cpu.pixels[base + 1], cpu.pixels[base + 2],
+        gpu.pixels[base], gpu.pixels[base + 1], gpu.pixels[base + 2]);
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    int reps = 5;
+    std::vector<std::string> paths;
+    bool listAdapters = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--reps") == 0 && i + 1 < argc) {
+            reps = std::atoi(argv[++i]);
+            continue;
+        }
+        if (std::strcmp(argv[i], "--adapter") == 0 && i + 1 < argc) {
+            g_adapterIndex = std::atoi(argv[++i]);
+            continue;
+        }
+        if (std::strcmp(argv[i], "--pixels") == 0) {
+            g_capturePixels = true;
+            if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') {
+                g_captureSize = static_cast<std::uint32_t>(std::atoi(argv[++i]));
+            }
+            continue;
+        }
+        if (std::strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
+            g_outDir = argv[++i];
+            g_capturePixels = true;
+            continue;
+        }
+        if (std::strcmp(argv[i], "--play") == 0) {
+            g_playVideo = true;
+            continue;
+        }
+        if (std::strcmp(argv[i], "--list-adapters") == 0) {
+            listAdapters = true;
+            continue;
+        }
+        paths.emplace_back(argv[i]);
+    }
+    if (listAdapters) {
+        ListAdapters();
+        if (paths.empty()) return 0;
+    }
+    if (paths.empty()) {
+        std::printf("usage: still_hw_probe [--reps N] [--adapter IDX] [--pixels [SZ]] [--out DIR]"
+            " [--list-adapters] <media> [...]\n");
+        return 2;
+    }
+    if (g_captureSize == 0) g_captureSize = 64;
+
+    WNDCLASSW windowClass{};
+    windowClass.lpfnWndProc = WindowProcedure;
+    windowClass.hInstance = GetModuleHandleW(nullptr);
+    windowClass.lpszClassName = L"3fpStillHwProbe";
+    if (RegisterClassW(&windowClass) == 0) { std::printf("RegisterClassW failed\n"); return 1; }
+    HWND window = CreateWindowExW(0, L"3fpStillHwProbe", L"3fp still hw probe",
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE, 60, 60, 960, 540, nullptr, nullptr,
+        GetModuleHandleW(nullptr), nullptr);
+    if (window == nullptr) { std::printf("CreateWindowExW failed\n"); return 1; }
+    PumpMessages(200);
+
+    auto cpuPlayer = CreatePlayer(window, FFF3FPDecodeMode::Cpu);
+    auto gpuPlayer = CreatePlayer(window, FFF3FPDecodeMode::D3D11);
+    if (cpuPlayer == nullptr || gpuPlayer == nullptr) {
+        std::printf("player creation failed (cpu=%p gpu=%p)\n",
+            static_cast<void*>(cpuPlayer), static_cast<void*>(gpuPlayer));
+        return 1;
+    }
+    std::printf("PlayerApiVersion: %u  reps=%d  adapter=%d  interleaved A/B/A  capture=%s%u\n",
+        FFF3FP_GetApiVersion(), reps, g_adapterIndex, g_capturePixels ? "" : "off ", g_captureSize);
+
+    for (const auto& path : paths) {
+        std::printf("\n%s\n", BaseName(path));
+        // Warm both arms on a throwaway open: the first open of a codec pays one-time
+        // FFmpeg discovery that later opens do not.
+        OpenOnce(cpuPlayer, path);
+        OpenOnce(gpuPlayer, path);
+        std::vector<double> cpuTimes;
+        std::vector<double> gpuTimes;
+        OpenResult lastCpu;
+        OpenResult lastGpu;
+        for (int rep = 0; rep < reps; ++rep) {
+            // Alternate which arm goes first so a positional drift cannot land on one arm.
+            if (rep % 2 == 0) {
+                lastCpu = OpenOnce(cpuPlayer, path);
+                lastGpu = OpenOnce(gpuPlayer, path);
+            } else {
+                lastGpu = OpenOnce(gpuPlayer, path);
+                lastCpu = OpenOnce(cpuPlayer, path);
+            }
+            if (lastCpu.completed) cpuTimes.push_back(lastCpu.ms);
+            if (lastGpu.completed) gpuTimes.push_back(lastGpu.ms);
+        }
+        Report("cpu", lastCpu);
+        Report("gpu", lastGpu);
+        const auto cpuMedian = Median(cpuTimes);
+        const auto gpuMedian = Median(gpuTimes);
+        std::printf("      median cpu=%.1fms gpu=%.1fms delta=%+.1fms over %zu/%zu completed\n",
+            cpuMedian, gpuMedian, gpuMedian - cpuMedian, gpuTimes.size(), cpuTimes.size());
+        if (gpuTimes.size() != cpuTimes.size()) std::printf("      NOTE: arms completed different counts\n");
+        if (g_capturePixels) {
+            ComparePixels("cpu-vs-gpu presented pixels", lastCpu, lastGpu);
+            const std::string stem = [&]{ const char* b = BaseName(path); const std::string s(b);
+                const auto dot = s.find_last_of('.'); return dot == std::string::npos ? s : s.substr(0, dot); }();
+            DumpPixels("a" + std::to_string(g_adapterIndex) + "_" + stem + "_cpu", lastCpu);
+            DumpPixels("a" + std::to_string(g_adapterIndex) + "_" + stem + "_gpu", lastGpu);
+        }
+    }
+
+    FFF3FP_Close(cpuPlayer);
+    FFF3FP_Close(gpuPlayer);
+    FFF3FP_Destroy(cpuPlayer);
+    FFF3FP_Destroy(gpuPlayer);
+    PumpMessages(50);
+    return 0;
+}

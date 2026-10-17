@@ -50,6 +50,22 @@ public interface IPlayerSession : IDisposable
     /// false 保持 VSync 锁定。显示器/驱动不支持时静默保持 VSync（返回值仅提示）。</summary>
     bool SetPresentConfig(bool tearing);
 
+    /// <summary>RTX 视频超分辨率（内核扩展 <c>FFF3FP_SetVideoSuperResolution</c>）。
+    /// enable=true 请求 Auto：内核<b>每帧</b>重新判定七道门（NVIDIA 适配器、源格式、
+    /// 是否真在放大、源高度 360..1440、失败闩…），本调用成功只代表"请求已登记"。
+    /// <para>返回 false 表示当前盘上的 <c>FFF.Native.dll</c> 没有这个入口（旧内核，
+    /// <c>NativeRuntime</c> 不覆盖已存在的同名文件）——这是告警级状态，不是会话失败，
+    /// 也不该弹窗；真实内核缺导出是常态而非异常。</para></summary>
+    bool SetVideoSuperResolution(bool enable);
+
+    /// <summary>读取 VSR 实际状态与内核给出的原因码。<para>返回 false 同样意味着
+    /// 内核不提供该入口，此时 <paramref name="status"/> 为 default。</para>
+    /// <para><see cref="VideoSuperResolutionStatus.Active"/> 只表示"驱动没有拒绝这次请求"：
+    /// 实测该路径的 HRESULT 不携带任何能力信息（对伪造的 GUID 也返回 S_OK），
+    /// 所以它<b>不能</b>当作"画面被增强"的证据；画质档位（1-4/Auto）归 NVIDIA App
+    /// 或控制面板所有，本 API 既不能设也不能读。</para></summary>
+    bool ReadVideoSuperResolutionStatus(out VideoSuperResolutionStatus status);
+
     // ⚠ 这里曾有一段"媒体率呈现节奏（pacing）"的 /// 注释，但内核**没有** SetPacingConfig
     // （已导出 82 个 API 中不存在）。悬空 /// 会被挂到下一个成员上 ⇒ 它实际成了
     // SetViewTransform 的文档，是错的。已删除。要实现需先在内核侧加导出。
@@ -87,6 +103,110 @@ public interface IPlayerSession : IDisposable
 
     /// <summary>引擎事件（原生工作线程回调；消费者须自行调度到 UI 线程）。</summary>
     event EventHandler<EngineEvent>? EngineEvent;
+
+    /// <summary>设置通用动态元数据注入表（kind 化通道：HDR10+ / HDR Vivid 等）。
+    /// 成功会整表替换（含旧版入口装载的表）；任一包校验失败（形状错/未知 kind）整批拒绝且旧表续任。
+    /// 返回 false 表示内核不支持该导出（旧版本）或整批被拒，不应抛异常。</summary>
+    bool SetDynamicMetadata(IReadOnlyList<DynamicMetadataPacket> packets);
+
+    /// <summary>清除动态元数据注入表。
+    /// kind=0 (None) 清除全部 kind；其他值仅清除该 kind 的条目并重新评估剩余表。
+    /// 返回 false 表示内核不支持该导出（旧版本）。</summary>
+    bool ClearDynamicMetadata(DynamicMetadataKind kind);
+
+    /// <summary>设置 HDR10+ 动态元数据注入表（旧版专用入口，与通用通道 kind=Hdr10Plus 共用内核实现）。
+    /// 传空列表即清除。返回 false 表示内核不支持该导出（旧版本）。</summary>
+    bool SetHdrDynamicMetadata(IReadOnlyList<HdrDynamicMetadataEntry> entries);
+
+    /// <summary>清除 HDR10+ 动态元数据注入表（旧版专用入口）。
+    /// 返回 false 表示内核不支持该导出（旧版本）。</summary>
+    bool ClearHdrDynamicMetadata();
+
+    /// <summary>获取当前 HDR 动态元数据来源（旧版专用入口）。
+    /// 返回 null 表示内核不支持该导出（旧版本）。</summary>
+    DynamicMetadataSource? GetHdrMetadataSource();
+}
+
+/// <summary>动态元数据种类（对应内核 FFF3FPDynamicMetadataKind，FFF.Player.Api.h:906）。</summary>
+public enum DynamicMetadataKind : uint
+{
+    /// <summary>仅对 Clear 有意义：清除全部 kind。</summary>
+    None = 0,
+    /// <summary>ST 2094-40（HDR10+）：载荷为 <see cref="HdrDynamicMetadataEntry"/>。</summary>
+    Hdr10Plus = 1,
+    /// <summary>ST 2094-30 / CUVA 005（HDR Vivid）：载荷为 <see cref="HdrVividMetadataPayload"/>。</summary>
+    HdrVivid = 2,
+    /// <summary>调用方 supplied 的色彩变换：载荷为 <see cref="ColorTransformTable"/>
+    /// （一张 33³ 采样立体 LUT + 一个线性光 3x3 矩阵，内核侧结构
+    /// <c>FFF3FPColorTransformPayload</c>，431296 字节）。</summary>
+    /// <remarks>值必须与内核同水：它是内核 <c>HdrDynamicMetadata.h</c> 的
+    /// <c>HdrMetadataKind::ExternalColorTransform</c> 与 <c>FFF.Player.Api.h</c> 的
+    /// <c>FFF3FPDynamicMetadataKind</c> 里的同一个 3，两侧任何一侧改动都要由
+    /// <c>ColorTransformLayoutTests</c> 判红。内核把这一 kind 当独立分支处理：它整体替换
+    /// 帧的动态元数据状态、走 <c>BuildColorTransformSettings</c> 的另一条渲染路径，
+    /// 与 ST 2094 那张窗口表无关。</remarks>
+    ExternalColorTransform = 3,
+}
+
+/// <summary>HDR 动态元数据来源（对应内核 FFF3FPHdrMetadataSource，FFF.Player.Api.h:715）。</summary>
+public enum DynamicMetadataSource : uint
+{
+    Bitstream = 0,
+    Injected = 1,
+}
+
+/// <summary>HDR10+ 动态元数据处理窗口（对应 FFF3FPHdrMetadataWindow）。
+/// 坐标归一化到画面（0,0=左上，1,1=右下）；maxScl 为线性化 RGB 最大值 0..1（nits = value*10000）。</summary>
+public sealed record HdrDynamicMetadataWindow
+{
+    public required float UpperLeftX { get; init; }
+    public required float UpperLeftY { get; init; }
+    public required float LowerRightX { get; init; }
+    public required float LowerRightY { get; init; }
+    public required float MaxSclR { get; init; }
+    public required float MaxSclG { get; init; }
+    public required float MaxSclB { get; init; }
+    public required float AverageMaxRgb { get; init; }
+    public required float FractionBrightPixels { get; init; }
+    /// <summary>toneMappingFlag=0 时该窗口只约束峰值、不提供曲线。</summary>
+    public required uint ToneMappingFlag { get; init; }
+    /// <summary>kneePointX=0 表示无线性段。</summary>
+    public required float KneePointX { get; init; }
+    public required float KneePointY { get; init; }
+    /// <summary>曲线锚点，升序 0..1，最多 15 个。</summary>
+    public required IReadOnlyList<float> CurveAnchors { get; init; }
+}
+
+/// <summary>HDR10+ 动态元数据条目（对应 FFF3FPHdrDynamicMetadataEntry）。
+/// 最多 3 个窗口（ST 2094-40 范围）；numWindows==1 时窗口必须覆盖全幅。</summary>
+public sealed record HdrDynamicMetadataEntry
+{
+    /// <summary>该条目生效的首帧（含），匹配键为 snapshot.frameIndex。</summary>
+    public required long FrameIndex { get; init; }
+    public required IReadOnlyList<HdrDynamicMetadataWindow> Windows { get; init; }
+    /// <summary>目标显示峰值 cd/m²（0 = 由窗口峰值推导）。</summary>
+    public required float TargetedDisplayNits { get; init; }
+}
+
+/// <summary>HDR Vivid 动态元数据载荷（峰值语义，对应 FFF3FPHdrVividMetadataPayload）。
+/// 按 CUVA 005.1 非公开曲线的前提，内核对 Vivid 用峰值语义（无曲线锚点解释）。</summary>
+public sealed record HdrVividMetadataPayload
+{
+    /// <summary>按定义全幅的窗口（Vivid 逐窗读数不带几何）；max 值 0..1，内核按 max(maxRGB)*10000 推算峰值。</summary>
+    public required IReadOnlyList<(float MaxR, float MaxG, float MaxB, float AverageMaxRgb)> Windows { get; init; }
+    /// <summary>目标显示峰值 cd/m²（0 = 由窗口峰值推导）。</summary>
+    public required float TargetedDisplayNits { get; init; }
+}
+
+/// <summary>通用动态元数据包（对应 FFF3FPDynamicMetadataPacket）。
+/// <see cref="Payload"/> 按 <see cref="Kind"/> 解释：
+/// Hdr10Plus = <see cref="HdrDynamicMetadataEntry"/>，HdrVivid = <see cref="HdrVividMetadataPayload"/>，
+/// ExternalColorTransform = <see cref="ColorTransformTable"/>。</summary>
+public sealed record DynamicMetadataPacket
+{
+    public required DynamicMetadataKind Kind { get; init; }
+    public required long FrameIndex { get; init; }
+    public required object Payload { get; init; }
 }
 
 /// <summary>渲染目标尺寸诊断（3FCompare K4）。
@@ -99,6 +219,48 @@ public readonly record struct RenderTargetInfo(
     uint ClientWidth, uint ClientHeight,
     int DestX, int DestY, uint DestWidth, uint DestHeight,
     uint OutputBitDepth, bool Hdr);
+
+/// <summary>HDR 呈现诊断（对应内核 <c>FFF3FPHdrSignalDiagnostics</c>）。
+/// <para>存在的理由：<c>hdrProcessingPath</c> 在两条臂上都报 <c>*Dynamic</c>，而
+/// <c>MapToHdr</c> 那条臂按设计（3fp/docs/58 §4.5 / T3）不套曲线、改为逐帧更新
+/// <c>DXGI_HDR_METADATA_HDR10</c>。此前"到底哪一个机制在跑"只能读着色器闸门；
+/// 这几个计数把它变成可读数，也用于回归——曲线 applied 恒 0 而 dyn=1 就是 RE-03 那一类故障。</para>
+/// <para><paramref name="MaxMasteringLuminance"/>/<paramref name="MinMasteringLuminance"/>
+/// 是 DXGI 原值，单位 1/10000 cd/m²；两个光级单位 cd/m²。</para></summary>
+public readonly record struct HdrSignalDiagnostics(
+    ulong DynamicCurveFramesApplied, ulong DynamicCurveFramesRefused,
+    ulong SetHdrMetaDataCalls, ulong SetHdrMetaDataSuppressed,
+    uint MaxMasteringLuminance, uint MinMasteringLuminance,
+    uint MaxContentLightLevel, uint MaxFrameAverageLightLevel,
+    bool SwapChainHdrEnabled);
+
+/// <summary>内核 <c>FFF3FPVideoSuperResolutionReason</c>：上一帧为什么用/没用 VSR。
+/// 逐值对应内核 3501..3525 的判定顺序，0 只在 Active=1 时出现（内核会把 reason 覆写成 None）。</summary>
+public enum VideoSuperResolutionReason : uint
+{
+    /// <summary>已使用（仅在 Active=true 时出现）。</summary>
+    None = 0,
+    /// <summary>宿主没请求 Auto（默认状态）。</summary>
+    NotRequested = 1,
+    /// <summary>渲染设备背后的适配器不是 NVIDIA；混合显卡机型上取决于窗口落在哪块卡。</summary>
+    NotNvidiaAdapter = 2,
+    /// <summary>目标不大于源——VSR 只做放大。</summary>
+    NotUpscaling = 3,
+    /// <summary>源高度不在 360..1440 内（4K 源就在这一档被拒）。</summary>
+    SourceResolutionOutOfRange = 4,
+    /// <summary>源纹理不满足视频处理器输入条件（软解上传路径没有 D3D11_BIND_DECODER 等）。</summary>
+    UnsupportedSourceFormat = 5,
+    /// <summary>驱动拒绝过，已闩住；只有重新发一次 Auto 才会再探。</summary>
+    DriverRejected = 6,
+}
+
+/// <summary>RTX VSR 状态（对应内核 <c>FFF3FPVideoSuperResolutionStatus</c>）。
+/// <para>用途是把"为什么没生效"变成可读数，而不是"是否生效"的证据——见
+/// <see cref="IPlayerEngine.ReadVideoSuperResolutionStatus"/> 的限定。</para></summary>
+public readonly record struct VideoSuperResolutionStatus(
+    bool Requested, bool NvidiaAdapter, bool Active, bool DriverRejected,
+    VideoSuperResolutionReason Reason,
+    uint SourceWidth, uint SourceHeight, uint TargetWidth, uint TargetHeight);
 
 /// <summary>会话创建选项。</summary>
 public sealed record EngineSessionOptions
@@ -132,6 +294,17 @@ public sealed record EngineSessionOptions
     /// 让 G-SYNC/FreeSync 显示器按自身节奏扫描输出；false 保持 VSync 锁定（无撕裂）。
     /// 显示器链不支持时静默保持 VSync。盯帧对比场景建议保持 false。</summary>
     public bool TearingPresent { get; init; }
+
+    /// <summary>RTX 视频超分辨率（内核扩展 <c>FFF3FP_SetVideoSuperResolution</c>）。
+    /// true = 请求 Auto：内核每帧自行判定（必须是真放大、源高度 360..1440、渲染适配器为
+    /// NVIDIA、源纹理可作视频处理器输入等），任一不满足只是这次不用，不影响会话。
+    /// <para>默认 false。三个诚实前提：① 出货内核（third_party 那棵）目前没有这个导出，
+    /// 请求会软失败并记一条 warn；② 画质档位（1-4/Auto）与总开关归 NVIDIA App/控制面板，
+    /// 本应用设不了也读不到；③ 内核的 Active 位只表示"驱动没拒绝"，<b>不表示画面被增强</b>
+    /// ——实测该路径的 HRESULT 不携带能力信息。所以这个开关的验收判据只能是
+    /// <see cref="IPlayerSession.ReadVideoSuperResolutionStatus"/> 的 Reason 分布，
+    /// 不能是 Active。</para></summary>
+    public bool RtxVideoSuperResolution { get; init; }
 
     /// <summary>媒体率呈现节奏（内核扩展 A9）：pacing=true 抑制叠加层固定周期的重翻转，
     /// 使呈现节奏跟随源视频帧率。需 TearingPresent=true 发挥完整效果。</summary>
@@ -193,9 +366,43 @@ public sealed record EngineSnapshot
     public long PresentedVideoFrames { get; init; }
     /// <summary>SwapChain Present 调用计数（诊断 D3D11 呈现是否正常）。</summary>
     public long SwapChainPresents { get; init; }
+    /// <summary>所有 DXGI Present 调用<b>内部</b>累计的阻塞时长（100ns 单位）。
+    /// 对应内核 <c>FFF3FPSnapshot.presentWait100ns</c>（FFF.Player.Api.h:174），
+    /// 由 <c>PlayerVideoRenderer::PresentCurrentFrame</c>（VideoRenderer.cpp:5342）在
+    /// <c>chain-&gt;Present(...)</c> 前后取 steady_clock 差值累加，
+    /// 并在 <c>PlayerSession::GetSnapshot</c>（PlayerSession.cpp:1733）里实时刷新到快照。
+    /// <para>这是 VRR/撕裂是否<b>真的生效</b>的唯一可观测证据：与
+    /// <see cref="SwapChainPresents"/> 相除即得"单次 Present 平均等待"——
+    /// VSync 锁定时应约等于一个刷新周期（60Hz ≈ 16.7ms），撕裂/VRR 生效时趋近 0。
+    /// <see cref="IPlayerSession.SetPresentConfig"/> 的返回值只说明交换链<b>允许</b>撕裂，
+    /// 不代表 Present 实际没等，故不能用作判据。</para></summary>
+    public long PresentWait100ns { get; init; }
     /// <summary>时间轴代数：仅在真实 demuxer seek 成功后递增。
     /// 用于判定 Seek/StepFrame 是否真正生效（3FCompare 优化项⑤）。</summary>
     public ulong TimelineGeneration { get; init; }
+    // ---- IAMF 空间音频（内核 FFF3FPSnapshot 中部 trio + 尾部 iamfContentChannels/iamfBinaural）----
+    /// <summary>IAMF 沉浸音频是否接管（AOM 参考解码器渲染该轨时为 true）。</summary>
+    public bool IamfActive { get; init; }
+    /// <summary>IAMF <b>渲染目标</b>输出声道数（如 7.1.4 = 12）。
+    /// 内容比目标小时 libiamf 用数字静音补齐而不是上混，故它回答"我们在往几个喇叭渲染"。</summary>
+    public uint IamfChannels { get; init; }
+    /// <summary>IAMF 声音系统标识（OAR sound system；int32）。</summary>
+    public int IamfSoundSystem { get; init; }
+    /// <summary>IAMF <b>内容声明</b>声道数（≠ <see cref="IamfChannels"/>；0 = libiamf
+    /// 未上报 per-element 细节）。它回答"文件里实际有几声道"——只显示前者会把
+    /// 7.1 轨误标成 7.1.4（其中四个喇叭全程静音）。</summary>
+    public uint IamfContentChannels { get; init; }
+    /// <summary>IAMF 渲染模式（内核 FFF.Player.Api.h:258，API v19 尾追加）：
+    /// 1=libiamf 双耳(HRTF)渲染直接出立体声，0=扬声器布局(7.1.4)由 swr 折叠。
+    /// 双耳保留耳机上的空间<b>成像</b>，矩阵折叠保留能量但丢掉方位——两者不是
+    /// 音量差别，故 UI 必须显示用户实际听到的那一种。</summary>
+    public uint IamfBinaural { get; init; }
+    /// <summary>API v20 尾追加（内核 FFF.Player.Api.h:268，结构体最尾部）：非 IAMF 多声道床
+    /// （AC-3/E-AC-3/Atmos 床、TrueHD、DTS/DTS-HD/DTS:X 床、普通多声道 PCM/FLAC/WAV）
+    /// 在立体声设备上的双耳渲染。1=OBR HRTF 双耳渲染（空间定位保留），0=swr 矩阵折叠
+    /// （保留能量、丢失方位）。IAMF 轨由各自的 <see cref="IamfBinaural"/> 双耳路径上报，
+    /// 不走此字段。</summary>
+    public uint AudioBinaural { get; init; }
 }
 
 /// <summary>媒体信息（从 3FP GetMediaInfo JSON 反序列化，F3 媒体信息面板）。</summary>

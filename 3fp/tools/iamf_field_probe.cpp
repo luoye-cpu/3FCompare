@@ -86,7 +86,7 @@ int wmain(const int argc, wchar_t** argv) {
     Pump(200);
 
     FFF3FPSnapshot s{};
-    s.size = sizeof(s); s.version = 8;
+    s.size = sizeof(s); s.version = 20;
     const auto result = FFF3FP_GetSnapshot(player, &s);
     printf("\n=== 运行期 ===\n");
     printf("  内核 API 版本        = %u\n", FFF3FP_GetApiVersion());

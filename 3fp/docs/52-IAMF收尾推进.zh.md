@@ -128,6 +128,15 @@ iamfActive / iamfChannels / iamfSoundSystem
 **重要**：这**早于**本轮改动（未 seek 时同样异常），**不是** seek 修复引入的。
 需要在音频渲染器的缓冲统计里单独排查。
 
+> **✅ 销账（2026-10-10 实测）**：该问题在当前代码中**已不复现**。
+> 渲染线程后来的重写把记账改为按设备游标**绝对值重算**
+> （`WasapiRenderer.cpp` :695/:913 `pendingMediaFrames_ = deviceSubmittedFrames - playedFrames`，
+> 取代了会累计的逐次 fetch_add 语义），`Buffered100ns`（:442-451）随之恢复正确。
+> 复现哨兵：`FFF.Player.Tests --stream-selection-regression` 场景三——真内核 + libiamf
+> 播放 `live_7_1_4.iamf`（本表 1.02s 素材原件）1 秒，实测 **缓冲 29 ms、欠载 0**，
+> 断言上界 2 s，防回归。附带观察：libiamf 解码日志有 Warn/Error 刷屏
+> （Substream ID already has audio frame OBU 等），解码可恢复、不影响播放，属上游库噪音。
+
 ### 5.2 容器声明序 vs 解码器输出序（易错点，已写进代码注释）
 
 `ffprobe` 报告 IAMF layer 为：
@@ -156,5 +165,5 @@ FL+FR+SL+SR+BL+BR+TFL+TFR+TBL+TBR+FC+LFE
 | 3 | 长时间稳定性 | ✅ 已验证 |
 | 4 | seek | ✅ 已修复并验证 |
 | 5 | 与视频共存 | ✅ 场景不存在（已论证） |
-| 6 | UI 呈现 | ⏳ 建议已给出，待产品决策 |
-| — | `bufferedAudio` 异常 | ⚠️ **新发现，待排查** |
+| 6 | UI 呈现 | ✅ **已落地**（2026-10-10 拍板"UI 声明即可"：打开媒体时操作消息声明 `IAMF 空间音频 · 布局（N 声道）`，内容<目标时补"内容 M 声道"；libiamf 回退时 toast 提示；调试层"声场："行既有） |
+| — | `bufferedAudio` 异常 | ✅ **已修复并销账**（2026-10-10 哨兵实测 29 ms，见 §5.1 注记） |

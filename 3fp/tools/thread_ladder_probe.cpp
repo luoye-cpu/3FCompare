@@ -86,13 +86,13 @@ int wmain(const int argc, wchar_t** argv) {
 
     FFF3FPSnapshot before{};
     before.size = sizeof(before);
-    before.version = 8;
+    before.version = 20;
     FFF3FP_GetSnapshot(player, &before);
     FFF3FP_Play(player);
     Pump(seconds * 1000);
     FFF3FPSnapshot after{};
     after.size = sizeof(after);
-    after.version = 8;
+    after.version = 20;
     FFF3FP_GetSnapshot(player, &after);
 
     const auto frames = static_cast<double>(after.presentedVideoFrames - before.presentedVideoFrames);

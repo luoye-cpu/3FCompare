@@ -3,10 +3,83 @@
 > **给接手的 agent**：先读本文件，再读 `README.md`（铁律），然后按「下一步」的第一个动作开工。
 > 更新本文件时请同步更新「最后更新」一行。
 
-- **最后更新**：2026-09-30（本文件重构为**短状态页**：原头部变更叙事与原「六、工作日志」
+- **最后更新**：2026-10-11（RTX VSR P1/P2：实验树 `3fp/kernel` 修 P1 旋转几何 + 三条 P2 清理，
+  记录见 [docs/89](docs/89-RTX-VSR自动模式P1旋转几何与P2清理修复记录（2026-10-11）.zh.md)；
+  `cl /Zs` PASS + `static_assert` 牙齿实测，未提交、未实机运行。下文「最后更新」叙事为 2026-10-09 交接轮收口内容。）
+  2026-10-09（交接轮收口：注入语义三缺陷 + 像素级闭环已修并复测，JXR/Vivid 两块补了正式账本。
+  本文件重构为**短状态页**：原头部变更叙事与原「六、工作日志」
   整段已迁入 [docs/archive/status-log-2026-09.md](docs/archive/status-log-2026-09.md)，按日期检索。）
 
-## 当前快照（2026-09-30）
+## 当前快照（2026-10-09）
+
+| 项 | 状态（本轮实测） |
+|---|---|
+| 内核实验树 `3fp/kernel` | 分支 `feature/vsr-and-rotation` @`782736e`，**4 个未提交文件**（3 个队友 + 本轮注释与计时修补 + layout-0 裁切修复）；构建镜像 `3fp/build` 与 `x64/Release` 同哈希 **`6F0DA5D303D40DDB`**（1,319,936 B；改前臂 `1ECD070915A7716C`/1,319,424 B 留存在 `_3fp-fix/laneM/run_bef/`） |
+| 出货内核源 `third_party/fff_project` | 分支 `3fcompare/hdr10plus` @`d2f5826`，**7 个未提交文件**（注入语义修复 6 + API 契约注释 1）；`x64/Release/FFF.Native.dll` **已还原为基线字节** `E5A7ADCB53B8DDB9`（803,328 B），与 `.3fc_kernel_build.json` 的 `dllSha256` 逐字符相符 |
+| 3FC 出货基线 | `3fcompare-kernel-2026.10.8.1` / `d2f5826`（API 17、**90 导出含注入三函数**）⇒ **third_party 就是出货源**，`3fp/kernel` 的成果默认**不进出货** |
+| 本轮修完 | D1 注入匹配键（`pts`→`frameIndex`）、D2 暂停/EOF 装表**画面级**生效（走呈现路径 `RefreshHdrShaderInputs`）、D5 峰值归属（注入项优先，否则流级基线）、夹具守卫（FATE 单帧件判红 exit 8）、`ShaderBytecode.h` 排版噪声 49,035→24,357 行（−50.3%） |
+| 回归（修复版出货内核 `CF6785F9B7684DE4`，全程同哈希） | SDR `fmt=0 peak=100 outBits=8 presented=78`；HDR10+ `fmt=2 path=2 dyn=1 peak=300 presented=77`；JXR `fh2_fp16` 可呈现；注入套件真夹具 `=== PASS (0 failures) ===`；FATE 守卫判红 |
+| **已修的产品缺陷（本轮收口）** | 出货内核曾把 HLG 基线的 HDR Vivid 按 PQ 绝对域读：`peak=10000`（锚点 4000）。门控 `vividBaselineIsHlg` 已从实验树**移植进 TP** 并实测：HLG 规范夹具 `10000 → 4000`、HLG 无静态 `=1000`、**PQ + `maximum_maxrgb=2048/4095` 仍 `=5001`**（×10000 那半没被切掉）、HDR10+ `peak=314` / SDR `peak=100` 未动 |
+| PR 包 | **一个 PR、一笔提交，base 直接是上游 master**：`3fp/patches/hdr10plus-pr-all-2026-10-09.md` —— 分支 `upstream/hdr10plus-on-master` @ **`fbd98fc`（父 = `12d8afc`，上游 master 本体）**，**18 文件** / +3,694 −731（15 内核 + `FFF.Native.rc` + 两个 VB 宿主件；标题后另 amend 过一次**纯提交说明**，树哈希未动 `2ebaa09…`），建在一次性克隆 `_3fp-fix/pr1/tp-clone`（工作树干净；**分支已于 2026-10-09 push 到 fork**：
+`ls-remote refs/heads/upstream/hdr10plus-on-master` ⇒ `fbd98fc5eb991aaac0c7e42690350cadb9b770ce` 与本地逐字符相同，
+GitHub compare 页自渲染 **1 commit / 18 changed files / 3,694 additions / 731 deletions** 与本地读数对得上；
+**PR 未提** —— 本机浏览器未登录 GitHub，匿名 compare 页 `textbox` 命中 0，表单填不了，那一下归用户）。**移植已真做**：`merge-tree` 报 12 文件，真打上去是 **5 文件 / 9 hunk**，逐处裁决 + 本轮复核见 `docs/77`；干净重建 **0 error / 0 warning**；三个部署位守卫在两修复臂上各跑一次全绿（PR 臂 exports **92** / 出货臂 90、kernel=17/managed=17、dest abi 2、config ABI 80 B/15 字段，`judged-pass=6/fail=0/not-judged=0`），跑完部署位还原成记录件并复算断言（`E5A7ADCB…` 803,328 B MATCHES record）；**15 条电池"退出码 + 结构字段"三臂逐字相同**（随取样时刻走的 `presented/peak/frameIndex` 单列，不作跨臂判据），带牙探针 J1 三区域 0.00000、J2 近黑 0/5、J3 SDR 装表 0/10 点移动、单帧守卫仍 **exit 8**。**收尾趟新修 D9**：两窗口表下未用槽 2 没停车 ⇒ 退化框仍带权重 1 与全零曲线行做加权平均，**整幅在 PQ 码域被砍一半**；同一支计数探针只换 DLL 的 A/B = `758DC466` **FAIL 0.77126/0.79863 exit 1** → 两修复臂 **PASS 0.00000/0.00000 exit 0**。**⚠ 我先前那句"当前版探针 12/12 PASS"是错的**：lane F 现版把该断言降级成不计数打印，它在带缺陷的臂上同样 12/12 PASS ⇒ 无牙，不能当证据。**lane G 的第二个发现登记不修**：多窗口归一化分母恒取 `windows[0]`（只翻倍窗口 1 自己的 maxScl ⇒ 区域移动 0.00000），改它要先动 b2 布局且必须先把同源钉的参照换掉（否则对更合规实现判红 0.46945–0.48663）、ST 2094-40 的分母逐字未拿到 ⇒ 写进 PR 正文 Not claimed 交上游裁。补丁路径重验：`format-patch` ⇒ `git am --keep-cr` 在 `12d8afc` 上 **exit 0**，落地树哈希 `2ebaa09…` **与本笔树相同**；私有引用对 `12d8afc..HEAD` 新增行重扫 **0 处**、FATE 引用保留 **6 处**；上游代码丢失审计 = **21 行、条条对应本笔改写点，无无关丢失**；`SdrShaderBytecode.h` 重生成后与上游**三个数组逐字节全同** ⇒ PR 只带 `ShaderBytecode.h` 一个生成物（D9 只动 C++，不涉字节码）。~~备选 `upstream/hdr10plus-all` @ `1db27cf`~~ **已退役不作 PR**（TP 生成物头本轮归位成生成器版式，该支会带约 2.5 万行纯版式）。**未覆盖**：宿主层（`--selftest` / 发布门禁）没跑过这支新二进制（904,192 B，不是出货件）；`FFF.Player` 在克隆里缺 LakeUI 依赖编不过，与移植无关；D9 的混合带内接缝未逐像素取样。旧三分支包 **作废留痕**。**layout-0 裁切修复仍不入这批**：自适应政策 `cedb7bb` 在任何远端都不存在（`git branch -r --contains` 空）⇒ 无上游承接对象，提案 `feature/vsr-and-rotation` 时合进那一笔；出货树全树搜 `adaptive` 零命中、无可达性（政策若进 TP 必须同带四刀，锚点见 `docs/76 §六`） |
+| 第二支 PR（其余全部本地工作，已 push） | **`3fp/patches/kernel-followup-pr-2026-10-09.md`** —— 分支 `upstream/kernel-all` @ **`72c0aec`**（父 = `12d8afc` 上游 master 本体，`ls-remote` 复核远端与本地同 SHA），**34 文件 / +27,626 −21,931**（89.6% 是两份生成物字节码重排，手写面 `VideoRenderer.cpp` +1,100/−80 等约 2,200 行；`72c0aec` 上重跑的值。先前记的 31/+27,517 是 `4878da0` 时的数）。内容 = `#16` 之外全部本地工作：IAMF 沉浸式音频（含新 `tools/准备Libiamf.ps1` 与 README 前置说明）、解码/上传性能、自适应降尺度 + layout-0 四刀几何修复、VSR/旋转/平移缩放/内嵌歌词/离屏回读、JPEG XR 浮点输入（原为**未提交**工作树内容，已随本支落定）、宿主 VB + 测试。**为什么是一支而不是三支**：实测 B 组 `b5db0a4` 写 C 组 `f1e3019` 引入的 `viewRotation` 字段（lane S1 六种排列全测，C→B→A=8 冲突为下限，与整条重放同），且政策与四刀不能拆、IAMF 缺 `libiamf` 上游根本链不动。验收：`-t:Rebuild` **0 error / 0 warning**（修掉 2 个 C4267 与 `.rc` 停在 16 的版本漂移后重跑）、`check_kernel_exports` API=19 OK、`format-patch`→`git am --keep-cr` 在 `12d8afc` 上 **exit 0 且落地树 `aea1f9bb…` 与分支树相同**、私货引用 12→17 处替换→**0**。**未验如实写进提交说明**：宿主 `FFF.Player` 本机编不过（LakeUI 缺，910 BC30002）；VSR 未量（本机 NVIDIA App 全 `isEnabled:false`）；IAMF 置换只对照解码器自身次序；准备脚本未端到端跑；`0 / 3,686,400` 那类无件数字**没有写进去**。**与 `#16` 的关系**：两支都动 `VideoRenderer`/`PlayerSession`/`PlayerApi`/`FFF.Player.Api.h`/快照尾部，`#16`=17 而本支=19 ⇒ 先合 `#16` 则本支必须 rebase 重编号 |
+| 正式账本（本轮新建，读数全在里面） | `docs/73`（JXR 格式实测与出货性判定）、`docs/74`（注入语义与像素级闭环）、`docs/75`（Vivid 峰值域分支与两树分叉账）、`docs/76`（自适应缩放下 layout-0 上传几何与真裁切）、`docs/77`（PR 审查轮：冲突裁决复核、缺陷闭环 D1–D9 与带牙判据）、**`docs/78`（两支已提交 PR 的全面审查台账：11 路 lane + 主循环逐条回源，含我驳回的 lane 断言清单）**；PR 交付件 `patches/hdr10plus-pr-all-2026-10-09.md`（同日的 `patches/hdr10plus-pr-{pack,squash}-2026-10-09.md` 已作废留痕） |
+| 阻塞 | 无技术阻塞；待用户点头 4 件（见 §二′ 末） |
+
+## 增量快照（2026-10-16，可变帧率内容周期与帧率模式）
+
+上一张表是 **2026-10-09 的日期戳快照，本轮没有改它**（改带日期戳的旧读数等于伪造历史）。这九行是本轮事实：
+
+| 项 | 状态（本轮实测） |
+|---|---|
+| 内核提交 | `3fp/kernel` 分支 `pr/all-local-extra` → **`7832e74`**，4 files **+126/−11**（`PlayerSession.cpp/.h`、`VideoRenderer.cpp/.h`）。只暂存本轮 hunk：提交后工作树余量正好是别人那句 `:4010` 注释改写（4 行）＋队友 4 个文件，一行没被动 |
+| 外层提交 | `main` → **`e5938f1`**，12 files（两支探针、跑批脚本、夹具生成、`docs/03` §A12 与补充节、快照目录） |
+| 内核树状态 | 8 个 `M`（本轮 4 个已提交，余 4 个是队友的 `Api/FFF.Player.Api.h`、`Audio/BedBinauralRenderer.h`、`Audio/IamfAudioDecoder.cpp`、`README.md`）；**`3fp/kernel/` 整树被外层 `.gitignore:63` 忽略**，所以在外层仓 `git diff` 存补丁会得到 0 字节文件 |
+| 构建 | `py tools/build_kernel_manual.py` rc=0，16.4s；`x64/Release/FFF.Native.dll` 与 `3fp/build/FFF.Native.dll` **同 md5**、**5,500,928 B**、mtime 新于源码（本轮取数一律同看这三件，见下"假信号"） |
+| 修了什么 | ① 内容周期改为四级取数（下一帧 PTS 差 → `frame->duration` → `avg`→`r` → 0＝未知）；② `frameRateMode` 改由**实测逐帧间距散布**判定并分两阶段发布；③ 屏幕停留判带改用**上一次**瞄准的 ratio |
+| 判据 | 无窗口 `tools/content_period_probe.cpp` 四臂 **PASS**（12b 两容器各两条平台段 20→40 ＋ ⑥ variable ＋ 丢弃 0；12c 两容器各一条 ＋ ⑥ constant ＋ **ⓔ 呈现 91 对 20fps×4.51s=90.2，差 0.9%**），复跑一致 ±0.01s；夹具自证 **7/7**；带窗口 ⑥ 四条全绿 |
+| 消融（证明判据有牙） | 退回旧两支 ⇒ 12b.**ts** 塌成一条 `[4.50s @20.0Hz]`（后段红），12b.**mp4** 仍全绿 ⇒ 红来自容器没有逐帧时长，不是探针自己坏。旧形状实测：4 秒丢 **68** 帧／呈现 86 → 修复后丢 **11**／呈现 **148** |
+| 仍未收口 | §A9 三条 CFR 臂的**吞吐**读数——本轮下午 `DeltaForceClient` 长期占 **300%+ CPU**，同一文件三次跑出 19／132／156 帧。已用同负载消融 A/B 证明塌陷两个构建同样（上限读数逐字相同：60.00／24.00／144.0x ⇒ CFR 无回归的证据是那三个上限数），并另立负载无关的 **ⓔ** 顶住风险面；**安静机器上重跑那三臂仍欠着**。`瞄格误差`／`屏幕停留带内比例` 在同一构建内部就红绿翻转 ⇒ 记未定（与 §A9 ④ 的不可重复性同向） |
+| 新发现未修 | **Annex-B 裸 H.264 在本播放器里不出帧**：VFR／CFR 裸流 × 带窗口／无窗口四种组合全部 `呈现帧=0｜媒体时钟推进=0.00s｜丢弃=0`，`Open` 却返回成功。推断它在本轮改动的上游（`PresentVideoFrame` 在释放闸之后，而这里连时钟都没走），但**没做 HEAD~1 对照** ⇒ 记"代码推理排除、未实测排除"。详见 `docs/03` 补充节 |
+
+## 二′、下一步（2026-10-09 重排，按优先级）
+
+1. **P2 路线**：实验树的 Vivid HLG 门控 + JXR 浮点通路要不要移植进出货树。移植成本实测：10 个已存在文件里 8 个 `git apply --check` 直接失败、`ShaderBytecode.h` 需全量重生成、API 17→19 十个触点 + 63 个快照字段重排、两仓不共享 object（`--3way` 要先 fetch）。**判据就是那条 `peak=10000`。**
+2. **PR-1 切分**：方案已落 `3fp/patches/hdr10plus-pr-squash-2026-10-09.md`（1A 特性五笔 / 1B 本轮语义修复，各压一笔）。**push 与开 PR 属远端动作，逐次要点头**；本机无 `gh`。
+3. **未定量的间歇性 Open 超时**：真 fp16 夹具 `fh2_fp16.jxr` 单次独立进程复跑 6/6 通过，此前观测到 1 次 `Open timed out` ⇒ n=7 不足定量；升格为验收件前必须多次复跑（详见 `docs/73` 勘误表第 5 行）。
+4. ~~**layout-0 臂的真裁切**~~ **已修（实验树闭环，2026-10-09）**：机制 = `convertedRgb_` 按整帧尺寸转换、上传 pitch 用解码宽，而
+   `EnsurePipeline` 已按目标尺寸建纹理 ⇒ `UpdateSubresource` 只吃每行前 `texture.Width` 字节，左上子矩形被着色器放大。
+   修法是把缩小**折进那次已有的 sws 转换**（转换/缓冲/行距/纹理/上传五处口径同源）。改前 engaged↔control 行扫描
+   **34/41 不同、平均 0.8143、max 1.00000**；改后 **4/41、平均 0.0035、max 0.08235**（残差是 CPU 双线性 vs GPU 滤波的边缘差）。
+   **control 改前↔改后 0/41 逐点全等**、planar 臂（layout 1，jpg 夹具）engaged 改前↔改后 **0/41 全等** ⇒ 未 engaged 路径与队友那条臂零回归；
+   **10-bit layout-0 臂同判**（改前 0.8199 → 改后 0.0044，control 逐点全等）。
+   附带口径：layout-0 的 `videoUpload100ns` 改前恒不记时，改后 control **24.44 ms** → engaged **0.64 ms**（上传带宽 1/38）。
+   证据 `\_3fp-fix/laneM/`（README + 四份 LAYOUT0 + 四份 LAYOUT1 原始读数 + 可逆补丁），判决件 `compare_geom.py` 由主循环复算过。
+5. ~~**待点头的清理**~~ **本轮已按 lane N 的账执行完毕**：`3fp/build/` 17 份零引用变体 DLL（21.16 MB）、laneA 的 4 支
+   `D1A92286` 片 FFmpeg（109.83 MB）与 `real_hdr10plus_rolloff.mp4` 副本（6.53 MB）、`run-after-tmp/FFF.Native.dll`
+   （0.77 MB）、`.obj` 中间件 13 件 ⇒ **合计 36 件 / 145,649,359 B（138.9 MB）**，逐件台账
+   `_3fp-fix/laneN-apply/deleted.json`（A–D 组的哈希取自 lane N 删除前自己的 census，E 组现场测量后 unlink；
+   4 件 `.obj` 因「同名 `.cpp` 不在同目录」这条更严前置而留下）。**清理脚本第二轮才落盘**，
+   第一轮在 `deleted.json` 写出前崩溃 ⇒ 前 23 件是**事后重建**（已逐条确认不在盘上、且各有同哈希留存件位置）。
+   **未动**：`hdr10plus-run/`（111.85 MB，交接文档与 docs/74 判词互斥）、`audit_tmp/`（含唯一哈希）、
+   `audit-baseline/`（git 恢复不了）、`_3fc_tmp/abtest/`（1110.9 MB，属 3FC 侧）。
+   另：`3fp/build/FFF.Native.{bak,bak2,dll.bak,keep,prem.bak}` 不在 lane N 的 `FFF.Native*.dll` census 口径内
+   ⇒ 重复性未证，本轮不删。**跑 `3fp/tools/bench_ab.ps1` 会覆写 `3fp/build/FFF.Native.dll`**（现 `6F0DA5D3…`），跑前先记哈希。
+   `3fp/samples/media/*` 是空目录属正常（本体不入库，跑样张回归前先 `samples/tools/generate_samples.sh`）。
+
+> **另一条已量到的红（不属本轮引入，也不属 PR 内容）**：`tools/check_kernel_ledger.py --upstream 2acd96d` 判 **3 项不一致**
+> ——A1 有 8 个成员未登记（`dynamicConstants_` `dynamicCurveBuilt_` `dynamicCurveTexture_` `dynamicCurveView_`
+> `hdrMetadataValid_` `injectedActive_` `injected_` `lastHdrMetadata_`）、B 两条探测计数对不上
+> （`EffectivePaperWhiteNits` 实得 7 / 台账写 6；`PlayerApiVersion = 16` 实得 0 / 台账写 1）、D 有 141 个长标识符没点名。
+> 归因已查：**这 8 个成员全部在 `d2f5826`（10-08 的 HDR10+ 五笔）里就有、在 `3940990` 里一个都没有**
+> ⇒ 欠账来自那批已提交的特性历史，**不是 10-09 这轮修复引入的**。订正要动的是内核树里的 `PATCHES.md`（§十一/§十三），
+> 且这条会拦 3FCompare 打包门禁 ⇒ 属 3FC 侧账，按"3FC 先搁置"未动。哨兵自证对工作树只读（F 项 PASS，前后指纹 `a5e99a77aef7`）。
+
+> 下面 2026-09-30 那份「二、下一步」是**历史清单**（图片模式/MKS/文件关联那一串），保留不删，但已不是当前优先级；与之冲突处以本节为准。
+
+## 当前快照（2026-09-30，历史快照）
 
 | 项 | 状态 |
 |---|---|
@@ -51,7 +124,7 @@
 
 ---
 
-## 二、下一步（按优先级，第一个动作即可执行）
+## 二、下一步（2026-09-30 版，**已被 §二′ 取代**，保留作历史）
 
 ### ✅ 阻塞项 1 · 样张集 —— **已解除（2026-09-24）**
 

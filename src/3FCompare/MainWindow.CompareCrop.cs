@@ -32,10 +32,11 @@ namespace _3FCompare;
 /// 目标尺寸就是 destination 尺寸，不是插值放大）；平移由窗口位置表达 ⇒ 不受内核
 /// <c>SetViewTransform</c> 的 <c>max(0,·)</c> 钳制影响。详见
 /// <see cref="SetCompareMagnify"/> 与 <c>CompareCropPlanner</c>。</description></item>
-/// <item><description><b>叠加模式（ICAT Single Screen，默认关闭）</b>：格表被换成"两路铺满"，
-/// 裁剪语义不再是"裁出格"而是"裁出互补的半区"—— B 路由
-/// <c>MainWindow.CompareOverlay.OverlayRevealPlan</c> 裁成 <c>[0, split]</c>、A 路裁成
-/// <c>[split, 1]</c>，两者互不重叠且并集为整窗 ⇒ 可见结果与容器 Z 序无关。
+/// <item><description><b>叠加 / 左右拉动（ICAT Single Screen，默认关闭）</b>：格表被换成"N 路铺满"，
+/// 裁剪语义不是"裁出格"而是"裁出自己那条带"—— 第 i 条带由
+/// <c>MainWindow.CompareOverlay.ApplyWipeCrop</c> 经 <c>WipeBands.PlanRegions</c> 算出，
+/// 各带互不重叠且并集为整窗 ⇒ 可见结果与容器 Z 序无关。
+/// 同一路占多条带（用户可选重复路）时下发的是一组矩形，由 <c>ApplyRects</c> 合成区域。
 /// 与放大互斥（见 <see cref="BuildCellMagnify"/> 的守卫）。</description></item>
 /// </list></para>
 ///
@@ -45,10 +46,16 @@ namespace _3FCompare;
 /// </summary>
 public partial class MainWindow
 {
-    /// <summary>每路最近一次真正下发成功的裁剪（路号 → 句柄 + 区域）。
-    /// 作用有二：① 避免同一方案反复调用 <c>SetWindowRgn</c>（它在 <c>bRedraw=true</c> 下会触发重绘）；
-    /// ② 句柄被重建时能发现"换了 HWND"，从而对旧句柄做清理、对新句柄重设。</summary>
-    private readonly Dictionary<int, (nint Hwnd, Rect32 Region)> _compareCropApplied = new();
+    /// <summary>每路最近一次真正下发成功的裁剪（路号 → 句柄 + 区域集合）。
+    /// 作用有三：① 避免同一方案反复调用 <c>SetWindowRgn</c>（它在 <c>bRedraw=true</c> 下会触发重绘）；
+    /// ② 句柄被重建时能发现"换了 HWND"，从而对旧句柄做清理、对新句柄重设；
+    /// ③ <b>区域是集合而不是单矩形</b> —— N 带拉动下，同一路可能占据<b>不相邻</b>的多条带
+    /// （用户可选重复路，见 docs/51 §九），此时它的可见区域是若干矩形的并集，
+    /// 由 <c>WindowRegionClipper.ApplyRects</c> 经 <c>CombineRgn(OR)</c> 合成一个区域句柄。
+    ///
+    /// <para>⚠ 这份账本是 <c>TryCompareVisibleBlockDip</c>、dragbench 与自测观测物的<b>唯一真源</b>
+    /// （"账上有什么，窗口上就裁成什么"）。改写入端必须同步全部消费者，否则读数与实际脱节。</para></summary>
+    private readonly Dictionary<int, (nint Hwnd, Rect32[] Regions)> _compareCropApplied = new();
 
     // ══════════ 无缝放大：子窗口放大 + 偏移 + 裁剪 ══════════
     //
@@ -301,9 +308,14 @@ public partial class MainWindow
 
     /// <summary>放大态的拖动平移：松手时提交一次。
     ///
-    /// <para><b>换算</b>：<see cref="CompareCropPlanner.Magnify"/> 的构造保证"格宽 Wc 恰好露出
-    /// 源区间的 1/z" ⇒ 源区间整体（归一化 1.0）在屏幕上占 <c>Wc·z</c>。故位移 <c>d</c> 像素
-    /// 对应的归一化位移为 <c>d / (Wc·z)</c>。画面跟手右移 ⇒ 露出的源区间左移 ⇒ 取负号。</para></summary>
+    /// <para><b>换算</b>：<see cref="CompareCropPlanner.Magnify"/> 的构造保证「基准宽 B 恰好露出
+    /// 源区间的 1/z」⇒ 源区间整体（归一化 1.0）在屏幕上占 <c>B·z</c>。故位移 <c>d</c> 像素
+    /// 对应的归一化位移为 <c>d / (B·z)</c>。画面跟手右移 ⇒ 露出的源区间左移 ⇒ 取负号。</para>
+    ///
+    /// <para><b>B 取什么看排布形态</b>（只判 <see cref="CompareGridView.MosaicWindows"/>）：拼合下
+    /// 放大是以<b>整个对比区</b>为基准调 <see cref="CompareCropPlanner.Magnify"/> 的（见
+    /// <see cref="ApplyCompareCrop"/> 的 mosaic 分支）⇒ B = 对比区尺寸；历史形态（窗口 == 自己那一格）
+    /// 才是 B = 光标所在那一格。B 取错就等于把速度按格宽高放大，2x3 形状下横轴快 2 倍、纵轴快 3 倍。</para></summary>
     internal void CommitComparePan()
     {
         if (!CompareMagnifyActive) return;
@@ -315,34 +327,46 @@ public partial class MainWindow
         var dyDip = _comparePanAccumY / scaling;
         _comparePanAccumX = _comparePanAccumY = 0;
 
-        var cells = CompareLayout.ComputeCells(_compareMode, _compareSplit);
+        var cells = _partition.ComputeCells();
         if (cells.Length == 0) return;
         var wDip = Grid.Bounds.Width;
         var hDip = Grid.Bounds.Height;
         if (wDip <= 0 || hDip <= 0) return;
 
+        // 光标所在格：只有非拼合（窗口 == 自己那一格）时它才是换算基准。
         // 各格尺寸不同（ABC 的 A 通高、B/C 半高）⇒ 用**光标所在格**的尺寸换算，
         // 否则在窄格里拖动的灵敏度会与宽格差一倍（表现为"上下拖不动"）。
         var cellIndex = CompareCellAtCursor();
         if (cellIndex < 0 || cellIndex >= cells.Length) cellIndex = 0;
         var cell = cells[cellIndex];
 
-        var cellWDip = Math.Max(1, cell.Width * wDip);
-        var cellHDip = Math.Max(1, cell.Height * hDip);
+        // 换算基准随排布形态而变（只判 Grid.MosaicWindows），两种形态是两套几何，不能共用一个基准：
+        //   · 拼合（mosaic，当前默认）：每路窗口都铺满对比区，放大是以**整个对比区**为基准调
+        //     Magnify 的（见 ApplyCompareCrop 的 mosaic 分支）⇒ 屏幕上的"源归一化 1.0"占 area·z
+        //     ⇒ 基准 = wDip/hDip；
+        //   · 历史形态（窗口 == 自己那一格，左右拉动 / FC_NOMOSAIC=1 走这条）⇒ 基准 = 那一格。
+        // 这里曾写死用格宽高（旧的"窗口 == 格"口径），实测已证其为倍数错：
+        // tests/output/comparemodetest-mosaic-5r-final2.txt，形状 2x3、z=1.15、对比区 1537 DIP、
+        // RenderScaling=1.5 ⇒ dx=24px（16 DIP）把 crop 从 0.0419 推到 0.0238（Δ=0.0181），
+        // 反解除数 884 DIP = (1537/2)×1.15 正是"半宽格×z"，按拼合口径应是 1537×1.15=1768 ⇒ Δ=0.0090；
+        // 即横轴快 2 倍、纵轴（1/3 高格）快 3 倍，且因 crop 被钳位，拖到量程边缘只用掉一半行程。
+        var mosaic = Grid.MosaicWindows;
+        var baseWDip = mosaic ? wDip : Math.Max(1, cell.Width * wDip);
+        var baseHDip = mosaic ? hDip : Math.Max(1, cell.Height * hDip);
 
         // 换算系数随对齐模式而变，且**与钳位上界同源**（下面两者必须一起换，否则"拖不到底"
-        // 或"拖过头"）：
-        //   · 相对对齐：格宽 Wc 显示源画面的 1/z ⇒ 源归一化 1.0 在屏幕上占 Wc·z，
-        //     crop 的合法上界是 1-1/z；
-        //   · 像素级对齐：格宽 Wc 显示 minW/z 个源像素，而可平移总量是 minW·(1-1/z)
-        //     ⇒ 拖满整个量程只需 Wc·(z-1) DIP（不是 Wc·z），view 的合法上界是 1。
-        //     用 Wc·z 会让拖动慢 z/(z-1) 倍（z=2 时整整慢一倍）。
+        // 或"拖过头"；B 指上面按形态选好的基准）：
+        //   · 相对对齐：crop 是源画面归一化位置，基准宽 B 显示源画面的 1/z ⇒ 源归一化 1.0 占 B·z，
+        //     合法上界是 MaxCropFraction(z) = 1-1/z；
+        //   · 像素级对齐：crop 是"视口在可平移范围内的相对位置"，基准宽 B 显示 minW/z 个源像素，
+        //     而可平移总量是 minW·(1-1/z) ⇒ 拖满整个量程只需 B·(z-1) DIP（不是 B·z），合法区间是 [0,1]。
+        //     用 B·z 会让拖动慢 z/(z-1) 倍（z=2 时整整慢一倍）。
         var pixelAligned = _compareAlign == CompareAlign.Pixel;
         var maxCrop = pixelAligned ? 1.0 : CompareCropPlanner.MaxCropFraction(_compareZoom);
-        var divisorX = cellWDip * (pixelAligned ? _compareZoom - 1.0 : _compareZoom);
-        var divisorY = cellHDip * (pixelAligned ? _compareZoom - 1.0 : _compareZoom);
-        if (divisorX <= 0) divisorX = cellWDip; // z→1 时量程趋于 0，避免除零
-        if (divisorY <= 0) divisorY = cellHDip;
+        var divisorX = baseWDip * (pixelAligned ? _compareZoom - 1.0 : _compareZoom);
+        var divisorY = baseHDip * (pixelAligned ? _compareZoom - 1.0 : _compareZoom);
+        if (divisorX <= 0) divisorX = baseWDip; // z→1 时量程趋于 0，避免除零
+        if (divisorY <= 0) divisorY = baseHDip;
 
         var cropX = ClampToCrop(_compareCropX - dxDip / divisorX, maxCrop);
         var cropY = ClampToCrop(_compareCropY - dyDip / divisorY, maxCrop);
@@ -363,9 +387,18 @@ public partial class MainWindow
         var h = Grid.Bounds.Height;
         if (w <= 0 || h <= 0) return -1;
 
-        var cells = CompareLayout.ComputeCells(_compareMode, _compareSplit);
+        var cells = _partition.ComputeCells();
+        // 命中区必须与**裁剪区同一口径**：拼合模式下裁剪用的是不留缝的 MosaicRegionDip，
+        // 这里若还用 CellToContainerDip（内缩 1px），那条缝里的点击就谁都归不到 ——
+        // 表现为"线正好压在那儿却点不中那一格"。
+        var mosaic = Grid.MosaicWindows;
         for (var i = 0; i < cells.Length; i++)
-            if (CompareCropPlanner.CellToContainerDip(cells[i], w, h).Contains(p)) return i;
+        {
+            var hitDip = mosaic
+                ? CompareCropPlanner.MosaicRegionDip(cells[i], w, h)
+                : CompareCropPlanner.CellToContainerDip(cells[i], w, h);
+            if (hitDip.Contains(p)) return i;
+        }
         return -1;
     }
 
@@ -440,7 +473,8 @@ public partial class MainWindow
         {
             RejectCompareMagnify(
                 $"放大 {zoom:0.##} 倍后子窗口总像素 {pixels / 1e6:0.#} Mpx 超过预算 " +
-                $"{budget / 1e6:0.#} Mpx（≈4 路 4K，BGRA8 单缓冲约 127 MB × 2~3 缓冲）");
+                $"{budget / 1e6:0.#} Mpx（≈4 路 4K，BGRA8 单缓冲约 127 MB × 2~3 缓冲）" +
+                DescribeCompareZoomCeiling(budget)); // 只补一句提示，判定与预算常数都不动
             return false;
         }
 
@@ -528,7 +562,8 @@ public partial class MainWindow
                 _compareMagnifyBudgetNote = note;
                 RejectCompareMagnify(
                     $"布局变化后放大 {_compareZoom:0.##} 倍的总像素 {pixels / 1e6:0.#} Mpx 超过预算 " +
-                    $"{_compareMagnifyBudget / 1e6:0.#} Mpx ⇒ 本次不放大（画面回到 1:1，不会爆显存）");
+                    $"{_compareMagnifyBudget / 1e6:0.#} Mpx ⇒ 本次不放大（画面回到 1:1，不会爆显存）" +
+                    DescribeCompareZoomCeiling(_compareMagnifyBudget)); // 同一句提示：超预算多半是路数 × 对比区把余量吃掉了
             }
             return null;
         }
@@ -557,9 +592,13 @@ public partial class MainWindow
     }
 
     /// <summary>估算放大后所有路子窗口的总物理像素数。
-    /// <para>上界推导：各格互不重叠且铺满对比区 ⇒ <c>Σ(格面积) ≤ 对比区面积</c>，
-    /// 于是 <c>Σ(格面积 × z²) ≤ 对比区物理面积 × z²</c>。这里按<b>实际格表逐格累加</b>，
-    /// 比"对比区 × z²"更紧（格数 &lt; 路数时多余的路不计）。</para>
+    /// <para><b>拼合模式下基准换成整对比区</b>：每路的窗口 == 整个对比区（可见范围靠区域裁），
+    /// 窗口排成基准的 z 倍 ⇒ <c>总量 = Σ各路(对比区面积 × z_i²) = 路数 × 对比区 × z²</c>。
+    /// 旧口径"Σ(格面积 × z²) ≤ 对比区 × z²"在拼合下<b>低估整整 N 倍</b>（9 路就是 9 倍，
+    /// 9 路 z=2 实测 88.6 Mpx 却按 9.8 Mpx 过闸）—— 闸门必须按<b>真正分配的窗口尺寸</b>估，
+    /// 不能按"理想上界"估。</para>
+    /// <para>非拼合（"窗口 == 格"的历史形态）仍按格累加：各格互不重叠且铺满对比区 ⇒
+    /// <c>Σ(格面积) ≤ 对比区面积</c>。</para>
     /// <para>布局尚未落地（尺寸为 0）时返回 0 —— 此时无从估算，交由 <see cref="BuildCellMagnify"/>
     /// 在布局落地后复核。</para></summary>
     private double EstimateCompareMagnifyPixels(double zoom)
@@ -569,7 +608,9 @@ public partial class MainWindow
         if (wDip <= 0 || hDip <= 0) return 0;
 
         var scaling = CompareCropScaling();
-        var cells = CompareLayout.ComputeCells(_compareMode, _compareSplit);
+        var cells = _partition.ComputeCells();
+        var mosaic = Grid.MosaicWindows;
+        var areaPx = CompareCropPlanner.ToPhysicalRect(new Rect(0, 0, wDip, hDip), scaling);
         // 像素级对齐下各路的**有效**倍率不同（z_i = z·W_i/minW），高分辨率路的窗口按平方更大。
         // 必须逐路按 z_i 累加：沿用共用 z 会低估到 (minW/W_i)² —— 4K 与 1080p 同场、
         // z=2 时 4K 路实为 8 倍（64 倍面积），按 2 倍估算等于把显存闸门当成摆设。
@@ -582,8 +623,11 @@ public partial class MainWindow
         double total = 0;
         for (var cell = 0; cell < cells.Length && cell < Grid.Count; cell++)
         {
-            var cellPx = CompareCropPlanner.ToPhysicalRect(
-                CompareCropPlanner.CellToContainerDip(cells[cell], wDip, hDip), scaling);
+            // 窗口是按哪个矩形排的就按它估：拼合 = 整对比区，历史形态 = 那一格
+            var blockPx = mosaic
+                ? areaPx
+                : CompareCropPlanner.ToPhysicalRect(
+                    CompareCropPlanner.CellToContainerDip(cells[cell], wDip, hDip), scaling);
 
             // 必须按"格 → 路"映射配对：cells[i] 是**格**、sources[i] 是**路**，
             // 互换 / 轮换之后两者不再同序（4 路用 AB 轮换到 [2,3] 时，循环里的
@@ -593,7 +637,7 @@ public partial class MainWindow
             var zi = route < sources.Length && sources[route].Width > 0 && minW > 0
                 ? CompareCropPlanner.AlignedZoom(zoom, sources[route].Width, minW)
                 : zoom;
-            total += (double)cellPx.Width * zi * cellPx.Height * zi;
+            total += (double)blockPx.Width * zi * blockPx.Height * zi;
         }
         return total;
     }
@@ -634,6 +678,42 @@ public partial class MainWindow
         ComponentLog.Log(Comp.Render, "MagnifyRejected", -1, reason);
         _3FCompare.Core.Diagnostics.AppLog.Warn("CompareMagnify", "拒绝启用无缝放大：" + reason);
         if (_compareActive) StatusInfo.Text = Loc($"未启用无缝放大：{reason}", $"Seamless zoom not enabled: {reason}");
+    }
+
+    /// <summary>超预算拒绝文案后面追的那句「本路数下大概能放大到几倍」。
+    ///
+    /// <para><b>为什么要加</b>：拼合（mosaic）下每路都开一块<b>整对比区</b>大小的窗口 ⇒ 预算上限随
+    /// 路数收缩（本机实测：预算 66.4 Mpx、对比区 2.4628 Mpx ⇒ 9 路约 1.73 倍、5 路约 2.32 倍）。
+    /// 不写这句，用户看到的只是「滚两下就没反应了」，不知道是路数把余量吃掉的。</para>
+    ///
+    /// <para><b>口径</b>：<c>z_max = sqrt(预算 / (窗口块数 × 对比区物理面积))</c>。块数按排布形态取：
+    /// 拼合 = 路数；历史形态（窗口 == 那一格）各路互不重叠、合计就是一个对比区 ⇒ 1，不该乘路数。</para>
+    ///
+    /// <para><b>它只是提示，不是承诺</b>：没算像素级对齐下各路有效倍率 <c>z_i = z·W_i/minW</c> 的差异，
+    /// 也没算布局与取整的偏差 ⇒ 文案一律写「约可到」。</para>
+    ///
+    /// <para>布局尚未落地（宽或高 ≤0）⇒ 拿不到面积就不报数，返回空串。</para></summary>
+    private string DescribeCompareZoomCeiling(double budget)
+    {
+        var wDip = Grid.Bounds.Width;
+        var hDip = Grid.Bounds.Height;
+        if (!(budget > 0) || wDip <= 0 || hDip <= 0) return string.Empty;
+
+        var areaPx = CompareCropPlanner.ToPhysicalRect(new Rect(0, 0, wDip, hDip), CompareCropScaling());
+        var area = (double)areaPx.Width * areaPx.Height;
+        if (area <= 0) return string.Empty;
+
+        // 窗口块数：拼合下每路一整块对比区（与 EstimateCompareMagnifyPixels 同一口径）；
+        // 非拼合是「窗口 == 格」，各路格互不重叠 ⇒ 合计就是一个对比区。
+        var cells = _partition.ComputeCells();
+        var mosaic = Grid.MosaicWindows;
+        var blocks = mosaic ? Math.Max(1, Math.Min(cells.Length, Grid.Count)) : 1;
+        var scope = mosaic ? $"按当前 {blocks} 路的预算" : "按当前预算";
+
+        var zMax = Math.Sqrt(budget / (blocks * area));
+        if (!(zMax > 0) || double.IsNaN(zMax) || double.IsInfinity(zMax)) return string.Empty;
+        if (zMax <= 1.0) return $"，{scope}已没有放大余量（1:1 就已超预算）";
+        return $"，{scope}约可到 {zMax:0.##} 倍（粗略提示，实际以布局为准）";
     }
 
     /// <summary>已排队一次延迟下发（合并同一轮内的多次请求，避免重复计算与重复 Win32 调用）。</summary>
@@ -727,7 +807,7 @@ public partial class MainWindow
             return;
         }
 
-        var cells = CompareLayout.ComputeCells(_compareMode, _compareSplit);
+        var cells = _partition.ComputeCells();
         var scaling = CompareCropScaling();
         // 放大参数（含预算复核）。null = 未启用 ⇒ 走既有路径，行为与改动前逐字一致。
         var magnify = BuildCellMagnify();
@@ -748,6 +828,19 @@ public partial class MainWindow
                 continue;
             }
 
+            // ── 第三条分支：叠加 / 左右拉动（见 MainWindow.CompareOverlay.cs）──
+            // ⚠ 必须排在下面那条"格表可见性"检查**之前**，理由有两条：
+            //   ① 拉动的语义不是"裁出格"而是"裁出自己那条带"，格表对它只是"窗口铺满"的载体；
+            //   ② 拉动下 `i` 是**带号**，而带→路映射允许重复（用户可选同一路占多条带），
+            //      用网格那套 `CellIndexOfRoute`（按路查首个格）去判可见性会算错。
+            // 这里**永远不 Clear**：任何一路"不裁"都会变成整窗可见，把可见性交回给 Z 序
+            // （整个方案的前提就是不依赖 Z 序）。
+            if (_compareOverlayActive)
+            {
+                ApplyWipeCrop(i, surface, hwnd, scaling);
+                continue;
+            }
+
             // 格数 < 路数时多余的路被隐藏（见 CompareGridView.ArrangeOverride）：它们不该有区域。
             // 该路显示在哪一格由"格→路"映射决定（互换 / 自选源后不是第 i 格）——
             // 按路号取格会裁到别的路的格上，表现为"画面缺一块、且裁错了位置"。
@@ -758,26 +851,15 @@ public partial class MainWindow
                 continue;
             }
 
-            // ── 第三条分支：叠加模式（ICAT Single Screen，见 MainWindow.CompareOverlay.cs）──
-            // 与下面两条的区别：格表已被换成"两路铺满"，裁剪语义不是"裁出格"而是"裁出互补的半区"
-            // —— B（第 1 路）露 [0, split]、A（第 0 路）露 [split, 1]，两者互不重叠且并集为整窗，
-            // 故可见结果与容器 Z 序完全无关（不需要任何 SetWindowPos）。这里**永远不 Clear**：
-            // 任何一侧"不裁"都会变成整窗可见，重新把可见性交回给 Z 序（见 OverlayRevealPlan）。
-            if (_compareOverlayActive)
-            {
-                var overlayWinPx = CompareCropPlanner.ToPhysicalRect(surface.Bounds, scaling);
-                if (!OverlayRevealPlan(overlayWinPx, _compareSplit.X, _compareOverlayAxis,
-                        out var regionA, out var regionB))
-                {
-                    ClearOne(i, hwnd); // 对比区窄于 2px：无法表达互补，不裁剪
-                    continue;
-                }
-
-                ApplyCropRegion(i, hwnd, i == CompareOverlayTopIndex ? regionB : regionA);
-                continue;
-            }
-
-            var cellDip = CompareCropPlanner.CellToContainerDip(cells[cellIndex], wDip, hDip);
+            // ── 拼合（mosaic）：窗口 == 整容器，"格"是这一路该露出的**区域** ──
+            // 与旧排布的区别只在这一点：旧的是"窗口 == 格 ⇒ 内核把整幅画面缩到格里"，
+            // 每格看到的是缩小版整幅；拼合是"窗口 == 整幅视图，裁出本格" ⇒ 几格拼回一整幅，
+            // 拖分割线改变的是"哪一块归哪一路"，画面不被拉伸、也不随格子大小改缩放。
+            // 区域的口径用 MosaicRegionDip（**不留缝**），与 CompareGridView 的拼合排布同源。
+            var mosaic = Grid.MosaicWindows;
+            var cellDip = mosaic
+                ? CompareCropPlanner.MosaicRegionDip(cells[cellIndex], wDip, hDip)
+                : CompareCropPlanner.CellToContainerDip(cells[cellIndex], wDip, hDip);
             var cellPx = CompareCropPlanner.ToPhysicalRect(cellDip, scaling);
 
             CompareCropPlanner.CropPlan plan;
@@ -787,6 +869,41 @@ public partial class MainWindow
                 // 两者不一致时（未来布局放大窗口）以实际为准，格表只用来定"要露出哪一块"。
                 var windowPx = CompareCropPlanner.ToPhysicalRect(surface.Bounds, scaling);
                 plan = CompareCropPlanner.Plan(windowPx, cellPx);
+            }
+            else if (mosaic)
+            {
+                // 拼合 + 放大：放大作用在**整幅拼合视图**上（以整个对比区为基准算 Magnify 几何），
+                // 再与本路那一格求交 ⇒ 各路仍只露出自己那一块，块与块的拼合关系不被放大破坏。
+                var areaDip = new Rect(0, 0, wDip, hDip);
+                var msrc = magnify.SourceOf(i);
+                var mcrop = magnify.CropOf(i);
+                var geom = CompareCropPlanner.Magnify(
+                    areaDip, magnify.ZoomOf(i), mcrop.CropX, mcrop.CropY, msrc.Width, msrc.Height);
+                // RegionDip 是**窗口相对**坐标，换到容器坐标才能与格求交。
+                var contentDip = new Rect(
+                    geom.RegionDip.X + geom.WindowDip.X, geom.RegionDip.Y + geom.WindowDip.Y,
+                    geom.RegionDip.Width, geom.RegionDip.Height);
+                var visibleDip = CompareCropPlanner.Intersect(contentDip, cellDip);
+                var windowPx = CompareCropPlanner.ToPhysicalRect(surface.Bounds, scaling);
+                var expectedWinPx = CompareCropPlanner.ToPhysicalRect(geom.WindowDip, scaling);
+                if (visibleDip.Width <= 0 || visibleDip.Height <= 0)
+                {
+                    // 这一格完全不在放大后的视野里（例：分割线拖到 5% 权重下界、格子窄于画面
+                    // letterbox 黑边）。这是「本路没有该露的块」，不是「还没落地」—— 留着上一次的
+                    // 区域会让这一路显示不属于自己视野的内容（相对对齐下各路窗口相同所以看着无害，
+                    // 像素级对齐 / 混分辨率下各路窗口不同 ⇒ 拼合当场错位），故主动清除。
+                    // 也不置 waitingForHwnd：求交为空是几何事实，再排几拍也等不出交集。
+                    ClearOne(i, hwnd);
+                    continue;
+                }
+                if (!RectApproximately(surface.Bounds, geom.WindowDip) ||
+                    !HwndMatchesPixels(hwnd, expectedWinPx))
+                {
+                    // 窗口还没搬到放大位置（排版或 OS 矩形与方案不符）：本拍不下发，末尾再排一拍。
+                    waitingForHwnd = true;
+                    continue;
+                }
+                plan = CompareCropPlanner.Plan(windowPx, CompareCropPlanner.ToPhysicalRect(visibleDip, scaling));
             }
             else
             {
@@ -899,21 +1016,128 @@ public partial class MainWindow
     }
 
     /// <summary>下发某一路的区域并记账（去重 + 失效重绘）。
-    /// <para>三条分支（未放大 / 放大 / 叠加）共用同一份 <c>_compareCropApplied</c> 状态 ——
-    /// 这是"退出时一定能清除"的前提：清除只认这一份账，任何一条路径漏记都会让窗口被永久裁剪。</para></summary>
-    private void ApplyCropRegion(int index, nint hwnd, Rect32 region)
+    /// <para>四条分支（未放大 / 放大 / 叠加 / N 带拉动）共用同一份 <c>_compareCropApplied</c> 状态 ——
+    /// 这是"退出时一定能清除"的前提：清除只认这一份账，任何一条路径漏记都会让窗口被永久裁剪。</para>
+    /// <para><paramref name="regions"/> 是<b>集合</b>：单块形态（网格拼合 / 放大 / 旧两路拉动）
+    /// 传一个元素，N 带拉动下同一路占多条不相邻带时传多个 —— 后者由 <c>ApplyRects</c> 用
+    /// <c>CombineRgn(OR)</c> 合成同一区域句柄，于是"一个 HWND 露出一组块"成为可能。</para></summary>
+    private void ApplyCropRegions(int index, nint hwnd, IReadOnlyList<Rect32> regions)
     {
+        // 归一化（丢空/负尺寸、丢被完全覆盖的）后才能作为去重键：
+        // 未归一化时"同一区域的两种等价写法"会被判为变化，从而反复调 SetWindowRgn。
+        var normalized = WindowRegionClipper.NormalizeRects(regions);
+        if (normalized.Length == 0) return;   // 无可下发内容：由调用方决定是否 Clear
+
         if (_compareCropApplied.TryGetValue(index, out var prev) &&
-            prev.Hwnd == hwnd && prev.Region == region)
+            prev.Hwnd == hwnd && SameRegions(prev.Regions, normalized))
             return; // 方案未变：不重复调用（bRedraw=true 会触发一次重绘）
 
-        if (!WindowRegionClipper.ApplyRect(hwnd, region.X, region.Y, region.Width, region.Height)) return;
-        _compareCropApplied[index] = (hwnd, region);
+        if (!WindowRegionClipper.ApplyRects(hwnd, normalized)) return;
+        _compareCropApplied[index] = (hwnd, normalized);
         InvalidateChildParent(hwnd);
+        _regionApplySeq++;
         // 组件日志：SetWindowRgn 真的下发成功（去重之后，即"确实调了 Win32"的那一次）。
         // 窗口区域与 D3D11 flip-model 交换链的交互是本项目已知的高风险面，必须留痕。
+        // `seq=` 是本进程内的累计下发次数（剂量），`step=` 是当前自测步骤 —— 两个一起才把
+        // "崩在第几次连发"换算成"崩在哪一步"（docs/50 §十九 的步序把手）。追加在行尾，
+        // 不动前面 `r=`/`hwnd=`/`rect=` 的顺序：门禁与取证脚本都是按前缀 grep 的。
+        // ⚠ 多块时 `rect=` 保留**第一块**（既有取证脚本按单块 grep，改格式会让它们失配）；
+        //   块数另记在 `n=`，需要精确读数时看它。
+        var first = normalized[0];
         ComponentLog.Log(Comp.Overlay, "RegionApply", index,
-            $"hwnd=0x{hwnd:X} rect={region.X},{region.Y},{region.Width},{region.Height}");
+            $"hwnd=0x{hwnd:X} rect={first.X},{first.Y},{first.Width},{first.Height}" +
+            $" n={normalized.Length} seq={_regionApplySeq}" + StepTag());
+        // dragbench 记账：与上面那条 RegionApply 同一口径（去重之后真调了 Win32 才算一次）。
+        // 只在 bench 态累加，非 bench 态是一次布尔判断 ⇒ 生产路径零开销、零行为改动。
+        // 清除类（RegionClear / RegionClearAll）刻意不计入：分割线拖动正常不该产生清除。
+        if (_dragBenchArmed) _dragBenchRegionApplies++;
+
+        // 测量档（默认 0 ⇒ 下面两句都不执行）：把连发的 SetWindowRgn 拉开，见 BenchRegionApplySpacingMs。
+        // 见证行只在第一次落，避免 9 路 × N 拍把组件日志刷满。
+        if (BenchRegionApplySpacingMs > 0)
+        {
+            if (!_regionSpacingWitnessed)
+            {
+                _regionSpacingWitnessed = true;
+                ComponentLog.Log(Comp.Overlay, "RegionSpacing", -1, $"ms={BenchRegionApplySpacingMs}");
+            }
+            System.Threading.Thread.Sleep(BenchRegionApplySpacingMs);
+        }
+    }
+
+    /// <summary>单块便捷入口（既有三条路径都只下发一个矩形，签名保持以便零改动迁移）。</summary>
+    private void ApplyCropRegion(int index, nint hwnd, Rect32 region)
+    {
+        if (!region.IsValid) return;
+        ApplyCropRegions(index, hwnd, new[] { region });
+    }
+
+    /// <summary>两组区域是否等价（逐项按值比较，顺序敏感）。
+    /// <para>顺序敏感是刻意的：调用方（<c>WipeBands.PlanRegions</c>）按带号产出，顺序稳定；
+    /// 做成顺序无关需要排序，而排序会掩盖"带序被改错"这一类缺陷。</para></summary>
+    private static bool SameRegions(Rect32[] a, Rect32[] b)
+    {
+        if (a.Length != b.Length) return false;
+        for (var i = 0; i < a.Length; i++)
+            if (a[i] != b[i]) return false;
+        return true;
+    }
+
+    /// <summary>本进程内 `SetWindowRgn` 成功下发的累计次数（只进日志，不参与任何判决）。</summary>
+    private int _regionApplySeq;
+
+    private static bool _regionSpacingWitnessed;
+
+    /// <summary>这一路<b>屏幕上真正露出的那一块</b>，以该路窗口自己的客户区为坐标（DIP）。
+    ///
+    /// <para>数据源刻意是 <c>_compareCropApplied</c>（<see cref="ApplyCropRegions"/> 去重之后
+    /// 真的调过 <c>SetWindowRgn</c> 才写进去的那一份账），不是再算一遍格表 —— 这样"滚轮退化锚"
+    /// 与"屏幕上那块像素"由 construction 同源：账上有什么，窗口上就裁成什么。</para>
+    ///
+    /// <para><b>多块时的口径</b>：N 带拉动下同一路可能占多条不相邻的带（区域是并集）。
+    /// 本方法返回这些块的<b>外接矩形</b>（包围盒）—— 它的语义是"这一路可见的锚，
+    /// 用于滚轮缩放退化"，而包围盒正是"这一路占据的范围"。
+    /// 需要逐块精确读数（自测逐带核对）请用 <see cref="TryCompareVisibleBlocksPx"/>。</para>
+    ///
+    /// <para>返回 false 的情形：这一路本拍没下发区域（未进入对比裁剪、非拼合下窗口==格所以不需要裁、
+    /// 拉动分区过窄、窗口还没落地…）。调用方须退回自己的口径，不要拿一个假矩形当锚。</para></summary>
+    internal bool TryCompareVisibleBlockDip(int index, out Rect blockDip)
+    {
+        blockDip = default;
+        if (!TryCompareVisibleBlocksPx(index, out var blocks) || blocks.Length == 0) return false;
+
+        var scaling = CompareCropScaling();
+        if (!(scaling > 0)) return false;
+
+        // 包围盒（DIP）：第一块作初值，其余取 min/max 扩展。
+        double left = blocks[0].X, top = blocks[0].Y;
+        double right = (double)blocks[0].X + blocks[0].Width;
+        double bottom = (double)blocks[0].Y + blocks[0].Height;
+        for (var i = 1; i < blocks.Length; i++)
+        {
+            left = Math.Min(left, blocks[i].X);
+            top = Math.Min(top, blocks[i].Y);
+            right = Math.Max(right, (double)blocks[i].X + blocks[i].Width);
+            bottom = Math.Max(bottom, (double)blocks[i].Y + blocks[i].Height);
+        }
+
+        blockDip = new Rect(left / scaling, top / scaling, (right - left) / scaling, (bottom - top) / scaling);
+        return blockDip.Width > 0 && blockDip.Height > 0;
+    }
+
+    /// <summary>这一路最近一次下发的<b>原始区域块表</b>（物理像素、窗口相对坐标），按带序排列。
+    /// 未下发过则返回 false。
+    ///
+    /// <para>供自测<b>逐带</b>核对使用：N 带拉动下同一路占多条带时，只读包围盒无法区分
+    /// "一条宽带"与"两条窄带"，而这两者的画面含义完全不同（前者是相邻重复、
+    /// 后者是真正的两条独立带）。</para></summary>
+    internal bool TryCompareVisibleBlocksPx(int index, out Rect32[] blocks)
+    {
+        blocks = Array.Empty<Rect32>();
+        if (!_compareCropApplied.TryGetValue(index, out var applied)) return false;
+        if (applied.Regions.Length == 0) return false;
+        blocks = applied.Regions;
+        return true;
     }
 
     /// <summary>区域变化后让父窗口重绘被"露出/收回"的那条带。

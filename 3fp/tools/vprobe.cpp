@@ -82,7 +82,7 @@ int wmain(const int argc, wchar_t** argv) {
     // 1) GetImageInfo 对视频应当失败（图片专用 API）——确认"没有渠道读视频旋转"
     FFF3FPImageInfo info{};
     info.size = sizeof(info);
-    info.version = 1;
+    info.version = 20;
     const auto imageResult = FFF3FP_GetImageInfo(player, &info);
     printf("GetImageInfo(视频)=%d %s\n", static_cast<int>(imageResult),
         imageResult == FFFResult::Success ? "(意外：视频也能读)" : "(预期失败=图片专用)");
@@ -94,7 +94,7 @@ int wmain(const int argc, wchar_t** argv) {
     // 2) 播放中再查一次快照，确认视频尺寸（旋转视频的解码尺寸不会变）
     FFF3FPSnapshot snapshot{};
     snapshot.size = sizeof(snapshot);
-    snapshot.version = 8;
+    snapshot.version = 20;
     if (FFF3FP_GetSnapshot(player, &snapshot) == FFFResult::Success)
         printf("snapshot: %ux%u scalingMode=%d outBits=%u\n",
             snapshot.videoWidth, snapshot.videoHeight,

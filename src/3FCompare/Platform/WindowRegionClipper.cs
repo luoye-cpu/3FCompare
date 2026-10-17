@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+// Rect32 的真源在 Core/Display（纯几何，需在 Core 单测里钉住 N 带不变式）。
+// 本别名让 Platform 命名空间内、以及 Platform.Rect32 的全限定写法都解析到同一个类型。
+using Rect32 = _3FCompare.Core.Display.Rect32;
 
 namespace _3FCompare.Platform;
 
@@ -203,46 +206,13 @@ public static class WindowRegionClipper
 /// <see cref="Width"/>/<see cref="Height"/> 为尺寸。X/Y 可为负（矩形落在窗口左上角之外）。
 /// 与 <see cref="WindowRegionClipper.ApplyRect"/> 的入参顺序一致，避免 Left/Top/Right/Bottom 的
 /// 开闭区间歧义。
+///
+/// <para><b>⚠ 真源已迁到 <c>_3FCompare.Core.Display</c></b>（定义见
+/// <c>Core/Display/WipeBands.cs</c>）：N 带拉动区域的换算是纯几何，必须在 Core 单测里逐条钉住
+/// "两两不重叠 / 并集铺满 / 每段为正"这三条不变式，而 Core 不能引用 UI 工程。
+/// 本文件顶部的 <c>using Rect32 = _3FCompare.Core.Display.Rect32;</c> 让本命名空间内
+/// （以及 <c>Platform.Rect32</c> 的全限定写法）继续解析到同一个类型 ——
+/// 只有一个定义，不存在两份实现在漂移。</para>
 /// </summary>
-public readonly record struct Rect32(int X, int Y, int Width, int Height)
-{
-    /// <summary>右下角 X（独占边界）。可能溢出 int，需精确比较请用 <see cref="TryGetEdges"/>。</summary>
-    public int Right => X + Width;
 
-    /// <summary>右下角 Y（独占边界）。可能溢出 int，需精确比较请用 <see cref="TryGetEdges"/>。</summary>
-    public int Bottom => Y + Height;
 
-    /// <summary>宽和高是否均为正（空矩形/负尺寸会被 CreateRectRgn 解释为空区域）。</summary>
-    public bool IsValid => Width > 0 && Height > 0;
-
-    /// <summary>是否完全覆盖 <paramref name="other"/>（用 long 运算，避免极端坐标下的溢出误判）。</summary>
-    public bool Contains(Rect32 other)
-        => IsValid && other.IsValid
-           && other.X >= X && other.Y >= Y
-           && (long)other.X + other.Width <= (long)X + Width
-           && (long)other.Y + other.Height <= (long)Y + Height;
-
-    /// <summary>
-    /// 纯逻辑：校验尺寸为正、且换算成 right/bottom 后不溢出 int 范围，成功则输出四条边。
-    /// 溢出会让 <c>CreateRectRgn</c> 收到翻转的矩形（被当成空区域），表现为"调用成功但窗口不可见"，
-    /// 因此宁可在这里明确拒绝。
-    /// </summary>
-    public bool TryGetEdges(out int left, out int top, out int right, out int bottom)
-    {
-        left = X;
-        top = Y;
-        right = 0;
-        bottom = 0;
-
-        if (!IsValid) return false;
-
-        var r = (long)X + Width;
-        var b = (long)Y + Height;
-        if (r > int.MaxValue || r < int.MinValue) return false;
-        if (b > int.MaxValue || b < int.MinValue) return false;
-
-        right = (int)r;
-        bottom = (int)b;
-        return true;
-    }
-}

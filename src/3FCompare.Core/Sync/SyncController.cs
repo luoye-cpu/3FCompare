@@ -65,12 +65,72 @@ public sealed class SyncController
         public bool Failed { get; set; }
         public string? Error { get; set; }
 
+        /// <summary>本槽是第几路的<b>镜像</b>（-1 = 不是镜像）。
+        ///
+        /// <para><b>为什么要镜像</b>：一个子窗口只能落在屏幕上一个位置，而"同一路出现在两条
+        /// <b>不相邻</b>的带上"要求它同时呈现在两处（用户决策，docs/51 §八）。内核的
+        /// <c>FFF3FPConfiguration.OutputWindow</c> 是<b>会话级</b>字段 ⇒ 一个会话只能渲染到
+        /// 一个窗口 ⇒ 必须再开一个会话绑到第二个窗口。镜像槽就是那个额外会话。</para>
+        ///
+        /// <para><b>同步怎么保证（这是镜像的核心风险）</b>：镜像槽是一个**普通槽**，
+        /// 只是它的偏移恒等于源路的偏移。于是既有的漂移校正
+        /// （<c>TickDriftCore</c>：期望位置 = <c>masterPos + slot.Offset100ns</c>）会把它
+        /// 当成普通 follower 每拍拉回 —— <b>不需要为镜像新增任何同步代码</b>。
+        /// 这也正是走镜像而不是"改内核让一个会话渲染到多窗口"的理由：
+        /// 复用已验证的同步层，而不是新写一套。</para>
+        ///
+        /// <para><b>不参与 master 选举</b>：master 恒为下标 0。镜像若占了 0 号位会改变
+        /// 规范时间轴的基准语义（<see cref="OffsetOf"/> 对 0 号路恒返回 0）⇒ 镜像一律排在尾部。</para>
+        ///
+        /// <para>读写走 Volatile：路数/镜像关系由 UI 线程写、漂移校正在线程池读。</para></summary>
+        public int MirrorOf { get; set; } = -1;
+
+        /// <summary>是否镜像槽。</summary>
+        public bool IsMirror => Volatile.Read(ref _mirrorOf) >= 0;
+        private int _mirrorOf = -1;
+
+        /// <summary>设置镜像源（供 <see cref="AddMirror"/> 与测试使用）。</summary>
+        internal void SetMirrorOf(int source)
+        {
+            Volatile.Write(ref _mirrorOf, source);
+            MirrorOf = source;
+        }
+
         /// <summary>这一次"要播"被内核状态守卫拒掉了，等轮询补发（#42）。
-        /// 只在 <see cref="SyncController.SetActiveRoutes"/> 的启用分支里置位，
-        /// 因此它<b>不会</b>把用户主动暂停的路叫醒 —— 那条语义仍由 multitest 依赖。</summary>
+        /// 置位点有两处，都在<b>被拒</b>的那一支：<see cref="SyncController.SetActiveRoutes"/> 的启用分支、
+        /// 以及 <see cref="SyncController.Play"/> 走 <see cref="ForEachSlot"/> 的整组扇出。
+        /// 两处都从 i=0 起遍历 ⇒ <b>master（下标 0）也在这条账上</b>，消费方见
+        /// <see cref="RetryPendingPlays"/>。
+        /// 因此它<b>不会</b>把用户主动暂停的路叫醒（那条语义仍由 multitest 依赖）：
+        /// 整组一暂停，WantPlaying=false，补发方自己把这条账清掉。</summary>
         internal bool PlayPending { get; set; }
         /// <summary>补发尝试次数，成功或放弃时清零（放弃要报运行错误，不能无限重试）。</summary>
         internal int PlayRetryCount { get; set; }
+
+        /// <summary>本路累计<b>被请求过起播</b>的次数（两处请求点：整组 `Play()` 扇出、启用分支）。
+        /// 只用于诊断计数：<c>#25</c> 的间歇红里"被拒/补发/扇出报错"三条痕迹全天 0 次，
+        /// 光看那三条分不清<b>根本没请求</b>与<b>请求了但在队列里丢了</b>。
+        /// 配合 <see cref="NotPlayingStreak"/> 才分得开。</summary>
+        internal int PlayRequests { get; set; }
+
+        /// <summary>上一次<b>漂移校正</b>发出 <c>Seek</c> 之前，本路快照里的时间轴代数（#42）。
+        /// 下一拍读到的代数若仍等于它，就说明那次 Seek 在内核里没有做成任何真 demuxer seek。
+        /// 只用于留痕与计数，不参与任何判定；发出 Seek 时置值，核对一次即清空。</summary>
+        internal ulong? SeekGenPending { get; set; }
+
+        /// <summary>上一拍的<b>呈现与位置计数器</b>（#42 形状 A 的归因读数）。
+        ///
+        /// <para>用途只有一个：把"落地后一拍掉了 ~90 ms"这件事拆开——掉的那 90 ms 是
+        /// <b>卡在 <c>Present</c> 里等</b>（<c>PresentWait100ns</c> 的差会接近这个量），
+        /// 还是<b>根本没解出/呈现那么多帧</b>（<c>PresentedVideoFrames</c> 的差低于帧率应有值）。
+        /// 两者要修的地方完全不同，而现在这两个计数器一次都没被读过。</para>
+        /// <para>只被写与被诊断行读，<b>不参与任何判定</b>；改语义要单独授权。</para></summary>
+        internal (long Presented, long Presents, long Wait100ns, long Pos100ns, long Ms)? DbgLast { get; set; }
+
+        /// <summary>"整组要播、本路启用、却没在播"的<b>连续</b>观测拍数（隔拍即清零）。
+        /// 为什么要连续两拍：单拍的读法会把"刚 Play 完还在队列里排队"的正常瞬态也报出来 ——
+        /// 那正是我先前的即时读快照写法被判成恒真噪声的原因（见 <c>docs/50</c> §二十一丁）。</summary>
+        internal int NotPlayingStreak { get; set; }
 
         /// <summary>本路是否<b>启用</b>：当前视图模式下真正占格的路为 true，没占格的为 false。
         ///
@@ -188,6 +248,93 @@ public sealed class SyncController
         RaiseStateChanged();
     }
 
+    /// <summary>追加一个<b>镜像</b>槽：把 <paramref name="sourceIndex"/> 路的内容再开一个会话，
+    /// 供"同一路出现在不相邻的两条带上"同时呈现。
+    ///
+    /// <para><b>入参 session 由调用方创建</b>（同一个文件、绑定第二个输出窗口）：
+    /// 本控制器不负责建会话 —— 那是引擎/协调器的职责，且创建失败要在那里走既有的失败归还路径。</para>
+    ///
+    /// <para><b>偏移立刻对齐源路</b>：镜像槽的 <see cref="SyncSlot.Offset100ns"/> 初始就设为
+    /// 源路的偏移，于是它一进来就与源路同位；此后由既有的漂移校正每拍维持
+    /// （期望位置 = masterPos + 本槽偏移）。</para>
+    ///
+    /// <para><b>源路不存在时拒绝</b>（返回 false，不追加）：镜像一个不存在的路只会得到一个
+    /// 永远对不上时间的孤儿槽，宁可在这里挡住。</para>
+    ///
+    /// <para><b>镜像不参与 master 选举</b>：它被追加到尾部，且 <see cref="RemoveSlotAt"/> 的
+    /// 主从重基准逻辑会把它当普通槽处理（镜像的偏移随源路一起平移，两者仍保持同位）。</para></summary>
+    /// <returns>真的追加了返回 true。</returns>
+    public bool AddMirror(IPlayerSession session, string path, int sourceIndex)
+    {
+        if (session is null) return false;
+
+        lock (_gate)
+        {
+            if (sourceIndex < 0 || sourceIndex >= _slots.Count) return false;
+
+            // ⚠ 源必须是**真实路**，不能是另一个镜像。
+            //   镜像槽也在 _slots 里 ⇒ 单靠范围检查会放过"以镜像为源"，造出镜像链：
+            //   m2 的偏移跟随 m1，而 m1 跟随真实源路 ⇒ ResyncMirrorOffsets 在中间层
+            //   尚未对齐时读它，m2 就与真实源路错开 —— 而"同一路错开"正是镜像最不能出的错。
+            //   （这条是审查轮补判据时抓出的：AddMirror 原本只查范围。见 SyncMirrorTests。）
+            if (IsMirrorIndex(sourceIndex)) return false;
+
+            var srcOffset = sourceIndex == 0 ? 0 : _slots[sourceIndex].Offset100ns;
+            var slot = new SyncSlot
+            {
+                Session = session,
+                Path = path,
+                Offset100ns = srcOffset,
+            };
+            slot.SetMirrorOf(sourceIndex);
+            _slots.Add(slot);
+            Volatile.Write(ref _fpsMismatchCache, -1);
+        }
+
+        RaiseStateChanged();
+        return true;
+    }
+
+    /// <summary>该槽号是否是一个镜像槽。调用方须已持有 <c>_gate</c>（或接受一次快照读）。</summary>
+    private bool IsMirrorIndex(int index)
+    {
+        var slots = SnapshotSlots();
+        return index >= 0 && index < slots.Length && slots[index].MirrorOf >= 0;
+    }
+
+    /// <summary>把镜像槽的偏移重新对齐到它的源路（源路偏移被改动后调用）。
+    ///
+    /// <para><b>为什么需要它</b>：用户改某一路的偏移（A/B 对齐）时，镜像必须以<b>源路</b>为准
+    /// 而不是 master —— 否则镜像会与它自己的源路错开，而"同一路"错开正是镜像最不能出的错。</para>
+    ///
+    /// <para><c>public</c> 而非 <c>internal</c>：调用方是 UI 工程的
+    /// <c>MainWindow.SyncWipeMirrors</c>，而 Core 的 <c>InternalsVisibleTo</c> 只对
+    /// Core 测试工程开放（见 <c>Testability.cs</c>）。这是镜像 API 的正当组成部分，
+    /// 不是"为测试开的口子"。</para></summary>
+    public void ResyncMirrorOffsets()
+    {
+        lock (_gate)
+        {
+            for (var i = 0; i < _slots.Count; i++)
+            {
+                var src = _slots[i].MirrorOf;
+                if (src < 0) continue;
+                if (src >= _slots.Count) continue;
+                _slots[i].Offset100ns = src == 0 ? 0 : _slots[src].Offset100ns;
+            }
+        }
+    }
+
+    /// <summary>全部镜像槽的（槽号, 源路号）。供 UI 与自测读取。</summary>
+    public (int Index, int Source)[] Mirrors()
+    {
+        var slots = SnapshotSlots();
+        var list = new System.Collections.Generic.List<(int, int)>();
+        for (var i = 0; i < slots.Length; i++)
+            if (slots[i].MirrorOf >= 0) list.Add((i, slots[i].MirrorOf));
+        return list.ToArray();
+    }
+
     /// <summary>释放一路会话。**绝不静默吞异常**：Dispose 抛异常意味着这一路的原生资源
     /// （解码器、交换链、GPU 句柄）<b>并没有真的释放</b>，属于永久泄漏；而"忽略释放异常"
     /// 的写法让它只在句柄缓慢增长时才被察觉，届时已无法归因。
@@ -211,12 +358,36 @@ public sealed class SyncController
     public void RemoveSlotAt(int index)
     {
         SyncSlot? slot;
+        // 因"源路被移除"而要一并移除的镜像槽（必须在锁内收集、锁外 Dispose）。
+        var orphanMirrors = new System.Collections.Generic.List<SyncSlot>();
         lock (_gate)
         {
             if (index < 0 || index >= _slots.Count) return;
             slot = _slots[index];
             _slots.RemoveAt(index);
             Volatile.Write(ref _fpsMismatchCache, -1);
+
+            // ── 镜像的处理（两件事，都不能省）──
+            // ① 被移除的若是**源路**，它的镜像失去意义 ⇒ 一并移除，否则会留下一个
+            //    "镜像一个不存在的路"的孤儿槽：它仍在解码 + Present（白烧资源），
+            //    且漂移校正会拿一个越界的源路号去算期望位置。
+            // ② 其余镜像的源路号要跟着**下标平移**（删掉前面的槽会让后面所有下标 -1）
+            //    —— 不修的话镜像会指到邻居身上，表现是"删了一路之后，另一路突然跟着别人走"。
+            if (slot.MirrorOf < 0)
+            {
+                for (var i = _slots.Count - 1; i >= 0; i--)
+                {
+                    if (_slots[i].MirrorOf != index) continue;
+                    orphanMirrors.Add(_slots[i]);
+                    _slots.RemoveAt(i);
+                }
+            }
+            for (var i = 0; i < _slots.Count; i++)
+            {
+                var src = _slots[i].MirrorOf;
+                if (src < 0) continue;
+                _slots[i].SetMirrorOf(src > index ? src - 1 : src);
+            }
 
             // 移除的是 master 时必须做**偏移重基准**（docs/15 §3.5）：
             // 各路的偏移都是"相对旧 master"的，旧 master 一走，语义就断了。
@@ -245,6 +416,8 @@ public sealed class SyncController
         }
         // Dispose 移到锁外：原生释放期间不应持有锁
         DisposeSlotSession(slot, "RemoveSlotAt");
+        // 孤儿镜像同样在锁外释放（理由同上；且绝不能静默不释放 —— 那是永久泄漏）
+        foreach (var m in orphanMirrors) DisposeSlotSession(m, "RemoveSlotAt(镜像)");
         RaiseStateChanged();
     }
 
@@ -273,6 +446,12 @@ public sealed class SyncController
     /// <param name="indexA">第一个槽位索引。</param>
     /// <param name="indexB">第二个槽位索引。</param>
     /// <exception cref="ArgumentOutOfRangeException">任一索引不在 <c>[0, Count)</c> 内（空列表亦然）。</exception>
+    /// <remarks>⚠ <b>本方法不适用于含镜像的槽表</b>（审查轮标注，未修）：
+    /// 它只搬槽位状态、<b>不调整 <see cref="SyncSlot.MirrorOf"/>、也不保证镜像仍在尾部</b>。
+    /// 若把镜像换进下标 0，会破坏"镜像永不成为 master"这条不变量
+    /// （<see cref="OffsetOf"/> 对下标 0 恒返回 0，而镜像的偏移本该跟随源路）。
+    /// 当前无生产调用者（仅测试用到），故按"已知约束"记账而不是加防御分支 ——
+    /// 真要放开使用，先定"交换镜像"的产品语义，再决定是禁止还是重算 <c>MirrorOf</c>。</remarks>
     public void SwapSlots(int indexA, int indexB)
     {
         lock (_gate)
@@ -377,7 +556,7 @@ public sealed class SyncController
     public void Play()
     {
         WantPlaying = true;
-        lock (_stepGate) { ForEachSlot("播放", s => s.Session.Play(), notify: false); }
+        lock (_stepGate) { ForEachSlot("播放", s => s.Session.Play(), notify: false, cause: "组播放"); }
         RaiseStateChanged();
     }
 
@@ -396,7 +575,7 @@ public sealed class SyncController
     public void Pause()
     {
         WantPlaying = false;
-        lock (_stepGate) { ForEachSlot("暂停", s => s.Session.Pause(), notify: false); }
+        lock (_stepGate) { ForEachSlot("暂停", s => s.Session.Pause(), notify: false, cause: "组暂停"); }
         RaiseStateChanged();
     }
 
@@ -437,15 +616,54 @@ public sealed class SyncController
     /// <para><see cref="SyncSlot.Active"/> 为 false 的路一并跳过：这正是"没占格的路不占性能"的实现点。
     /// 播放/暂停/停止/重绘/Seek/步进五条路径全部经过这里，所以只在这一处判据，
     /// 不在各调用方分别过滤（分头过滤必然漏一条 —— 漏掉的那条表现为"隐藏的路还在响"）。</para></summary>
-    private void ForEachSlot(string actionName, Action<SyncSlot> action, bool notify)
+    private void ForEachSlot(string actionName, Action<SyncSlot> action, bool notify, string? cause = null)
     {
         var slots = SnapshotSlots();
         for (var i = 0; i < slots.Length; i++)
         {
             var slot = slots[i];
             if (slot.Failed || !slot.Active) continue;
-            try { action(slot); }
-            catch (Exception ex) { ReportRuntimeError($"{actionName}第 {i} 路", ex); }
+            try
+            {
+                action(slot);
+                if (actionName == "播放") slot.PlayRequests++;
+                // ⚠ 只在"请求确实发出"这一条上留痕，且只对**调用方给了原因**的动作留：
+                //   视图变换/重绘由 resize 与布局高频触发，逐路打日志会把日志冲走。
+                //   为什么播放/暂停这一族需要它：#25 的间歇红里，内核上报了一次
+                //   `状态→Paused（内核操作=pause）`，而那一刻前后托管侧没有任何一条能对上号的
+                //   暂停 ⇒ "我们迟到的暂停请求 / 内核自发停的 / 事件通道迟到投递"三种解释分不开。
+                //   有了 路号+动作+原因+时间戳，判红那条就能被 ±2 s 内的请求序列裁决。
+                if (cause is not null)
+                    _3FCompare.Core.Diagnostics.AppLog.Debug("Sync",
+                        $"第 {i} 路 {actionName}请求已发出（原因={cause}，wantPlaying={WantPlaying}）");
+            }
+            catch (Exception ex)
+            {
+                ReportRuntimeError($"{actionName}第 {i} 路", ex);
+                // ── 组播放扇出的守卫拒绝必须挂起补发（本轮由实测正文驱动的最小修复）──
+                //   `SetActiveRoutes` 的再启用分支早就这么办了（#42：拒掉 ⇒ PlayPending ⇒ 轮询补发），
+                //   唯独 `Play()` 的整组扇出漏了这一步：被拒的请求既不计数也不挂起 ⇒ **永久丢失**，
+                //   而紧挨着入队的那次 Pause 照常执行 ⇒ 该路最终停在 Paused、Active=true、
+                //   整组 WantPlaying=true，而 `TickDriftCore` 刻意不校正 Paused ⇒ 没有任何机制叫醒它。
+                //   实测形态（2026-10-02 03:52:59.442，同一路在同一毫秒里两边都被拒）：
+                //     第 3 路 播放请求抛出并已被吞（原因=组播放，EngineException: Play 失败: InvalidState）
+                //     第 3 路 暂停请求抛出并已被吞（原因=组暂停，EngineException: Pause 失败: InvalidState）
+                //   ⚠ 只挂起"确实请求过起播"的路，语义不变：用户主动暂停的那一路走不到这里
+                //     （WantPlaying=false ⇒ RetryPendingPlays 自己跳过），multitest 的判据照旧。
+                //   ⚠ 这条账**含下标 0**（master）：扇出从 i=0 起遍历，master 同样会被守卫拒掉。
+                //     消费方 `RetryPendingPlays` 也必须从 0 起，否则这里挂上去就再没人取（RA-01）。
+                if (actionName == "播放" && ex is EngineException && HoldRejectedPlay)
+                    slot.PlayPending = true;
+                // ⚠ 必须落日志：ReportRuntimeError 只写 LastRuntimeError 这**一个字符串槽**，
+                //   既不追加也不落盘 ⇒ 连续两路抛出时前一条被后一条覆盖，事后连"发生过"都查不到。
+                //   实测停用那一路就是这形态：有"停用第 i 路开始"、没有"…停用完成"，也没有
+                //   "暂停请求已发出（原因=停用让位）"⇒ 中间那次 Pause 抛出且被静默吞掉。
+                _3FCompare.Core.Diagnostics.AppLog.Warn("Sync",
+                    $"第 {i} 路 {actionName}请求抛出并已被吞（原因={(cause ?? "?")}，hold={HoldRejectedPlay}，{ex.GetType().Name}: {ex.Message}）");
+            }
+            // 这里**不加**"调用后 state"的见证：实测在完全绿的一轮里它也 12/12 打"没进播放态"
+            // —— 内核 Play() 是 Enqueue，调用返回时读快照必然读到旧状态 ⇒ 那是一条恒真噪声，
+            // 留着只会被读成信号。真要看得在队列执行侧落点（PlayerSession 那层），不在托管侧。
         }
         if (notify) RaiseStateChanged();
     }
@@ -461,7 +679,12 @@ public sealed class SyncController
             var slot = slots[i];
             if (slot.Failed || !slot.Active) continue;
             try { action(slot, i); }
-            catch (Exception ex) { ReportRuntimeError($"{actionName}第 {i} 路", ex); }
+            catch (Exception ex)
+            {
+                ReportRuntimeError($"{actionName}第 {i} 路", ex);
+                _3FCompare.Core.Diagnostics.AppLog.Warn("Sync",
+                    $"第 {i} 路 {actionName}(带索引)请求抛出并已被吞（{ex.GetType().Name}: {ex.Message}）");
+            }
         }
         if (notify) RaiseStateChanged();
     }
@@ -509,7 +732,16 @@ public sealed class SyncController
                     if (!want)
                     {
                         slot.Active = false;
+                        // 返回值语义是"标志翻过来的路数"：停用这一步的 Active 已经落地，
+                        // 紧接着那次 Pause 被内核守卫拒掉（实测当日 616 次 InvalidState）**不能**把它抹掉。
+                        // 记在这一行而不是 try 末尾，是因为调用方拿 `changed == 0` 当"什么都没改"就 return
+                        // （MainWindow.Playback.cs:145）⇒ 少计一次 = 状态栏与覆盖层这一拍根本不刷。
+                        changed++;
                         slot.Session.Pause();
+                        // 停用这一步真的发了暂停请求，时间戳要落在这一行而不是外层的
+                        // "停用第 i 路开始"（那行在 Seek/Play 之前，差几毫秒就是判错的依据）。
+                        _3FCompare.Core.Diagnostics.AppLog.Debug("Sync",
+                            $"第 {i} 路 暂停请求已发出（原因=停用让位，wantPlaying={WantPlaying}）");
                     }
                     else
                     {
@@ -519,10 +751,12 @@ public sealed class SyncController
                             masterRead = true;
                         }
                         slot.Active = true;
+                        changed++;   // 同上：标志已翻，后面 Seek/Play 抛不抛都不改"这一路变过"
                         slot.Session.Seek(ClampToDuration(slot, masterPos + slot.Offset100ns));
                         // "该不该立刻播"由本类自己记账，不接受调用方传参：
                         // 传参的版本要读 UI 线程的 _isPlaying，异步下发时可能读到过期值
                         // （表现为切回来的那一路停在正确位置却不播）。
+                        var stateAtRequest = slot.Session.ReadSnapshot().State;
                         if (WantPlaying)
                         {
                             // ⚠ #42 的机制就在这里：内核 `Play()` 的守卫读的是**调用那一刻**的 state，
@@ -537,41 +771,76 @@ public sealed class SyncController
                             //   读数与顺序见 docs/46 §11.11。
                             // 处理方式：记账，交给轮询补发（<see cref="RetryPendingPlays"/>）。
                             //   不去放宽"Paused 不被自动恢复"——那是 multitest 判别实验依赖的语义。
-                            try { slot.Session.Play(); }
+                            try
+                            {
+                                slot.Session.Play();
+                                slot.PlayRequests++;
+                                // 双向见证：以前只有"被拒"才留一行，成功什么都不写 ⇒ 间歇红里
+                                // "被拒/补发"两条日志一次都没出现时，分不清"没请求"、"请求成功但被后面的
+                                // Pause 压掉"还是"请求被拒但没记上"。这一行把第二种钉出来。
+                                _3FCompare.Core.Diagnostics.AppLog.Debug("Sync",
+                                    $"第 {i} 路再启用：已请求起播，守卫接受（调用那一刻 state={stateAtRequest}）");
+                            }
                             catch (EngineException ex)
                             {
                                 slot.PlayPending = true;
                                 _3FCompare.Core.Diagnostics.AppLog.Debug("Sync",
-                                    $"第 {i} 路起播被状态守卫拒掉（{ex.Message}）⇒ 记 PlayPending，等轮询补发");
+                                    $"第 {i} 路起播被状态守卫拒掉（调用那一刻 state={stateAtRequest}，{ex.Message}）⇒ 记 PlayPending，等轮询补发");
                             }
+                        }
+                        else
+                        {
+                            // 这一支过去什么都不留：整组不在播 ⇒ 本次**根本不发** Play。
+                            // 之后若有人只按"启用分支跑过 = 一定请求过起播"去推，就会把这一支误读成
+                            // "请求了没生效"。#25 那两次间歇红里"被拒/补发"都是 0 次 ⇒ 必须先排除这一支。
+                            _3FCompare.Core.Diagnostics.AppLog.Debug("Sync",
+                                $"第 {i} 路再启用：整组不在播 ⇒ 本次不请求起播（调用那一刻 state={stateAtRequest}）");
                         }
                     }
                     _3FCompare.Core.Diagnostics.AppLog.Debug("Sync", $"第 {i} 路{(want ? "启用" : "停用")}完成");
-                    changed++;
                 }
-                catch (Exception ex) { ReportRuntimeError($"{(want ? "启用" : "停用")}第 {i} 路", ex); }
+                catch (Exception ex)
+                {
+                    ReportRuntimeError($"{(want ? "启用" : "停用")}第 {i} 路", ex);
+                    // 同上：这一支的抛出过去只进那个会被覆盖的槽。#25 要的正是"这一路的暂停
+                    // 到底发出去没有"，这一行是唯一能区分"发了"和"抛了"的证据。
+                    _3FCompare.Core.Diagnostics.AppLog.Warn("Sync",
+                        $"第 {i} 路{(want ? "启用" : "停用")}过程中抛出并已被吞" +
+                        $"（wantPlaying={WantPlaying}，{ex.GetType().Name}: {ex.Message}）");
+                }
             }
         }
         if (changed > 0) RaiseStateChanged();
         return changed;
     }
 
-    /// <summary>补发那些被内核状态守卫拒掉的"起播"（#42，见 <see cref="SetActiveRoutes"/> 启用分支）。</summary>
+    /// <summary>补发那些被内核状态守卫拒掉的"起播"（#42，见 <see cref="SetActiveRoutes"/> 启用分支
+    /// 与 <see cref="ForEachSlot"/> 的播放扇出）。</summary>
     /// <para>由 UI 轮询每拍调用。只补 **同时满足**"仍启用、未失败、整组仍要播、且确实挂过一次被拒"的路，
     /// 所以用户主动暂停的路不会被它叫醒（那条语义是 multitest 的判据所在）。
     /// 连续 <see cref="MaxPlayRetries"/> 次仍补不上就放弃并报运行错误 —— 不静默吞，也不无限重试。</para>
+    ///
+    /// <para><b>⚠ 循环必须从下标 0 起（RA-01）</b>：挂账的两个入口都对 master 生效
+    /// （<c>ForEachSlot</c> 的扇出与 <c>SetActiveRoutes</c> 的启用分支都是 <c>i = 0</c> 起遍历），
+    /// 而这里曾从 <c>i = 1</c> 起 ⇒ 下标 0 的 <c>PlayPending</c> **既不补发也不清零**：
+    /// master 被守卫拒掉的那一次起播永久丢失，标志还常驻。后果不止"master 不播"——
+    /// <see cref="TickDriftCore"/> 在 <c>master.State != Playing</c> 时是**整拍早退**的，
+    /// 于是全组（含镜像同位）一起失去漂移校正，而观测位只会报"master 非播放"。
+    /// master 恒启用（<see cref="SetActiveRoutes"/> 的契约），所以它落在补发账里没有任何例外要走；
+    /// "只清标志不补发"不算修好 —— 见测试 <c>MasterFlagClearedWithoutReissue_LeavesWholeGroupUncorrected</c>。</para>
     public const int MaxPlayRetries = 20;
 
     public int RetryPendingPlays()
     {
         var slots = SnapshotSlots();
         var woke = 0;
-        for (var i = 1; i < slots.Length; i++)
+        for (var i = 0; i < slots.Length; i++)
         {
             var slot = slots[i];
             if (!slot.PlayPending || !slot.Active || slot.Failed || !WantPlaying)
             {
                 slot.PlayPending = false;   // 意图已经不作数了（停用/整组暂停），别留着下次误补
+                DetectLostPlay(slot, i);    // 只诊断：#25 的间歇红要靠这条才分得开"没请求"与"请求了又丢了"
                 continue;
             }
             try
@@ -596,11 +865,70 @@ public sealed class SyncController
         return woke;
     }
 
+    /// <summary><b>只诊断、不改行为</b>：整组要播、本路启用、也确实请求过起播，却连续两拍不在播放态 ⇒ 报一条 WARN。
+    ///
+    /// <para>为什么要它：<c>docs/50</c> §二十二那两例间歇红里，"起播被状态守卫拒掉 / 补发起播 / 播放第 N 路报错"
+    /// 三条痕迹<b>全天各 0 次</b> ⇒ 掉播既不走 #42 那条被拒路径、也不走扇出异常。剩下的两种可能
+    /// （"根本没请求到这一路" 与 "请求成功但在队列里丢了"）在托管侧目前<b>长一个样</b>，
+    /// 只有把"请求过几次"与"现在到底在不在播"放在一起才分得开。分不开就没有资格改语义。</para>
+    ///
+    /// <para>为什么是"连续两拍"而不是即时读：<c>Play()</c> 在内核侧是 Enqueue，调用返回后立刻读快照
+    /// 必然读到旧状态 —— 那样写出来的见证在同一轮绿档里 12/12 全说"没进播放态"，是恒真噪声（已撤）。
+    /// 本方法跑在轮询里，读的是<b>隔拍之后</b>的状态，才可能区分"还在排队"与"真的掉了"。</para>
+    ///
+    /// <para>⚠ 它<b>不</b>补发起播：multitest 的判别实验靠"这一路被有意停着且不会被自动叫醒"，
+    /// 而现在 Core 里没有"有意停"这个状态（multitest 直接 <c>slots[i].Session.Pause()</c>）。
+    /// 没有这个状态就动手补发，等于拿一个未确认的机制去撞一条有主语义。</para></summary>
+    private void DetectLostPlay(SyncSlot slot, int index)
+    {
+        if (!slot.Active || slot.Failed || !WantPlaying || slot.PlayRequests == 0)
+        {
+            slot.NotPlayingStreak = 0;
+            return;
+        }
+        var st = slot.Session.ReadSnapshot().State;
+        if (st is PlayerState.Playing or PlayerState.Ended)
+        {
+            slot.NotPlayingStreak = 0;
+            return;
+        }
+        if (++slot.NotPlayingStreak == 2)
+            _3FCompare.Core.Diagnostics.AppLog.Warn("Sync",
+                $"第 {index} 路：整组要播、已请求起播 {slot.PlayRequests} 次，连续两拍仍是 {st}" +
+                "⇒ 起播掉了（本条只诊断，不补发：没有「有意停这路」的状态就不能自动叫醒）");
+    }
+
+    /// <summary>bench-only 开关：被守卫拒掉的整组起播要不要挂进补发账（默认挂）。
+    ///
+    /// <para>为什么要有：这条修复上线后那一批 9 路轮崩溃率 10/12，而同机相邻的上一批是 15/30 ——
+    /// 时序相邻的两个水平分不开"崩溃带自己随时间爬"（§十七 已量过这个波动）与
+    /// "补发让每轮的 Play 变多、暴露面变大"。判这个只能拿**同一份二进制里的开关**做臂并交错轮序，
+    /// 所以留一个只在 bench 下改动的口（`FC_HOLD_PLAY_PENDING=0` 退回修复前行为）。</para></summary>
+    public static readonly bool HoldRejectedPlay =
+        System.Environment.GetEnvironmentVariable("FC_HOLD_PLAY_PENDING") != "0";
+
     /// <summary>本路当前是否启用（供 UI 与自测读取，判据只有一份）。</summary>
     public bool IsRouteActive(int index)
     {
         var slots = SnapshotSlots();
         return index >= 0 && index < slots.Length && slots[index].Active;
+    }
+
+    /// <summary>起播丢失的诊断快照（只读，供判红正文自带计数器）。
+    ///
+    /// <para><b>为什么必须有</b>：<see cref="DetectLostPlay"/> 有一条前置是
+    /// <c>PlayRequests != 0</c> —— "这一路从没被请求过起播"那种形态它<b>按设计不开口</b>。
+    /// 于是"检测器全天 0 告警"就有两种完全不同的解释：真的没红 / 红落在检测器条件之外。
+    /// 光看告警条数分不清，必须让判红那一条自己带上这几个数。</para>
+    ///
+    /// <para>⚠ <b>读时机</b>：<c>NotPlayingStreak</c> 在整组转为不想要播时立即归零，
+    /// 所以调用方要在<b>任何 Pause 之前</b>取，取晚了只会得到一个假的"0 拍"。</para></summary>
+    public (bool Want, int Requests, int Streak, bool Failed) LostPlayDiag(int index)
+    {
+        var slots = SnapshotSlots();
+        if (index < 0 || index >= slots.Length) return (WantPlaying, 0, 0, false);
+        var s = slots[index];
+        return (WantPlaying, s.PlayRequests, s.NotPlayingStreak, s.Failed);
     }
 
     /// <summary>当前<b>实测</b>未启用（没占格）的路号，升序。
@@ -744,8 +1072,18 @@ public sealed class SyncController
         {
             // 未启用的路本来就停着，不必再 Pause；对齐也一样跳过（见 SyncSlot.Active）
             if (slots[i].Failed || !slots[i].Active) continue;
-            try { slots[i].Session.Pause(); }
-            catch (Exception ex) { ReportRuntimeError($"帧步进前暂停第 {i} 路", ex); }
+            try
+            {
+                slots[i].Session.Pause();
+                _3FCompare.Core.Diagnostics.AppLog.Debug("Sync",
+                    $"第 {i} 路 暂停请求已发出（原因=帧步进对齐，wantPlaying={WantPlaying}）");
+            }
+            catch (Exception ex)
+            {
+                ReportRuntimeError($"帧步进前暂停第 {i} 路", ex);
+                _3FCompare.Core.Diagnostics.AppLog.Warn("Sync",
+                    $"第 {i} 路 帧步进前暂停抛出并已被吞（原因=帧步进对齐，{ex.GetType().Name}: {ex.Message}）");
+            }
         }
 
         var master = slots[0];
@@ -926,6 +1264,39 @@ public sealed class SyncController
     /// （首拍必须放行，不能留 0，理由见构造函数）。</summary>
     private long _lastDriftCheckTicks;
 
+    // ── #42 的"该校正却被跳过"见证 ──────────────────────────────────────────────
+    // 为什么要它：`--multitest` 16 轮里 7 轮判红，6 条同形（"第 1 路漂移 0.25–0.40s > 250ms"），
+    // 而同一时刻 app 日志里 `漂移校正` 每秒都在发、Δ 只有 90–150ms ⇒ 判据看到的数与校正看到的数
+    // 差了 2–4 倍。三种可能（从路落到 Paused 被排除 / master 非播放使整拍早退 / 拿不到
+    // `_stepGate` 使整拍静默跳过）在现有日志里**完全看不出区别**——三条路径都没有留痕。
+    // 所以这里只加计数与一条一次性详情，不改任何判定：跳过几次、因为什么跳、当时 Δ 多大。
+    private int _skipGateBusy;
+    private int _skipMasterNotPlaying;
+    private int _skipPausedBig;
+    private int _skipOtherStateBig;
+    private string _skipLastDetail = "";
+    private const long DriftObserveMinDelta100ns = 100_0000;   // 100ms：只关心已经大到会被判据抓到的那些
+
+    // #42 的第三个候选："校正每秒都在发，但位置从不回"。上面四个计数器只能证明"没人跳过它"，
+    // 证不了"发出去的 Seek 在内核里做成没有"——`PlayerSession::Seek` 只是 `Enqueue`，
+    // 返回值恒为 Success，真正的 `av_seek_frame` 失败发生在之后的工作线程里，
+    // 而且它 <b>不</b>把状态改成 Failed（消息原文："playback remained active"），
+    // 所以既不会抛、也不会被 `HandleEngineEvent` 的失败升级抓到。
+    // 唯一的正面证据是内核的<b>时间轴代数</b>：`++snapshot_.timelineGeneration` 只在
+    // `av_seek_frame` 成功后执行（PlayerSession.cpp:3032，同一处还做
+    // `snapshot_.position100ns = position; ResetClock(position)`）。
+    // ⇒ "下一拍代数没变" = 那次 Seek 在内核里根本没做成（硬否证）；
+    //   "代数变了" 只说明期间做过至少一次真 seek，来源可能是本校正、用户步进或广播 Seek，
+    //   <b>不能</b>当正证 —— 本读数只做单向判决。
+    private int _seekGenMoved;
+    private int _seekGenStuck;
+
+    /// <summary>漂移校正的"跳过"读数，供判红行与自测打印使用（纯观测，不参与任何决策）。</summary>
+    public string DriftSkipDiag() =>
+        $"校正跳过：gate忙={_skipGateBusy} master非播放={_skipMasterNotPlaying} " +
+        $"Paused大偏差={_skipPausedBig} 其他态大偏差={_skipOtherStateBig}；" +
+        $"Seek代数核对：变={_seekGenMoved} 未变={_seekGenStuck}；最后一条={_skipLastDetail}";
+
     // 帧率不会变，所以"是否存在帧率差异"只需算一次；槽位增减时失效。
     // -1 = 尚未计算，0 = 无差异，1 = 有差异
     private int _fpsMismatchCache = -1;
@@ -1022,7 +1393,13 @@ public sealed class SyncController
         // 表现为"播放中按方向键逐帧后画面随机错帧"，且难以复现。
         // 这里用 TryEnter 非阻塞取锁：取不到就整拍跳过（1s 后自然补下一拍），
         // **绝不能**改成 lock —— StepFramesCore 内有 Thread.Sleep(50)，会卡住 UI 线程。
-        if (!Monitor.TryEnter(_stepGate)) return;
+        if (!Monitor.TryEnter(_stepGate))
+        {
+            // 整拍静默跳过是 #42 的三个候选之一；没有这一行就永远分不出来。
+            _skipGateBusy++;
+            if (_skipGateBusy == 1) NoteSkip("本拍拿不到 _stepGate ⇒ 整拍跳过（各路 Δ 未测）");
+            return;
+        }
         try
         {
             TickDriftCore();
@@ -1055,6 +1432,10 @@ public sealed class SyncController
         if (master is null || master.State != PlayerState.Playing)
         {
             // 非播放态不校正，但仍要更新时戳，否则恢复播放瞬间会立刻触发一次
+            // 计数是 #42 的第二个候选：master 一旦离开播放，整拍早退，各路 Δ 无人管。
+            _skipMasterNotPlaying++;
+            if (_skipMasterNotPlaying == 1)
+                NoteSkip($"master 态={(master is null ? "null快照" : master.State.ToString())} ⇒ 本拍不校正");
             _lastDriftCheckTicks = now;
             return;
         }
@@ -1073,6 +1454,26 @@ public sealed class SyncController
             if (slots[i].Failed || !slots[i].Active) continue;
             var s = snaps[i];
             if (s is null) continue;
+
+            // #42 的代数核对：上一拍这一路发过漂移 Seek，就在这一拍看它的代数动没动（消费掉，只报一次）。
+            // 放在状态/阈值分支<b>之前</b>：正因为"没落地"的那一路下一拍仍然偏差很大，
+            // 如果只在要再次 Seek 时才核对，就等于只在失败的分支上打分母，读数会自证。
+            if (slots[i].SeekGenPending is ulong genBefore)
+            {
+                slots[i].SeekGenPending = null;
+                var moved = s.TimelineGeneration != genBefore;
+                if (moved) _seekGenMoved++; else _seekGenStuck++;
+                Diagnostics.AppLog.Debug("Sync",
+                    $"漂移校正核对 路{i} 上次Seek前代数={genBefore} 本拍代数={s.TimelineGeneration}" +
+                    $"（{(moved ? "已变" : "未变 ⇒ 那一次 Seek 在内核里没做成任何真 demuxer seek")}）" +
+                    $" 本拍Δ={s.Position100ns - (masterPos + slots[i].Offset100ns)}" +
+                    // 2026-10-04 04:39 现场：刚重开的那一路（`状态→Opening→Ready→Playing` 之后 1 s）
+                    // 连续四拍的代数恒为 0、且没有 `op=seek` 完成事件，而 expected 每秒涨 ~10.5 s
+                    // （素材只有 12 s）。要么这一路的 `Offset100ns` 在重开时被留成了一个大残值，
+                    // 要么 master 的位置本身在跑飞 —— 这两个数不写出来就分不开，所以各补一个。
+                    $" offset={slots[i].Offset100ns} masterPos={masterPos}" +
+                    CountersSinceLastTick(slots[i], s, now));
+            }
 
             // ── 哪些状态参与校正（docs/41 #21）──
             // 旧写法是 `s.State != Playing ⇒ continue`，一刀切且**没有替代判据**：
@@ -1107,9 +1508,16 @@ public sealed class SyncController
             // 偏差在半帧以内视为已收敛。这一条同时覆盖了"从路真到片尾、master 也快到片尾"
             // 的正常收敛：此时从路位置≈自身时长≈expected，差值落在半帧内，直接跳过，
             // 因此不会出现"来回拉"的抖动或循环。
-            // ⚠ 不能裸写 Math.Abs(a - b)：任一端是 long.MinValue 时会抛 OverflowException，
-            // 而本行在 try **之外** ⇒ 异常冒到轮询的顶层 catch 被吞，表现为位置/时间码停更、
-            // 每拍重抛、界面形似卡死（docs/45 P1-9）。
+            // ⚠ 这一支防的是"极端值把这一拍的判定带跑"。两条前提都实测过
+            //   （SyncDriftOverflowObservationTests.BclFact_MathAbs_OfLongMinValue_Throws）：
+            //   ① 本工程默认 unchecked（CheckForOverflowUnderflow 从未设置）⇒ `s.Position100ns - expected`
+            //      **环绕且不抛**，所以"减法溢出"这件事不能靠 catch；
+            //   ② 但 Math.Abs(long.MinValue) 是**真抛** OverflowException 的，而本行在 try **之外**
+            //      ⇒ 异常冒到轮询的顶层 catch 被吞，表现为位置/时间码停更、每拍重抛、界面形似卡死
+            //      （docs/45 P1-9）。当年那句"相减会抛"把因果记错了，防住的其实是 ②。
+            //   真正的兜底是下面那条 ±24h 过滤：期望值仍然离谱时放弃该路本拍的校正。
+            //   ⚠ 未解决：绕回小值的差会被当成"已收敛"而本拍不校正 —— 与观测位（RA-04）同源，
+            //   本轮只把观测位的环绕显式判掉，没动这条校正路径（它改的是同步语义，要另立判据）。
             // 加载侧（MainWindow 载入 .3fcs）已把偏移钳制到 ±24h，这里是二次防御：
             // 期望值仍然离谱时放弃该路本拍的校正，好过把整个轮询打断。
             if (expected < -_3FCompare.Core.Settings.SessionSnapshot.MaxOffset100ns ||
@@ -1120,7 +1528,11 @@ public sealed class SyncController
 
             try
             {
+                var before = s.Position100ns - expected;
                 slots[i].Session.Seek(ClampToDuration(slots[i], expected));
+                // 记下 Seek **之前**本拍读到的代数（`s` 是这一拍的快照，Seek 是异步入队，
+                // 现在再读一次只会读到同一个值 —— 那正是被现场否证掉的"残余"列的错法）。
+                slots[i].SeekGenPending = s.TimelineGeneration;
                 // Ended 从路必须补一次 Play 才会继续推进：Seek 只把它从 Ended 改成 Paused
                 //（内核 PlayerSession::DoSeek 尾部：`if (state == Ended) SetState(Paused,"seek")`），
                 // 位置对了却停着不动 ⇒ 下一拍又判为偏差 ⇒ 每秒一次 Seek 风暴且画面永久冻住。
@@ -1135,12 +1547,100 @@ public sealed class SyncController
                 if (s.State == PlayerState.Ended) slots[i].Session.Play();
 
                 Diagnostics.AppLog.Debug("Sync",
-                    $"漂移校正 路{i} 态={s.State} Δ={s.Position100ns - expected} → Seek {expected}");
+                    $"漂移校正 路{i} 态={s.State} Δ={before} → Seek {expected}");
             }
             catch (Exception ex) { ReportRuntimeError($"漂移校正第 {i} 路", ex); }
         }
 
         _lastDriftCheckTicks = now;
+
+        // 每拍存一次计数器快照，供下一拍的核对行求差（#42 形状 A 的归因读数；纯观测，不改判定）。
+        // 为什么存 i=0 也要：master 自己的前进速率是"从路掉 90 ms"那条读数的分母，
+        // 只存从路就无法判断到底是 master 在跑、还是从路在落后。
+        for (var i = 0; i < slots.Length && i < snaps.Length; i++)
+        {
+            var snap = snaps[i];
+            if (snap is null) continue;
+            slots[i].DbgLast = (snap.PresentedVideoFrames, snap.SwapChainPresents,
+                                snap.PresentWait100ns, snap.Position100ns, now);
+        }
+
+        // 只观测、不动手：把"这一拍偏差已经大到会被判据抓到、但上面的循环没有对它下手"的情形记下来。
+        ObserveSkippedDrift(slots, snaps, masterPos);
+    }
+
+    /// <summary>记一条"跳过"详情（每种原因只记第一次，避免每秒刷日志）。</summary>
+    private void NoteSkip(string detail)
+    {
+        if (!string.IsNullOrEmpty(_skipLastDetail)) return;
+        _skipLastDetail = detail;
+        Diagnostics.AppLog.Debug("Sync", $"漂移校正跳过见证：{detail}");
+    }
+
+    /// <summary>把上一拍存的计数器与本拍的做差，拼成 <c>漂移校正核对</c> 行的尾巴
+    /// （#42 形状 A 的归因读数，见 <see cref="SyncSlot.DbgLast"/>）。
+    ///
+    /// <para>要分的就两种病：<b>卡在 <c>Present</c> 里等</b> ⇒ <c>Present阻塞</c> 的差会吃掉
+    /// 那一段缺失的时间；<b>根本没解出/呈现那么多帧</b> ⇒ <c>呈现帧</c> 的差低于帧率应有值、
+    /// 而 <c>Present阻塞</c> 不涨。修法完全不同（前者是呈现节律/负载，后者是解码供给）。</para>
+    ///
+    /// <para>没有上一拍、或间隔不大于 0 就回空串：<b>这条读数的意义全在两拍之间，单次取值
+    /// 说明不了任何事</b>，宁可整列不出。</para></summary>
+    private static string CountersSinceLastTick(SyncSlot slot, EngineSnapshot s, long nowMs)
+    {
+        if (slot.DbgLast is not (var p0, var c0, var w0, var pos0, var ms0)) return string.Empty;
+        var gapMs = nowMs - ms0;
+        if (gapMs <= 0) return string.Empty;
+        return $" 间隔={gapMs}ms 位置前进={(s.Position100ns - pos0) / 10000}ms" +
+               $" 呈现帧=+{s.PresentedVideoFrames - p0}" +
+               $" Present调用=+{s.SwapChainPresents - c0}" +
+               $" Present阻塞={(s.PresentWait100ns - w0) / 10000}ms";
+    }
+
+    /// <summary>#42 的读数：哪些路"该被校正却因为状态排除而没人管"。
+    /// 纯观测——不改判定、不 Seek、不影响 <see cref="TickDriftCore"/> 的任何分支。</summary>
+    private void ObserveSkippedDrift(SyncSlot[] slots, EngineSnapshot?[] snaps, long masterPos)
+    {
+        for (var i = 1; i < slots.Length; i++)
+        {
+            if (slots[i].Failed || !slots[i].Active) continue;   // 停用路本就不参与，不算"该校正被跳过"
+            var s = snaps[i];
+            if (s is null) continue;
+            // 与校正同一口径：期望位置 = master + 本路偏移
+            var expected = masterPos + slots[i].Offset100ns;
+            if (expected < -_3FCompare.Core.Settings.SessionSnapshot.MaxOffset100ns ||
+                expected > _3FCompare.Core.Settings.SessionSnapshot.MaxOffset100ns) continue;
+            if (s.Duration100ns > 0 && expected > s.Duration100ns) continue;   // 情形 A：内容放完，不追
+            // Playing / Ended 都被上面的循环处理过了，跳过的只可能是别的态（Paused 是刻意排除项）
+            if (s.State is PlayerState.Playing or PlayerState.Ended) continue;
+            // ⚠ RA-04：这里原来是 `try { delta = … } catch (OverflowException) { continue; }`，
+            //   而那条 catch **永远触发不了**：本工程从未开启 CheckForOverflowUnderflow
+            //   （3FCompare.Core.csproj 没有该项，仓根也没有 Directory.Build.props）⇒ C# 默认 unchecked，
+            //   long 相减**环绕且不抛**。实测形态：Position=long.MaxValue、expected=-1
+            //   ⇒ 真差 2^63 落在 long 域外，环绕成 long.MinValue，再被下面那句当成"一个大偏差"计进读数，
+            //   Δ 还印成负数。现在显式判环绕，不依赖运行时抛异常：
+            //   两操作数异号、而结果与被减数同号 ⇒ 有符号溢出（本拍这条观测放弃，不猜数）。
+            var delta = s.Position100ns - expected;
+            if (((s.Position100ns ^ expected) & (s.Position100ns ^ delta)) < 0) continue;
+            // 溢出已排除，delta 仍可能**正好等于** long.MinValue（Position=long.MinValue、expected=0
+            // 这种可表示的组合）⇒ 单独兜一支：Math.Abs(long.MinValue) 在 BCL 里是**真抛** OverflowException
+            // 的（实测见 SyncDriftOverflowObservationTests.BclFact_MathAbs_OfLongMinValue_Throws），
+            // 而观测位整条路径都不该反过来把校正这一拍打断。
+            var abs = delta == long.MinValue ? long.MaxValue : System.Math.Abs(delta);
+            if (abs < DriftObserveMinDelta100ns) continue;
+            if (s.State == PlayerState.Paused)
+            {
+                _skipPausedBig++;
+                if (_skipPausedBig == 1)
+                    NoteSkip($"路{i} 态=Paused 且 Δ={delta / 10000:F0}ms ⇒ 按 #21 的语义刻意不校正，判据却会把它算成失步");
+            }
+            else
+            {
+                _skipOtherStateBig++;
+                if (_skipOtherStateBig == 1)
+                    NoteSkip($"路{i} 态={s.State} 且 Δ={delta / 10000:F0}ms ⇒ 交给打开流程，本拍无人管");
+            }
+        }
     }
 
     /// <summary>处理循环：若开启区间循环且 master 位置越过终点，Seek 回起点。</summary>

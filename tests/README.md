@@ -4,7 +4,7 @@
 
 | 工程 | 类型 | 用途 |
 |---|---|---|
-| `3FCompare.Core.Tests` | 单元测试（xunit） | FrameTimeline 帧/秒步进换算、SyncController 多会话同步（含漂移校正）、GridLayout 网格布局、ToneMapping 色调映射参数、设置/会话 JSON 序列化、**PixelReadback 片源↔后台缓冲坐标域换算**、**RenderStallWatchdog 呈现停滞判定**、**EngineDto 契约** |
+| `3FCompare.Core.Tests` | 单元测试（xunit） | FrameTimeline 帧/秒步进换算、SyncController 多会话同步（含漂移校正）、GridLayout 网格布局、**GridPartition 合并态几何（权重→格表、拖动只改相邻两列、5% 下界、末边界逐位贴边、朝向候选含 1×2）**、ToneMapping 色调映射参数、设置/会话 JSON 序列化、**PixelReadback 片源↔后台缓冲坐标域换算**、**RenderStallWatchdog 呈现停滞判定**、**EngineDto 契约** |
 | `3FCompare.Platform.Tests` | 平台层单元测试（xunit） | ViewPan 缩放/平移与光标锚点、MagnifierPlacement 放大镜定位、PlaybackCoordinator 配额、FrameCapture 抓帧路由、CrashGuard 崩溃守卫、LanguageManager 中英键覆盖、ProbePoint 哨兵 |
 | `3FCompare.SmokeTests` | 控制台冒烟 | E3 可达性冒烟：**始终走演示引擎**（合成画面，无需真实 DLL）全流程（打开 → 步进 → 循环 → 一致性） |
 

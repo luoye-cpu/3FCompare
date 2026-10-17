@@ -1,0 +1,137 @@
+## 静图硬件解码 · 第二轮证据（2026-10-15，半平面呈现缺陷修复 + GetImageInfo 回归修复）
+
+判据：两臂（cpu=FFF3FPDecodeMode::Cpu / gpu=:D3D11）进程内交错 A/B/A，
+      --pixels 64 采视频区中心（891x501 窗内 439,218 起点），capture=64。
+      repro: 见 3fp/docs/99 的 §8，第二轮 bat 在 _3fc_tmp/run_final_verify.bat。
+
+--- 1) §5 根因：VideoRenderer.cpp:5898-5912 半平面每行字节数少算"每 texel 分量数" ---
+修复前 rowBytes = ceil(W>>xShift) * (bitDepth>8?2:1)     <- 缺 x2
+修复后 rowBytes = ceil(W>>xShift) * samplesPerTexel * (bitDepth>8?2:1)
+        samplesPerTexel = (layout==2 && plane!=0) ? 2 : 1
+半平面 chroma 目标纹理是 R8G8 / R16G16（每 texel 2 分量），平面格式与 luma 是 1 分量。
+
+--- 2) 视频侧 CUDA 后端判定（§10-2，第一轮未判）---
+夹具: v_mjpeg_1280x720.avi（ffmpeg -c:v mjpeg -pix_fmt yuvj420p，1280x720，25fps 1s）
+MJPEG 的唯一硬件后端是 CUDA ⇒ gpu 臂必然走 av_hwframe_transfer_data 到 CPU 半平面。
+
+[修复已回退的 DLL，同一命令同一夹具]
+  cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms image_info=n/a pixels=439,218 891x501 bit=8 29.8ms
+  gpu  open=1 mode=Gpu  presented=1 xfer=1.1ms image_info=n/a pixels=439,218 891x501 bit=8 92.4ms
+  cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=1.000000 (B) mean=0.2023897  cpu=(0.0157,0.0157,1.0000) gpu=(0.0000,0.6627,0.0000)
+
+[修复后的 DLL]
+  a0 cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms image_info=n/a pixels=439,218 891x501 bit=8 30.7ms
+  a0 gpu  open=1 mode=Gpu  presented=1 xfer=1.3ms image_info=n/a pixels=439,218 891x501 bit=8 94.1ms
+  a0 cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.9961,1.0000,0.0000) gpu=(0.9961,1.0000,0.0000)
+  a1 cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms image_info=n/a pixels=439,218 891x501 bit=8 30.6ms
+  a1 gpu  open=1 mode=Gpu  presented=1 xfer=0.9ms image_info=n/a pixels=439,218 891x501 bit=8 70.7ms
+  a1 cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.9961,1.0000,0.0000) gpu=(0.9961,1.0000,0.0000)
+
+--- 3) §7 GetImageInfo 源格式/位深回归修复（两臂同值）---
+adapter 0:
+  01d_heic_1280x720.heic
+  cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=0 srcbitdepth=8 pixels=439,218 891x501 bit=8 241.8ms
+  gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=0 srcbitdepth=8 pixels=439,218 891x501 bit=8 244.0ms
+  cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.3529,0.3647,0.3255) gpu=(0.3529,0.3647,0.3255)
+  04_pq_10bit.avif
+  cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=62 srcbitdepth=10 pixels=439,218 891x501 bit=10 214.3ms
+  gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=62 srcbitdepth=10 pixels=439,218 891x501 bit=10 273.4ms
+  cpu-vs-gpu presented pixels: 64 x 64 bit=10/10 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.8700,0.4702,1.0000) gpu=(0.8700,0.4702,1.0000)
+  01c_srgb_1920x1080.jpg
+  cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] srcpixfmt=12 srcbitdepth=8 pixels=439,218 891x501 bit=8 90.0ms
+  gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] srcpixfmt=12 srcbitdepth=8 deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} pixels=439,218 891x501 bit=8 182.5ms
+  cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.9961,1.0000,0.0000) gpu=(0.9961,1.0000,0.0000)
+  01_srgb_alpha_1920x1080.png
+  cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] srcpixfmt=26 srcbitdepth=8 pixels=439,218 891x501 bit=8 211.2ms
+  gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] srcpixfmt=26 srcbitdepth=8 deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} pixels=439,218 891x501 bit=8 216.6ms
+  cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.9922,0.9922,0.0000) gpu=(0.9922,0.9922,0.0000)
+  03_exif_orientation6.jpg
+  cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=3[has_rot] srcpixfmt=12 srcbitdepth=8 pixels=439,218 891x501 bit=8 181.1ms
+  gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=3[has_rot] srcpixfmt=12 srcbitdepth=8 deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} pixels=439,218 891x501 bit=8 238.9ms
+  cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.9961,1.0000,0.0000) gpu=(0.9961,1.0000,0.0000)
+  m_3840x2160.avif
+  cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=0 srcbitdepth=8 pixels=439,218 891x501 bit=8 241.0ms
+  gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=0 srcbitdepth=8 pixels=439,218 891x501 bit=8 243.2ms
+  cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(1.0000,0.9412,0.0000) gpu=(1.0000,0.9412,0.0000)
+  j_yuvj422p.jpg
+  cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] srcpixfmt=13 srcbitdepth=8 pixels=439,218 891x501 bit=8 211.8ms
+  gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] srcpixfmt=13 srcbitdepth=8 deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} pixels=439,218 891x501 bit=8 244.3ms
+  gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.9961,1.0000,0.0000) gpu=(0.9961,1.0000,0.0000)
+  j_yuvj444p.jpg
+  cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] srcpixfmt=14 srcbitdepth=8 pixels=439,218 891x501 bit=8 244.0ms
+  gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] srcpixfmt=14 srcbitdepth=8 deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} pixels=439,218 891x501 bit=8 211.7ms
+  cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.9961,1.0000,0.0000) gpu=(0.9961,1.0000,0.0000)
+adapter 1:
+  01d_heic_1280x720.heic
+  cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=0 srcbitdepth=8 pixels=439,218 891x501 bit=8 240.1ms
+  gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=0 srcbitdepth=8 pixels=439,218 891x501 bit=8 268.9ms
+  cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.3529,0.3647,0.3255) gpu=(0.3529,0.3647,0.3255)
+  04_pq_10bit.avif
+  cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=62 srcbitdepth=10 pixels=439,218 891x501 bit=10 220.0ms
+  gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=62 srcbitdepth=10 pixels=439,218 891x501 bit=10 286.2ms
+  cpu-vs-gpu presented pixels: 64 x 64 bit=10/10 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.8710,0.4721,1.0000) gpu=(0.8710,0.4721,1.0000)
+  01c_srgb_1920x1080.jpg
+  cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] srcpixfmt=12 srcbitdepth=8 pixels=439,218 891x501 bit=8 212.9ms
+  gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] srcpixfmt=12 srcbitdepth=8 deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} pixels=439,218 891x501 bit=8 243.0ms
+  cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.9961,1.0000,0.0000) gpu=(0.9961,1.0000,0.0000)
+  01_srgb_alpha_1920x1080.png
+  cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] srcpixfmt=26 srcbitdepth=8 pixels=439,218 891x501 bit=8 244.1ms
+  gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot][alpha] srcpixfmt=26 srcbitdepth=8 deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} pixels=439,218 891x501 bit=8 306.3ms
+  cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.9922,0.9922,0.0000) gpu=(0.9922,0.9922,0.0000)
+  03_exif_orientation6.jpg
+  cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=3[has_rot] srcpixfmt=12 srcbitdepth=8 pixels=439,218 891x501 bit=8 223.5ms
+  gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=3[has_rot] srcpixfmt=12 srcbitdepth=8 deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} pixels=439,218 891x501 bit=8 215.6ms
+  cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.9961,1.0000,0.0000) gpu=(0.9961,1.0000,0.0000)
+  m_3840x2160.avif
+  cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=0 srcbitdepth=8 pixels=439,218 891x501 bit=8 269.8ms
+  gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=0 srcbitdepth=8 pixels=439,218 891x501 bit=8 307.6ms
+  cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(1.0000,0.9412,0.0000) gpu=(1.0000,0.9412,0.0000)
+  j_yuvj422p.jpg
+  cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] srcpixfmt=13 srcbitdepth=8 pixels=439,218 891x501 bit=8 213.6ms
+  gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] srcpixfmt=13 srcbitdepth=8 deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} pixels=439,218 891x501 bit=8 211.3ms
+  vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.9961,1.0000,0.0000) gpu=(0.9961,1.0000,0.0000)
+  j_yuvj444p.jpg
+  cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] srcpixfmt=14 srcbitdepth=8 pixels=439,218 891x501 bit=8 746.0ms
+  gpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=-1 rot=4294967295[no_rot] srcpixfmt=14 srcbitdepth=8 deviceChanged={"type":"video","decodeMode":1,"fallback":true,"reason":"No compatible hardware decoder was found."} pixels=439,218 891x501 bit=8 250.0ms
+  cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(0.9961,1.0000,0.0000) gpu=(0.9961,1.0000,0.0000)
+
+修复前（第一轮读数）:
+  01d_heic            cpu srcpixfmt=0   bitdepth=8   -> gpu 171 bitdepth=8
+  04_pq_10bit.avif    cpu srcpixfmt=62  bitdepth=10  -> gpu 171 bitdepth=8   <- 10bit 被报成 8bit
+
+--- 4) 46 张全量 × 两卡（判"只在 Gpu 臂失败" + 逐位等价）---
+adapter 0: open=0 的臂（两臂同失败 = 既有封顶/旧账）:
+  09_huge_17000x64.png                       cpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_i
+  09_huge_17000x64.png                       gpu  open=0 mode=Gpu  presented=0 xfer=0.0ms image_i
+  09d_stripe_huge_17000x4000.jpg             cpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_i
+  09d_stripe_huge_17000x4000.jpg             gpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_i
+  09e_stripe_huge_anim_17000x300.gif         cpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_i
+  09e_stripe_huge_anim_17000x300.gif         gpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_i
+  12a_srgb_1920x1080.jxr                     cpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_i
+  12a_srgb_1920x1080.jxr                     gpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_i
+adapter 0: max|d| != 0 的样本:
+  07d_anim.avif                              cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.517647 (B) mean=0.0045650  cpu=(0.9373,0.9373,0.3804) gpu=(0.8745,0.8745,0.8980)
+  10g_bitdepth_8bit_640x480.avif             cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.015686 (R) mean=0.0000776  cpu=(0.1333,0.2000,0.1412) gpu=(0.1176,0.2078,0.1373)
+  10h_bitdepth_10bit_640x480.avif            cpu-vs-gpu presented pixels: 64 x 64 bit=10/10 max|d|=0.012708 (R) mean=0.0000815  cpu=(0.1349,0.1975,0.1398) gpu=(0.1222,0.2033,0.1388)
+adapter 1: open=0 的臂（两臂同失败 = 既有封顶/旧账）:
+  09_huge_17000x64.png                       cpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_i
+  09_huge_17000x64.png                       gpu  open=0 mode=Gpu  presented=0 xfer=0.0ms image_i
+  09d_stripe_huge_17000x4000.jpg             cpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_i
+  09d_stripe_huge_17000x4000.jpg             gpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_i
+  09e_stripe_huge_anim_17000x300.gif         cpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_i
+  09e_stripe_huge_anim_17000x300.gif         gpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_i
+  12a_srgb_1920x1080.jxr                     cpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_i
+  12a_srgb_1920x1080.jxr                     gpu  open=0 mode=Cpu  presented=0 xfer=0.0ms image_i
+adapter 1: max|d| != 0 的样本:
+  07d_anim.avif                              cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.517647 (B) mean=0.0045956  cpu=(0.9373,0.9412,0.3804) gpu=(0.8745,0.8706,0.8980)
+  10g_bitdepth_8bit_640x480.avif             cpu-vs-gpu presented pixels: 64 x 64 bit=8/8 max|d|=0.015686 (R) mean=0.0000799  cpu=(0.1333,0.2000,0.1412) gpu=(0.1176,0.2078,0.1373)
+  10h_bitdepth_10bit_640x480.avif            cpu-vs-gpu presented pixels: 64 x 64 bit=10/10 max|d|=0.012708 (R) mean=0.0000822  cpu=(0.1349,0.1975,0.1398) gpu=(0.1222,0.2033,0.1388)
+
+--- 5) JPEG 硬解放开实验（gate 临时移除后测得，据此判定不放开）---
+gate 移除后 gpu 臂对 JPEG 走 CUDA：mode=Gpu, xfer=1.3~1.4ms, srcpixfmt=23(nv12)
+  01c_srgb_1920x1080.jpg      max|d|=0.000000  (4:2:0，逐位相同)  delta=+64.2ms
+  03_exif_orientation6.jpg    max|d|=0.000000                    delta=+195.8ms
+  09h_stripe_small_1600x1200  max|d|=0.003922  (1/255，B 通道)    delta=+91.0ms
+  j_yuvj422p.jpg              被 cuvid 拒包 -> 回退 CPU（多花一次失败探测）
+  j_yuvj444p.jpg              max|d|=0.015686  (4/255，B 通道；4:4:4 被压成 4:2:0)
+=> 判定：CUDA JPEG 既不逐位等价，也不更快 ⇒ 静图后端限制保留（理由改写，见源码注释）。

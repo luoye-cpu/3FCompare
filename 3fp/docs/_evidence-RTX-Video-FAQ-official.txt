@@ -1,3 +1,10 @@
+# 取证件说明（2026-10-15 追加，以下正文一字未改）
+来源：NVIDIA「RTX Video FAQ」，页面标识 custhelp.com/a_id/5448，页内自述 Updated 01/30/2025。
+取得方式：本机代理 127.0.0.1:10808 → Wayback Machine 快照 20250609234633，HTTP 200。
+用途：仅为 docs/28 的技术规格取证（输入 360p~1440p、输出支持 5K、GPU 矩阵、状态指示器）。
+版权：文本归 NVIDIA 所有。本文件是网页全文的取证副本，不随发布包分发（pack.ps1 实测不拷 docs/）。
+本仓引用出处：docs/28-RTX-VSR与自动HDR播放器支持分析.zh.md:568,:721。
+==== 正文自此以下 ====
 RTX Video FAQ | NVIDIA
 Skip Navigation
 Your browser either does not have JavaScript enabled or does not appear to support enough features of JavaScript to be used well on this site.

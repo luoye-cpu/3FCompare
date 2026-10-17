@@ -170,6 +170,22 @@ internal sealed class StubSession : IPlayerSession
     public void SetVolume(float volume, bool muted) { }
     public void SetColorMode(ColorMode mode, bool? contentIsHdr = null) { }
     public bool SetPresentConfig(bool tearing) => true;
+
+    // RTX VSR：本桩不建模驱动通路。请求恒真、状态读不出来（= 等价于"内核不提供该入口"），
+    // 免得任何同步用例误把 active=false 当成一条被测结论。
+    public bool SetVideoSuperResolution(bool enable) => true;
+
+    public bool ReadVideoSuperResolutionStatus(out VideoSuperResolutionStatus status)
+    {
+        status = default;
+        return false;
+    }
+    // 动态元数据注入族（2026-10-10）：同步控制器测试不触碰注入，恒成功即可。
+    public bool SetDynamicMetadata(IReadOnlyList<DynamicMetadataPacket> packets) => true;
+    public bool ClearDynamicMetadata(DynamicMetadataKind kind) => true;
+    public bool SetHdrDynamicMetadata(IReadOnlyList<HdrDynamicMetadataEntry> entries) => true;
+    public bool ClearHdrDynamicMetadata() => true;
+    public DynamicMetadataSource? GetHdrMetadataSource() => DynamicMetadataSource.Bitstream;
     public void SetViewTransform(float zoom, float panX, float panY) { }
     public void SetFitLimitToNative(bool enable) { }
     public EngineMediaInfo? ReadMediaInfo() => null;

@@ -164,6 +164,8 @@ public static class LanguageManager
         ["Menu_SaveSession"] = "保存会话…",
         ["Menu_LoadSession"] = "加载会话…",
         ["Menu_ExportFrame"] = "导出当前帧 PNG… (Ctrl+S)",
+        ["Menu_LoadDynamicMetadata"] = "载入动态元数据…",
+        ["Menu_ClearDynamicMetadata"] = "清除注入的动态元数据",
         ["Menu_Exit"] = "退出",
         ["Menu_View"] = "视图(&V)",
         ["Menu_ToggleSingle"] = "单屏/多屏切换",
@@ -180,12 +182,40 @@ public static class LanguageManager
         ["Menu_Grid_2x2"] = "2×2",
         ["Menu_Grid_3x3"] = "3×3",
         ["Menu_Grid_Auto"] = "自动",
-        // 视图模式三态（菜单顶部一列，互斥单选）。只写身份，不写解释 ——
+        // 视图模式两项（菜单顶部一列，互斥单选）：2026-09-30 把「标准网格」与「A/B 可拖动」合成一项。只写身份，不写解释 ——
         // 每种模式具体怎么排布、显示几路，切过去之后由状态栏那句话说明。
         ["Menu_ViewMode"] = "视图模式",
-        ["Menu_Mode_Standard"] = "标准模式",
-        ["Menu_Mode_AbDrag"] = "A/B 可拖动对比",
+        ["Menu_Mode_Standard"] = "网格对比（分割线可拖）",
         ["Menu_Mode_Wipe"] = "左右拉动对比",
+        ["Menu_Mode_LayoutEditor"] = "布局编辑器（自由拼接）…",
+
+        // ── 自由拼接布局编辑器（Views/MosaicLayoutEditorWindow）──
+        ["Layout_Title"] = "布局编辑器 — 自由拼接",
+        ["Layout_Hint"] = "点选一块，然后竖切或横切。每块可指定显示第几路。双击块 = 竖切，右键 = 横切。",
+        ["Layout_SplitV"] = "竖切",
+        ["Layout_SplitH"] = "横切",
+        ["Layout_Merge"] = "合并（删掉这道线）",
+        ["Layout_ThisTileShows"] = "这一块显示：",
+        ["Layout_Reset"] = "重置为单块",
+        ["Layout_ResetDone"] = "已重置为单块。",
+        ["Layout_SelectFirst"] = "先点选一块再操作。",
+        ["Layout_SplitNoEffect"] = "切分未生效（块已到最小尺寸下界）。",
+        ["Layout_SplitV_Done"] = "已竖切，新块自动分配了下一路。",
+        ["Layout_SplitH_Done"] = "已横切，新块自动分配了下一路。",
+        ["Layout_MergeSkipped"] = "这一块与相邻块显示的不是同一路，或拼起来不是矩形 ⇒ 未合并。",
+        ["Layout_MergeDone"] = "已合并相邻同路块。",
+        ["Layout_Empty"] = "布局为空，无法应用。",
+        ["Layout_SplitAtClick"] = "已在鼠标位置切开。",
+        ["Layout_Confirm"] = "确定",
+        ["Layout_Cancel"] = "取消",
+
+        // ── 「选择路」对话框（Views/RoutePickerWindow）──
+        ["Menu_Mode_RoutePicker"] = "选择路（指定哪些路参与）…",
+        ["Routes_Title"] = "选择路 — 指定哪些路参与拉动对比",
+        ["Routes_Hint"] = "每一行是拉动的一条带，选它显示第几路。同一路可以出现在多条带上（重复对照）。",
+        ["Routes_BandCount"] = "条带数：",
+        ["Routes_ResetIdentity"] = "重置为依次对应",
+        ["Pb_AddRoute"] = "加路（选择文件并新开一路）…",
         ["Menu_CompareOptions"] = "对比选项",
         ["Menu_Mode_Swap"] = "左右互换（AB）",
         ["Menu_Mode_Rotate"] = "轮换各格画面",
@@ -210,6 +240,21 @@ public static class LanguageManager
         ["Status_SingleMode"] = "单屏",
         // 各路帧率不同时，"第 N 帧"在各路指向的是不同时刻的内容
         ["Status_FpsMismatch"] = "各路帧率不一致（按时间对齐）",
+        ["Status_DmLoadedAll"] = "已注入动态元数据：{0} 条，作用于 {1}/{2} 路",
+        ["Status_DmLoadedPartial"] = "动态元数据只注入了 {1}/{2} 路（其余路被内核拒绝）",
+        ["Status_DmLoadedNone"] = "动态元数据注入失败：{1}/{2} 路全部被拒（旧内核不支持，或载荷被校验拒绝）",
+        ["Status_DmCleared"] = "已清除注入的动态元数据（{0}/{1} 路）",
+        ["Status_DmClearNone"] = "当前没有已注入的动态元数据",
+        ["Status_DmNeedMedia"] = "请先打开视频，再载入动态元数据",
+        ["Msg_DmLoadFailed"] = "动态元数据文件无法载入。",
+        // 外部色彩变换模块的解锁提示（仅当该模块在盘上且未解锁时出现；文案保持中性，不出现厂家名）
+        ["Unlock_Title"] = "色彩变换模块未解锁",
+        ["Unlock_Body"] = "检测到色彩变换模块，但它尚未解锁。请输入解锁码以启用；取消则本次仍按基础层出画，不会有任何提示。",
+        ["Unlock_CodeLabel"] = "解锁码",
+        ["Unlock_Cancel"] = "取消 / Cancel",
+        ["Unlock_Confirm"] = "确定 / OK",
+        ["Unlock_WrongCode"] = "解锁码未被接受（第 {0}/{1} 次）。请重新输入，或取消以按基础层出画。",
+        ["Unlock_NotPersisted"] = "解锁码已被接受，但授权票据写不进程序目录 ⇒ 本次运行有效，重启后需要重新输入。",
         ["Status_Color"] = "色彩",
         // 设置窗口「外观」节
         ["Theme_SectionTitle"] = "外观",
@@ -290,6 +335,10 @@ public static class LanguageManager
         ["MediaInfo_PixelFormat"] = "像素格式",
         ["MediaInfo_Color"] = "色彩",
         ["MediaInfo_Hdr"] = "HDR",
+        ["MediaInfo_DmSource"] = "动态元数据来源",
+        ["MediaInfo_DmBitstream"] = "位流（文件自带）",
+        ["MediaInfo_DmInjected"] = "注入（外部载入）",
+        ["MediaInfo_DmUnsupported"] = "内核不支持此查询",
         ["MediaInfo_Frames"] = "帧数",
         ["MediaInfo_Lossless"] = "无损",
         ["MediaInfo_Interlaced"] = "交错",
@@ -322,6 +371,7 @@ public static class LanguageManager
         ["Msg_CaptureUnavailable"] = "截图失败：窗口帧捕获与像素采样均不可用",
         ["Msg_CaptureFail"] = "截图失败",
         ["Msg_SessionInvalid"] = "会话文件无效或为空",
+        ["Msg_OperationFailed"] = "操作失败",
         ["Msg_AppName"] = "3FCompare",
         ["Audio_NoTrack"] = "无音轨",
         // VRR 呈现（内核扩展 F27）
@@ -329,6 +379,9 @@ public static class LanguageManager
         ["Vrr_TearingPresent"] = "VRR 低延迟呈现 (G-SYNC/FreeSync，实验)",
         ["Vrr_TearingHint"] = "开启后以 Present(0+ALLOW_TEARING) 呈现，让 G-SYNC/FreeSync 显示器按自身节奏扫描输出（可消除 24fps 内容的 3:2 抖动）。显示器或驱动不支持时自动回退 VSync 锁定。盯帧逐帧对比建议关闭。对新打开的会话生效。",
         ["Vrr_PacingHint"] = "开启后抑制叠加层固定周期的重翻转，使呈现节奏跟随源视频帧率而非叠加层帧率。需与 VRR 低延迟呈现配合使用，在叠加层无活动时消除额外翻转。",
+        ["Vsr_SectionTitle"] = "RTX 视频超分辨率 (VSR，实验)",
+        ["Vsr_Enable"] = "对新开的会话请求 RTX VSR（Auto 档）",
+        ["Vsr_Hint"] = "勾选后，新建的会话向驱动登记 RTX 视频超分辨率请求（内核 FFF3FP_SetVideoSuperResolution(Auto)）；到底用不用由内核逐帧判定，条件包括：渲染适配器为 NVIDIA、源高度 360–1440、画面确实在放大、源纹理可作视频处理器输入。⚠ 勾选本身与状态里的 active=1 都只表示“驱动没有拒绝这次请求”——实测该查询接口对一个伪造的 GUID 也返回 S_OK，因此它不是“画面被增强”的证据。画质档位（1–4/Auto）与总开关由 NVIDIA App 或 NVIDIA 控制面板决定，本程序既不能设置也读不到。若盘上的 FFF.Native.dll 没有这个入口（出货内核目前没有），只记一条告警、会话照常打开。对新打开的会话生效。",
         ["Scrub_PreviewEnabled"] = "时间轴拖动缩略图预览",
         ["Scrub_SectionTitle"] = "时间轴预览",
         ["Scrub_PreviewHint"] = "拖动时间轴时每 150ms 抓帧显示弹窗。低配设备可关闭，关闭后仅更新时间码和播放头。",
@@ -340,7 +393,7 @@ public static class LanguageManager
         // LanguageManagerKeysTests.两张语言表键集合一致 判红，界面上则表现为裸键名。
         ["Keys_SectionTitle"] = "快捷键",
         ["Keys_Hint"] = "点击按钮后按下新按键即可改键，Esc 取消；「清除」= 解绑，未绑定的动作不响应键盘。" +
-                        "固定功能键（O 打开 / Ctrl+S 导出 / V·S·G 三种视图模式 / C 对比布局循环 / " +
+                        "固定功能键（O 打开 / Ctrl+S 导出 / G·V·S 视图模式（G 与 V 同态：网格对比；S：左右拉动）/ C 换分格朝向 / " +
                         "T·Shift+T 底栏折叠 / P 探针 / R 重置视图 / Ctrl+H 侧栏三态 / F11 / 上下键 / F6 / Delete / 1~9）" +
                         "不可绑定，会被当场拒绝。步进量在上一节「步进」里设；「停止」已无界面按钮，只能靠这里绑的键触发。",
         ["Keys_StepSecondBackward"] = "按秒快退",
@@ -415,6 +468,8 @@ public static class LanguageManager
         ["Menu_SaveSession"] = "Save Session…",
         ["Menu_LoadSession"] = "Load Session…",
         ["Menu_ExportFrame"] = "Export Current Frame PNG… (Ctrl+S)",
+        ["Menu_LoadDynamicMetadata"] = "Load Dynamic Metadata…",
+        ["Menu_ClearDynamicMetadata"] = "Clear Injected Dynamic Metadata",
         ["Menu_Exit"] = "Exit",
         ["Menu_View"] = "View(&V)",
         ["Menu_ToggleSingle"] = "Toggle Single/Multi View",
@@ -434,9 +489,37 @@ public static class LanguageManager
         // View modes: the mutually exclusive column at the top of the View menu.
         // Identity only — what each mode lays out is reported by the status line after switching.
         ["Menu_ViewMode"] = "View mode",
-        ["Menu_Mode_Standard"] = "Standard view",
-        ["Menu_Mode_AbDrag"] = "A/B draggable split",
+        ["Menu_Mode_Standard"] = "Grid compare (draggable dividers)",
         ["Menu_Mode_Wipe"] = "Left-right wipe",
+        ["Menu_Mode_LayoutEditor"] = "Layout editor (free-form tiling)…",
+
+        // Free-form tiling layout editor (Views/MosaicLayoutEditorWindow)
+        ["Layout_Title"] = "Layout editor — free-form tiling",
+        ["Layout_Hint"] = "Click a tile, then split it vertically or horizontally. Each tile can show a chosen route. Double-click a tile = vertical split, right-click = horizontal split.",
+        ["Layout_SplitV"] = "Split vertical",
+        ["Layout_SplitH"] = "Split horizontal",
+        ["Layout_Merge"] = "Merge (remove the line)",
+        ["Layout_ThisTileShows"] = "This tile shows:",
+        ["Layout_Reset"] = "Reset to one tile",
+        ["Layout_ResetDone"] = "Reset to a single tile.",
+        ["Layout_SelectFirst"] = "Select a tile first.",
+        ["Layout_SplitNoEffect"] = "Split had no effect (tile already at its minimum size).",
+        ["Layout_SplitV_Done"] = "Split vertically; the new tile took the next route.",
+        ["Layout_SplitH_Done"] = "Split horizontally; the new tile took the next route.",
+        ["Layout_MergeSkipped"] = "This tile and its neighbour do not show the same route, or they do not form a rectangle — merge skipped.",
+        ["Layout_MergeDone"] = "Merged adjacent same-route tiles.",
+        ["Layout_Empty"] = "Layout is empty; cannot apply.",
+        ["Layout_SplitAtClick"] = "Split at the click position.",
+        ["Layout_Confirm"] = "OK",
+        ["Layout_Cancel"] = "Cancel",
+
+        // Route picker dialog (Views/RoutePickerWindow)
+        ["Menu_Mode_RoutePicker"] = "Choose routes (pick which routes take part)…",
+        ["Routes_Title"] = "Choose routes — pick which routes the wipe compares",
+        ["Routes_Hint"] = "Each row is one band; choose which route it shows. The same route may appear in several bands (repeat for detail).",
+        ["Routes_BandCount"] = "Bands:",
+        ["Routes_ResetIdentity"] = "Reset to in-order",
+        ["Pb_AddRoute"] = "Add route (pick a file and open one more)…",
         ["Menu_CompareOptions"] = "Compare options",
         ["Menu_Mode_Swap"] = "Swap left/right (AB)",
         ["Menu_Mode_Rotate"] = "Rotate sources across cells",
@@ -461,6 +544,21 @@ public static class LanguageManager
         ["Status_SingleMode"] = "Single",
         // Frame N points to a different instant per slot when frame rates differ
         ["Status_FpsMismatch"] = "Frame rates differ (time-aligned)",
+        ["Status_DmLoadedAll"] = "Injected dynamic metadata: {0} entries applied to {1}/{2} lane(s)",
+        ["Status_DmLoadedPartial"] = "Dynamic metadata applied to only {1}/{2} lane(s) (others rejected)",
+        ["Status_DmLoadedNone"] = "Dynamic metadata injection failed: all {1}/{2} lane(s) rejected (old kernel or payload rejected)",
+        ["Status_DmCleared"] = "Cleared injected dynamic metadata ({0}/{1} lane(s))",
+        ["Status_DmClearNone"] = "No injected dynamic metadata to clear",
+        ["Status_DmNeedMedia"] = "Open a video before loading dynamic metadata",
+        ["Msg_DmLoadFailed"] = "Cannot load the dynamic metadata file.",
+        // Unlock prompt for the external colour-transform module (shown only when the module is on disk and locked)
+        ["Unlock_Title"] = "Colour transform module is locked",
+        ["Unlock_Body"] = "A colour transform module was found, but it is not unlocked. Enter the unlock code to enable it; cancelling leaves this session on the base layer, with no further prompts.",
+        ["Unlock_CodeLabel"] = "Unlock code",
+        ["Unlock_Cancel"] = "Cancel / 取消",
+        ["Unlock_Confirm"] = "OK / 确定",
+        ["Unlock_WrongCode"] = "The unlock code was not accepted (attempt {0}/{1}). Enter it again, or cancel to stay on the base layer.",
+        ["Unlock_NotPersisted"] = "The unlock code was accepted, but the ticket could not be written to the program directory: it works for this run only and must be re-entered after a restart.",
         ["Status_Color"] = "Color",
         // Settings window "Appearance" section
         ["Theme_SectionTitle"] = "Appearance",
@@ -542,6 +640,10 @@ public static class LanguageManager
         ["MediaInfo_PixelFormat"] = "Pixel Format",
         ["MediaInfo_Color"] = "Color",
         ["MediaInfo_Hdr"] = "HDR",
+        ["MediaInfo_DmSource"] = "Dynamic metadata source",
+        ["MediaInfo_DmBitstream"] = "Bitstream (from file)",
+        ["MediaInfo_DmInjected"] = "Injected (loaded externally)",
+        ["MediaInfo_DmUnsupported"] = "Not supported by kernel",
         ["MediaInfo_Frames"] = "Frames",
         ["MediaInfo_Lossless"] = "Lossless",
         ["MediaInfo_Interlaced"] = "Interlaced",
@@ -574,6 +676,7 @@ public static class LanguageManager
         ["Msg_CaptureUnavailable"] = "Capture failed: window capture and pixel sampling unavailable",
         ["Msg_CaptureFail"] = "Capture failed",
         ["Msg_SessionInvalid"] = "Invalid or empty session file",
+        ["Msg_OperationFailed"] = "Operation failed",
         ["Msg_AppName"] = "3FCompare",
         ["Audio_NoTrack"] = "No Audio Track",
         // VRR present (kernel extension F27)
@@ -581,6 +684,9 @@ public static class LanguageManager
         ["Vrr_TearingPresent"] = "VRR low-latency present (G-SYNC/FreeSync, experimental)",
         ["Vrr_TearingHint"] = "When enabled, frames are presented with Present(0+ALLOW_TEARING) so a G-SYNC/FreeSync display scans out on its own schedule (removes 3:2 judder for 24fps content). Falls back to vsync lock when the display chain does not support tearing. Recommended off for frame-by-frame comparison. Applies to newly opened sessions.",
         ["Vrr_PacingHint"] = "When enabled, suppresses the timed-text layer's periodic keepalive presents so the presentation cadence follows the source video frame rate instead of the overlay frame rate. Requires VRR tearing present for full effect; harmless on vsync-locked displays. Eliminates extra flips on VRR displays when no overlay content is active.",
+        ["Vsr_SectionTitle"] = "RTX Video Super Resolution (VSR, experimental)",
+        ["Vsr_Enable"] = "Request RTX VSR for newly opened sessions (Auto tier)",
+        ["Vsr_Hint"] = "When checked, newly created sessions register an RTX Video Super Resolution request with the driver (kernel FFF3FP_SetVideoSuperResolution(Auto)). Whether it is actually used is decided per frame by the kernel, which requires all of: an NVIDIA adapter backing the renderer, source height between 360 and 1440, a genuine upscale rather than a downscale, and a source texture usable as a video-processor input. WARNING: neither this checkbox nor active=1 in the status means the picture was enhanced - active only records that the driver did not refuse the request. Measured on this driver, the query path returns S_OK even for a fabricated GUID, so it carries no capability information. The quality tier (1-4/Auto) and the global switch belong to NVIDIA App or the NVIDIA Control Panel; this application can neither set nor read them. If the FFF.Native.dll on disk does not export this entry point (the shipping kernel does not yet), a warning is logged and the session opens normally. Applies to newly opened sessions.",
         ["Scrub_PreviewEnabled"] = "Timeline scrub thumbnail preview",
         ["Scrub_SectionTitle"] = "Timeline Preview",
         ["Scrub_PreviewHint"] = "Captures frames every 150ms during timeline drag to show a popup preview. Disable on low-end devices; only the timecode and playhead update when disabled.",
@@ -592,7 +698,7 @@ public static class LanguageManager
         // Missing entries show up as raw key names in the UI and fail the key-parity test.
         ["Keys_SectionTitle"] = "Keyboard shortcuts",
         ["Keys_Hint"] = "Click a button, then press the new key; Esc cancels. Clear = unbind, an unbound action stops responding to the keyboard. " +
-                        "Fixed keys (O open / Ctrl+S export / V·S·G the three view modes / C cycle compare layout / " +
+                        "Fixed keys (O open / Ctrl+S export / G·V·S view modes (G and V both enter grid compare; S = wipe) / C cycle the grid split / " +
                         "T·Shift+T bottom bars / P probe / R reset view / Ctrl+H sidebar tri-state / F11 / Up·Down / F6 / Delete / 1~9) cannot be rebound and are rejected on the spot. " +
                         "Step sizes are in the previous section; \"Stop\" has no toolbar button any more — it only fires from a key bound here.",
         ["Keys_StepSecondBackward"] = "Step back (seconds)",

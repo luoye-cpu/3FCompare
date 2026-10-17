@@ -57,8 +57,8 @@ logs/
 third_party/fff_project/
 
 # ── 3FP「图片模式」独立工作区（见 3fp/README.md）──
-# 与 third_party/fff_project/ 同源同基线（b765a1f），但用于图片模式的试验性改动，
-# 互不干扰：3FC 的日常构建只认 third_party/fff_project/，图片模式改动只落在 3fp/kernel/。
+# 与 third_party/fff_project/ **同上游但不同基线**：实测 `b765a1f` 并非 3fp/kernel HEAD 的祖先
+# （两树真实的共同祖先是 `a87046e`）。3FC 出货链只认 third_party/fff_project/，本树只落试验性改动。
 # 不入库原因与 third_party/fff_project/ 相同：第三方源码 + 构建产物 + 嵌套 git 仓。
 3fp/kernel/
 3fp/build/
@@ -183,3 +183,58 @@ _quarantine_*/
 # Python 探针/门禁脚本的字节码缓存（每次跑都变，不入库）
 __pycache__/
 *.pyc
+
+# --- 2026-10-17 侵权隔离：内部台账与临时件绝不进公开仓 -------------------------------
+# origin 是公开仓（luoye-cpu/3FCompare，private=False），本仓实测有 17,991 个"未跟踪且
+# 未被忽略"条目：GB 级临时件、备份 bundle、真票据，以及文件名本身就在描述外置模块的台账。
+# 任何一次 git add -A 都会把它们一起发出去，所以按形状拦。要提交其中某一份就显式
+# git add -f <路径>；每条命中用 git check-ignore -v <路径> 自证。
+_3fc_tmp/
+_3fc_dumps/
+_3fp-fix/
+3fp/_backup_*/
+3fp/_freshdev-*/
+*.ticket
+FFF.HDRdp.Test.dll
+交接文档-*.md
+*侵权*.md
+*解锁*.md
+*中性*.md
+*审计*.md
+*ColorTransform*.md
+*HDRdp*.md
+# --- 2026-10-17 工作树收口：产物/临时/私有台账，不进库 -------------------------------
+# 判据：没有任何已跟踪代码引用它们（逐条 git check-ignore -v 自证）。忽略不是删除，
+# 文件仍在盘上；将来要收编就显式 git add -f。
+/recovery-*/
+/audit-baseline/
+/kit/
+/build/
+/.workbuddy/
+/.3fc_arm64_audit_pe.py
+/.3fc_arm64_audit_pe.py.txt
+/0
+/output_ffmpeg.pcm
+/synthetic_targeted.hevc
+/test_*.iamf
+/make_synth.ps1
+/sei_parse*.ps1
+/perf_test.cpp
+/3fp/ss5_live_7_1_4.wav
+# patch 工作区的临时快照与二进制
+*.BEFORE
+*.ABL-BASE
+*.WITH-OTHERS
+3fp/patches/**/*.exe
+3fp/patches/**/*.7z
+# 私有/敏感台账（文件名本身就是暴露面）
+docs/*DLL*
+3fp/docs/*DLL*
+docs/*授权*
+3fp/docs/*授权*
+3fp/patches/*授权*
+# 交接台账（含种子路径与对外交付决策）与 patch 工作区里的源码副本
+docs/交接-*.md
+3fp/patches/*-work-*/*.cpp
+3fp/patches/*-work-*/*.h
+3fp/patches/*-work-*/*.sh

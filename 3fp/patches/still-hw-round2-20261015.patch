@@ -1,0 +1,101 @@
+warning: in the working copy of 'a/FFF.Native/3FP/Core/PlayerSession.cpp', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'b/FFF.Native/3FP/Core/PlayerSession.cpp', LF will be replaced by CRLF the next time Git touches it
+diff --git a/FFF.Native/3FP/Core/PlayerSession.cpp b/FFF.Native/3FP/Core/PlayerSession.cpp
+index 73f800d..5294b66 100644
+--- a/FFF.Native/3FP/Core/PlayerSession.cpp
++++ b/FFF.Native/3FP/Core/PlayerSession.cpp
+@@ -2551,11 +2551,19 @@ FFFResult PlayerSession::OpenHardwareVideoDecoder(AVFormatContext* owner, const
+         AV_HWDEVICE_TYPE_D3D11VA,
+         AV_HWDEVICE_TYPE_CUDA,
+     };
+-    // A still image is presented from the decoded surface and then kept, so it must land
+-    // on the renderer's own device. The CUDA backend can only be consumed after a frame
+-    // transfer into semi-planar memory, and a transferred still is not what the retained
+-    // frame is meant to be; formats whose only hardware path is CUDA (JPEG/MJPEG) stay on
+-    // the CPU decoder.
++    // A still image is presented one frame and then kept, so a backend whose surfaces
++    // the renderer cannot sample directly has to be consumed through a frame transfer
++    // into semi-planar CPU memory. That route measured two things against the CPU arm
++    // and neither is worth paying at still sizes:
++    //   - it is not bit-exact: the CUDA JPEG decode differs from libjpeg by 1/255 at a
++    //     stripe edge (09h) and by 4/255 on a 4:4:4 sample, and a 4:2:0 surface loses
++    //     the chroma detail of a 4:4:4 source outright;
++    //   - it is slower: +64 ms to +196 ms measured, because the decoder is built for
++    //     one frame that never amortises it.
++    // So stills stay on the renderer's own device, where the decoded surface is sampled
++    // as-is and every sampled file measures bit-exact. Video keeps the full list: there
++    // a CUDA or QSV frame is transferred every frame anyway, and the semi-planar upload
++    // in VideoRenderer is what carries it.
+     const std::size_t backendCount = staticImage_ ? 1u : std::size(Backends);
+     std::string lastFailure = "No compatible hardware decoder was found.";
+     for (std::size_t backendIndex = 0; backendIndex < backendCount; ++backendIndex) {
+@@ -3799,8 +3807,7 @@ void PlayerSession::PresentVideoFrame(AVFrame* frame, AVFormatContext* owner) no
+ 
+     AVFrame* renderFrame = frame;
+     // Only a D3D11 surface can be handed to the renderer as-is. Anything else (the CUDA
+-    // backend) has to come back to CPU memory first -- and a still never does that now,
+-    // because OpenHardwareVideoDecoder restricts stills to D3D11VA.
++    // backend, or QSV) has to come back to CPU memory first as a semi-planar frame.
+     if (IsHardwareFrame(frame) && frame->format != AV_PIX_FMT_D3D11) {
+         if (videoTransferFrame_ == nullptr) videoTransferFrame_ = av_frame_alloc();
+         if (videoTransferFrame_ == nullptr) {
+@@ -4173,16 +4180,31 @@ void PlayerSession::BuildImageInfo(FFF3FPImageInfo& info) const noexcept {
+     // resets its format to AV_PIX_FMT_NONE, and reading the flags off that would
+     // silently drop alpha (and misreport the bit depth).
+     //
+-    const auto frameFormat = frame != nullptr ?
++    // A hardware frame is the second unusable case, and for the same reason: its
++    // format names the GPU surface layout (AV_PIX_FMT_D3D11 and friends) rather
++    // than the source. Those descriptors declare no components at all, so
++    // reporting one misnames the source format AND leaves the bit depth on its
++    // 8-bit default -- a 10-bit still was reported as 8-bit. A retained still
++    // image frame is a hardware frame, so this is reachable; fall through to the
++    // container parameters (which avformat_find_stream_info fills from a software
++    // decode, hence independent of the decode path), then to the frame's own
++    // underlying software format.
++    const auto frameFormat = frame != nullptr && !IsHardwareFrame(frame) ?
+         static_cast<AVPixelFormat>(frame->format) : AV_PIX_FMT_NONE;
+-    const auto pixelFormat = frameFormat != AV_PIX_FMT_NONE ?
++    auto pixelFormat = frameFormat != AV_PIX_FMT_NONE ?
+         frameFormat : static_cast<AVPixelFormat>(parameters->format);
++    if (pixelFormat == AV_PIX_FMT_NONE && frame != nullptr && frame->hw_frames_ctx != nullptr) {
++        const auto* frames = reinterpret_cast<const AVHWFramesContext*>(frame->hw_frames_ctx->data);
++        if (frames != nullptr) pixelFormat = static_cast<AVPixelFormat>(frames->sw_format);
++    }
+     info.sourcePixelFormat = static_cast<std::int32_t>(pixelFormat);
+     info.sourceBitDepth = parameters->bits_per_raw_sample > 0 ?
+         static_cast<std::uint32_t>(parameters->bits_per_raw_sample) : 8u;
+     if (const auto* descriptor = av_pix_fmt_desc_get(pixelFormat)) {
+-        if (descriptor->comp[0].depth > 0) info.sourceBitDepth = descriptor->comp[0].depth;
+-        if ((descriptor->flags & AV_PIX_FMT_FLAG_ALPHA) != 0) flags |= FFF3FP_IMAGE_FLAG_HAS_ALPHA;
++        if (descriptor != nullptr && descriptor->nb_components > 0 &&
++            descriptor->comp[0].depth > 0) info.sourceBitDepth = descriptor->comp[0].depth;
++        if (descriptor != nullptr &&
++            (descriptor->flags & AV_PIX_FMT_FLAG_ALPHA) != 0) flags |= FFF3FP_IMAGE_FLAG_HAS_ALPHA;
+     }
+ 
+     // ICC profiles arrive as frame side data from the codecs that embed them.
+diff --git a/FFF.Native/3FP/Render/VideoRenderer.cpp b/FFF.Native/3FP/Render/VideoRenderer.cpp
+index 8456cf6..9e2c0d1 100644
+--- a/FFF.Native/3FP/Render/VideoRenderer.cpp
++++ b/FFF.Native/3FP/Render/VideoRenderer.cpp
+@@ -5898,8 +5898,18 @@ FFFResult PlayerVideoRenderer::Render(const AVFrame* frame, const std::int64_t f
+                     const auto xShift = plane == 0 ? 0u : input.chromaWidthShift;
+                     const auto yShift = plane == 0 ? 0u : input.chromaHeightShift;
+                     const auto rows = (uploadHeight + (1u << yShift) - 1) >> yShift;
++                    // A row of the destination texture is (texels x samples-per-texel x
++                    // bytes-per-sample). Semi-planar chroma packs U and V into one R8G8 /
++                    // R16G16 texel, so it carries two samples per texel -- skipping that
++                    // factor copies half of every chroma row and leaves the rest at the
++                    // zeroed pages a freshly created texture starts with, which samples
++                    // as (U=0, V=0) and reads as a strong green cast. Planar formats
++                    // (and the luma plane) are one sample per texel, so they are
++                    // unaffected. The >= 4K arm above uses the real source stride via
++                    // UpdateSubresource and never had this problem.
++                    const auto samplesPerTexel = (input.layout == 2 && plane != 0) ? 2u : 1u;
+                     const auto rowBytes = ((uploadWidth + (1u << xShift) - 1) >> xShift) *
+-                        (input.bitDepth > 8 ? 2u : 1u);
++                        samplesPerTexel * (input.bitDepth > 8 ? 2u : 1u);
+                     for (unsigned row = 0; row < rows; ++row)
+                         std::memcpy(static_cast<std::uint8_t*>(mapped.pData) +
+                             static_cast<std::size_t>(row) * mapped.RowPitch,

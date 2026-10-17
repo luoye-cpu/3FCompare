@@ -95,7 +95,7 @@ bool TryAss(const char* path, std::int32_t streamIndex, const char* fontDirector
     for (const std::int64_t moment : gMoments) {
         FFF3FPBitmapSubtitleFrame frame{};
         frame.size = sizeof(frame);
-        frame.version = 1;
+        frame.version = 20;
         const auto render = FFF3FP_RenderAssSubtitle(handle, moment * kSecond100ns,
             kCanvasWidth, kCanvasHeight, &frame);
         const int renderResult = static_cast<int>(render);
@@ -154,7 +154,7 @@ bool TryBitmap(const char* path, std::int32_t streamIndex) {
         }
         FFF3FPBitmapSubtitleFrame frame{};
         frame.size = sizeof(frame);
-        frame.version = 1;
+        frame.version = 20;
         const int readResult = static_cast<int>(FFF3FP_ReadBitmapSubtitle(handle, &frame));
         if (readResult != 0) {
             printf("      t=%llds read -> %s (%d)\n", moment, ResultName(readResult), readResult);

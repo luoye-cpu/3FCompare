@@ -54,7 +54,7 @@ static int ReadLuma(unsigned x, unsigned y, float* out) {
     FFF3FPVideoPixelProbe probe;
     memset(&probe, 0, sizeof(probe));
     probe.size = sizeof(probe);
-    probe.version = 1;
+    probe.version = 20;
     probe.x = x;
     probe.y = y;
     if (FFF3FP_ReadVideoPixel(g_player, &probe) != FFFResult::Success) return 0;

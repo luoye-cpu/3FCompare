@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <!-- 必须与被测工程（src/3FCompare）同 TFM：本工程测的是 UI 层的 Platform 辅助类。
@@ -28,6 +28,11 @@
 
   <ItemGroup>
     <Using Include="Xunit" />
+    <!-- Rect32 的真源在 Core（Core/Display/WipeBands.cs）：N 带拉动区域的换算是纯几何，
+         其不变式必须在 Core 单测里逐条钉住，所以类型本身住在 Core 才引用得到。
+         本工程原先经 _3FCompare.Platform 解析到它，现在给一个全局别名，
+         让既有用例（含 WindowRegionClipperTests 的 Rect32 用法）零改动继续编译到同一类型。 -->
+    <Using Include="_3FCompare.Core.Display.Rect32" Alias="Rect32" />
   </ItemGroup>
 
   <ItemGroup>

@@ -140,9 +140,28 @@ public sealed class SimulatedEngine : IPlayerEngine
 
         public bool SetPresentConfig(bool tearing) => !tearing; // 演示模式无呈现链，仅"关闭"语义成立
 
+        // RTX VSR：演示模式没有 D3D11 视频处理器，也没有驱动扩展可请求。
+        // 与 SetPresentConfig 同口径——只承认"关闭"；状态一律读不出来，不伪造一个 active=false
+        // 的"已确认未启用"，因为那会让 UI 把"没实现"显示成"驱动拒绝"。
+        public bool SetVideoSuperResolution(bool enable) => !enable;
+
+        public bool ReadVideoSuperResolutionStatus(out VideoSuperResolutionStatus status)
+        {
+            status = default;
+            return false;
+        }
+
         public void SetViewTransform(float zoom, float panX, float panY) { /* 演示模式略过 */ }
 
         public void SetFitLimitToNative(bool enable) { /* 演示模式略过：判据须自报 SKIP，不得当成 1:1 达成 */ }
+
+        // 动态元数据注入族（2026-10-10 通用通道 + HDR10+ 旧入口）：演示模式没有内核，
+        // 统一报"不支持/无来源"，与 ReadRenderTargetInfo 同口径——不得伪装成已注入。
+        public bool SetDynamicMetadata(IReadOnlyList<DynamicMetadataPacket> packets) => false;
+        public bool ClearDynamicMetadata(DynamicMetadataKind kind) => false;
+        public bool SetHdrDynamicMetadata(IReadOnlyList<HdrDynamicMetadataEntry> entries) => false;
+        public bool ClearHdrDynamicMetadata() => false;
+        public DynamicMetadataSource? GetHdrMetadataSource() => null;
 
         public EngineSnapshot ReadSnapshot()
         {

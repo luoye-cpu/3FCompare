@@ -1,5 +1,5 @@
 // HDR 峰值行为探针：验证上游 SetExtensionProcessing 收紧后，
-// 普通 HDR10（非 Dolby Vision、无外部扩展）的 sourcePeak 是否仍正确取自 MaxCLL。
+// 普通 HDR10（非 HDRdp、无外部扩展）的 sourcePeak 是否仍正确取自 MaxCLL。
 //
 // 背景：上游把 `if (std::isfinite(sourcePeakNits) && sourcePeakNits > 0)` 收紧为
 // `if (active && ...)`。这条只在 SetExtensionProcessing 内部，而它只在
@@ -88,7 +88,7 @@ int wmain(const int argc, wchar_t** argv) {
     // 2) 快照里的源峰值与 HDR 判定
     FFF3FPSnapshot snapshot{};
     snapshot.size = sizeof(snapshot);
-    snapshot.version = 8;
+    snapshot.version = 20;
     if (FFF3FP_GetSnapshot(player, &snapshot) == FFFResult::Success) {
         printf("快照: sourcePeakNits=%u  isHdrSource=%u  hdrFormat=%d  hdrPath=%d  "
                "actualColorMode=%d  outBits=%u\n",
@@ -100,7 +100,7 @@ int wmain(const int argc, wchar_t** argv) {
     // 3) 颜色变换探针：直接问内核"这个源峰值会怎么映射"
     FFF3FPColorTransform transform{};
     transform.size = sizeof(transform);
-    transform.version = 1;
+    transform.version = 20;
     transform.colorMode = FFF3FPColorMode::MapToSdr;
     transform.transfer = FFF3FPColorTransfer::Pq;
     transform.sdrPeakNits = 100.0f;

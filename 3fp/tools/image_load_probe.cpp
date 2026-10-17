@@ -111,7 +111,7 @@ int wmain(const int argc, wchar_t** argv) {
         const auto pixelMs = std::chrono::duration<double, std::milli>(pixelEnd - pixelStart).count();
 
         FFF3FPSnapshot s{};
-        s.size = sizeof(s); s.version = 8;
+        s.size = sizeof(s); s.version = 20;
         FFF3FP_GetSnapshot(player, &s);
 
         printf("%-20s %10.2f %14.1f %14.1f %10s  open=%d %ux%u\n",

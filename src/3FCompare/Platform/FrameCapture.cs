@@ -38,6 +38,27 @@ public static class FrameCapture
     private static readonly object ProbeLock = new();
     private static volatile ProbeResult? _probe;
 
+    /// <summary><b>测量档：强制走 GDI 兜底路线</b>（<c>FC_FORCE_GDI_ROUTE=1</c>；未设 ⇒ 与产品完全一致）。
+    ///
+    /// <para>为什么要它：本机 WGC 永远可用（docs/50 §十三 的 6 条抓屏读数全 <c>route=Wgc</c>），
+    /// 于是"GDI 在拼合下到底抓到什么"这条兜底语义**从来没有读数**，也就无从验牙。
+    /// 移动/删 <c>3FC.WgcCapture.dll</c> 会抢主循环正在用的那份 bin，最小化窗口又会让拼合的屏幕矩形整个失效
+    /// ⇒ 只能用一个"只为测量存在"的短路。</para>
+    ///
+    /// <para>与 <c>FC_NOMOSAIC</c> / <c>FC_REGION_SPACING_MS</c> 同族。第一次生效会落一条
+    /// <c>[Capture] ForcedGdiRoute</c> 见证行，供 A/B 自证臂有没有真跑（不靠"结果不同"反推）。</para></summary>
+    internal static readonly bool BenchForceGdiRoute =
+        Environment.GetEnvironmentVariable("FC_FORCE_GDI_ROUTE") == "1";
+
+    private static bool _forcedRouteWitnessed;
+
+    private static void WitnessForcedRoute(nint hwnd)
+    {
+        if (_forcedRouteWitnessed) return;
+        _forcedRouteWitnessed = true;
+        ComponentLog.Log(Comp.Capture, "ForcedGdiRoute", -1, $"hwnd=0x{hwnd:X}");
+    }
+
     /// <summary>
     /// 抓取目标窗口当前帧（WGC 优先，失败自动回退 GDI）。
     /// </summary>
@@ -94,6 +115,14 @@ public static class FrameCapture
         CaptureRouter router)
     {
         if (hwnd == 0) return null;
+
+        if (BenchForceGdiRoute)
+        {
+            // 测量档：跳过 WGC 那一整段，直连兜底路线。默认关 ⇒ 下面这个 if 一次都不进。
+            WitnessForcedRoute(hwnd);
+            var forced = gdi.Capture(hwnd);
+            return forced is null ? null : new CapturedFrame(forced, CaptureRoute.Gdi);
+        }
 
         var decision = router.SelectRoute(wgcSupported, wgcDllAvailable, windowMinimized);
 

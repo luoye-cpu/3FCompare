@@ -1,0 +1,162 @@
+diff --git a/FFF.Native/3FP/Render/VideoRenderer.cpp b/FFF.Native/3FP/Render/VideoRenderer.cpp
+index 21ff9e2..9c395e2 100644
+--- a/FFF.Native/3FP/Render/VideoRenderer.cpp
++++ b/FFF.Native/3FP/Render/VideoRenderer.cpp
+@@ -68,6 +68,15 @@ std::int64_t QpcNowValue() noexcept {
+     return value.QuadPart;
+ }
+ 
++// 停留判带的区间账开关。残差（60fps 臂最好的一趟 95.6%、带外最差 2 格）要归因，只能
++// 把每个样本的"区间里翻了几次帧 / 其中几次没上屏 / 累计该占几格 / 实际停了几格"一次打出来：
++// 聚合读数分不开"区间真的跨了两帧"和"PresentRefreshCount 读数滞后"这两种解释，它们给出的
++// 修复方向是相反的。默认关闭，FPT_HOLD_TRACE=1 才写 stderr。
++bool HoldTraceEnabled() noexcept {
++    static const bool enabled = GetEnvironmentVariableW(L"FPT_HOLD_TRACE", nullptr, 0) != 0;
++    return enabled;
++}
++
+ // The grid the cadence lock aims at is 6.94 ms wide on a 144 Hz panel. This process runs at
+ // the default system timer resolution, and the release cadence of 60 fps content measured at
+ // a 15.7 ms median -- the quantisation is coarser than the thing it has to hit, so no
+@@ -6575,6 +6584,7 @@ std::int64_t PlayerVideoRenderer::AdvancePacingDeadline(const std::int64_t nowQp
+ 
+ void PlayerVideoRenderer::UpdatePresentGrid(const std::int64_t syncRefresh,
+     const std::int64_t syncQpc, const std::int64_t landedRefresh,
++    const std::int64_t presentCount, const std::uint64_t generation,
+     const bool sequenceDisjoint) noexcept {
+     const auto frequency = QpcTicks();
+     if (sequenceDisjoint || syncRefresh <= 0 || syncQpc <= 0) {
+@@ -6594,6 +6604,12 @@ void PlayerVideoRenderer::UpdatePresentGrid(const std::int64_t syncRefresh,
+         aimedSlotRatio_ = 0.0;
+         scoredSlotRatio_ = 0.0;
+         pendingHoldRatio_ = 0.0;
++        intervalFlips_ = 0;
++        intervalAdvances_ = 0;
++        intervalNeverComposited_ = 0;
++        intervalUnscoreable_ = false;
++        lastPresentCount_ = 0;
++        lastFlipGeneration_ = 0;
+         measuredRefreshHz_.store(0.0, std::memory_order_release);
+         return;
+     }
+@@ -6658,14 +6674,38 @@ void PlayerVideoRenderer::UpdatePresentGrid(const std::int64_t syncRefresh,
+         ? (static_cast<double>(holdContent100ns) * static_cast<double>(frequency) / 10'000'000.0) /
+             gridPeriodQpc_
+         : 0.0;
+-    pendingHoldRatio_ += std::max(1.0, std::max(scoredSlotRatio_, holdContentRatio));
++    const auto aimEvidence = std::max(scoredSlotRatio_, holdContentRatio);
++    // 这条兜底本身就是"这一帧我没有依据"的声明：既没算出瞄准值、网格又还没标定
++    // （标定重启后的头一两次翻帧就是这种时刻，此时锁按设计根本没在岗，pacingBypass=2）。
++    // 拿 1 格兜底去判这次停留，会把一次本来没有瞄点的重翻记成 2 格的偏差——实测三趟
++    // 60fps 臂各只有 1 个这样的样本（形状固定：flips=2 adv=1 nc=0 err=0.00 held=1），
++    // 而它正是整轮里唯一的带外样本。所以这段区间标成不可判，跳过结算：判带只对"锁真的
++    // 给过瞄点"的区间成立，这与上面丢弃重启两侧差分是同一条理由。
++    if (aimEvidence < 1.0) intervalUnscoreable_ = true;
++    pendingHoldRatio_ += std::max(1.0, aimEvidence);
++    ++intervalFlips_;
++    const auto advance = (generation != 0 && lastFlipGeneration_ != 0 &&
++        generation > lastFlipGeneration_) ? generation - lastFlipGeneration_ : 0;
++    intervalAdvances_ += static_cast<std::uint32_t>(advance > 16 ? 16 : advance);
++    if (generation != 0) lastFlipGeneration_ = generation;
++    const auto presentDelta = lastPresentCount_ == 0 ? std::int64_t{ 0 } :
++        presentCount - lastPresentCount_;
++    lastPresentCount_ = presentCount;
+     const bool composited = landedRefresh > 0 && lastLandedRefresh_ > 0 &&
+         landedRefresh > lastLandedRefresh_;
+-    if (!composited && landedRefresh > 0 && lastLandedRefresh_ > 0)
++    if (!composited && landedRefresh > 0 && lastLandedRefresh_ > 0) {
+         neverCompositedPresents_.fetch_add(1, std::memory_order_relaxed);
++        ++intervalNeverComposited_;
++        if (HoldTraceEnabled())
++            std::fprintf(stderr, "HOLDNC dPresent=%lld dPresentRefresh=%lld dSync=%lld flips=%u\n",
++                static_cast<long long>(presentDelta),
++                static_cast<long long>(landedRefresh - lastLandedRefresh_),
++                static_cast<long long>(syncRefresh - lastSyncRefresh_),
++                intervalFlips_);
++    }
+     if (composited) {
+         const auto held = landedRefresh - lastLandedRefresh_;
+-        if (held <= 16 && pendingHoldRatio_ >= 1.0) {
++        if (held <= 16 && pendingHoldRatio_ >= 1.0 && !intervalUnscoreable_) {
+             // Accept either rounding of the fractional slot count: 60 fps on 144 Hz is
+             // legitimately held 2 or 3 refreshes, and a steady alternation between those
+             // two is what "locked" looks like. A hold of 1, or of 4 and up, is what a viewer
+@@ -6679,8 +6719,29 @@ void PlayerVideoRenderer::UpdatePresentGrid(const std::int64_t syncRefresh,
+                 (held > high ? held - high : (held < low ? low - held : high - held)));
+             if (deviation > holdWorstDeviation_.load(std::memory_order_relaxed))
+                 holdWorstDeviation_.store(deviation, std::memory_order_release);
++            if (HoldTraceEnabled())
++                std::fprintf(stderr,
++                    "HOLD flips=%u adv=%u nc=%u pend=%.2f held=%lld band=[%lld,%lld] %s "
++                    "dPresent=%lld ratio=%.3f err=%.2f\n",
++                    intervalFlips_, intervalAdvances_, intervalNeverComposited_,
++                    pendingHoldRatio_, static_cast<long long>(held),
++                    static_cast<long long>(low), static_cast<long long>(high),
++                    within ? "in" : "OUT", static_cast<long long>(presentDelta),
++                    holdContentRatio, gridPeriodQpc_ > 0.0 ?
++                        static_cast<double>(lastSlotError100ns_.load(std::memory_order_acquire)) *
++                        static_cast<double>(frequency) / 10'000'000.0 / gridPeriodQpc_ : 0.0);
++        } else if (intervalUnscoreable_ && HoldTraceEnabled()) {
++            // 跳过也要留痕：这个计数不走 API，只能靠这一行证明它没有把真卡顿一起扔掉。
++            std::fprintf(stderr, "HOLDSKIP flips=%u adv=%u nc=%u pend=%.2f held=%lld grid=%.3fHz\n",
++                intervalFlips_, intervalAdvances_, intervalNeverComposited_,
++                pendingHoldRatio_, static_cast<long long>(held),
++                measuredRefreshHz_.load(std::memory_order_acquire));
+         }
+         pendingHoldRatio_ = 0.0;
++        intervalFlips_ = 0;
++        intervalAdvances_ = 0;
++        intervalNeverComposited_ = 0;
++        intervalUnscoreable_ = false;
+     }
+     scoredSlotRatio_ = aimedSlotRatio_;
+     if (landedRefresh > 0) lastLandedRefresh_ = landedRefresh;
+@@ -7079,6 +7140,7 @@ FFFResult PlayerVideoRenderer::PresentCurrentFrame(IDXGISwapChain4* chain,
+     UpdatePresentGrid(static_cast<std::int64_t>(frameStatistics.SyncRefreshCount),
+         frameStatistics.SyncQPCTime.QuadPart,
+         static_cast<std::int64_t>(frameStatistics.PresentRefreshCount),
++        static_cast<std::int64_t>(frameStatistics.PresentCount), renderedVideoGeneration,
+         statisticsResult == DXGI_ERROR_FRAME_STATISTICS_DISJOINT || FAILED(statisticsResult));
+     presentedVideoGeneration_.store(renderedVideoGeneration);
+     const auto previous = countedVideoGeneration_.exchange(renderedVideoGeneration);
+diff --git a/FFF.Native/3FP/Render/VideoRenderer.h b/FFF.Native/3FP/Render/VideoRenderer.h
+index 9365103..abef788 100644
+--- a/FFF.Native/3FP/Render/VideoRenderer.h
++++ b/FFF.Native/3FP/Render/VideoRenderer.h
+@@ -563,8 +563,13 @@ private:
+     // Feeds one swap-chain frame-statistics sample into the grid estimate and scores the
+     // last flip against the slot it was aimed at. Plain integers rather than the DXGI
+     // struct so this header stays free of the dxgi includes.
++    // presentCount and generation are carried for the interval accounting: a flip whose
++    // image never reached the monitor leaves PresentRefreshCount where it was, and the only
++    // way to tell that apart from frame-statistics lag is PresentCount advancing anyway,
++    // while generation says whether the flip even had a new picture to hand over.
+     void UpdatePresentGrid(std::int64_t syncRefresh, std::int64_t syncQpc,
+-        std::int64_t landedRefresh, bool sequenceDisjoint) noexcept;
++        std::int64_t landedRefresh, std::int64_t presentCount, std::uint64_t generation,
++        bool sequenceDisjoint) noexcept;
+     FFFResult DrawTimedText(TimedTextLayerSlot slot) noexcept;
+     void TimedTextThread() noexcept;
+     void StopTimedTextThread() noexcept;
+@@ -785,6 +790,21 @@ private:
+     // 停留样本并清零——这样被后来者取代、从未上屏的那些翻帧会把自己应得的那份计入带内，
+     // 而不是让下一次停留凭空多出好几格。
+     double pendingHoldRatio_ = 0.0;
++    // 结算一个停留样本所用的区间账，三个数各自独立数同一段区间：
++    //   intervalFlips_          —— 这段区间里有几次翻帧；
++    //   intervalAdvances_       —— 这些翻帧一共带进来几张新画面（生成号差值之和）；
++    //   intervalNeverComposited_—— 其中几次翻帧的 PresentRefreshCount 没有前进。
++    // 残差要归因到"区间真的跨了两帧"还是"统计读数滞后"，只能拿这三个数与 held 对账：
++    // 真跨两帧 ⇒ held ≈ 2×ratio 而带内判据本该放宽；读数滞后 ⇒ held ≈ ratio，
++    // 那就是我把同一帧的停留多算了一份，累计口径本身是错的。
++    std::uint32_t intervalFlips_ = 0;
++    std::uint32_t intervalAdvances_ = 0;
++    std::uint32_t intervalNeverComposited_ = 0;
++    // 这段区间里出现过"没有瞄点的翻帧"（网格尚未标定，锁按设计不在岗）。这样的区间
++    // 结算不出"停留落在瞄点的 ⌊r⌋/⌈r⌉ 内"这句话，判带要跳过它。
++    bool intervalUnscoreable_ = false;
++    std::int64_t lastPresentCount_ = 0;
++    std::uint64_t lastFlipGeneration_ = 0;
+     std::atomic<std::uint64_t> neverCompositedPresents_{ 0 };
+     std::atomic<std::uint64_t> holdSampled_{ 0 };
+     std::atomic<std::uint64_t> holdWithinRounding_{ 0 };

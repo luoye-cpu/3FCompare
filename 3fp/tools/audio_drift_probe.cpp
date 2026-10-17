@@ -79,7 +79,7 @@ int wmain(const int argc, wchar_t** argv) {
     for (int i = 0; i < 200 && !g_open; ++i) Pump(50);
 
     FFF3FPSnapshot s{};
-    s.size = sizeof(s); s.version = 8;
+    s.size = sizeof(s); s.version = 20;
     FFF3FP_GetSnapshot(player, &s);
     const auto durationSeconds = static_cast<double>(s.duration100ns) / 1e7;
     printf("时长 %.2fs   运行 %d 秒\n\n", durationSeconds, seconds);

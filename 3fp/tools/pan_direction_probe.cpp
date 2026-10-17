@@ -111,7 +111,7 @@ int wmain(const int argc, wchar_t** argv) {
 
     FFF3FPSnapshot snapshot{};
     snapshot.size = sizeof(snapshot);
-    snapshot.version = 8;
+    snapshot.version = 20;
     FFF3FP_GetSnapshot(player, &snapshot);
     // ReadVideoPixelRegion reads the back buffer, so the region must fit the swap
     // chain, not the source. Use the window client size.

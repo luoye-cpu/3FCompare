@@ -33,6 +33,9 @@ public sealed class SettingsWindow : Window
     private readonly CheckBox _startFullscreen = new();
     private readonly CheckBox _hideChrome = new() { IsChecked = true };
     private readonly CheckBox _vrrTearing = new();
+    /// <summary>RTX 视频超分辨率（内核 <c>FFF3FP_SetVideoSuperResolution</c>）。会话级设置：
+    /// 改动后只对<strong>新开的会话</strong>生效（与 VRR 呈现、scRGB 链同一约定）。</summary>
+    private readonly CheckBox _vsrEnable = new();
     private readonly CheckBox _scrubPreview = new() { IsChecked = true };
     private readonly CheckBox _minimap = new() { IsChecked = true };
     private readonly ComboBox _colorMode = new();
@@ -105,6 +108,9 @@ public sealed class SettingsWindow : Window
             DefaultGridCols = current.DefaultGridCols,
             DefaultGridRows = current.DefaultGridRows,
             VrrTearingPresent = current.VrrTearingPresent,
+            // ⚠ 与 AppSettings.RtxVideoSuperResolution 的注释同源：两处深拷贝（_orig 与
+            // Result）都要带上，漏一处就让"确认设置"把该字段静默写回默认值。
+            RtxVideoSuperResolution = current.RtxVideoSuperResolution,
             ScrubPreviewEnabled = current.ScrubPreviewEnabled,
             MinimapEnabled = current.MinimapEnabled,
             WindowX = current.WindowX,
@@ -160,6 +166,12 @@ public sealed class SettingsWindow : Window
         _vrrTearing.Content = LanguageManager.T("Vrr_TearingPresent");
         ToolTip.SetTip(_vrrTearing, LanguageManager.T("Vrr_TearingHint"));
         _vrrTearing.IsChecked = current.VrrTearingPresent;
+        // VSR 文案的键（Vsr_SectionTitle / Vsr_Enable / Vsr_Hint）在 LanguageManager 的
+        // zh、en 两本词典里；措辞刻意不提"画质提升"——见 AppSettings.RtxVideoSuperResolution
+        // 与 IPlayerSession.ReadVideoSuperResolutionStatus 的限定（active 位只等于"驱动没拒绝"）。
+        _vsrEnable.Content = LanguageManager.T("Vsr_Enable");
+        ToolTip.SetTip(_vsrEnable, LanguageManager.T("Vsr_Hint"));
+        _vsrEnable.IsChecked = current.RtxVideoSuperResolution;
         _scrubPreview.Content = LanguageManager.T("Scrub_PreviewEnabled");
         _scrubPreview.IsChecked = current.ScrubPreviewEnabled;
         ToolTip.SetTip(_scrubPreview, LanguageManager.T("Scrub_PreviewHint"));
@@ -217,6 +229,10 @@ public sealed class SettingsWindow : Window
         stack.Children.Add(Section(LanguageManager.T("Vrr_SectionTitle"),
             _vrrTearing,
             Hint(LanguageManager.T("Vrr_TearingHint"))));
+        // 紧跟「VRR」节：两条都是"呈现/缩放链"的会话级实验开关，放在一起才看得清谁影响什么。
+        stack.Children.Add(Section(LanguageManager.T("Vsr_SectionTitle"),
+            _vsrEnable,
+            Hint(LanguageManager.T("Vsr_Hint"))));
         stack.Children.Add(Section(LanguageManager.T("Scrub_SectionTitle"),
             _scrubPreview, _minimap, Hint(LanguageManager.T("Scrub_PreviewHint"))));
         stack.Children.Add(Section(LanguageManager.T("Status_Color"),
@@ -574,6 +590,7 @@ public sealed class SettingsWindow : Window
         var cols = (int)(_cols.Value ?? 2);
         var rows = (int)(_rows.Value ?? 1);
         var vrrTearing = _vrrTearing.IsChecked == true;
+        var vsrEnable = _vsrEnable.IsChecked == true;
         var scrubPreview = _scrubPreview.IsChecked == true;
         var miniMap = _minimap.IsChecked == true;
         // 对齐模式：越界下标（列表项数变化 / 脏初值）会被静默当成某一档，故显式钳一次，
@@ -609,6 +626,7 @@ public sealed class SettingsWindow : Window
             || startFs != _orig.StartFullscreen || hideChrome != _orig.HideChromeInFullscreen
             || color != _orig.ColorMode || cols != _orig.DefaultGridCols || rows != _orig.DefaultGridRows
             || vrrTearing != _orig.VrrTearingPresent
+            || vsrEnable != _orig.RtxVideoSuperResolution
             || scrubPreview != _orig.ScrubPreviewEnabled || miniMap != _orig.MinimapEnabled
             // ⚠ 新设置项必须加进这条链：漏了它 Changed 恒为 false ⇒ 改了设置"确定"后
             // MainWindow 直接 return（Result 不落地），表现为"设置存不住"且无任何报错。
@@ -636,6 +654,7 @@ public sealed class SettingsWindow : Window
                 DefaultGridCols = cols,
                 DefaultGridRows = rows,
                 VrrTearingPresent = vrrTearing,
+                RtxVideoSuperResolution = vsrEnable,
                 ScrubPreviewEnabled = scrubPreview,
                 MinimapEnabled = miniMap,
                 WindowX = _orig.WindowX, WindowY = _orig.WindowY,

@@ -101,7 +101,7 @@ int wmain(const int argc, wchar_t** argv) {
         Pump(150);
 
         FFF3FPSnapshot s{};
-        s.size = sizeof(s); s.version = 8;
+        s.size = sizeof(s); s.version = 20;
         FFF3FP_GetSnapshot(player, &s);
 
         const auto name = std::filesystem::path(wide).filename().string();

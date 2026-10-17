@@ -727,11 +727,22 @@ public sealed class PlayerSurface : NativeControlHost
     private struct Reserved32 { public int R0, R1, R2, R3, R4, R5, R6, R7; }
 
     /// <summary>PAINTSTRUCT 与原生布局的一致性校验（防回归）。
-    /// <para>按指针宽度取期望值：x64 = 8+4+16+4+4+32 = 72；x86 = 4+4+16+4+4+32 = 64。
+    /// <para><b>为什么按"架构"而不是"指针宽度"取期望值（ARM 前瞻准备，docs/51 §三）</b>：
+    /// 原实现写的是 <c>IntPtr.Size == 8 ? 72 : 64</c>，注释也把它称作"按指针宽度取期望值"。
+    /// 但 <c>IntPtr.Size</c> 是**指针宽度**的代理，不是**架构**的代理 —— Windows 的
+    /// x64 与 ARM64 指针**同为 8 字节**，于是 ARM64 上这个表达式会**静默走进 x64 分支**取 72。
+    /// 若 ARM64 的 <c>PAINTSTRUCT</c> packing 与 x64 不同，断言失败 ⇒ 按本文件 :706 的说法
+    /// "启动即失败"；而若不巧恰好相同，这个断言也就**从未真正验证过 ARM64**。
+    /// 两种结果都不好，所以改成显式按 <see cref="RuntimeInformation.ProcessArchitecture"/> 取期望值：
+    /// x64 / ARM64 均为 72（8+4+16+4+4+32），x86 为 64（4+4+16+4+4+32）。</para>
+    /// <para>⚠ ARM64 那一档的 72 **尚未在真 ARM64 工具链上实测**（本会话无法编译，见 docs/51 §五）：
+    /// 它是按"x64 与 ARM64 都是 8 字节指针 ⇒ 同一布局"推出的，与 x64 同理成立；
+    /// 迁移时应当在 ARM64 上跑一次，把结果写回这里（这正是本断言的用途）。</para>
     /// （<c>IntPtr.Size</c> 不是编译期常量，故为 static readonly 而非常量；
     /// 静态字段初始化器先于静态构造函数体执行，取值一定是已初始化的。）</para>
     /// 放在静态构造函数里：进程启动即校验一次，不在 WM_PAINT 热路径上。</summary>
-    private static readonly int NativePaintStructSize = IntPtr.Size == 8 ? 72 : 64;
+    private static readonly int NativePaintStructSize =
+        RuntimeInformation.ProcessArchitecture == Architecture.X86 ? 64 : 72;
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct WNDCLASSEX

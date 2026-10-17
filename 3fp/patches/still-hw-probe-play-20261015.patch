@@ -1,0 +1,53 @@
+warning: in the working copy of 'a/tools/still_hw_probe.cpp', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'b/tools/still_hw_probe.cpp', LF will be replaced by CRLF the next time Git touches it
+diff --git a/tools/still_hw_probe.cpp b/tools/still_hw_probe.cpp
+index a95e979..11b2c54 100644
+--- a/tools/still_hw_probe.cpp
++++ b/tools/still_hw_probe.cpp
+@@ -94,6 +94,7 @@ const char* ModeName(const FFF3FPDecodeMode mode) {
+ 
+ int g_adapterIndex = -1;
+ bool g_capturePixels = false;
++bool g_playVideo = false;
+ std::uint32_t g_captureSize = 64;
+ std::string g_outDir;
+ std::string g_captureTag;
+@@ -134,6 +135,27 @@ OpenResult OpenOnce(FFF3FPHandle player, const std::string& path) {
+     // empty target. With --play, start it, wait for the first presented frame and
+     // pause again; the snapshot below is then re-read so presented/transfer reflect
+     // the frame actually captured.
++    if (g_playVideo) {
++        FFF3FPSnapshot pre{};
++        pre.size = sizeof(pre);
++        pre.version = FFF3FP_GetApiVersion();
++        auto needsPlay = false;
++        if (FFF3FP_GetSnapshot(player, &pre) == FFFResult::Success)
++            needsPlay = pre.presentedVideoFrames == 0;
++        if (needsPlay) {
++            FFF3FP_Play(player);
++            for (int i = 0; i < 200; ++i) {
++                PumpMessages(20);
++                FFF3FPSnapshot tick{};
++                tick.size = sizeof(tick);
++                tick.version = FFF3FP_GetApiVersion();
++                if (FFF3FP_GetSnapshot(player, &tick) == FFFResult::Success &&
++                    tick.presentedVideoFrames > 0) break;
++            }
++            FFF3FP_Pause(player);
++            PumpMessages(80);
++        }
++    }
+     FFF3FPSnapshot snapshot{};
+     snapshot.size = sizeof(snapshot);
+     snapshot.version = FFF3FP_GetApiVersion();
+@@ -321,6 +343,10 @@ int main(int argc, char** argv) {
+             g_capturePixels = true;
+             continue;
+         }
++        if (std::strcmp(argv[i], "--play") == 0) {
++            g_playVideo = true;
++            continue;
++        }
+         if (std::strcmp(argv[i], "--list-adapters") == 0) {
+             listAdapters = true;
+             continue;

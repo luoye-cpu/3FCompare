@@ -1,0 +1,16 @@
+# 3fp/tools 探针集坏名单基线（判据 tools/check_probe_set.py）
+#
+# 每行：	<探针名>	<失败层>	<为什么坏（说明用，不参与对账）>
+# 失败层：compile=cl.exe 没过（含 C1083 缺头、C2039 ABI 字段不存在）
+#         link=link.exe 没过（LNK2019/LNK1120，build_probe.py 只链内核导入库）
+#
+# 对账口径：**实测坏集合必须与本文件逐名、逐层相等**。
+#   新坏一个 ⇒ 红（红名单不许变长）
+#   修好一个 ⇒ 也红，并提示把这条删掉（基线不许只增不减、也不许挂着不删）
+#   失败层变了 ⇒ 也红（条目含义变了，要重新对账）
+#
+# 生成方式：py tools/check_probe_set.py --write-baseline --full
+# 手工加条目：要能指出"哪一行、哪一层、为什么"，写不出理由就别加。
+#
+hdr10plus_cost_microbench	link	LNK2019 HdrMetadataParse::FromHdr10Plus / HdrToneCurveBuild::BuildIdentity / BuildFromWindow——内核**内部**类（HDRMETADATAPARSE.OBJ/HDRTONECURVE.OBJ），FFF.Native.lib 不导出
+iamf_pump_probe	link	LNK2019 IamfAudioDecoder::IamfAudioDecoder/~IamfAudioDecoder/OpenFile/PumpFile——内核**内部**类（3FP/Audio/IamfAudioDecoder.h），FFF.Native.lib 不导出

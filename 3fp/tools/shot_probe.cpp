@@ -87,7 +87,7 @@ int wmain(const int argc, wchar_t** argv) {
 
     FFF3FPSnapshot snapshot{};
     snapshot.size = sizeof(snapshot);
-    snapshot.version = 8;
+    snapshot.version = 20;
     const auto snapResult = FFF3FP_GetSnapshot(player, &snapshot);
     printf("媒体: %s\n", path.c_str());
     printf("请求色彩模式: %s\n", hdr ? "MapToHdr(强制HDR输出)" : "MapToSdr");
@@ -102,7 +102,7 @@ int wmain(const int argc, wchar_t** argv) {
 
     FFF3FPRenderTargetInfo rt{};
     rt.size = sizeof(rt);
-    rt.version = 2;
+    rt.version = 20;
     if (FFF3FP_GetRenderTargetInfo(player, &rt) == FFFResult::Success)
         printf("渲染目标: swap=%ux%u client=%ux%u dest=(%u,%u) %ux%u outBits=%u hdr=%u\n",
             rt.swapWidth, rt.swapHeight, rt.clientWidth, rt.clientHeight,

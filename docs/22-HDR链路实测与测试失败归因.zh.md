@@ -50,7 +50,8 @@
 
 ## 二、HDR 链路实测通过（正面证据）
 
-`--hdr-switch-regression` 第一阶段 `测试播放中HDR交换链切换`（`Program.vb:1370`）**全部通过**：
+`--hdr-switch-regression` 第一阶段 `测试播放中HDR交换链切换`（`FFF.Player.Tests/Program.vb` 原 `:1370`；
+**该测试套件已被上游 `5d2cb21` 删除**，在盘文件现只剩 30 行 smoke，登记见 `3fp/docs/39`。当时行号不再给现行等价物）**全部通过**：
 
 | 断言 | 结果 |
 |---|---|
@@ -106,7 +107,7 @@ HDR 切换：视频帧 3→129→130，交换链 Present 4→153→155。
 3. **已排除"核心文件缺失"**
    `Form1_Load`（`Form1.vb:57`）若核心文件缺失，会在 `:85` 提前 `Return`，
    则 `画面控件`（`:86`）与 `播放控制器`（`:88`）均为 Nothing，
-   测试断言（`Program.vb:1478`）会抛 **"无法取得完整播放器 HDR 回归所需的控制器、信息图层或画面控件。"**
+   测试断言（`FFF.Player.Tests/Program.vb` 原 `:1478`，该套件已被上游 `5d2cb21` 删除）会抛 **"无法取得完整播放器 HDR 回归所需的控制器、信息图层或画面控件。"**
    实际并未抛出 ⇒ `核心文件检查通过 = True`，DLL 依赖齐全。
 
 4. **Form1 拿不到媒体路径（根因）**
@@ -122,7 +123,7 @@ HDR 切换：视频帧 3→129→130，交换链 Present 4→153→155。
    **而该事件只在 VB 应用程序框架启动时触发。** 测试的入口是 `FFF.Player.Tests.exe`，
    FFF.Player 的 `MyApplication.Run()` 从未执行 ⇒ `待处理启动文件` 恒为空。
 
-   佐证：测试工程里唯一出现 `记录初次启动命令行` 的地方是 `Program.vb:564`，
+   佐证：测试工程里唯一出现 `记录初次启动命令行` 的地方是 `FFF.Player.Tests/Program.vb` 原 `:564`（该套件已被上游 `5d2cb21` 删除），
    那是**针对该函数自身的单元测试**（`testApplication.记录初次启动命令行({"不存在的文件", executablePath})`），
    并没有为 HDR 测试向 `My.Application` 注入路径。
 
@@ -143,7 +144,7 @@ BT.2390：knee 24.40 nit；暗部 12.20 nit 保持；源峰值 1242 nit → SDR 
 测试失败：HDR 源没有采用 MaxCLL 1242 nit：1000。
 ```
 
-- 断言位于 `Program.vb:4272`：`HDR源峰值 = 1242UI`，失败信息为
+- 断言位于 `FFF.Player.Tests/Program.vb` 原 `:4272`（该套件已被上游 `5d2cb21` 删除）：`HDR源峰值 = 1242UI`，失败信息为
   `"HDR 源没有采用 MaxCLL 1242 nit：{峰值}"`。
 - **1242 nit 是上游自有样本的固有值**，被硬编码进测试。本机素材 `real_4k_hevc_hdr10_60m.mp4`
   实测为 **1000 nit**（内核在无 MaxCLL 元数据时亦按母版/回退 1000 nit），必然不相等。

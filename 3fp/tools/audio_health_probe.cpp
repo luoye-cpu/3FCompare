@@ -95,7 +95,7 @@ int wmain(const int argc, wchar_t** argv) {
     Pump(seconds * 1000);
 
     FFF3FPSnapshot s{};
-    s.size = sizeof(s); s.version = 8;
+    s.size = sizeof(s); s.version = 20;
     FFF3FP_GetSnapshot(player, &s);
 
     std::vector<std::string> details;

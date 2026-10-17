@@ -1,9 +1,12 @@
 # 3FCompare 构建与部署脚本
-# 用法: powershell -ExecutionPolicy Bypass -File tools/构建全部.ps1 [-SkipTests]
+# 用法: powershell -ExecutionPolicy Bypass -File tools/构建全部.ps1 [-SkipTests] [-NoRunDirDeploy]
 # 前置: Visual Studio 2022+ (C++ 桌面负载), Git, （vcpkg 首次联网）
 
 param(
     [switch]$SkipTests,
+    # 默认会把内核与原生依赖刷进本机运行目录 publish\3FCompare（见 §部署运行目录 的注释）。
+    # 想只构建不碰那份正在跑的东西时加这个开关。
+    [switch]$NoRunDirDeploy,
     [ValidateSet("Release", "Debug")]
     [string]$Configuration = "Release"
 )
@@ -223,6 +226,77 @@ function Deploy-To($targetDir) {
 
 Deploy-To (Join-Path $ProjectRoot "src\3FCompare\bin\$Configuration\net11.0-windows")
 Deploy-To (Join-Path $ProjectRoot "tests\3FCompare.SmokeTests\bin\$Configuration\net11.0")
+
+# ── 部署运行目录（2026-10-13 补，此前这一步根本不存在）──────────────────────
+# 为什么非做不可：`publish\3FCompare` 是本机**真正跑起来**的那份（同目录有 settings.json、
+# logs、debug.log），而 `NativeRuntime.ExtractEmbeddedDll` 的既定策略是"磁盘上已有 FFF.Native.dll
+# 就绝不覆盖"（该方法注释记着 2026-09-16 实测：按"哈希不同就覆盖"把用户磁盘上刚构建的 API 15
+# 降级成内嵌的 API 14，而托管 ConfigVersion=15、内核对版本严格相等 ⇒ 所有会话创建失败）。
+# ⇒ **运行期加载的是这个目录里散落的 FFF.Native.dll，exe 内嵌那份只是缺失兜底、且通常更旧**。
+# 所以"改动有没有到货"的闸口是这个散 DLL；本脚本过去只部署两个 bin 目录，这里从来没人写，
+# 实测它停在 10-11 的 6,180,352 B / API 17，而新构建是 5,398,016 B / API 20。
+# 边界：只写内核与原生依赖，**绝不碰** settings.json / logs / debug.log / selftest_output.txt；
+# 目录不存在时**不新建**（那里是运行时状态，凭空造一份没有意义）；进程在跑时**跳过并说明**，
+# 不是静默跳过——"内核没刷进去"必须留下能归因的一行。
+$RunDir = Join-Path $ProjectRoot "publish\3FCompare"
+$KernelDllSrc = Join-Path $ForkRoot "FFF.Native\x64\$Configuration\FFF.Native.dll"
+function Get-ShaShort([string]$path) {
+    if (-not (Test-Path -LiteralPath $path)) { return "缺失" }
+    try { (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.Substring(0, 12).ToLowerInvariant() }
+    catch { "读不到" }
+}
+if ($NoRunDirDeploy) {
+    Write-Host "  [跳过] 运行目录部署（-NoRunDirDeploy）：publish\3FCompare 里的内核仍是旧版，属已知状态"
+} elseif (-not (Test-Path -LiteralPath $RunDir -PathType Container)) {
+    Write-Host "  [跳过] 运行目录不存在：$RunDir（不新建——那里是运行时状态目录）" -ForegroundColor Yellow
+} elseif (-not (Test-Path -LiteralPath $KernelDllSrc)) {
+    throw "内核 DLL 不存在：$KernelDllSrc"
+} else {
+    $running = @(Get-Process -Name "3FCompare" -ErrorAction SilentlyContinue)
+    if ($running.Count -gt 0) {
+        # 覆盖一个正在被加载的 DLL 要么失败要么让进程读到混合状态；宁可红着提醒。
+        Write-Host ("  [跳过] 3FCompare 正在运行（PID {0}），不刷运行目录 —— 关掉它再重跑本脚本，" -f ($running.Id -join ',')) -ForegroundColor Yellow
+        Write-Host "         否则本轮改动不会生效，而这里会看起来成功了。" -ForegroundColor Yellow
+    } else {
+        # ⚠ 版本配对闸：内核对 PlayerApiVersion 做**严格相等**判断（FFF3FP_Create 不等即拒），
+        # 而运行目录里的 3FCompare.exe 是**上一次发布**的产物、带着那一版的托管镜像。
+        # 只把新内核放进去 = "新内核 + 旧托管镜像"，会话全部创建失败。
+        # `NativeRuntime.ExtractEmbeddedDll` 的注释记着反方向的同一件事（2026-09-16：
+        # 按"哈希不同就覆盖"把磁盘上的 API 15 降级成内嵌的 API 14，表现是"未就绪/找不到入口点"）。
+        # 所以这里要求**成对到货**：exe 必须不早于本轮内核，否则跳过并说明要去重跑发布。
+        $exePath = Join-Path $RunDir "3FCompare.exe"
+        if (-not (Test-Path -LiteralPath $exePath)) {
+            Write-Host "  [跳过] 运行目录里没有 3FCompare.exe，无法判断托管镜像版本，不单独放内核" -ForegroundColor Yellow
+        } elseif ((Get-Item $exePath).LastWriteTimeUtc -lt (Get-Item $KernelDllSrc).LastWriteTimeUtc) {
+            Write-Host ("  [跳过] 运行目录的 exe（{0}）早于本轮内核（{1}）：只刷内核会造出" -f `
+                (Get-Item $exePath).LastWriteTime.ToString('MM-dd HH:mm'), `
+                (Get-Item $KernelDllSrc).LastWriteTime.ToString('MM-dd HH:mm')) -ForegroundColor Yellow
+            Write-Host "         『新内核 + 旧托管镜像』，而内核对 API 版本严格相等 ⇒ 会话全建不起来。" -ForegroundColor Yellow
+            Write-Host "         要成对到货：先重新发布 exe（pack.ps1 的 dotnet publish），再跑本脚本。"
+            Write-Host ("  现状：运行目录 FFF.Native.dll {0} B / exe {1} B" -f `
+                (Get-Item (Join-Path $RunDir "FFF.Native.dll")).Length, (Get-Item $exePath).Length)
+        } else {
+        Write-Host "=== 部署运行目录 $RunDir ==="
+        $before = Get-ShaShort (Join-Path $RunDir "FFF.Native.dll")
+        $beforeBytes = (Get-Item (Join-Path $RunDir "FFF.Native.dll")).Length
+        Copy-Item -LiteralPath $KernelDllSrc (Join-Path $RunDir "FFF.Native.dll") -Force
+        foreach ($rt in (Get-ChildItem (Join-Path $ForkRoot "runtime\*.dll") -ErrorAction SilentlyContinue)) {
+            Copy-Item -LiteralPath $rt.FullName -Destination $RunDir -Force
+        }
+        $runAss = Join-Path $ForkRoot "third_party\vcpkg_installed\x64-windows\bin\ass-9.dll"
+        if (Test-Path -LiteralPath $runAss) { Copy-Item -LiteralPath $runAss -Destination $RunDir -Force }
+        $after = Get-ShaShort (Join-Path $RunDir "FFF.Native.dll")
+        $built = Get-ShaShort $KernelDllSrc
+        # 部署后自证：运行目录那份必须与刚构建的那份同哈希，否则这行就是红的来源。
+        if ($after -ne $built) { throw "运行目录内核哈希 $after ≠ 构建产物 $built —— 部署没真正落地" }
+        Write-Host ("  FFF.Native.dll sha256 {0} -> {1}（构建产物 {2}）" -f $before, $after, $built)
+        Write-Host ("  字节 {0} -> {1}" -f $beforeBytes, (Get-Item $KernelDllSrc).Length)
+        # 内嵌件与散件的差异是**设计如此**（散件优先、内嵌只兜底），所以这里只报不拦。
+        Write-Host ("  注：{0} 内嵌的仍是发布那批的兜底内核；运行期用的是上面这份散 DLL。" -f (Split-Path $exePath -Leaf))
+        Write-Host "      要让内嵌件也变新，得重跑 pack.ps1 重新发布 exe——那是发布动作，不在本脚本职责内。"
+        }
+    }
+}
 
 if (-not $SkipTests) {
     Write-Host "=== [可选] 构建 .NET 解决方案 ==="

@@ -80,7 +80,7 @@ Totals RunOnce(const std::string& path, const bool gpu, const int seconds, const
 
     FFF3FPSnapshot before{};
     before.size = sizeof(before);
-    before.version = 8;
+    before.version = 20;
     FFF3FP_GetSnapshot(player, &before);
 
     const auto wallStart = GetTickCount64();
@@ -90,7 +90,7 @@ Totals RunOnce(const std::string& path, const bool gpu, const int seconds, const
 
     FFF3FPSnapshot after{};
     after.size = sizeof(after);
-    after.version = 8;
+    after.version = 20;
     FFF3FP_GetSnapshot(player, &after);
 
     t.frames = static_cast<double>(after.presentedVideoFrames - before.presentedVideoFrames);
