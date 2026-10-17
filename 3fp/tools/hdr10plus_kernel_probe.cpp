@@ -116,7 +116,7 @@ int main(int argc, char** argv) {
 
     FFF3FPSnapshot snapshot{};
     snapshot.size = sizeof(snapshot);
-    snapshot.version = 8;
+    snapshot.version = 20;
     if (FFF3FP_GetSnapshot(g_player, &snapshot) != FFFResult::Success) {
         std::printf("GetSnapshot failed at open\n");
         FFF3FP_Destroy(g_player);
@@ -131,7 +131,7 @@ int main(int argc, char** argv) {
         Pump(400);
         std::memset(&snapshot, 0, sizeof(snapshot));
         snapshot.size = sizeof(snapshot);
-        snapshot.version = 8;
+        snapshot.version = 20;
         if (FFF3FP_GetSnapshot(g_player, &snapshot) != FFFResult::Success) continue;
         char label[32];
         std::snprintf(label, sizeof(label), "t=%4dms", (step + 1) * 400);

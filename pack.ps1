@@ -37,7 +37,9 @@ param(
     [switch]$ChecksOnly,          # 只跑产物校验，对 -CheckDir 生效（不单测/不编译/不压缩）
     [string]$CheckDir = "",       # -ChecksOnly 要校验的已存在目录
     [switch]$WriteManifest,       # 配合 -ChecksOnly：先重算 SHA256SUMS 再校验
-    [string]$BuildDate = ""       # 写进使用说明的构建日期；留空则不写该项（保证包内文本文件可复现）
+    [string]$BuildDate = "",      # 写进使用说明的构建日期；留空则不写该项（保证包内文本文件可复现）
+    [string]$SourceOfferUrl = ""  # GPL/LGPL 类组件的"对应源码"获取地址；留空 ⇒ 包内如实写"要约未提供"
+                                  # 与 $BuildDate 同一套理由：只由显式入参决定，不引入不可复现的输入。
 )
 
 $ErrorActionPreference = "Stop"
@@ -584,6 +586,43 @@ function Invoke-Pack([string]$mode) {
         }
     }
 
+    # 外部 HDRdp 模块（中性色彩变换，可选件）：**默认不进包**。
+    #   2026-10-15 的 IP 普查查明：这枚件与厂家原件带同一份授权密钥材料，且它的实现里有
+    #   与厂家源码逐行相同的部分 ⇒ 它不是"我们的自研产物"，不该由打包脚本顺手分发。
+    #   要随包发必须由人显式开 FFF_INCLUDE_HDRDP_DLL=1（并承担上面那条后果）；不开就是干净缺席，
+    #   宿主侧本来就是"模块缺席 ⇒ 静默按基底出画"，用户看不到任何提示。
+    #   源在库外独立仓 C:\PLAN\ColorTransform\build\FFF.HDRdp.Test.dll（源码按约定不入本仓）。
+    #   拷到包根——ColorTransformModule.CandidatePaths 的第一搜索位就是 AppContext.BaseDirectory。
+    $HdrDpModuleSrc = "C:\PLAN\ColorTransform\build\FFF.HDRdp.Test.dll"
+    $HdrDpOptIn = ($env:FFF_INCLUDE_HDRDP_DLL -eq '1')
+    if (-not $HdrDpOptIn) {
+        if (Test-Path -LiteralPath $HdrDpModuleSrc -PathType Leaf) {
+            Write-Host "   ⏭ 本包不含外部色彩变换模块（在盘上但未开 FFF_INCLUDE_HDRDP_DLL=1）—— 默认不分发，宿主按基底静默出画" -ForegroundColor DarkGray
+        } else {
+            Write-Host "   ⏭ 本包不含外部色彩变换模块（源不在盘）—— 宿主按基底静默出画，属既定降级非缺陷" -ForegroundColor DarkGray
+        }
+    } elseif (Test-Path -LiteralPath $HdrDpModuleSrc -PathType Leaf) {
+        Write-Host "   ⚠ FFF_INCLUDE_HDRDP_DLL=1：显式把外部模块放进公开载荷 —— 该件含厂家同源密钥材料，分发后果由这一行开关承担" -ForegroundColor Yellow
+        Copy-Item -LiteralPath $HdrDpModuleSrc -Destination $OutputDir -Force
+        $hdrDpModule = Get-Item -LiteralPath (Join-Path $OutputDir "FFF.HDRdp.Test.dll")
+        Write-Host "   ✅ 外部 HDRdp 模块已随包（$($hdrDpModule.Length) 字节；缺席时降级 HDR10 基底）" -ForegroundColor Green
+
+        # 拷进来了还必须验它是**当代那一版**模块。授权门之前的 v1 与现在的 v2 同名，
+        # Test-Path 与 Copy-Item 都拦不住旧件；而宿主把"握手版本不符"当成"模块不在盘上"
+        # 静默降级 —— 于是包里躺着一枚永远不会生效的旧模块，SHA256SUMS 还会忠实地为
+        # 这个错文件背书（sha256sum -c 照样过）。缺席是既定降级，只留痕；
+        # 在而不匹配是实质缺陷，直接失败。
+        $HdrDpAbiMarker = "FFF_ColorTransformAuthorizationStatus"
+        $hdrDpBytes = [IO.File]::ReadAllBytes($hdrDpModule.FullName)
+        if (-not [Text.Encoding]::ASCII.GetString($hdrDpBytes).Contains($HdrDpAbiMarker)) {
+            throw "包里的 FFF.HDRdp.Test.dll 不含导出 $HdrDpAbiMarker —— 这是授权门之前（ABI 版本 1）的旧模块，宿主只会按'模块缺席'静默降级，发出去等于没发。请重新构建库外仓后再打包。"
+        }
+        Write-Host "   ✅ 模块 ABI 代次匹配（含 $HdrDpAbiMarker 导出）" -ForegroundColor Green
+    }
+    else {
+        Write-Host "   ⚠ 未找到 $HdrDpModuleSrc —— 本包不含外部 HDRdp 模块，DV 素材将回落 HDR10 基底（既定降级，非缺陷）" -ForegroundColor Yellow
+    }
+
     # Step 2/3: 复制 FFmpeg 运行时 + 生成使用说明 (仅完整版)
     if ($mode -eq "full") {
         Write-Host "`n[2/4] 复制 FFmpeg 组件包 / Copy FFmpeg bundle..." -ForegroundColor Yellow
@@ -609,6 +648,54 @@ function Invoke-Pack([string]$mode) {
         }
         Write-Host "   ✅ FFmpeg DLL 已复制到 ffmpeg-full/ 子目录（$($copied.Count) 个）" -ForegroundColor Green
 
+        # ── 变体门禁：数量对 ≠ 变体对 ──
+        # 上面那段只管"拷了几件"。2026-10-15 的 IP 普查实测：发货源 `publish\PLAN\ffmpeg-full`
+        # 的 13 件里有 7 件带 configuration 串，且这 7 件**全部**是
+        # `--enable-gpl --enable-nonfree --enable-version3`（BtbN 农场 `/home/dominic/ffmpeg/bin`），
+        # 含 libx264/libx265/libfdk-aac。这类组合的分发条件与 GPL 义务由**变体**决定，文件数看不出来。
+        # 判据 = tools/check_ffmpeg_variant.py：先 --self-test 证明探针能扫出合成件里的 nonfree
+        # （探针不活就不配当门），再扫真正进包的那一份。
+        #   rc=1 含 nonfree ⇒ 默认中止；显式 `$env:FFF_ALLOW_NONFREE=1` 才放行，并当场说明放行的是哪一条代价。
+        #   rc=2 一个构建串都没读到 ⇒ 判定**未执行**，只警告并点名（不许冒充通过）。
+        #   rc=3 或判据脚本缺失/没有 python ⇒ 守卫自己不成立，脚本缺失一律中止。
+        $variantPy = Join-Path $PSScriptRoot "tools\check_ffmpeg_variant.py"
+        if (-not (Test-Path -LiteralPath $variantPy)) {
+            throw "变体门禁找不到判据脚本 $variantPy —— 守卫缺件必须中止，不许静默跳过"
+        }
+        $pyExe = $null
+        foreach ($cand in @('py', 'python')) {
+            $g = Get-Command $cand -CommandType Application -ErrorAction SilentlyContinue
+            # Windows Store 的"应用执行别名"占位桩会在 PATH 上但跑起来返回 9009，必须排除
+            if ($g -and $g.Source -and ($g.Source -notmatch '(?i)[\\/]WindowsApps[\\/]')) { $pyExe = $g.Source; break }
+        }
+        if (-not $pyExe) {
+            Write-Host "   ⚠ 变体门禁未执行：本机没有可用的 python（py/python 均不在 PATH 或只有应用执行别名占位桩）" -ForegroundColor Yellow
+            Write-Host "     代价：这一包究竟是不是 nonfree 构建属**未判定**，别把'打包成功'当'分发条件已核'。" -ForegroundColor Yellow
+        } else {
+            $stRc = Invoke-Cmd $pyExe @($variantPy, '--self-test')
+            if ($stRc.Exit -ne 0) {
+                throw ("变体门禁自检失败（rc={0}）：探针扫不出合成件里的 --enable-nonfree ⇒ 判据本身不可信。输出尾部：{1}" `
+                    -f $stRc.Exit, (($stRc.Out | Select-Object -Last 3) -join ' / '))
+            }
+            $var = Invoke-Cmd $pyExe @($variantPy, '--dir', $FfmpegDest, '--quiet')
+            $tail = ($var.Out | Select-Object -Last 4) -join ' / '
+            if ($var.Exit -eq 0) {
+                Write-Host "   ✅ FFmpeg 变体已核：无 --enable-nonfree（$tail）" -ForegroundColor Green
+            } elseif ($var.Exit -eq 2) {
+                Write-Host "   ⚠ FFmpeg 变体**未判定**：进包件里一个构建串都没读到 —— 判定未执行，不是通过。$tail" -ForegroundColor Yellow
+            } elseif ($var.Exit -eq 1) {
+                if ($env:FFF_ALLOW_NONFREE -eq '1') {
+                    Write-Host "   ⚠ 已放行 nonfree 构建（FFF_ALLOW_NONFREE=1）：这一包含 --enable-nonfree 组合，" -ForegroundColor Yellow
+                    Write-Host "     分发条件最严，且 THIRD-PARTY-NOTICES.md 里的源码要约必须按该变体补齐。$tail" -ForegroundColor Yellow
+                } else {
+                    throw ("FFmpeg 变体判红：进包的 DLL 含 --enable-nonfree（见 THIRD-PARTY-NOTICES.md §1）。" +
+                           " 换 lgpl/gpl-shared 无 nonfree 的构建，或明确承担后果后设 `$env:FFF_ALLOW_NONFREE=1 再打包。$tail")
+                }
+            } else {
+                throw "变体门禁退出码异常（rc=$($var.Exit)）⇒ 守卫不成立，中止：$tail"
+            }
+        }
+
         Write-Host "`n[3/4] 生成使用说明 / Generate usage guide..." -ForegroundColor Yellow
         $ReadmePath = "$OutputDir\使用说明.txt"
         # ⚠ 使用说明.txt 是**包内文件**（在 SHA256SUMS 里），内容必须只由 Version/Arch 决定。
@@ -618,6 +705,38 @@ function Invoke-Pack([string]$mode) {
         #   注：exe 自身的 PE 时间戳仍可能变化，故"全包字节级一致"尚不成立；
         #   这里保证的是**脚本生成的文本文件**可复现。
         $buildDateLine = if ($BuildDate) { " | 构建日期 Build: ${BuildDate}" } else { "" }
+        # ── F13：许可与"源码要约"必须出现在包内文本里 ──
+        # 随包分发 GPL/LGPL 组件（x264/x265 触发 GPL、libbluray/libudfread/libiconv/fribidi 是 LGPL）
+        # 时，许可自己要求"附带许可副本"或"给出获取对应源码的方式"。清单文件已随包（上面那条门），
+        # 但用户翻开 使用说明.txt 也得能看到同一件事 —— 否则只有翻 md 的人看得见义务。
+        # 地址不由我编造：没有 -SourceOfferUrl 就如实写"未提供"，并在打包时打一条 ⚠（缺失要说清代价，
+        # 不是静默省略，也不是拦住打包 —— 那是发布策略，不是本步的裁判权）。
+        if ($SourceOfferUrl) {
+            $licenseBlock = @"
+📄 许可与源码 / Licences & Source
+  本包内含第三方组件（FFmpeg 及其 libx264/libx265/libass/libbluray 等、libiamf 一族、LakeUI）。
+  逐项许可与本项目的构建变体实测登记在包内 THIRD-PARTY-NOTICES.md，请先读它。
+  本版本对应源码获取方式 How to obtain the corresponding source: $SourceOfferUrl
+  This build's third-party components (FFmpeg with libx264/libx265/libass/libbluray, the libiamf
+  family, LakeUI) are itemised in THIRD-PARTY-NOTICES.md inside this package; read it first.
+  The corresponding source for this version is available at the URL above.
+
+"@
+            Write-Host "   ✅ 使用说明已写入源码要约地址（-SourceOfferUrl）" -ForegroundColor Green
+        } else {
+            $licenseBlock = @"
+📄 许可与源码 / Licences & Source
+  本包内含第三方组件（FFmpeg 及其 libx264/libx265/libass/libbluray 等、libiamf 一族、LakeUI），
+  逐项许可登记在包内 THIRD-PARTY-NOTICES.md。
+  ⚠ 本次打包**未提供**"对应源码获取方式"（未传 -SourceOfferUrl）；含 GPL/LGPL 组件的分发通常需要
+    该要约，发布前请补齐，不要把这行当成可忽略的提示。
+  Third-party components are itemised in THIRD-PARTY-NOTICES.md inside this package.
+  ⚠ No URL for obtaining the corresponding source was supplied at packaging time (-SourceOfferUrl);
+    distributing GPL/LGPL components normally requires such an offer — fill it in before release.
+
+"@
+            Write-Host "   ⚠ 使用说明缺源码要约：未传 -SourceOfferUrl（含 GPL/LGPL 组件，发布前应补齐）" -ForegroundColor Yellow
+        }
         $content = @"
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   3FCompare v${Version} — 使用说明 / Usage Guide
@@ -652,12 +771,17 @@ function Invoke-Pack([string]$mode) {
     P3 sources are converted with the P3 matrix instead of Rec.2020 / Rec.709.
   • 放大态平移两个方向都跟手：向右下平移此前会被钳死（原点被当成无符号数）。
     Panning now works in both directions; the down/right half of the range used to stick.
+  • 网格对比是"拼合"：每一格显示这一路画面的**自己那一块**，几块拼起来是一整幅；
+    拖分割线改的是"哪一块归哪一路"，画面不会被逐格重新缩放（缩放仍由滚轮负责）。
+    Grid compare is a mosaic: each cell shows its own region of the frame and the regions
+    tile back into one picture — dragging a divider reassigns regions, it does not rescale.
   • 倍率可以小于 1.00×（画面真的缩小），此前 <1 被内核当无效值忽略。
     Zoom below 1.00x actually shrinks the picture; the previous kernel ignored it.
   • VRR 低延迟呈现：设置 → "VRR 低延迟呈现（G-SYNC/FreeSync，实验）"。仅在显示链确实支持
     撕裂呈现时才改节奏，否则保持 VSync 锁定；逐帧对比建议关闭。
     Opt-in low-latency present for VRR displays; stays vsync-locked when unsupported.
 
+$licenseBlock
 ⌨️ 快捷键 / Shortcuts
   ※ 前三行的键位与步进量都能在「设置 → 快捷键 / 步进」里改；下面按**出厂默认**列出。
     The first three rows are rebindable in Settings → Shortcuts / Stepping; defaults shown.
@@ -665,8 +789,8 @@ function Invoke-Pack([string]$mode) {
   A / D            逐帧后退/前进（默认 1 帧）Frame step back/forward (1 frame by default)
   ← / →            按秒快退/快进（默认 1 秒）Second step back/forward (1 s by default)
   ↑ / ↓            ±10 秒步进 10s step
-  G / V / S        视图模式：标准 / A-B 可拖动 / 左右拉动  View modes: standard / A-B split / wipe
-  C                对比布局循环（AB / AB 上下 / ABC / ABC 三列 / ABCD）Cycle compare layout
+  G / V / S        视图模式：网格对比（分割线可拖）/ 左右拉动  Grid compare (draggable) / wipe
+  C                换分格朝向（左右↔上下、三列↔三行↔2×2…）Cycle the grid split
   P                像素探针 Pixel probe
   R                重置视图 Reset view
   O 或 Ctrl+O      打开视频 Open videos
@@ -677,6 +801,24 @@ function Invoke-Pack([string]$mode) {
   Esc              退出全屏 Exit fullscreen
   A / B            时间轴 A/B 打点（时间轴获得焦点时）Timeline A/B markers (when focused)
   设置 / Settings  菜单「设置 → 设置对话框」（无默认快捷键）Settings menu item, no default key
+
+🔀 左右拉动支持多路 / Multi-route wipe
+  • 拉动会把**参与对比的每一路**各铺一条带，条与条之间可独立拖动调比例。
+    此前只显示前 2 路，第 3 路起点「加路」看不到任何变化——现在每路都有自己的带。
+    The wipe tiles one band per route taking part; drag any divider to resize. Previously
+    only the first two were shown, so "Add route" appeared to do nothing.
+  • 拉动下点左下角「加路」= 选文件并**真正多开一路**（网格下仍是扩一条空 lane）。
+    In the wipe, "Add route" picks a file and opens one more route for real.
+  • 菜单「视图 → 布局编辑器（自由拼接）」可横竖自由组合、允许不对称（含 T 形交叉）。
+    Menu "View → Layout editor (free-form tiling)" composes rows and columns freely.
+  • 菜单「视图 → 选择路」可指定每条带显示第几路，**同一路可以出现在多条带上**做重复对照。
+    Menu "View → Choose routes" picks which route each band shows; a route may repeat.
+  • ⚠ 装了 RTSS（RivaTuner / MSI Afterburner 的覆盖层）等第三方注入工具时，
+    多路高负载下可能偶发闪退。程序**自带崩溃自愈**：会自动重启并恢复上次会话（暂停态），
+    按空格继续即可。连续 3 次崩溃后会停止自动重启，以免反复循环。
+    With third-party injectors such as RTSS installed, occasional crashes are possible under
+    heavy multi-route load. The app self-recovers: it restarts and restores the last session
+    (paused) — press Space to resume. After 3 consecutive crashes it stops restarting.
 
 ❓ 常见问题 / FAQ
   Q: 提示"FFmpeg 不可用"？/ "FFmpeg unavailable"?
@@ -719,6 +861,66 @@ function Invoke-Pack([string]$mode) {
         Write-Host "`n[2/4] 跳过 (精简版不含 PLAN) / Skipped (lite, no PLAN)" -ForegroundColor Yellow
         Write-Host "`n[3/4] 跳过 (精简版不生成使用说明) / Skipped (lite, no usage guide)" -ForegroundColor Yellow
     }
+
+    # 第三方清单必须在**包里**，不是只在仓里：随包分发第三方件却不带清单 = 义务没落。
+    # 位置刻意在 New-Sha256Manifest 之前 ⇒ 清单本身进清单、也被 .7z 收录，用户解压后可自证。
+    # 只"文件在不在"不够：一份通用模板也能过 Test-Path，所以同时要求它登记了**实测**的构建串。
+    $noticesSrc = Join-Path $PSScriptRoot "THIRD-PARTY-NOTICES.md"
+    if (-not (Test-Path -LiteralPath $noticesSrc)) {
+        throw "缺 THIRD-PARTY-NOTICES.md（仓库根）—— 本包含 FFmpeg/libass/LakeUI 等第三方件，清单缺席即中止"
+    }
+    Copy-Item -LiteralPath $noticesSrc -Destination $OutputDir -Force
+    $noticesInPkg = Get-Item -LiteralPath (Join-Path $OutputDir "THIRD-PARTY-NOTICES.md")
+    $noticesText = [IO.File]::ReadAllText($noticesInPkg.FullName)
+    if ($noticesInPkg.Length -lt 400 -or -not $noticesText.Contains('--enable-nonfree')) {
+        throw ("包内 THIRD-PARTY-NOTICES.md 不像实测清单（{0} 字节 / 未登记 nonfree 构建串）" -f $noticesInPkg.Length)
+    }
+    Write-Host "   ✅ 第三方清单已入包（$($noticesInPkg.Length) 字节，随 SHA256SUMS 一起背书）" -ForegroundColor Green
+
+    # ── F10：许可**全文**必须进包 ──
+    # 清单只写"用了谁"不够：ISC / LGPL / GPL / FTL / bzip2 / libpng 这些许可文本自身都要求
+    # "分发时附带许可全文"。这里把盘上真读得到的原文收进包内 licenses\，并**逐件点名**：
+    # 少收一件就中止（不静默少收），显式 FFF_ALLOW_MISSING_LICENSES=1 才降级成警告。
+    # 已知仍缺的不是"漏收"而是"根本没有"：随包的 FFmpeg 是 gpl+nonfree 构建，而仓内只有
+    # LGPLv2.1/LGPLv3 两份文本 —— GPL 文本与源码要约属修复方案 D3 的决定权，这里如实打印。
+    $vcpkgShare = Join-Path $ProjectDir "third_party\fff_project\third_party\vcpkg_installed\x64-windows\share"
+    $ffLicDir   = Join-Path $ProjectDir "third_party\ffmpeg"
+    $lakeLic    = Join-Path $ProjectDir "third_party\LakeUI\LICENSE.txt"
+    $LicPorts   = @('libass','libbluray','libudfread','libiconv','fribidi','freetype',
+                    'harfbuzz','brotli','bzip2','libpng','zlib','libxml2')
+    $LicDir = Join-Path $OutputDir "licenses"
+    New-Item -ItemType Directory -Force -Path $LicDir | Out-Null
+    $licCopied = @(); $licMissing = @()
+    foreach ($p in $LicPorts) {
+        $s = Join-Path $vcpkgShare "$p\copyright"
+        $d = Join-Path $LicDir "vcpkg-$p.txt"
+        if (Test-Path -LiteralPath $s -PathType Leaf) { Copy-Item -LiteralPath $s -Destination $d -Force; $licCopied += "vcpkg-$p" }
+        else { $licMissing += "vcpkg-$p（$s 不在盘）" }
+    }
+    foreach ($e in @(
+        @('ffmpeg-COPYING.LGPLv2.1', (Join-Path $ffLicDir 'COPYING.LGPLv2.1')),
+        @('ffmpeg-COPYING.LGPLv3',   (Join-Path $ffLicDir 'COPYING.LGPLv3')),
+        @('LakeUI-GPL-3.0',          $lakeLic))) {
+        $d = Join-Path $LicDir "$($e[0]).txt"
+        if (Test-Path -LiteralPath $e[1] -PathType Leaf) { Copy-Item -LiteralPath $e[1] -Destination $d -Force; $licCopied += $e[0] }
+        else { $licMissing += "$($e[0])（$($e[1]) 不在盘）" }
+    }
+    $licWant = $LicPorts.Count + 3
+    if ($licMissing.Count -gt 0) {
+        $msg = "许可文本缺 $($licMissing.Count)/$licWant 件：" + ($licMissing -join '；')
+        if ($env:FFF_ALLOW_MISSING_LICENSES -eq '1') { Write-Host "   ⚠ 已放行：$msg" -ForegroundColor Yellow }
+        else { throw "$msg —— 分发第三方件却不附许可全文；确认可接受后再设 FFF_ALLOW_MISSING_LICENSES=1" }
+    }
+    # 收来的文本必须是"有内容的"，不是 0 字节占位：逐件量，0 字节也算缺
+    $licEmpty = @(Get-ChildItem -LiteralPath $LicDir -Filter *.txt -File | Where-Object { $_.Length -eq 0 })
+    if ($licEmpty.Count -gt 0) { throw "licenses\ 里有 $($licEmpty.Count) 个 0 字节文件：$(($licEmpty | ForEach-Object { $_.Name }) -join ', ')" }
+    # 放行过缺失就不能打 ✅ —— 那会让"0/15 件"在日志里长得像全绿
+    if ($licMissing.Count -eq 0) {
+        Write-Host "   ✅ 许可文本已入包 licenses/（$($licCopied.Count)/$licWant 件）" -ForegroundColor Green
+    } else {
+        Write-Host "   ⚠ 许可文本只入包 $($licCopied.Count)/$licWant 件（放行缺 $licMissing.Count 件）" -ForegroundColor Yellow
+    }
+    Write-Host "   ⚠ 仍缺 GPL 文本与源码要约（随包 FFmpeg 是 gpl+nonfree 构建，仓内只有 LGPL 两份）—— 属修复方案 D3，未擅自决定" -ForegroundColor Yellow
 
     # Step 4: 压缩 / Archive
     Write-Host "`n[4/4] 压缩打包 / Archiving..." -ForegroundColor Yellow

@@ -140,7 +140,7 @@ int wmain(const int argc, wchar_t** argv) {
     for (int i = 0; i < 200 && !g_open; ++i) Pump(50);
     FFF3FPSnapshot snapshot{};
     snapshot.size = sizeof(snapshot);
-    snapshot.version = 8;
+    snapshot.version = 20;
     FFF3FP_GetSnapshot(player, &snapshot);
     printf("内核: iamfActive=%u  声道=%u  soundSystem=%u\n",
         snapshot.iamfActive, snapshot.iamfChannels, snapshot.iamfSoundSystem);

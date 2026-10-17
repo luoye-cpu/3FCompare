@@ -75,7 +75,7 @@ Sample RunOnce(const std::string& path, const bool gpu, const int seconds) {
 
     FFF3FPSnapshot before{};
     before.size = sizeof(before);
-    before.version = 8;
+    before.version = 20;
     FFF3FP_GetSnapshot(player, &before);
 
     FFF3FP_Play(player);
@@ -83,7 +83,7 @@ Sample RunOnce(const std::string& path, const bool gpu, const int seconds) {
 
     FFF3FPSnapshot after{};
     after.size = sizeof(after);
-    after.version = 8;
+    after.version = 20;
     FFF3FP_GetSnapshot(player, &after);
 
     out.frames = static_cast<double>(after.presentedVideoFrames - before.presentedVideoFrames);

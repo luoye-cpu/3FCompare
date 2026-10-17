@@ -149,7 +149,16 @@ public partial class MainWindow
         for (var i = 0; i < _sync.Count; i++)
             if (_sync.IsRouteActive(i)) activeCount++;
         ComponentLog.Log(Comp.Sync, "RouteActivity", -1,
-            $"启用 {activeCount}/{_sync.Count} 路，本次变更 {changed} 路，耗时 {sw.ElapsedMilliseconds} ms");
+            $"启用 {activeCount}/{_sync.Count} 路，本次变更 {changed} 路，耗时 {sw.ElapsedMilliseconds} ms" + StepTag());
+
+        // 内核契约（见 <c>SyncController.RedrawAll</c> 的注释）：子窗口尺寸变了必须补一次 Redraw，
+        // 否则呈现停住。重新占格的那一路正好经历"0×0 → 一整格"的尺寸变化。
+        // 组在播时下一帧自然会来，但**停在暂停态时没有任何机制会补这一帧** ——
+        // 表现是"切回来的那一格冻在旧帧上"。这条在 2026-09-30 由合并后的自测抓出：
+        // 退出左右拉动回到网格（暂停态）时第 4 路 presented 2 秒内 74→74 不动。
+        // 旧路径侥幸没中，只是因为"退出对比模式"顺手撤了窗口区域，那是一次被动的重绘，不是设计。
+        _sync.RedrawAll();
+
         // 状态栏那句"显示前 N / 共 M 路"要跟着改口径（它此前只说可见性，现在说的是启用态）
         if (_compareActive) NotifyCompareOverlay();
     }
@@ -634,7 +643,7 @@ public partial class MainWindow
         sb.Append(" win=").Append(ClientSize.Width.ToString("0", CultureInfo.InvariantCulture))
           .Append('x').Append(ClientSize.Height.ToString("0", CultureInfo.InvariantCulture));
         sb.Append(" scale=").Append(RenderScaling.ToString("0.##", CultureInfo.InvariantCulture));
-        sb.Append(" mode=").Append(_compareMode)
+        sb.Append(" gridShape=").Append(_partition.Cols).Append('x').Append(_partition.Rows)
           .Append(" cmp=").Append(_compareActive ? 1 : 0)
           .Append(" zoom=").Append(_viewZoom.ToString("0.###", CultureInfo.InvariantCulture))
           .Append(" single=").Append(Grid.SingleView ? 1 : 0);

@@ -1,4 +1,4 @@
-﻿﻿using System;
+using System;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -491,6 +491,9 @@ public partial class MainWindow : Window
     /// ② 减路优先撤尾部的<b>空 lane</b>，素材一路都不许掉（路数与会话实例都不变）——
     ///    这条是 "+ 与 − 互逆" 的全部内容，也是历史上最容易击穿用户数据的一条
     ///    （旧实现会在撤空 lane 时把最后一路的会话连同解码位置一起销毁）；
+    ///    ⚠ ① 与 ② 需要 <c>lane0 + 2 ≤ MaxLaneCount</c> 的余量：在天花板上起盘（9 路整轮）时
+    ///    "加路扩格"这件事根本不可达，硬断言会把产品的**正确拒绝**读成缺陷（2026-10-01 首次
+    ///    跑 9 路档就是这样红的）。没有余量时两条明写"不适用"，天花板契约全部由 ③ 承担。
     /// ③ D1..D9 与上限：网格顶到 9 路后，「只加不减」必须真成立（按 D2 不得撤空 lane），
     ///    且此时加路既不得把网格<b>缩小</b>、也必须给出可见反馈（不静默）；
     /// ④ 对比模式下若新 lane 落在格表之外（AB 只有 2 格），它必然不可见 ——
@@ -505,65 +508,103 @@ public partial class MainWindow : Window
         var route0 = _sync.Count;
         var sessions0 = _sync.Slots.Select(s => s.Session).ToList();
 
-        // ── ① 加路 = 网格 +1，且不造素材 ──
-        AddSlotPlaceholder();
-        if (Grid.Count != lane0 + 1)
-            throw new InvalidOperationException(
-                $"{label}: 加路未扩格 网格 {lane0}→{Grid.Count}（期望 {lane0 + 1}）");
-        if (_sync.Count != route0)
-            throw new InvalidOperationException(
-                $"{label}: 加路凭空多出一路素材 路数 {route0}→{_sync.Count}");
-
-        // ── ② 连撤两次：只撤 lane，素材不许掉 ──
-        AddSlotPlaceholder();          // 现在尾部有两条空 lane
-        RemoveLastSlot();
-        RemoveLastSlot();
-        var sessionsNow = _sync.Slots;
-        if (_sync.Count != route0 || Grid.Count != lane0 || sessionsNow.Count != sessions0.Count)
-            throw new InvalidOperationException(
-                $"{label}: 撤空 lane 时误删素材 网格 {lane0 + 2}→{Grid.Count}（期望回 {lane0}）" +
-                $" 路数 {route0}→{_sync.Count}");
-        for (var i = 0; i < sessions0.Count; i++)
-            if (!ReferenceEquals(sessions0[i], sessionsNow[i].Session))
-                throw new InvalidOperationException(
-                    $"{label}: 第 {i} 路的会话实例被换掉（撤空 lane 不该触碰素材）");
-
-        // ── ④ 对比模式：格表之外的新 lane 必然不可见，且必须提示、不得改模式 ──
-        if (_compareActive)
+        // ① 与 ② 描述的是"还能再加"那一段。已经在天花板上时，产品对加路的**正确**响应是
+        // 拒绝 + 可见反馈（见 LaneCountAfterAdd / NotifyLaneLimit），此时硬断言
+        // "Grid.Count == lane0+1" 会把正确行为读成缺陷 —— 2026-10-01 第一次拿 9 路跑整轮
+        // 就是这样红的（此前没有任何脚本跑过 9 路档，所以这条一直没暴露）。
+        // 天花板上的契约由下面 ③ 逐条硬断言（不缩格 / 有反馈 / 不动素材），故这里**明写跳过原因**，
+        // 不是悄悄不判。② 连加两条空 lane，故需要 2 格余量。
+        var headroom = lane0 + 2 <= MaxLaneCount;
+        if (headroom)
         {
-            var modeBefore = _compareMode;
-            var cells = CompareLayout.CellCount(_compareMode);
+            // ── ① 加路 = 网格 +1，且不造素材 ──
+            AddSlotPlaceholder();
+            if (Grid.Count != lane0 + 1)
+                throw new InvalidOperationException(
+                    $"{label}: 加路未扩格 网格 {lane0}→{Grid.Count}（期望 {lane0 + 1}）");
+            if (_sync.Count != route0)
+                throw new InvalidOperationException(
+                    $"{label}: 加路凭空多出一路素材 路数 {route0}→{_sync.Count}");
+
+            // ── ② 连撤两次：只撤 lane，素材不许掉 ──
+            AddSlotPlaceholder();          // 现在尾部有两条空 lane
+            RemoveLastSlot();
+            RemoveLastSlot();
+            var sessionsNow = _sync.Slots;
+            if (_sync.Count != route0 || Grid.Count != lane0 || sessionsNow.Count != sessions0.Count)
+                throw new InvalidOperationException(
+                    $"{label}: 撤空 lane 时误删素材 网格 {lane0 + 2}→{Grid.Count}（期望回 {lane0}）" +
+                    $" 路数 {route0}→{_sync.Count}");
+            for (var i = 0; i < sessions0.Count; i++)
+                if (!ReferenceEquals(sessions0[i], sessionsNow[i].Session))
+                    throw new InvalidOperationException(
+                        $"{label}: 第 {i} 路的会话实例被换掉（撤空 lane 不该触碰素材）");
+        }
+        else
+            Console.WriteLine($"  {label} 加减路契约：① ②（加路扩格 / 连撤两次）**不适用**——" +
+                              $"网格已在 {lane0} 路（上限 {MaxLaneCount}，需 {lane0}+2≤{MaxLaneCount} 才有余量），" +
+                              $"产品对加路的正确响应是拒绝+反馈；那条契约由下面 ③ 硬断言，不是没判");
+
+        // ── ④ 对比态下加路：网格必须给新 lane 一格（合并的整个意义），拉动则必须隐藏 + 提示 ──
+        // 同样只在"加得进去"时成立：触顶时 AddSlotPlaceholder 根本不产生新 lane，
+        // 下面那句"最后一条 lane 必须可见"会退化成在检一条**与本次加路无关**的旧 lane（假绿）。
+        if (_compareActive && Grid.Count < MaxLaneCount)
+        {
+            var shapeBefore = (_partition.Cols, _partition.Rows);
+            var weightsBefore = _partition.ColumnWeights.ToArray();
             var statusBefore = StatusInfo.Text;
+            var lanesBefore = Grid.Count;
             AddSlotPlaceholder();
             await System.Threading.Tasks.Task.Delay(150);   // IsVisible 由 Arrange 决定，等一次布局
-            var hidden = Grid.Count > cells;
             var addedLane = Grid.GetSurface(Grid.Count - 1);
-            if (hidden && addedLane is { IsVisible: true })
+
+            if (_compareOverlayActive)
+            {
+                // 左右拉动恒两格：多出来的 lane 必须不可见，且状态栏必须说清楚
+                if (Grid.Count > 2 && addedLane is { IsVisible: true })
+                    throw new InvalidOperationException(
+                        $"{label}: 左右拉动下第 {Grid.Count} 条 lane 超出两格却仍然可见（拉动只铺满两路）");
+                if (Grid.Count > 2 && StatusInfo.Text == statusBefore)
+                    throw new InvalidOperationException(
+                        $"{label}: 新 lane 被拉动的两格挤掉，状态栏却没有任何提示（用户看到的是「点了没反应」）");
+            }
+            else if (addedLane is not { IsVisible: true })
+            {
+                // 网格：一路一格，加一条 lane 就多一格 —— 这正是"以网格的渲染覆盖为基准"
+                // 与旧 A/B（只显示前 2~4 路）的分水岭，看不见就说明合并没落地。
                 throw new InvalidOperationException(
-                    $"{label}: 第 {Grid.Count} 条 lane 超出 {cells} 格表却仍然可见（格表短于路数时应隐藏）");
-            if (hidden && StatusInfo.Text == statusBefore)
+                    $"{label}: 网格对比下新加的第 {Grid.Count} 条 lane 不可见，" +
+                    $"一路一格的基准没落地（网格 {lanesBefore}→{Grid.Count}，形状 {_partition.Cols}x{_partition.Rows}）");
+            }
+
+            // 形状未变就不许动用户拖好的列宽（形状真变了才退回均匀，见 GridPartition.Retune）
+            if ((_partition.Cols, _partition.Rows) == shapeBefore &&
+                !weightsBefore.SequenceEqual(_partition.ColumnWeights.ToArray()))
                 throw new InvalidOperationException(
-                    $"{label}: 新 lane 被 {modeBefore} 格表隐藏，状态栏却没有任何提示（用户看到的是「点了没反应」）");
-            if (_compareMode != modeBefore)
-                throw new InvalidOperationException(
-                    $"{label}: 加路改掉了对比模式 {modeBefore}→{_compareMode}（模式只按素材路数收敛）");
+                    $"{label}: 加路在形状 {shapeBefore} 未变时改掉了已拖好的列宽 " +
+                    $"[{string.Join(", ", weightsBefore)}]→[{string.Join(", ", _partition.ColumnWeights.ToArray())}]");
             RemoveLastSlot();
             await System.Threading.Tasks.Task.Delay(150);
         }
+        else if (_compareActive)
+            Console.WriteLine($"  {label} 加减路契约：④（对比态加路必须给新 lane 一格）**不适用**——" +
+                              $"网格已在上限 {MaxLaneCount} 路，加路根本产不出新 lane");
 
         // ── ③ D1..D9 只加不减 + 上限：触顶后加路既不得缩格、也必须给可见反馈 ──
-        GrowLanes(9);
-        if (Grid.Count != 9)
-            throw new InvalidOperationException($"{label}: D9 未把网格扩到 9 路 网格 {lane0}→{Grid.Count}");
-        GrowLanes(2);   // 已在 9 路时按 D2：承诺是"只加不减"，不得反过来撤掉 7 条空 lane
-        if (Grid.Count != 9)
+        // 天花板用产品自己的常数（LaneCountAfterAdd 里那个 MaxLaneCount），不在这里再写一份 9。
+        GrowLanes(MaxLaneCount);
+        if (Grid.Count != MaxLaneCount)
             throw new InvalidOperationException(
-                $"{label}: D2 在 9 路时撤了空 lane 9→{Grid.Count}（违反「只加不减」）");
+                $"{label}: D{MaxLaneCount} 未把网格扩到 {MaxLaneCount} 路 网格 {lane0}→{Grid.Count}");
+        GrowLanes(2);   // 已在 9 路时按 D2：承诺是"只加不减"，不得反过来撤掉 7 条空 lane
+        if (Grid.Count != MaxLaneCount)
+            throw new InvalidOperationException(
+                $"{label}: D2 在 {MaxLaneCount} 路时撤了空 lane {MaxLaneCount}→{Grid.Count}（违反「只加不减」）");
         var statusAtLimit = StatusInfo.Text;
         AddSlotPlaceholder();
-        if (Grid.Count != 9)
+        if (Grid.Count != MaxLaneCount)
             throw new InvalidOperationException(
-                $"{label}: 已达 9 路上限时加路反而缩了网格 9→{Grid.Count}");
+                $"{label}: 已达 {MaxLaneCount} 路上限时加路反而缩了网格 {MaxLaneCount}→{Grid.Count}");
         if (StatusInfo.Text == statusAtLimit)
             throw new InvalidOperationException($"{label}: 加路触顶时无任何可见反馈");
         if (_sync.Count != route0)
@@ -574,8 +615,11 @@ public partial class MainWindow : Window
         if (Grid.Count != lane0 || _sync.Count != route0)
             throw new InvalidOperationException(
                 $"{label}: 还原失败 网格={Grid.Count}（期望 {lane0}）路数={_sync.Count}（期望 {route0}）");
-        Log($"{label} 加减路契约 ✓ 加路只扩格({lane0}→{lane0 + 1})、撤空 lane 不动素材" +
-            $"(路数恒 {route0})、9 路上限不缩格且有反馈");
+        Log($"{label} 加减路契约 ✓ " +
+            (headroom
+                ? $"加路只扩格({lane0}→{lane0 + 1})、撤空 lane 不动素材(路数恒 {route0})、"
+                : $"① ② 不适用（已在 {MaxLaneCount} 路上限，见上），") +
+            $"{MaxLaneCount} 路上限不缩格且有反馈");
     }
 
     /// <summary>侧栏三态回归闸门（D1 / D2 / D3 / D4 / D6）。
@@ -944,6 +988,22 @@ public partial class MainWindow : Window
                               $"files={_3FCompare.BuildInfo.SourceFingerprint.FileCount} " +
                               "（覆盖面=App 工程自身源文件；Core/native 由验证守卫按 mtime 兜）");
 
+            // ⚠ bench 开关必须**每轮无条件**打进 stdout，不能只在"开关起作用那一支"留痕。
+            //   教训：#32 的第一批 A/B（12 对 24 轮）里，臂自验读的是"组播放被守卫拒掉"那一行——
+            //   它只在恰好发生拒绝的轮次才出现 ⇒ 24 轮里只有 3 对可判、不一致对 0 ⇒ McNemar p=1.0，
+            //   等于花 10 分钟判了个寂寞（off 臂 12 轮里 9 轮不可判）。开关状态是进程启动就定的事实，
+            //   打在每轮头部才是可配对的证据。
+            Console.WriteLine("[产物]   bench-knobs:" +
+                $" FC_HOLD_PLAY_PENDING={System.Environment.GetEnvironmentVariable("FC_HOLD_PLAY_PENDING") ?? "(unset)"}" +
+                $" ⇒ HoldRejectedPlay={_3FCompare.Core.Sync.SyncController.HoldRejectedPlay}" +
+                $" FC_STEPS={System.Environment.GetEnvironmentVariable("FC_STEPS") ?? "(unset)"}" +
+                $" FC_NOMOSAIC={System.Environment.GetEnvironmentVariable("FC_NOMOSAIC") ?? "(unset)"}" +
+                $" FC_SKIP_ZINJECT={System.Environment.GetEnvironmentVariable("FC_SKIP_ZINJECT") ?? "(unset)"}" +
+                $" FC_REGION_SPACING_MS={System.Environment.GetEnvironmentVariable("FC_REGION_SPACING_MS") ?? "(unset)"}" +
+                $" FC_KEEP_LAYOUTOVERLAY={System.Environment.GetEnvironmentVariable("FC_KEEP_LAYOUTOVERLAY") ?? "(unset)"}" +
+                $" FC_FORCE_GDI_ROUTE={System.Environment.GetEnvironmentVariable("FC_FORCE_GDI_ROUTE") ?? "(unset)"}");
+
+
 #pragma warning disable IL3000 // 单文件下恒为空：正因可能为空，才只在非空时附加打印
             var asmPath = typeof(MainWindow).Assembly.Location;
             if (!string.IsNullOrEmpty(asmPath) &&
@@ -1083,10 +1143,84 @@ public partial class MainWindow : Window
             if (_realMode && _sync.ReadMasterSnapshot() is not { State: PlayerState.Playing })
                 throw new InvalidOperationException($"自动播放未启动（状态={_sync.ReadMasterSnapshot()?.State}）");
 
-            // VRR 呈现路径覆盖：开启撕裂模式并记录支持状态（不支持则静默回退 VSync）
+            // VRR 呈现路径覆盖。⚠ 这条过去只读 `SetPresentConfig` 的返回值 ⇒ **恒绿形状**：
+            //   返回值只说明交换链**允许**撕裂，不说明每次 Present 真的没等（修复前后同样打 ✓，
+            //   README 里"已支持"就是从这行抄的）。现在改成量内核那两个计数器：
+            //   `PresentWait100ns / SwapChainPresents` = 单次 Present 平均阻塞时长。
+            //   VSync 锁定时应约等于一个刷新周期（60Hz ≈ 16.7ms）；撕裂真生效应趋近 0。
+            // ⚠ 判决口径（别改回去）：**数值本身不判红**——固定刷新率屏上"允许撕裂但仍被节流"是合法硬件形态，
+            //   把它写成判红就是把环境当缺陷。只有**仪器级**事实才判红：计数器倒退或压根不动。
             _step = "VRR 呈现";
-            var vrrSupported = _sync.Slots[0].Session.SetPresentConfig(true);
-            Log($"VRR 撕裂呈现: {(vrrSupported ? "显示器链支持 ✓" : "不支持 → 保持 VSync 锁定")}");
+            var vrrAccepted = _sync.Slots[0].Session.SetPresentConfig(true);
+            Log($"VRR 撕裂呈现: SetPresentConfig(撕裂) 返回 {(vrrAccepted ? "true（交换链接受该请求）" : "false（不支持→静默回退 VSync）")}" +
+                " —— 这**只是请求结果**，不代表撕裂真发生");
+            if (_realMode)
+            {
+                var vrrFrom = _sync.ReadMasterSnapshot();
+                var presentFrom = vrrFrom is null ? -1L : vrrFrom.SwapChainPresents;
+                var waitFrom = vrrFrom is null ? -1L : vrrFrom.PresentWait100ns;
+                var vrrDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);
+                long presentDelta = 0, waitDelta = 0;
+                while (DateTime.UtcNow < vrrDeadline)
+                {
+                    await System.Threading.Tasks.Task.Delay(250);
+                    var now = _sync.ReadMasterSnapshot();
+                    if (now is null) continue;
+                    presentDelta = now.SwapChainPresents - presentFrom;
+                    waitDelta = now.PresentWait100ns - waitFrom;
+                    if (waitDelta < 0 || presentDelta < 0)
+                        throw new InvalidOperationException(
+                            $"VRR 计数器倒退：Present +{presentDelta}、Present 内等待 +{waitDelta}（100ns）" +
+                            " ⇒ 内核那两个计数不是同一个会话的单调累计，本判据的原料不成立");
+                    if (presentDelta >= 10) break;
+                }
+                if (presentDelta < 3)
+                {
+                    // 采不到呈现次数就是**没量到**：明写未验证，不打 ✓（本仓规矩：未验证 ≠ 通过）。
+                    Log($"VRR 单次 Present 等待：**未验证**（3s 内仅采到 {presentDelta} 次呈现，样本不足）" +
+                        $"⇒ 这一项没量到东西，别看上面那行 true 就当撕裂验过");
+                }
+                else
+                {
+                    var msPerPresent = waitDelta / 1e4 / presentDelta;
+                    Log($"VRR 实测：{presentDelta} 次 Present 内总阻塞 {waitDelta / 1e4:0.##}ms" +
+                        $" ⇒ 单次平均 {msPerPresent:0.##}ms；VSync 锁定特征 ≈ 一个刷新周期，撕裂真开应趋近 0" +
+                        (vrrAccepted && msPerPresent >= 8.0
+                            ? "；⚠ 交换链**允许**撕裂但每次仍在等 ⇒ 这台屏/这个驱动下那句 true 不足以说明撕裂发生"
+                            : string.Empty));
+                }
+            }
+
+
+            // RTX VSR 状态读取。判决口径（别改回去）：
+            //   ① 内核不提供该入口时记 **SKIP，不判红** —— 出货内核（third_party 那棵）今天
+            //      还没有 Set/GetVideoSuperResolutionStatus 两个导出（实测那份 DLL 93 个导出、
+            //      源码 grep 0 命中），这是已知缺口，不是故障。
+            //   ② Active 只表示驱动没拒绝这次请求，**不是**画面被增强的证据：本机实测该路径的
+            //      HRESULT 连对一个伪造的 GUID 都返回 S_OK，所以它不携带任何能力信息。
+            //   ③ 唯一够格判红的是一条内核自己保证的不变量：VideoRenderer.cpp:7178 在
+            //      Active=1 时把 Reason 覆写成 None。读到别的组合，说明托管镜像在按错偏移读
+            //      ——正是"尺寸相同、字段换序"那类会静默全错读数的事故。
+            _step = "RTX VSR 状态";
+            var vsrAccepted = _sync.Slots[0].Session.SetVideoSuperResolution(true);
+            if (!_sync.Slots[0].Session.ReadVideoSuperResolutionStatus(out var vsr))
+            {
+                Log($"RTX VSR: 请求登记结果 {(vsrAccepted ? "true" : "false")}，状态读不出来" +
+                    " ⇒ **SKIP**（盘上的内核不含该导出，不代表功能坏，也不代表功能没坏）");
+            }
+            else
+            {
+                Log($"RTX VSR: requested={vsr.Requested} NVIDIA适配器={vsr.NvidiaAdapter} " +
+                    $"active={vsr.Active} 驱动拒绝闩={vsr.DriverRejected} 原因={vsr.Reason} " +
+                    $"源={vsr.SourceWidth}x{vsr.SourceHeight} 目标={vsr.TargetWidth}x{vsr.TargetHeight}");
+                if (vsr.Active && vsr.Reason != VideoSuperResolutionReason.None)
+                    throw new InvalidOperationException(
+                        $"VSR active=true 却带原因码 {vsr.Reason} ⇒ 内核在 active 时恒把 reason 写成 None，" +
+                        "读到别的组合说明托管镜像字段偏移与内核不一致");
+                Log("  ⚠ 上面 active 只说明驱动没拒绝本次请求；画质档位与总开关归 NVIDIA App / 控制面板，" +
+                    "本程序设不了也读不到，画面是否真被增强这一项本步骤**不判**");
+            }
+
 
             // 帧步进 +1：位置不得后退（真实模式）
             // 且**必须**在播放态下步进——这是 docs/15 §2.1 的回归场景：
@@ -2928,7 +3062,13 @@ public partial class MainWindow : Window
             var drift = Math.Abs(snap.Position100ns - expect);
             if (drift > Tolerance)
                 throw new InvalidOperationException(
-                    $"第 {i} 路漂移 {TimeSpan.FromTicks(drift):g} > {Tolerance / 10_000}ms（pos={TimeSpan.FromTicks(snap.Position100ns):g} 期望 {TimeSpan.FromTicks(expect):g}）");
+                    $"第 {i} 路漂移 {TimeSpan.FromTicks(drift):g} > {Tolerance / 10_000}ms（pos={TimeSpan.FromTicks(snap.Position100ns):g} 期望 {TimeSpan.FromTicks(expect):g}）" +
+                // 判红自带分诊（#42）：这一条红与"校正侧看到的 Δ"差 2–4 倍，光看数分不出是
+                // "从路落到 Paused 被刻意排除"还是"整拍被 gate/master 早退跳过"。
+                // 读数来自 SyncController 的跳过见证（纯观测，不改任何判定）。
+                $"｜各路态={string.Join(",", snaps.Select(s => s is null ? "null" : s.State.ToString()))}" +
+                $"｜master态={(snaps.Count > 0 && snaps[0] is { } m0 ? m0.State.ToString() : "?")} " +
+                _sync.DriftSkipDiag());
             checkedRoutes++;
         }
         Console.WriteLine($"multitest[{phase}]: 漂移 OK（{checkedRoutes} 路 ≤{Tolerance / 10_000}ms）✓");
@@ -2996,7 +3136,7 @@ public partial class MainWindow : Window
     // 属 Win32/合成器行为，两个测试工程（只引用 Core）覆盖不到，故必须真机跑。
     //
     // 另外验证「格表确实驱动了画面排版」——这是本次改动的核心验收点：
-    // 各路 PlayerSurface 的 Bounds 必须与 CompareLayout.ComputeCells 的结果一致，
+    // 各路 PlayerSurface 的 Bounds 必须与 GridPartition.ComputeCells 的结果一致，
     // 且改变分割参数后 Bounds 必须跟着变（此前只有覆盖层的线条在动）。
     /// <summary>验收点隔离驱动器（切片 0：一条红不许掩掉后面的验收点）。
     ///
@@ -3037,9 +3177,10 @@ public partial class MainWindow : Window
         ("layout.enter-ab",       "P4 对比布局与格表"),
         ("layout.mode-sweep",     "P4 对比布局与格表"),
         ("layout.split-relayout", "P5 分割线与覆盖层"),
+        ("view.drag-commit",      "P5 分割线与覆盖层"),   // 覆盖层自己的合并/结算/回灌（此前无测量覆盖）
         ("cells.swap",            "P6 格→路映射"),
         ("cells.rotate",          "P6 格→路映射"),
-        ("entry.split",           "P6 格→路映射"),
+        ("entry.grid-compare",    "P6 格→路映射"),   // 合并后取代旧 entry.split（别名仍收着"模式-分屏入口"）
         ("entry.grid",            "P6 格→路映射"),
         ("exit.cleanup",          "P6 格→路映射"),
         ("magnify.",              "P7 无缝放大与窗口区域"),
@@ -3143,6 +3284,8 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             _stepFailures++;
+            _3FCompare.Diagnostics.ComponentLog.Log(
+                _3FCompare.Diagnostics.Comp.Test, "UnitFail", -1, $"id={id}" + StepTag());
             _stepOutcomes.Add($"FAIL {id} {CostOf(sw)}: {ex.GetType().Name}: {ex.Message}");
             Console.Error.WriteLine($"comparemodetest[单元 {id}]: 判红 ✗ {ex.Message}");
         }
@@ -3166,9 +3309,15 @@ public partial class MainWindow : Window
         // 三行被记成"放大镜浮窗坐标#2/#3"，P7 的判据被归进 P11），汇总表就不可信了。
         var savedStep = _step;
         var skipsBefore = _selfTestSkips.Count;
+        // 验收点边界进组件日志：崩溃带过去只能靠"第几次 SetWindowRgn"这种剂量去猜它落在哪个验收点里
+        // （docs/50 §十九→§二十），有了 UnitBegin/UnitDone 就是直接读数。
+        _3FCompare.Diagnostics.ComponentLog.Log(
+            _3FCompare.Diagnostics.Comp.Test, "UnitBegin", -1, $"id={id}" + StepTag());
         try
         {
             var v = await body();
+            _3FCompare.Diagnostics.ComponentLog.Log(
+                _3FCompare.Diagnostics.Comp.Test, "UnitDone", -1, $"id={id}" + StepTag());
             // 同 StepNamedAsync：体内登记过跳过的行不记 PASS
             if (_selfTestSkips.Count > skipsBefore)
             {
@@ -3181,6 +3330,8 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             _stepFailures++;
+            _3FCompare.Diagnostics.ComponentLog.Log(
+                _3FCompare.Diagnostics.Comp.Test, "UnitFail", -1, $"id={id}" + StepTag());
             _stepOutcomes.Add($"FAIL {id} {CostOf(sw)}: {ex.GetType().Name}: {ex.Message}");
             Console.Error.WriteLine($"comparemodetest[验收点 {id}]: 记录失败并继续 ✗ {ex.Message}");
             return default!;
@@ -3230,30 +3381,57 @@ public partial class MainWindow : Window
 
     /// <summary>已"自带夹具"的验收点（切片 2 的核心：单跑不付整轮剧本的钱）。
     /// <para>登记一个单元 = 把它原先"在剧本里的位置"换成<b>它自己声明的前置</b>：
-    /// <c>Routes</c> 要求的最小会话路数、<c>Mode</c> 要求进入的对比模式、<c>Body</c> 判据本体。
+    /// <c>Routes</c> 要求的最小会话路数、<c>Shape</c> 要求钉住的分格朝向、<c>Body</c> 判据本体。
     /// 未登记的判据仍只能按整轮剧本跑，宿主会<b>明说</b>哪些没匹配，绝不静默少跑。</para>
     /// <para><c>Aliases</c> 收着旧的 <c>_step</c> 中文标签，所以 <c>FC_STEPS=对比-对齐模式</c>
     /// 和 <c>FC_STEPS=align.modes</c> 选到同一个单元。</para></summary>
-    private sealed record Unit(string Id, int Routes, CompareMode? Mode, string[] Aliases, Func<Task> Body);
+    private sealed record Unit(string Id, int Routes, (int Cols, int Rows)? Shape, string[] Aliases, Func<Task> Body);
 
-    /// <summary>P5 单元：拖动分割手柄 ⇒ <c>SplitChanged</c> ⇒ 重算格表 ⇒ 画面跟着迁。
-    /// <para>从整轮剧本里原样搬出，<b>那段断言形式的说明一并搬来，勿改回</b>：
-    /// 不能要求"宽和高都要变"—— AB 的第 0 格是通高的（<c>ComputeCells</c> 给 A 的 Height 恒为 1），
-    /// 拖竖直分割线只改 X。旧写法在 2 路下必然误报，而 4 路（十字分割，宽高都变）恰好掩盖了它。
-    /// 正确形式是用 <c>ComputeCells(mode, 旧split)</c> 与 <c>ComputeCells(mode, 新split)</c> 各自独立复算
-    /// 期望矩形，断言实际 Bounds 确实由前者迁到后者；并先坐实"这组 split 真的改变格表"，
-    /// 否则断言退化为恒真（无鉴别力）。</para></summary>
-    /// <returns>本单元真正下发的裁剪次数（供剧本累计"整轮必须下发过区域"的兜底）。</returns>
-    private async Task<int> SplitRelayoutUnitAsync(int routes, CompareMode maxMode)
+    /// <summary>自测夹具：进入网格对比，并把分格朝向钉到 <paramref name="cols"/>×<paramref name="rows"/>。
+    /// <para>等价于用户按 G 进入后再按几下 C。权重退回均匀，让后续判据有确定的起点 ——
+    /// 单元之间不该被上一个单元拖出来的列宽影响。</para></summary>
+    private async Task EnterGridShapeAsync(int cols, int rows)
     {
-        EnterCompareMode(maxMode);
+        // 夹具自己先把不合法的构型拦下：合并的前提是"一路一格"，
+        // 装不下就无从谈起（真实路径由 GridLayout.ResolveGrid 兜住，这里兜住的是夹具）。
+        if (cols > 0 && rows > 0 && cols * rows < Grid.Count)
+            throw new InvalidOperationException(
+                $"夹具：{cols}x{rows} 装不下 {Grid.Count} 条 lane（网格对比的基准是一路一格）");
+        EnterCompareMode();
         await System.Threading.Tasks.Task.Delay(150);
+        if (!_compareActive)
+            throw new InvalidOperationException(
+                $"网格对比未能激活（路数 {Grid.Count} / 素材 {_sync.Count}；覆盖层降级也会走到这里）");
+        if (cols > 0 && rows > 0)
+        {
+            _partition = GridPartition.Uniform(Grid.Count, cols, rows);
+            _layoutOverlay?.Update(_partition);
+            ApplyCompareLayout();
+            ScheduleCompareCrop();
+            await System.Threading.Tasks.Task.Delay(150);
+        }
         UpdateLayout();
+    }
 
-        var oldSplit = _compareSplit;                 // 进入模式后 = 该模式的默认初值
-        var newSplit = new SplitParams(0.7, 0.35);
-        var oldCells = CompareLayout.ComputeCells(maxMode, oldSplit);
-        var newCells = CompareLayout.ComputeCells(maxMode, newSplit);
+    /// <summary>P5 单元：拖动分割手柄 ⇒ <c>PartitionChanged</c> ⇒ 重算格表 ⇒ 画面跟着迁。
+    /// <para><b>断言形式勿改回"宽和高都要变"</b>：竖分割线只改宽度，AB 的第 0 格本就通高；
+    /// 旧写法在 2 路下必然误报，而 4 路（十字）恰好掩盖了它。正确形式是用
+    /// <c>partition.ComputeCells()</c> 在拖动前后各自<b>独立复算</b>期望矩形，断言各路实际
+    /// <b>露出的那块</b>确实由前者迁到后者；并先坐实"这一下拖动真的改变格表"，否则断言退化为恒真（无鉴别力）。
+    /// 拼合模式下"露出的那块"是窗口区域回读，不是 Bounds（各路 Bounds 恒等于整对比区）。</para>
+    /// <para>拖动目标用 Core 的 <see cref="GridPartition.WithHandleDragged"/> 造，
+    /// 于是"手柄 0 = 第一条竖线"这条索引语义也被顺带验了一遍。</para></summary>
+    /// <returns>本单元真正下发的裁剪次数（供剧本累计"整轮必须下发过区域"的兜底）。</returns>
+    private async Task<int> SplitRelayoutUnitAsync(int routes, int cols, int rows)
+    {
+        await EnterGridShapeAsync(cols, rows);
+
+        var oldCells = _partition.ComputeCells();
+        var dragged = _partition.WithHandleDragged(0, 0.7, 0.35);   // 第一条手柄：2 列时是竖线
+        if (dragged.SameShape(_partition))
+            throw new InvalidOperationException(
+                $"自测的拖动不改变 {cols}x{rows} 的格表，断言将失去鉴别力");
+        var newCells = dragged.ComputeCells();
 
         var cellChanged = false;
         for (var i = 0; i < newCells.Length; i++)
@@ -3261,94 +3439,79 @@ public partial class MainWindow : Window
                 cellChanged = true;
         if (!cellChanged)
             throw new InvalidOperationException(
-                $"自测选取的分割参数不改变 {maxMode} 格表（{oldSplit} → {newSplit}），断言将失去鉴别力");
+                $"拖动前后格表逐项相同（{cols}x{rows}），断言失去鉴别力");
 
         var areaW = Grid.Bounds.Width;
         var areaH = Grid.Bounds.Height;
-        var before = Grid.GetSurface(0)?.Bounds ?? default;
-        var beforeExp = ExpectedBounds(oldCells[0], areaW, areaH);
-        if (!BoundsClose(before, beforeExp))
+        var scaling = TopLevel.GetTopLevel(Grid)?.RenderScaling ?? RenderScaling;
+        var before = RouteVisibleRectPx(0, scaling, $"拖动前 {cols}x{rows}");
+        var beforeExp = ExpectedBlockPx(CellOfRoute(0, oldCells, "拖动前"), areaW, areaH, scaling);
+        if (!BlockClose(before, beforeExp))
             throw new InvalidOperationException(
-                $"拖动前 {maxMode} 第 0 路 Bounds {before} 与旧 split {oldSplit} 的期望 {beforeExp} 不符");
+                $"拖动前 {cols}x{rows} 第 0 路露出的块 {before} 与旧格表期望 {beforeExp} 不符");
 
-        OnCompareSplitChanged(newSplit);
+        OnPartitionChanged(dragged);
         UpdateLayout();
+        ApplyCompareCrop();   // 分割变化只排了一次队（Background 优先级），本单元要当场读到新块
 
         for (var i = 0; i < routes; i++)
         {
-            if (i >= newCells.Length) continue; // 格数 < 路数：多余的路已被隐藏，另有断言覆盖
-            var s = Grid.GetSurface(i) ?? throw new InvalidOperationException($"分割驱动重排：第 {i} 路缺失");
-            var exp = ExpectedBounds(newCells[i], areaW, areaH);
-            if (!BoundsClose(s.Bounds, exp))
-                throw new InvalidOperationException(
-                    $"分割参数变化未驱动画面重排：{maxMode} 第 {i} 路 Bounds {s.Bounds} ≠ " +
-                    $"新 split {newSplit} 的期望 {exp}");
+            if (i >= newCells.Length) continue; // 路数多于格数（拉动态才会出现）：多余的路已隐藏
+            AssertRouteBlockAt(i, CellOfRoute(i, newCells, "分割驱动重排"),
+                $"分割驱动重排（{cols}x{rows} 拖到 0.70 后）");
         }
-        var after = Grid.GetSurface(0)?.Bounds ?? default;
+        var after = RouteVisibleRectPx(0, scaling, "分割驱动重排");
 
-        AssertCellsDriveLayout(routes, maxMode, $"分割 0.70/0.35（{maxMode}）");
-        var crop = AssertCompareCrop(routes, "分割 0.70/0.35");
+        AssertCellsDriveLayout(routes, $"分割 0.70（{cols}x{rows}）");
+        var crop = AssertCompareCrop(routes, "分割 0.70");
         Console.WriteLine(
-            $"  分割驱动重排 ✓ {maxMode} 第0路 Bounds {before.Width:F1}x{before.Height:F1} → " +
-            $"{after.Width:F1}x{after.Height:F1}（与 ComputeCells 复算的 {oldSplit} → {newSplit} 期望一致）");
+            $"  分割驱动重排 ✓ {cols}x{rows} 第0路露出块 {before.Width}x{before.Height}px → " +
+            $"{after.Width}x{after.Height}px（与 ComputeCells 复算的拖动前后期望一致，" +
+            $"{(Grid.MosaicWindows ? "观测量=窗口区域回读" : "观测量=窗口 Bounds")}）");
         return crop;
     }
 
-    /// <summary>P6 单元：菜单/快捷键的「分屏」入口 —— 按路数收敛模式、只显示前 N 格、
-    /// 且"已在目标模式时重进"不得抹掉用户拖好的分割参数。从剧本里的内联块原样搬出。
-    /// <para><b>鉴别力前提（搬出时补上的洞）</b>：需要 ≥5 路。4 路及以下"格数 == 路数"，
-    /// 下面那段"第 splitCells..routes 路应隐藏"的循环<b>一次都不执行</b> ⇒ 单元退化成恒真，
-    /// 看着绿其实什么都没验。所以这里显式判红，并且单元自己声明 <c>Routes=5</c>。</para></summary>
-    private async Task SplitEntryUnit(int routes)
+    /// <summary>P6 单元：合并后的「网格对比」入口（G / V / 菜单同一落点）。
+    /// <para><b>这条单元就是合并本身的验收点</b>：旧分屏入口断言"5 路收敛到 ABCD、只显示前 4 路、
+    /// 第 5 路必须隐藏"；合并后基准换成网格的渲染覆盖 ⇒ 判据<b>反过来</b>：
+    /// <b>路数 ≡ 格数，一条 lane 都不许被挤掉</b>。若哪天回退成"固定 2~4 格"，这里立刻判红。</para>
+    /// <para>第二半是幂等：已处于该态时再走一遍入口不得抹掉用户拖好的列宽。</para></summary>
+    private async Task GridCompareEntryUnit(int routes)
     {
-        EnterSplitMode();
+        EnterGridCompare();
         await System.Threading.Tasks.Task.Delay(150);
 
-        var splitTarget = CompareLayout.CoerceMode(CompareMode.Abcd, routes);
-        if (!_compareActive || _compareMode != splitTarget)
+        if (!_compareActive)
             throw new InvalidOperationException(
-                $"分屏入口未按路数收敛：active={_compareActive} mode={_compareMode} " +
-                $"期望 {splitTarget}（{routes} 路，CoerceMode 复算）");
+                $"网格对比入口未激活：active={_compareActive}（{routes} 路，素材 {_sync.Count}）");
 
-        AssertCellsDriveLayout(routes, splitTarget, "分屏入口");
+        // 一路一格：格数必须等于 lane 数，且每条 lane 都可见
+        var cells = _partition.CellCount;
+        if (cells != Grid.Count)
+            throw new InvalidOperationException(
+                $"网格对比入口的格数 {cells} ≠ lane 数 {Grid.Count}（合并的基准就是一路一格）");
+        for (var i = 0; i < Grid.Count; i++)
+            if (Grid.GetSurface(i)?.IsVisible != true)
+                throw new InvalidOperationException(
+                    $"网格对比入口：第 {i} 条 lane 不可见（{routes} 路应全部铺出，" +
+                    $"实际形状 {_partition.Cols}x{_partition.Rows}）");
 
-        // 显式钉住"第 5~9 路隐藏"：AssertCellsDriveLayout 已按格数断言，这里再点名一次，
-        // 以免将来格数规则变化时这条验收点被静默带过（9 路 → 只应显示前 4 路）。
-        var splitCells = CompareLayout.CellCount(splitTarget);
-        if (splitCells >= routes)
-        {
-            // ≤4 路时"格数 == 路数"，下面这个循环一次都不执行 ⇒ 该子断言没有鉴别力。
-            // 按规矩（docs/49 R4）明写跳过、不伪装成验过；单元宿主按声明的 5 路起盘时才会真正执行。
-            Console.WriteLine($"  分屏入口：子断言「多余路应被隐藏」**跳过**" +
-                              $"（{routes} 路恰好 {splitCells} 格，没有多余路 ⇒ 该分支恒真，" +
-                              "宿主以 Routes=5 起盘时才验得到）");
-            RecordSelfTestSkip($"分屏入口：{routes} 路无多余路，「多余路应被隐藏」子断言恒真");
-        }
-        else
-        {
-            for (var i = splitCells; i < routes; i++)
-                if (Grid.GetSurface(i)?.IsVisible != false)
-                    throw new InvalidOperationException(
-                        $"分屏入口：{routes} 路收敛到 {splitTarget}（{splitCells} 格），第 {i} 路应隐藏却仍可见");
-            Console.WriteLine(
-                $"  分屏入口 ✓ 第 {splitCells}..{routes - 1} 路确被隐藏（显示前 {splitCells} 路）");
-        }
+        AssertCellsDriveLayout(routes, "网格对比入口");
         Console.WriteLine(
-            $"  分屏入口 ✓ {routes} 路收敛到 {splitTarget}（显示前 {splitCells} 路）");
+            $"  网格对比入口 ✓ {routes} 路全部显示：形状 {_partition.Cols}x{_partition.Rows}，" +
+            $"{_partition.HandleCount} 条可拖分割线，无路被隐藏或停用");
 
-        // 幂等：已处于目标分屏模式时再点「分屏」不得重进（EnterCompareMode 会重置分割参数，
-        // 用户拖好的位置不该被抹掉）。模拟一次用户拖动，再走一遍入口。
-        var draggedSplit = new SplitParams(0.31, 0.62);
-        OnCompareSplitChanged(draggedSplit);
+        // 幂等：拖过之后再按一次入口不得重置列宽（EnterCompareMode 对已激活态是空操作）
+        var dragged = _partition.WithHandleDragged(0, 0.31, 0.62);
+        OnPartitionChanged(dragged);
         UpdateLayout();
-        EnterSplitMode();
-        // 直接比 X / Y（CellEquals 只比 CellRect，SplitParams 是另一类型）
-        if (Math.Abs(_compareSplit.X - draggedSplit.X) > CompareLayout.Epsilon ||
-            Math.Abs(_compareSplit.Y - draggedSplit.Y) > CompareLayout.Epsilon)
+        EnterGridCompare();
+        if (!_partition.SameShape(dragged))
             throw new InvalidOperationException(
-                $"分屏入口重进后分割参数被重置：{_compareSplit} ≠ 用户拖动后的 {draggedSplit}");
-        Console.WriteLine("  分屏入口幂等 ✓ 已在该模式时未重置分割参数");
+                $"网格对比入口重进后列宽被重置：{_partition.ColumnWeights} ≠ 用户拖动的 {dragged.ColumnWeights}");
+        Console.WriteLine("  网格对比入口幂等 ✓ 已在该态时未重置已拖好的列宽");
     }
+
 
     /// <summary>播放一小段，逐路记 <c>PresentedVideoFrames</c> 增量，断言
     /// <b>"没占格的路真的不干活、占格的路真的在干活"</b>。
@@ -3387,29 +3550,42 @@ public partial class MainWindow : Window
     }
 
     /// <summary>P6 单元：多余路必须<b>停用</b>而不是只隐藏，且切回全部占格时要能恢复。
-    /// <para>一趟走完"停用 → 重新启用"：① 分屏（ABCD 4 格 / 5 路）⇒ 第 5 路停用且不呈现；
-    /// ② 回网格（全部占格）⇒ 第 5 路重新启用、恢复呈现，并且位置落回规范时间
+    /// <para>一趟走完"停用 → 重新启用"：① 制造"未占格的路" ⇒ 它们停用且不呈现；
+    /// ② 回到全部占格 ⇒ 那些路重新启用、恢复呈现，并且位置落回规范时间
     /// （停用期间它不跟随 master，若不 Seek 回去，用户切回来会看到停在旧帧）。</para>
-    /// <para>鉴别力前提：≥5 路。4 路及以下"格数 == 路数"，没有任何路会被停用，
-    /// 整条判据退化成恒真 ⇒ 按 docs/49 R4 明写跳过，单元自己声明 Routes=5。</para></summary>
+    ///
+    /// <para><b>⚠ 本单元的"制造方式"已随 N 带语义改变（2026-10-07）</b>：
+    /// 旧写法靠"左右拉动恒两格"把第 3 路起挤出去。N 带之后拉动<b>逐路都有带</b>
+    /// （这正是修掉"加路失效"的那条改动），故拉动本身不再产生"未占格的路"。
+    /// 现在改用它真正的来源：<b>用户经「选择路」把带表指定得比素材路数少</b>
+    /// （<c>SetWipeRoutes</c>，即"只对比其中几路"这一正常用法）⇒ 未入选的路没有带、
+    /// 自然未占格。鉴别力前提从"≥3 路"变为"≥3 路且带表少于路数"，判决口径一字未改。</para></summary>
     private async Task RouteActivityUnit(int routes)
     {
-        if (routes < 5)
+        if (routes < 3)
         {
-            Console.WriteLine($"  路启用态：**跳过**（{routes} 路 ≤ ABCD 的 4 格，没有多余路可停用，" +
+            Console.WriteLine($"  路启用态：**跳过**（{routes} 路不足以让带表少于路数（需 ≥3），" +
                               "该判据会退化成恒真；宿主以 Routes=5 起盘时才验得到）");
-            RecordSelfTestSkip($"路启用态：{routes} 路没有多余路可停用，整条判据恒真");
+            RecordSelfTestSkip($"路启用态：{routes} 路造不出「带表少于路数」，整条判据恒真");
             return;
         }
 
-        EnterGridMode();
+        ExitGridCompare();
         await System.Threading.Tasks.Task.Delay(200);
-        EnterSplitMode();
+        if (!EnterCompareOverlay())
+            throw new InvalidOperationException(
+                $"路启用态：进不了左右拉动（素材 {routes} 路），造不出「未占格的路」");
+
+        // 关键一步：把带表收窄到前 2 路（用户"只对比前两路"的真实操作），
+        // 于是第 3 路起没有带 ⇒ 未占格 ⇒ 必须被停用。
+        // 旧实现是"拉动天然只有 2 格"达到同样效果；N 带下必须显式指定。
+        const int compared = 2;
+        SetWipeRoutesForTest(MakeIdentityWipeRoutes(compared));
         await System.Threading.Tasks.Task.Delay(300);   // 占格集合变化 → Post 的延后一拍要落地
-        await AssertRouteActivityAsync(routes, CompareLayout.CellCount(CompareMode.Abcd), "分屏停用");
+        await AssertRouteActivityAsync(routes, compared, "拉动停用");
 
         // 回到全部占格：此前停用的路必须重新启用并恢复呈现
-        EnterGridMode();
+        SetWipeRoutesForTest(MakeIdentityWipeRoutes(routes));
         await System.Threading.Tasks.Task.Delay(300);
         await AssertRouteActivityAsync(routes, routes, "网格恢复");
 
@@ -3425,11 +3601,16 @@ public partial class MainWindow : Window
         //   并把那一枪记为作废）；轮询到收敛或超时。阈值 250ms 一字未改。
         const long Tolerance = 250_0000;   // 250ms —— 阈值一字未改
         const int SettleTimeoutMs = 6000;  // > 5 个校正节拍（DriftCheckIntervalMs=1000ms），留出 Seek + 追帧
-        var firstReactivated = CompareLayout.CellCount(CompareMode.Abcd);
+        // 本单元停用/再启用的是"未被带表选中的那几路"= 第 compared 路起。
+        // 旧实现硬编码 2（"拉动恒两格"），N 带下必须用实际收窄的带数。
+        var firstReactivated = compared;
         var wasPlayingBeforeDrift = _isPlaying;
         _sync.Play();
         var trajectory = new System.Collections.Generic.List<string>();
-        long worstTarget = 0, worstAll = 0, prevTargetPos = -1;
+        var worstTarget = 0L; var worstAll = 0L; var worstIdx = -1; var curWorstPos = 0L;
+        var targetState = "?";
+        var prevByRoute = new long[Math.Max(routes, 1)];
+        var seenByRoute = new bool[Math.Max(routes, 1)];
         var validSamples = 0;   // 落在播放态的采样数 —— 只有这些有判决资格
         var replays = 0;        // 判据为守住"在播"这个前置，被迫重新起播几次
         var deadline = DateTime.UtcNow + TimeSpan.FromMilliseconds(SettleTimeoutMs);
@@ -3439,8 +3620,9 @@ public partial class MainWindow : Window
             var masterPos = snaps[0]?.Position100ns ?? 0;
             worstTarget = 0;
             worstAll = 0;
-            var targetState = "?";
-            long targetPos = 0;
+            targetState = "?";
+            worstIdx = -1;
+            curWorstPos = 0;
             for (var i = 1; i < routes; i++)
             {
                 var s = snaps[i] ?? throw new InvalidOperationException($"网格恢复：第 {i} 路无快照");
@@ -3448,22 +3630,34 @@ public partial class MainWindow : Window
                 worstAll = Math.Max(worstAll, drift);
                 if (i >= firstReactivated)
                 {
-                    if (drift > worstTarget) { worstTarget = drift; targetState = s.State.ToString(); }
-                    targetPos = s.Position100ns;
+                    // 状态、位置、路号必须一起取**同一路**：原先 `targetPos` 无条件等于最后一路的位置，
+                    // 而 `targetState` 是最差那一路的状态 ⇒ 轨迹能写出"Paused + 位置在动"这种两头话，
+                    // 把归因往错方向带（2026-10-02 追 #42 时撞见；同一段还漏报了"这一路根本没启用"）。
+                    if (drift > worstTarget)
+                    {
+                        worstTarget = drift;
+                        targetState = s.State.ToString();
+                        worstIdx = i;
+                        curWorstPos = s.Position100ns;
+                    }
                 }
             }
             // 状态与位置增量都要记：Active=True 而 State=Paused = "占着格却停着"，而 TickDriftCore
             // 只校正 Playing/Ended ⇒ 这种路不可能自己追回来 —— 那是"没人管"，不是"追不上"。
             // 位置在动 + Playing = 解码追帧（慢但收敛）；Playing 而位置不动 = 校正没对这一路出手。
             var masterPlaying = snaps[0]?.State == PlayerState.Playing;
+            var deltaText = worstIdx < 0 ? "无目标路"
+                : !seenByRoute[worstIdx] ? "首次"
+                : $"{(curWorstPos - prevByRoute[worstIdx]) / TimeSpan.TicksPerMillisecond}ms";
+            var activeText = worstIdx < 0 ? "" : (_sync.IsRouteActive(worstIdx) ? "" : " 且Active=false!");
+            if (worstIdx >= 0) { prevByRoute[worstIdx] = curWorstPos; seenByRoute[worstIdx] = true; }
             var entry = $"[{DateTime.Now:HH:mm:ss.fff}]{worstTarget / TimeSpan.TicksPerMillisecond}ms" +
-                $"@{targetState}(全路最差 {worstAll / TimeSpan.TicksPerMillisecond}ms 位置增量 " +
-                (prevTargetPos < 0 ? "首次" : $"{(targetPos - prevTargetPos) / TimeSpan.TicksPerMillisecond}ms") +
+                $"@第{worstIdx}路={targetState}{activeText}(全路最差 {worstAll / TimeSpan.TicksPerMillisecond}ms " +
+                $"该路位置增量 " + deltaText +
                 $"/master={snaps[0]?.State}";
             if (masterPlaying) validSamples++;
             else { replays++; _sync.Play(); entry += " 作废：未在播放⇒已重新起播"; }
             trajectory.Add(entry + ")");
-            prevTargetPos = targetPos;
             if ((masterPlaying && worstTarget <= Tolerance) || DateTime.UtcNow >= deadline) break;
             await System.Threading.Tasks.Task.Delay(150);
         }
@@ -3471,6 +3665,16 @@ public partial class MainWindow : Window
         var validSamplesAtExit = validSamples;
         var replaysAtExit = replays;
         var trajectoryAtExit = string.Join(" → ", trajectory);
+        // ⚠ 诊断计数必须在下面那次"按原意停回"之前取：NotPlayingStreak 随整组转"不想要播"立即清零，
+        //   取晚了只剩一串 0，读不出这一路到底被请求过起播没有（那正是检测器的盲区所在）。
+        string diagAtExit = "无目标路";
+        if (worstIdx >= 0)
+        {
+            var d = _sync.LostPlayDiag(worstIdx);
+            diagAtExit = $"第{worstIdx}路 Active={_sync.IsRouteActive(worstIdx)} Failed={d.Failed} " +
+                         $"整组要播={d.Want} 已请求起播={d.Requests}次 连续未播={d.Streak}拍";
+        }
+
         // 还原本轮原意：③"暂停态切回"那一相位**要求整组是停着的**（否则 presented 靠正常播放就会涨，
         // 那一枪变成恒真）。上面为了量同位把组开了起来，这里必须按原样停回去。
         if (!wasPlayingBeforeDrift) _sync.Pause();
@@ -3480,14 +3684,14 @@ public partial class MainWindow : Window
         {
             // 一次都没落进播放态 ⇒ 这条判据**根本没量到东西**：既不判绿也不判红，登记 SKIP。
             RecordSelfTestSkip($"路启用态：{SettleTimeoutMs}ms 内 {trajectory.Count} 次采样全部不在播放态" +
-                $"（重新起播 {replaysAtExit} 次仍被别的写者按回暂停）⇒ 同位判据未验证");
+                $"（重新起播 {replaysAtExit} 次仍被别的写者按回暂停；诊断 {diagAtExit}）⇒ 同位判据未验证");
             Console.WriteLine($"  路启用态：**跳过**（全程没落进播放态，未验证 ≠ 通过）{preconditionNote}");
         }
         else if (worstTargetAtExit > Tolerance)
             throw new InvalidOperationException(
                 $"重新启用后第 {firstReactivated}..{routes - 1} 路与规范时间相差 " +
                 $"{worstTargetAtExit / TimeSpan.TicksPerMillisecond}ms > 250ms，等满 {SettleTimeoutMs}ms 仍未收敛" +
-                $"{preconditionNote}（轨迹 {trajectoryAtExit}；" +
+                $"{preconditionNote}（诊断 {diagAtExit}）（轨迹 {trajectoryAtExit}；" +
                 "停用期间它不跟随 master，切回来必须 Seek 回规范时间）");
         else
             Console.WriteLine($"  路启用态 ✓ {routes} 路：分屏停用第 {firstReactivated}..{routes - 1} 路、回网格全部恢复且同位" +
@@ -3506,9 +3710,14 @@ public partial class MainWindow : Window
             throw new InvalidOperationException(
                 "相位③前置失效：整组仍在播放 ⇒ 无法把\u201c重新启用后才出帧\u201d与\u201c本来就在播\u201d区分开，这一枪会恒真");
         var beforeReEnable = SnapshotTuple(_sync.ReadAllSnapshots());
-        EnterSplitMode();
+        // 合并后"进一次网格对比再退出"不再产生"停用 → 再启用"（网格本来就一路一格，两次都全部占格）
+        // ⇒ 这一相位改由左右拉动制造那个 cycle：拉动铺满两格会把第 3~N 路挤出去，退出拉动再把它们
+        //   放回来 —— 正是"暂停态下切回一整格尺寸"要观察的动作本身。
+        if (!EnterCompareOverlay())
+            throw new InvalidOperationException(
+                $"相位③前置失效：进不了左右拉动（{routes} 路），造不出「暂停态下的再启用」");
         await System.Threading.Tasks.Task.Delay(300);
-        EnterGridMode();
+        ExitCompareOverlay();
         // ⚠ 又是一次性采样抢跑：再启用是 `Seek` + 补一次呈现，而** seek 出来的那一帧要等解码**，
         //   5 路 4K 下这常常超过原来那 400ms 的固定等待 ⇒ 同一份代码 me/rev 两批各 5/8 判红、
         //   0/10 判绿（`lane_r*`、`rev8_r*`、`fixed_r*`）——红与绿都不说明产品变了。
@@ -3585,7 +3794,7 @@ public partial class MainWindow : Window
     /// 改后 07:50:47 通过：presented 12→19、1754ms、按回 _isPlaying 7 次）。</para>
     private async Task StallRecoveryUnit()
     {
-        EnterGridMode();
+        ExitGridCompare();
         await System.Threading.Tasks.Task.Delay(200);
         _sync.Play();
         await System.Threading.Tasks.Task.Delay(300);
@@ -3662,7 +3871,7 @@ public partial class MainWindow : Window
             RecordSelfTestSkip($"单路受控Seek：{_sync.Count} 路无从路 ⇒ 判据恒真");
             return;
         }
-        EnterGridMode();
+        ExitGridCompare();
         await System.Threading.Tasks.Task.Delay(200);
 
         const int lane = 1;
@@ -3799,21 +4008,25 @@ public partial class MainWindow : Window
             {
                 _sync.Play();
                 await System.Threading.Tasks.Task.Delay(200);
-                // 明确进 AB（2 格）：3/4 路必然有未占格的路被停用。
-                // 原先写 EnterSplitMode() 在 4 路下会把 4 路全摆出来 ⇒ 没有"停用"发生，
-                // 相位B 的守卫如实报了恒真并 SKIP（2026-09-28 07:32:51 实测）。
-                EnterCompareMode(CompareMode.Ab);
+                // 明确进**左右拉动**（恒两格）：3/4 路必然有未占格的路被停用。
+                // 合并后的网格是一路一格、永远不会把路挤出去 ⇒ 只有拉动还能造出
+                // "被停用 → 再启用"这个 #42 前置形状（原先这里写的是 AB 两格）。
+                if (!EnterCompareOverlay())
+                {
+                    phaseBSkipped = $"第 {c} 轮起无法进入左右拉动（素材 {_sync.Count} 路）";
+                    break;
+                }
                 await System.Threading.Tasks.Task.Delay(400);   // 占格集合是 Post 出去的，要落地
                 var laneB = -1;
                 for (var i = _sync.Count - 1; i >= 1; i--)
                     if (!_sync.Slots[i].Active) { laneB = i; break; }
                 if (laneB < 0)
                 {
-                    phaseBSkipped = $"第 {c} 轮起就没有多余路可停用（{_sync.Count} 路在 AB 两格下全占格）";
-                    EnterGridMode();
+                    phaseBSkipped = $"第 {c} 轮起就没有多余路可停用（{_sync.Count} 路在拉动两格下全占格）";
+                    ExitCompareOverlay();
                     break;
                 }
-                EnterGridMode();                  // 再启用：SetActiveRoutes 的启用分支 Seek 回规范时间
+                ExitCompareOverlay();               // 再启用：回到网格后 SetActiveRoutes 的启用分支 Seek 回规范时间
                 await System.Threading.Tasks.Task.Delay(400);
                 if (!_sync.Slots[laneB].Active)
                     throw new InvalidOperationException(
@@ -3903,9 +4116,9 @@ public partial class MainWindow : Window
     /// <c>GridLayout.ComputeGrid</c> <b>独立复算</b>，不读 Grid 的内部预设状态。</para></summary>
     private async Task GridEntryUnit(int routes)
     {
-        EnterSplitMode();
+        EnterGridCompare();
         await System.Threading.Tasks.Task.Delay(150);
-        EnterGridMode();
+        ExitGridCompare();
         await System.Threading.Tasks.Task.Delay(150);
 
         if (_compareActive || CompareOverlayActive)
@@ -3943,141 +4156,620 @@ public partial class MainWindow : Window
 
     /// <summary>「视图模式」一列：菜单列 ↔ 真实状态 ↔ 真实键盘路由，三者必须同步。
     ///
-    /// <para><b>为什么钉这一列</b>：三项原本埋在「对比模式」子菜单里、名字是"叠加 / 分屏 / 网格"，
-    /// 现在提到视图菜单顶部做成一列单选。用户唯一的确认途径就是"圆点在哪一项"—— 勾错比不勾更糟
-    /// （会让人以为切换没生效）。而菜单只是入口之一：G / V / S 与 C 循环改的是同一份状态。</para>
+    /// <para><b>合并后这一列只有两项</b>：网格对比（G / V，一路一格 + 可拖分割线）与左右拉动（S）。
+    /// 旧的第三项「A/B 可拖动对比」已并进第一项，所以这里同时钉住"第三项确实不在了"——
+    /// 谁要是把它加回来，同组互斥变成三项，本用例的项数与勾选元组判据会立刻红。</para>
     ///
     /// <para><b>牙在哪</b>：① 按键一律走 <see cref="RaiseKeyOn"/> 的真实路由（隧道→目标→冒泡），
     /// 于是"菜单项的 <c>InputGesture</c> 被菜单处理器又执行一次"这类双触发会当场露出来 ——
-    /// 每按一次状态必须<b>恰好翻转一次</b>（S 是开关语义，按两次必回到原态）；
+    /// 每按一次状态必须<b>恰好翻转一次</b>（G 与 S 都是开关语义，按两次必回原态）；
     /// ② 勾选只读 <c>MenuItem.IsChecked</c>，判据不与 <see cref="RefreshCompareModeChecks"/> 同源复制；
-    /// ③ 三项必须同父、同组、同为 Radio，否则"一列互斥"在视觉上根本不成立。</para></summary>
+    /// ③ 两项必须同父、同组、同为 Radio，且标注的键位与真实路由一致；
+    /// ④ 未进入任何对比态时<b>两处都不打勾</b>：均匀网格是真实存在的中性态，
+    /// 给它随便挂个勾就是在谎报模式（旧三项时代"其余即标准模式"的兜底已不适用）。</para></summary>
     private async Task ViewModeColumnUnit(int routes)
     {
         if (routes < 2)
             throw new InvalidOperationException($"视图模式列：{routes} 路不足以进入对比，宿主应按 2 路起盘");
 
-        var three = new[] { MenuViewStandard, MenuViewAbSplit, MenuViewWipe };
-        var names = new[] { "标准模式", "A/B 可拖动", "左右拉动" };
-        for (var i = 0; i < three.Length; i++)
+        var two = new[] { MenuViewStandard, MenuViewWipe };
+        var names = new[] { "网格对比", "左右拉动" };
+        for (var i = 0; i < two.Length; i++)
         {
-            if (three[i].ToggleType != global::Avalonia.Controls.MenuItemToggleType.Radio)
+            if (two[i].ToggleType != global::Avalonia.Controls.MenuItemToggleType.Radio)
                 throw new InvalidOperationException($"「{names[i]}」不是 Radio 型，画不出互斥单选圆点");
-            if (three[i].GroupName != "ViewMode")
-                throw new InvalidOperationException($"「{names[i]}」未落进 ViewMode 组（实际 {three[i].GroupName}）");
-            if (three[i].Parent is null || !ReferenceEquals(three[i].Parent, three[0].Parent))
-                throw new InvalidOperationException($"「{names[i]}」与其余两项不同父，'一列'不成立");
+            if (two[i].GroupName != "ViewMode")
+                throw new InvalidOperationException($"「{names[i]}」未落进 ViewMode 组（实际 {two[i].GroupName}）");
+            if (two[i].Parent is null || !ReferenceEquals(two[i].Parent, two[0].Parent))
+                throw new InvalidOperationException($"「{names[i]}」与另一项不同父，'一列'不成立");
         }
 
-        // 勾选与真实状态是否同源：真实状态只有一个来源（两个 bool），勾选必须由它推出。
+        // 菜单右侧标的键位必须就是真正路由到的那个键：标 G 却按了不生效（或反过来）
+        // 都是"看着能按"的假入口，比没有入口更坏。
+        if (two[0].InputGesture is not { Key: global::Avalonia.Input.Key.G })
+            throw new InvalidOperationException(
+                $"网格对比项标注的快捷键={two[0].InputGesture?.Key}，与真实路由的 G 不一致");
+        if (two[1].InputGesture is not { Key: global::Avalonia.Input.Key.S })
+            throw new InvalidOperationException(
+                $"左右拉动项标注的快捷键={two[1].InputGesture?.Key}，与真实路由的 S 不一致");
+
         void ExpectChecked(string expect)
         {
             RefreshCompareModeChecks();
-            var real = _compareOverlayActive ? "wipe" : _compareActive ? "ab" : "std";
+            var real = _compareOverlayActive ? "wipe" : _compareActive ? "grid" : "std";
             if (real != expect)
                 throw new InvalidOperationException($"状态未切到 {expect}（实际 {real}）");
-            var got = (MenuViewStandard.IsChecked, MenuViewAbSplit.IsChecked, MenuViewWipe.IsChecked);
+            var got = (two[0].IsChecked, two[1].IsChecked);
             var want = expect switch
             {
-                "std" => (true, false, false),
-                "ab" => (false, true, false),
-                _ => (false, false, true),
+                "std" => (false, false),   // 中性态：两项都不勾，理由见方法注释 ④
+                "grid" => (true, false),
+                _ => (false, true),
             };
             if (got != want)
                 throw new InvalidOperationException(
-                    $"切到 {expect} 后勾选=标准{got.Item1} A/B{got.Item2} 拉动{got.Item3}，期望 {want}");
+                    $"切到 {expect} 后勾选=网格{got.Item1} 拉动{got.Item2}，期望 {want}");
         }
 
-        // 起点：标准模式（网格入口是幂等的，已在该态时不动状态）
-        EnterGridMode();
+        // 起点：均匀网格（ExitGridCompare 不在态时不动状态，与 G 的开关语义刻意不同）
+        ExitGridCompare();
         await System.Threading.Tasks.Task.Delay(150);
         ExpectChecked("std");
 
-        // V = A/B 可拖动
+        // V = 进入网格对比（合并后它是同一态的进入别名，不再是第二个态）
         RaiseKeyOn(FocusedRouteSource, global::Avalonia.Input.Key.V);
         await System.Threading.Tasks.Task.Delay(150);
-        ExpectChecked("ab");
+        ExpectChecked("grid");
 
-        // S = 左右拉动（键是"开关"：若 InputGesture 让菜单项再执行一次"进入拉动"，此处仍会停在拉动态）
+        // S = 左右拉动；再按 S 退出拉动，落点必须是**网格对比**而不是均匀网格
         RaiseKeyOn(FocusedRouteSource, global::Avalonia.Input.Key.S);
         await System.Threading.Tasks.Task.Delay(150);
         ExpectChecked("wipe");
         RaiseKeyOn(FocusedRouteSource, global::Avalonia.Input.Key.S);
         await System.Threading.Tasks.Task.Delay(150);
-        ExpectChecked("ab");
+        ExpectChecked("grid");
 
-        // G = 回标准
+        // G = 开关：先退出到均匀网格，再按一次回到网格对比
         RaiseKeyOn(FocusedRouteSource, global::Avalonia.Input.Key.G);
         await System.Threading.Tasks.Task.Delay(150);
         ExpectChecked("std");
+        RaiseKeyOn(FocusedRouteSource, global::Avalonia.Input.Key.G);
+        await System.Threading.Tasks.Task.Delay(150);
+        ExpectChecked("grid");
 
-        Log($"视图模式列 ✓ 三项同父互斥，G/V/S 真实路由逐次恰好翻转一次（{routes} 路）");
+        Log($"视图模式列 ✓ 两项同父互斥、键位标注与路由一致，G/V/S 真实路由逐次恰好翻转一次（{routes} 路）");
     }
 
-    /// <summary>分割线的拖动命中区：单轴手柄（AB 竖线 / AB 竖横线 / ABC 三列的竖线）沿轴放开到<b>整条线</b>，
-    /// 交叉点型手柄（ABC / ABCD 的 <c>SplitAxis.Both</c>）仍只放开一个圆点。
+    /// <summary>分割线的拖动命中区：网格里的<b>每一条线都是单轴线</b>，于是"沿轴放开到整条线"
+    /// 适用于全部手柄 —— 竖线不论高低都能抓，横线不论左右都能抓。
     ///
     /// <para><b>为什么钉这个</b>：用户对"左右拉动对比"的说法是"<b>中间的线可以拉动</b>"。
-    /// 判据改成整条线之前，只有线正中间那个圆点（半径 14 DIP）能抓 —— 窗口越高，"瞄不准"越明显，
+    /// 判据改成整条线之前只有线正中间那个圆点（半径 14 DIP）能抓，窗口越高"瞄不准"越明显，
     /// 而这条差别<b>肉眼看不出来</b>（线画在那儿、圆点也画在那儿）。
-    /// 交叉点型刻意不放开：那种手柄一次改两个分量，沿整条线抓会把另一轴一起拽到指针高度，
-    /// 表现为"没抓的那条线跳了"。</para>
+    /// 合并后连"交叉点型手柄"也不存在了（2×2 的两条线各自单轴、各自一个手柄），
+    /// 所以旧那句"同一条线的顶端不得命中"<b>反过来</b>成了本用例的判据：
+    /// 竖线顶端必须命中竖线那个手柄，同时不能顺手把横线也拽走。</para>
+    ///
+    /// <para><b>还要拦住过宽</b>：离线 1/4 宽处必须不命中，否则整幅画面都成了拖拽区，
+    /// 滚轮缩放与拖动平移会被覆盖层吞掉。</para>
     ///
     /// <para>读的是覆盖层自己的探针 <see cref="Controls.LayoutOverlayWindow.HitHandleIndexAt"/>，
     /// 也就是真实点击走的那一条判据（DIP 路径），不复制几何。</para></summary>
     private async Task SplitLineHitUnit(int routes)
     {
-        if (routes < 3)
+        // 形状按 lane 数枚（判据只关几何，与素材路数是两件事）：这样 2 条 lane 也能跑，
+        // 不再需要旧实现那句"routes<3 就登记跳过"——那一句在门禁里永远算一次 SKIP。
+        var lanes = Grid.Count;
+        var shapes = GridPartition.ShapesFor(lanes);
+        Console.WriteLine($"  分割线命中 覆盖范围（{routes} 路 / {lanes} 条 lane）：[" +
+                          $"{string.Join(", ", shapes.Select(s => $"{s.Cols}x{s.Rows}"))}]");
+
+        foreach (var (cols, rows) in shapes)
         {
-            // 不判红也不静默：登记跳过 ⇒ 汇总表里这一行是 SKIP，而不是"凭空消失"，也不是 PASS。
-            // （隔离单元 view.split-line-hit 自带 Routes=3，单跑它一定真执行。）
-            Console.WriteLine($"  分割线命中：**跳过**（{routes} 路摆不出 ABC 交叉点，" +
-                              "该判据要 AB + ABC 两种模式各测一次）");
-            RecordSelfTestSkip($"分割线命中：{routes} 路摆不出 ABC 交叉点");
-            return;
+            await EnterGridShapeAsync(cols, rows);
+            var ov = _layoutOverlay ?? throw new InvalidOperationException("分割线命中：覆盖层未创建");
+            if (!ov.IsOverlayVisible) throw new InvalidOperationException("分割线命中：覆盖层不可见");
+            var w = ov.Bounds.Width;
+            var h = ov.Bounds.Height;
+            if (w <= 0 || h <= 0)
+                throw new InvalidOperationException($"分割线命中：覆盖层尺寸非法 {w:F1}x{h:F1}");
+
+            var handles = ov.HandlePositions();
+            var expect = (cols - 1) + (rows - 1);
+            if (handles.Length != expect)
+                throw new InvalidOperationException($"{cols}x{rows} 手柄数 {handles.Length} ≠ 规则要求 {expect}");
+
+            // 每条线在自己的轴上不论多远都能抓：竖线验顶端与底端，横线验左端与右端。
+            var probes = new System.Collections.Generic.List<string>();
+            for (var i = 0; i < handles.Length; i++)
+            {
+                var vertical = _partition.HandleAxisAt(i) == SplitAxis.X;
+                var near = new Point(vertical ? handles[i].X * w : w * 0.05,
+                                     vertical ? h * 0.05 : handles[i].Y * h);
+                var far = new Point(vertical ? handles[i].X * w : w * 0.95,
+                                    vertical ? h * 0.95 : handles[i].Y * h);
+                var a = ov.HitHandleIndexAt(near);
+                var b = ov.HitHandleIndexAt(far);
+                if (a != i || b != i)
+                    throw new InvalidOperationException(
+                        $"{cols}x{rows} 第 {i} 条{(vertical ? "竖" : "横")}线没放开到整条线：" +
+                        $"两端命中={a}/{b}（都应={i}）");
+                probes.Add($"{(vertical ? "竖" : "横")}{i}@{(vertical ? handles[i].X : handles[i].Y):0.###}");
+            }
+
+            // 反面判据：离所有线都远的地方必须不命中，否则整幅画面成了拖拽区，
+            // 滚轮缩放与拖动平移会被覆盖层吞掉。权重下界保证最靠边的线也在 5% 之外，
+            // 于是 (0.02,0.02) 到最近那条线是 0.03·边长；对比区太窄时这个距离不足一个命中半径
+            // ⇒ 那一支明写跳过，而不是悄悄不判。
+            if (w * 0.03 <= 20 || h * 0.03 <= 20)
+            {
+                Console.WriteLine($"  分割线命中 {cols}x{rows}：负样本**跳过**（对比区 {w:F0}x{h:F0} DIP 太窄，" +
+                                  "0.03·边长已小于命中半径，分不出「放开」与「过宽」）");
+                RecordSelfTestSkip($"分割线命中 {cols}x{rows}：对比区过窄，负样本无鉴别力");
+            }
+            else
+            {
+                var miss = ov.HitHandleIndexAt(new Point(w * 0.02, h * 0.02));
+                if (miss != -1)
+                    throw new InvalidOperationException(
+                        $"{cols}x{rows}：左上角离所有线都有 0.03 边长，却仍命中手柄 {miss}" +
+                        "（命中区过宽，会吞掉画面上的滚轮与平移）");
+            }
+
+            // 线画在哪 == 拖动判据用哪一份：不同源时表现为"线在这儿、抓住却拖不动"
+            var host = _partition.HandlePositions();
+            for (var i = 0; i < handles.Length; i++)
+                if (Math.Abs(handles[i].X - host[i].X) > GridPartition.Epsilon
+                    || Math.Abs(handles[i].Y - host[i].Y) > GridPartition.Epsilon)
+                    throw new InvalidOperationException(
+                        $"{cols}x{rows} 覆盖层手柄 {i}={handles[i]} 与宿主分区 {host[i]} 不同源");
+
+            Console.WriteLine($"  分割线命中 ✓ {cols}x{rows}：整条可抓 [{string.Join(", ", probes)}]");
+        }
+    }
+
+    /// <summary>拼合（mosaic）语义的实机验收：<b>各路窗口铺满对比区，可见部分由 Win32 区域裁出来，
+    /// 而裁出的这些块必须严丝合缝地拼回一整幅画面</b>。</summary>
+    ///
+    /// <para><b>为什么单独钉这一条</b>：这是本模式被纠正后的语义本身。旧实现排的是"窗口 == 格"，
+    /// 于是每格显示的是<b>整幅画面的缩小版</b>，拖分割线只是在改每格的尺寸 —— 用户要的是
+    /// "一个内容、不同区域渲染它的不同部分"。纠正后：窗口 == 整容器，"哪一块归哪一路"完全由
+    /// <c>SetWindowRgn</c> 决定 ⇒ 一旦区域算错（留缝、重叠、越界），表现就是拼合处出现黑线、
+    /// 两块画面叠在一起、或某一路盖住邻居。<b>肉眼在真机上很难看出 1px 的缝</b>，所以必须回读。</para>
+    ///
+    /// <para>判据全部走 Win32 回读（<c>GetWindowRgnBox</c>）+ 从分区<b>独立复算</b>的期望值，
+    /// 不读生产代码的内部状态：四条各自对应一种坏法 ——
+    /// ① 每路的区域 == 它那一格（算错块 ⇒ 画面错位）；
+    /// ② 各块两两不重叠且并集 == 整容器（留缝 ⇒ 黑线；重叠 ⇒ 一路盖住另一路）；
+    /// ③ 每块都严格小于窗口（等于窗口 ⇒ 该路根本没裁，会盖住全部邻居）；
+    /// ④ 每格中心按生产入口 <c>HitSurfaceAt</c> 命中的正是占这一格的那一路
+    ///    （漏了这条的话放大镜/滚轮锚点/指针映射会在拼合下恒读第 0 路，而画面看不出来）。</para>
+    private void AssertMosaicTiling(int routes, string label)
+    {
+        UpdateLayout();
+        ApplyCompareCrop();
+
+        var w = Grid.Bounds.Width;
+        var h = Grid.Bounds.Height;
+        if (w <= 0 || h <= 0)
+            throw new InvalidOperationException($"{label}：拼合判据要求对比区尺寸有效，实际 {w:F1}x{h:F1}");
+        var scaling = TopLevel.GetTopLevel(Grid)?.RenderScaling ?? RenderScaling;
+        var cells = _partition.ComputeCells();
+        if (cells.Length < 2)
+            throw new InvalidOperationException(
+                $"{label}：拼合判据需要 ≥2 块才有鉴别力（单块时无缝性恒成立），当前形状 {_partition.Cols}x{_partition.Rows}");
+        if (!Grid.MosaicWindows)
+        {
+            // 对照臂（FC_NOMOSAIC=1）本来就是来量"关掉拼合会怎样"的 ⇒ 这条拼合专属判据**明写不适用**，
+            // 不悄悄通过也不判红。其余判据各自按 Grid.MosaicWindows 换口径（Bounds / 区域回读）。
+            if (BenchNoMosaic)
+            {
+                Console.WriteLine($"  拼合铺块 不适用（{label}：FC_NOMOSAIC=1 已把排布退回『窗口 == 格』，" +
+                                  "本判据的对象不存在；对照臂要的是崩溃率与每拍像素，不是这条）");
+                return;
+            }
+            throw new InvalidOperationException($"{label}：网格对比态应当处于拼合排布（Grid.MosaicWindows=false）");
         }
 
-        EnterCompareMode(CompareMode.Ab);
-        await System.Threading.Tasks.Task.Delay(150);
-        UpdateLayout();
-        var ov = _layoutOverlay ?? throw new InvalidOperationException("分割线命中：覆盖层未创建");
-        if (!ov.IsOverlayVisible) throw new InvalidOperationException("分割线命中：覆盖层不可见");
-        var w = ov.Bounds.Width;
-        var h = ov.Bounds.Height;
-        if (w <= 0 || h <= 0) throw new InvalidOperationException($"分割线命中：覆盖层尺寸非法 {w:F1}x{h:F1}");
+        // 回读各路实际区域（窗口相对物理像素），换算到容器坐标。
+        // **按路循环 + 反查格**：互换 / 轮换之后"第 i 路"不再站第 i 格，按格号取第 i 路的
+        // 区域会把判据钉在别人的块上（2026-10-01 实读判红：2x3 下第 0 路 Y=712 vs 期望 0）。
+        var boxes = new System.Collections.Generic.List<Rect32>(routes);
+        double covered = 0;
+        for (var i = 0; i < routes; i++)
+        {
+            var cell = CellOfRoute(i, cells, label);
+            var s = Grid.GetSurface(i) ?? throw new InvalidOperationException($"{label}：第 {i} 路缺失");
+            if (s.Hwnd == nint.Zero)
+                throw new InvalidOperationException($"{label}：第 {i} 路子 HWND 未创建，区域无从回读");
+            var type = ReadWindowRegion(s.Hwnd, out var box);
+            if (type != RegionTypeSimple)
+                throw new InvalidOperationException(
+                    $"{label}：第 {i} 路的窗口区域不是单一矩形（type={type}；0=无区域、3=复杂区域）" +
+                    "⇒ 要么根本没裁（会盖住整个对比区），要么裁成了非矩形");
 
-        var lineX = _compareSplit.X * w;
-        // 线的顶端与底端：离"线中间的圆点"半个窗口以上，只有放开到整条线才可能命中
-        var top = ov.HitHandleIndexAt(new Point(lineX, h * 0.05));
-        var bottom = ov.HitHandleIndexAt(new Point(lineX, h * 0.95));
-        if (top != 0 || bottom != 0)
-            throw new InvalidOperationException(
-                $"AB 竖线未放开到整条线：线上端命中={top} 下端命中={bottom}（都应=0）");
-        // 离线 1/4 宽处必须不命中 —— 否则整幅画面都成了拖拽区，滚轮与平移会被吞
-        var off = ov.HitHandleIndexAt(new Point(lineX + w * 0.25, h * 0.5));
-        if (off != -1)
-            throw new InvalidOperationException($"AB：离线 1/4 宽处仍命中手柄 {off}（命中区过宽，会吞掉画面上的滚轮/平移）");
-        Console.WriteLine($"  分割线命中 ✓ AB 竖线整条可抓（上端/下端=0），离线 1/4 宽处={off}");
+            var windowPx = CompareCropPlanner.ToPhysicalRect(s.Bounds, scaling);
+            // ③ 每块必须严格小于窗口：等于窗口就是"根本没裁"
+            if (box.Width >= windowPx.Width && box.Height >= windowPx.Height)
+                throw new InvalidOperationException(
+                    $"{label}：第 {i} 路区域 {box} 不小于窗口 {windowPx} ⇒ 这一路铺满全屏、盖住邻居");
 
-        // 交叉点型：只放圆点
-        EnterCompareMode(CompareMode.Abc);
-        await System.Threading.Tasks.Task.Delay(150);
-        UpdateLayout();
-        var (cx, cy) = _compareSplit;
-        var cross = ov.HitHandleIndexAt(new Point(cx * w, cy * h));
-        var farUp = ov.HitHandleIndexAt(new Point(cx * w, h * 0.05));
-        if (cross != 0)
-            throw new InvalidOperationException($"ABC 交叉点本身抓不住（命中={cross}）");
-        if (farUp != -1)
-            throw new InvalidOperationException(
-                $"ABC 的竖线顶端也被判成手柄（命中={farUp}）：交叉点型沿整条线放开会把 Y 一起拽到指针高度");
-        Console.WriteLine($"  分割线命中 ✓ ABC 交叉点可抓（={cross}），同一条线的顶端不命中（={farUp}）");
+            // ① 与独立复算的格一致（容器坐标下逐像素比对，容差 1px = 取整残差）
+            var exp = CompareCropPlanner.ToPhysicalRect(
+                CompareCropPlanner.MosaicRegionDip(cell, w, h), scaling);
+            var gotInContainer = new Rect32(windowPx.X + box.X, windowPx.Y + box.Y, box.Width, box.Height);
+            if (Math.Abs(gotInContainer.X - exp.X) > 1 || Math.Abs(gotInContainer.Y - exp.Y) > 1 ||
+                Math.Abs(gotInContainer.Width - exp.Width) > 1 || Math.Abs(gotInContainer.Height - exp.Height) > 1)
+                throw new InvalidOperationException(
+                    $"{label}：第 {i} 路回读区域 {gotInContainer}（容器坐标）与期望 {exp}" +
+                    $"（它那一格是 {_partition.Cols}x{_partition.Rows} 的第 {Grid.CellIndexOfRoute(i)} 格）不符" +
+                    $"（窗口 {windowPx}，缩放 {scaling}）");
+            // 窗口本身应当铺满对比区（拼合排布的定义）
+            var expWin = CompareCropPlanner.ToPhysicalRect(new Rect(0, 0, w, h), scaling);
+            if (Math.Abs(windowPx.Width - expWin.Width) > 1 || Math.Abs(windowPx.Height - expWin.Height) > 1)
+                throw new InvalidOperationException(
+                    $"{label}：第 {i} 路窗口 {windowPx} 没铺满对比区 {expWin} ⇒ 拼合排布没生效，" +
+                    "这一路显示的还是「缩小版整幅」而不是自己那一块");
+            boxes.Add(gotInContainer);
+            covered += cell.Width * cell.Height;
+        }
 
-        // 线画的位置必须就是拖动判据用的那一份：两者不同源时表现为"线在这儿、抓住却拖不动"
-        var handle = ov.HandlePositions()[0];
-        if (System.Math.Abs(handle.X - cx) > CompareLayout.Epsilon || System.Math.Abs(handle.Y - cy) > CompareLayout.Epsilon)
+        // ④ 命中测试必须跟着格走。拼合下各路窗口恒等于整对比区 ⇒ 任何"按 Bounds 命中"的旧路径
+        //    都会**恒返回第一个可见表面（第 0 路）**：画面上完全看不出来，但放大镜、滚轮锚点、
+        //    指针→源像素映射会一路都读第 0 路。这里对每一格取中心点，走生产同一个 HitSurfaceAt，
+        //    断言拿到的正是占这一格的那一路（互换/轮换之后仍然是"占这格的那一路"）。
+        for (var c = 0; c < cells.Length; c++)
+        {
+            var routeAtCell = Grid.RouteIndexOfCell(c);
+            if (routeAtCell < 0 || routeAtCell >= routes) continue;
+            var occ = Grid.GetSurface(routeAtCell);
+            if (occ is null || !occ.IsVisible) continue;
+            var block = CompareCropPlanner.MosaicRegionDip(cells[c], w, h);
+            if (block.Width <= 0 || block.Height <= 0) continue;   // 零面积的格没中心可取
+            var center = Grid.TranslatePoint(
+                new Point(block.X + block.Width / 2, block.Y + block.Height / 2), this)
+                ?? throw new InvalidOperationException(
+                    $"{label}：第 {c} 格中心换算到窗口坐标失败（视觉树还没挂好？命中判据无法执行）");
+            var hit = HitSurfaceAt(center);
+            if (!ReferenceEquals(hit, occ))
+                throw new InvalidOperationException(
+                    $"{label}：第 {c} 格中心 ({center.X:F1},{center.Y:F1}) 应命中第 {routeAtCell} 路，实际" +
+                    (hit is null ? "谁都没命中" : $"命中第 {hit.Index} 路") +
+                    " ⇒ 命中测试还在按 Bounds 比（拼合下各路 Bounds 全等 ⇒ 恒返回第一个可见表面）");
+        }
+
+        // ⑤ 滚轮的退化锚必须落在"这一路自己那一块"的中心，而不是整窗（=整对比区）中心。
+        //    拼合下各路窗口恒等于整对比区 ⇒ `Bounds.Center` 对所有路都是同一个点（组合画面中心），
+        //    光标在哪个格都朝那一个点缩放。这里只把「选哪个点」这一半交给独立参照（上面的
+        //    `MosaicRegionDip` 格表），映射算术仍走生产同一个 MapPointerToVideoFraction ——
+        //    被钉的是点选择，映射本身另有单路九宫格判据。
+        var anchorWorst = 0d;
+        var anchorChecked = 0;
+        var anchorDiscriminating = false;
+        for (var c = 0; c < cells.Length; c++)
+        {
+            var anchorRoute = Grid.RouteIndexOfCell(c);
+            if (anchorRoute < 0 || anchorRoute >= routes) continue;
+            var surf = Grid.GetSurface(anchorRoute);
+            if (surf is null || !surf.IsVisible) continue;
+            if (_sync.Slots.ElementAtOrDefault(anchorRoute)?.Session is not { } sess) continue;
+            var blk = CompareCropPlanner.MosaicRegionDip(cells[c], w, h);
+            if (blk.Width <= 0 || blk.Height <= 0) continue;
+            var blockCenter = new Point(blk.X + blk.Width / 2, blk.Y + blk.Height / 2);   // 拼合：窗口 == 容器
+            if (MapPointerToVideoFraction(surf, sess, blockCenter) is not { } expect) continue;  // 整格在 letterbox 里 ⇒ 本就没有锚
+            var actual = VisibleCenterFractions(surf);
+            if (actual is null)
+                throw new InvalidOperationException(
+                    $"{label}：第 {anchorRoute} 路的格中心 ({blk.X + blk.Width / 2:F1},{blk.Y + blk.Height / 2:F1})DIP " +
+                    "明明能映射到源画面，但 VisibleCenterFractions 返回 null ⇒ 退化锚整条不可用（滚轮落在黑边上就会乱跳）");
+            anchorWorst = Math.Max(anchorWorst, Math.Max(
+                Math.Abs(actual.Value.U - expect.U), Math.Abs(actual.Value.V - expect.V)));
+            anchorChecked++;
+            // 夹具自检：本形状下「整窗中心」这个旧口径与格中心差得够不够远。差得太小说明这一格
+            // 本来就接近对比区中心，两条候选都会通过 ⇒ 该形状没有区分力，不许拿它当"验过了"。
+            var naiveOk = MapPointerToVideoFraction(surf, sess, new Point(w / 2, h / 2)) is { } nb &&
+                Math.Max(Math.Abs(nb.U - expect.U), Math.Abs(nb.V - expect.V)) > 0.02;
+            anchorDiscriminating |= naiveOk || MapPointerToVideoFraction(
+                surf, sess, new Point(w / 2, h / 2)) is null;   // 旧口径落到黑边 ⇒ 连值都取不出，也是一条差异
+        }
+        if (anchorChecked == 0)
+            Console.WriteLine($"  滚轮退化锚 不适用：{label} 下没有一格既有会话又能映射到源画面");
+        else if (!anchorDiscriminating)
+            Console.WriteLine($"  滚轮退化锚 不适用：{label} 下「格中心」与「整窗中心」两个候选相差 <2% ⇒ 本形状无区分力");
+        else if (anchorWorst > 2e-3)
             throw new InvalidOperationException(
-                $"覆盖层手柄位置 {handle} 与分割参数 ({cx},{cy}) 不同源");
+                $"{label}：滚轮退化锚不跟本路那一块 —— {anchorChecked} 路里最大偏差 {anchorWorst:F4}（源归一化坐标）" +
+                "⇒ 锚点仍取整窗/对比区中心：拼合下各路窗口恒等于整对比区，所有路共用同一个锚，" +
+                "光标落在哪个格都朝那一个点缩放");
+        else
+            Console.WriteLine($"  滚轮退化锚 ✓ {anchorChecked} 路：锚 == 本格中心的源坐标（最大偏差 {anchorWorst:F6}；" +
+                "本形状下旧口径「整窗中心」与之相差 >2%，判据有区分力）");
+
+        // ⑥ 放大镜/探针"这一次算哪一路"必须以位置为准。旧实现走视觉树（e.Source），而拼合下
+        //    各路 Bounds 全等且互相重叠 ⇒ 视觉树恒给同一顶层，与光标落在哪一格无关。
+        //    夹具刻意把 source 喂成"视觉树最顶的那一个"（就是旧实现会给的答案），只有不看 source、
+        //    按位置换算才可能判对 ⇒ 与④方向相反：④ 证明位置能定路，⑥ 证明 source 骗不过它。
+        var laneChecked = 0;
+        var laneDiscriminating = false;
+        for (var c = 0; c < cells.Length; c++)
+        {
+            var laneRoute = Grid.RouteIndexOfCell(c);
+            if (laneRoute < 0 || laneRoute >= routes) continue;
+            var occ = Grid.GetSurface(laneRoute);
+            if (occ is null || !occ.IsVisible) continue;
+            var blk6 = CompareCropPlanner.MosaicRegionDip(cells[c], w, h);
+            if (blk6.Width <= 0 || blk6.Height <= 0) continue;
+            var pos6 = Grid.TranslatePoint(
+                new Point(blk6.X + blk6.Width / 2, blk6.Y + blk6.Height / 2), this)
+                ?? throw new InvalidOperationException(
+                    $"{label}：第 {c} 格中心换算到窗口坐标失败，放大镜路归属判据无法执行");
+            PlayerSurface? topmost = null;
+            foreach (var cand in Grid.Surfaces) { if (cand.IsVisible) { topmost = cand; break; } }
+            if (topmost is null) continue;
+            if (!ReferenceEquals(topmost, occ)) laneDiscriminating = true;
+            var got = LaneForPointerOverlay(topmost, pos6);
+            if (!ReferenceEquals(got, occ))
+                throw new InvalidOperationException(
+                    $"{label}：第 {c} 格中心 ({pos6.X:F1},{pos6.Y:F1}) 应算在第 {laneRoute} 路头上，实际算到" +
+                    (got is null ? "谁都没算" : $"第 {got.Index} 路") +
+                    $"（喂给它的 source 是第 {topmost.Index} 路）⇒ 放大镜/探针还在信视觉树：" +
+                    "拼合下各路 Bounds 全等且重叠，视觉树恒给同一顶层");
+            laneChecked++;
+        }
+
+        // ⑥b 镜像断言：位置落在所有格之外（对比区之外）时**必须退回 source**，而不是返回 null。
+        //     没有这一条，"位置优先"写成一意孤行的 return HitSurfaceAt(...) 也能过⑥ ——
+        //     非对比态下面板留白里的移动就整个没有归属（放大镜会突然不跟）。
+        var outsideDip = Grid.TranslatePoint(new Point(0, 0), this) is { } gridOrigin
+            ? new Point(gridOrigin.X + w + 500, gridOrigin.Y + h + 500)
+            : default;
+        if (laneChecked > 0 && Grid.Surfaces.FirstOrDefault(s => s.IsVisible) is { } someLane)
+        {
+            if (LaneForPointerOverlay(someLane, outsideDip) is not { } fell)
+                throw new InvalidOperationException(
+                    $"{label}：位置落在对比区之外 ({outsideDip.X:F0},{outsideDip.Y:F0}) 时" +
+                    "LaneForPointerOverlay 返回 null ⇒ 只剩「位置命中才算数」，视觉树那条退路被删了");
+            if (!ReferenceEquals(fell, someLane))
+                throw new InvalidOperationException(
+                    $"{label}：对比区之外的位置应退回喂进去的 source（第 {someLane.Index} 路），" +
+                    $"实际给第 {fell.Index} 路");
+        }
+
+        if (laneChecked == 0)
+            Console.WriteLine($"  放大镜路归属 不适用：{label} 下没有可判定的格");
+        else if (!laneDiscriminating)
+            Console.WriteLine($"  放大镜路归属 不适用：{label} 下「视觉树最顶的那一路」恰好就是每格的占路 ⇒ 本形状区分不出两种实现");
+        else
+            Console.WriteLine($"  放大镜路归属 ✓ {laneChecked} 格：按位置定路（source 故意喂错那一路也扭不回来），" +
+                "且对比区之外如期退回视觉树");
+
+        // ② 两两不重叠 + 覆盖面积 == 分区算出来的那份
+        // 期望值用<b>归一化占比 × 整幅面积</b>独立复算（不是把每格矩形再加一遍，那样与判据①同源）：
+        // 路数 < 容量时（3 路用 2×2）本来就只有 3 格有内容，第 4 格是空的 ——
+        // 拿"整幅"当期望会把这种正常状态读成缺陷（2026-10-01 第一次跑就是这样红的：
+        // 回读 1,847,106 vs 整幅 2,462,808，比值正好 0.75 = 3/4 格）。
+        var areaPx = CompareCropPlanner.ToPhysicalRect(new Rect(0, 0, w, h), scaling);
+        long areaTotal = (long)areaPx.Width * areaPx.Height;
+        long unionArea = 0;
+        foreach (var b in boxes) unionArea += (long)b.Width * b.Height;
+        // 期望覆盖率 = 各路**所站那一格**的归一化占比之和（在上面的按路循环里累加，来源是分区
+        // 复算而非回读 ⇒ 与本判据不同源）。路数 < 格容量时（3 路用 2×2）它本就小于 1，
+        // 空格没有内容，拿"整幅"当期望会把正常状态读成缺陷（第一次跑正是这样红的）。
+        for (var i = 0; i < boxes.Count; i++)
+            for (var j = i + 1; j < boxes.Count; j++)
+            {
+                var ov = CompareCropPlanner.Intersect(ToDip(boxes[i]), ToDip(boxes[j]));
+                // 判"二维重叠"必须两个维度同时看：相邻两块<b>共边</b>是正确状态，
+                // 此时交集是 0 宽 × 满高（或满宽 × 0 高）—— 用 || 会把共边误判成重叠
+                // （本判据第一次跑就是这样红的，回读数据显示两块其实严丝合缝：0..1153 与 1153..2306）。
+                if (ov.Width > 1 && ov.Height > 1)
+                    throw new InvalidOperationException(
+                        $"{label}：第 {i} 块 {boxes[i]} 与第 {j} 块 {boxes[j]} 二维重叠 " +
+                        $"{ov.Width}x{ov.Height}px ⇒ 两块画面叠在一起（Z 序决定谁露出来），拼合不成立");
+            }
+        // 面积和与"分区应覆盖的那部分"之差 ≤ 每块 2px 的取整残差（N 块各边最多各差 1px）
+        var expectedCoverage = (long)(areaTotal * covered);
+        var slack = 2L * (boxes.Count + 1) * (areaPx.Width + areaPx.Height);
+        if (Math.Abs(unionArea - expectedCoverage) > slack)
+            throw new InvalidOperationException(
+                $"{label}：各块面积之和 {unionArea} 与分区期望 {expectedCoverage}" +
+                $"（覆盖率 {covered:0.####} × 整幅 {areaTotal}）相差 {unionArea - expectedCoverage}，" +
+                $"容许取整残差 {slack} ⇒ 拼合处有缝、有洞，或有块被裁错尺寸");
+
+        Console.WriteLine(
+            $"  拼合铺块 ✓ {label}：{boxes.Count} 块（首块 {boxes[0].Width}x{boxes[0].Height}px）" +
+            $"窗口均铺满对比区 {areaPx.Width}x{areaPx.Height}，两两不重叠、面积和 {unionArea} " +
+            $"= 分区期望 {expectedCoverage}（覆盖率 {covered:0.####}）");
+    }
+
+    private static Rect ToDip(Rect32 r) => new(r.X, r.Y, r.Width, r.Height);
+
+    /// <summary>M4：覆盖层<b>拖动热路径</b>的三条判据。此前的验收全部直接调宿主回调
+    /// （<c>OnPartitionChanged</c> / <c>SplitRelayoutUnitAsync</c>），也就是**绕开了覆盖层自己那段
+    /// 合并提交 / 结算 / 回灌**——那一段今天没有一条测量，改坏了没人报警。
+    ///
+    /// <list type="number">
+    /// <item><description><b>合并比</b>：一次手势里「真的改变几何的 move 数」必须显著大于
+    /// 「发给宿主的次数」。宿主每次提交要重排最多 9 路子 HWND + 一轮裁剪派发 + 组件日志，
+    /// 高回报率鼠标每 move 都戳一遍（125+/s）不该由用户手感买单。</description></item>
+    /// <item><description><b>拖动中宿主回灌不得把线拽回</b>：宿主收到提交后立刻把<b>同一份滞后值</b>
+    /// 回灌（OnPartitionChanged → Update），覆盖层若照写，线每提交一次被回退一格 ⇒ 拖动抖动。
+    /// 欠账同时必须还在（被清掉等于松手后宿主停在旧位置）。</description></item>
+    /// <item><description><b>拖动中宿主换形状必须整份收下、欠账作废</b>：换形状只可能由宿主的权威
+    /// 事件发起（加减路 / 网格预设 / 单屏 / C 键）。把这类回灌也一并挡掉，松手时那笔欠账就会把
+    /// <b>旧形状</b>的分区灌回新形状 ⇒ 画面停在错格上、此后每拍都错（比抖动严重）。</description></item>
+    /// </list>
+    ///
+    /// <para><b>扫幅为什么是「当前边界 ±5%」而不是 0.30~0.70</b>：后者在 ≥3 列时会被邻居的 5%
+    /// 下界钳住，被钳住的那些 move 不改变几何、于是不计入分母 ⇒ 判据会读成「移动次数变少」
+    /// 而不是「合并失效」，分母失真的绿不算绿。</para>
+    ///
+    /// <para><b>本判据不声称量过逐帧成本</b>：三臂都是确定性状态机驱动（零耗时循环里
+    /// <c>TickCount64</c> 门限几乎不推进，正是「最坏情况全被挡下」那一臂）；
+    /// 单次提交耗时与出帧率归 <c>--magnifybench</c>，日志见
+    /// <c>tests/output/magnifybench-pancommit-z2-20260929.log</c>。</para></summary>
+    private async Task DragCommitUnit(int routes)
+    {
+        var lanes = Grid.Count;
+        var shapes = GridPartition.ShapesFor(lanes);
+        if (shapes.Count == 0)
+            throw new InvalidOperationException($"拖动热路径：{lanes} 条 lane 没有朝向候选，夹具摆不出可拖的线");
+        var (cols, rows) = shapes[0];
+        await EnterGridShapeAsync(cols, rows);
+        var ov = _layoutOverlay ?? throw new InvalidOperationException("拖动热路径：覆盖层未创建");
+        if (!ov.IsOverlayVisible)
+            throw new InvalidOperationException("拖动热路径：覆盖层不可见，探针灌进去的移动不会被处理");
+        if (ov.HandlePositions().Length == 0)
+            throw new InvalidOperationException($"拖动热路径：{cols}x{rows} 没有可拖分割线");
+        if (_partition.HandleAxisAt(0) != SplitAxis.X)
+            throw new InvalidOperationException($"拖动热路径：本判据按「手柄 0 是竖线」扫 X，{cols}x{rows} 不满足");
+
+        const int Moves = 120;        // ≈ 高回报率鼠标一次持续拖动 1 秒的量
+        const double Span = 0.05;
+        var x0 = _partition.HandlePositionAt(0).X;
+        var targetX = x0 + Span;
+
+        // ── ① 合并比 ──────────────────────────────────────────────────
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        ov.ProbeGrabHandle(0);
+        for (var i = 0; i < Moves; i++)
+            ov.ProbeMoveTo(x0 - Span + 2 * Span * i / (Moves - 1), 0.5);
+        sw.Stop();
+        var elapsedMs = sw.Elapsed.TotalMilliseconds;
+        var gotMoves = ov.ProbeDragMoves;
+        var commits = ov.ProbeHostCommits;
+        if (gotMoves != Moves)
+            throw new InvalidOperationException(
+                $"拖动热路径夹具：{Moves} 次移动只有 {gotMoves} 次改变了几何" +
+                $"（{cols}x{rows} 边界 {x0:0.###}±{Span:0.###}）⇒ 扫幅撞到权重下界、分母失真，" +
+                "该收窄扫幅，不该放宽判据");
+        if (commits < 1)
+            throw new InvalidOperationException("拖动热路径：一次都没提交给宿主 ⇒ 拖动的通知线断了");
+        if (commits * 2 > gotMoves)
+            throw new InvalidOperationException(
+                $"拖动合并未生效：{gotMoves} 次几何改变只被合并成 {commits} 次提交" +
+                $"（门槛 {LayoutOverlayWindow.ProbeCommitIntervalMs}ms、整轮耗时 {elapsedMs:F1}ms）" +
+                "⇒ 宿主在每个 move 上被重排一遍，门槛形同不存在");
+        Console.WriteLine($"  拖动合并 ✓ {cols}x{rows}：{gotMoves} 次几何改变 → {commits} 次宿主提交" +
+                          $"（门槛 {LayoutOverlayWindow.ProbeCommitIntervalMs}ms，整轮 {elapsedMs:F1}ms，" +
+                          $"合并比 {commits * 1.0 / gotMoves:0.###}）");
+
+        // ── ② 结算：松手后宿主必须等于覆盖层的乐观值，且落点是扫幅终点 ──
+        if (!ov.IsDragging)
+            throw new InvalidOperationException("拖动热路径：探针结束前 IsDragging 已为 false，结算臂的前提不成立");
+        ov.ProbeRelease();
+        if (ov.IsDragging)
+            throw new InvalidOperationException("拖动热路径：ProbeRelease 后仍在拖动态 ⇒ 手势没结束");
+        if (!PartitionWeightsEqual(_partition, ov.Partition))
+            throw new InvalidOperationException(
+                $"拖动热路径：松手后宿主与覆盖层不一致 宿主={WeightsText(_partition)} 覆盖层={WeightsText(ov.Partition)}" +
+                "⇒ 被门限挡下的最后一段没有补发，宿主停在旧格表上（画面与线错位）");
+        var settledX = _partition.HandlePositionAt(0).X;
+        if (Math.Abs(settledX - targetX) > GridPartition.Epsilon)
+            throw new InvalidOperationException(
+                $"拖动热路径：宿主落点 {settledX:0.#####} ≠ 扫幅终点 {targetX:0.#####}" +
+                "⇒ 补发的不是最后一次位置（结算值取错/晚了一拍）");
+        Console.WriteLine($"  拖动结算 ✓ 松手后宿主边界={settledX:0.#####}（终点一致），" +
+                          $"累计提交 {ov.ProbeHostCommits} 次（含收尾补发）");
+
+        // ── ③ 拖动中宿主回灌（同一形状、权重滞后）不得把线拽回 ──────────
+        // 重新摆回均匀权重：下面要把「拖动前的那一份」当回灌值用，它必须是同形状、不同权重。
+        await EnterGridShapeAsync(cols, rows);
+        var stale = _partition;
+        ov.ProbeGrabHandle(0);
+        for (var i = 1; i <= 4; i++)
+            ov.ProbeMoveTo(x0 - Span * 0.5 * i, 0.5);      // 向左拖，与 ① 的方向相反
+        var optimistic = ov.Partition;
+        if (PartitionWeightsEqual(stale, optimistic))
+            throw new InvalidOperationException(
+                "拖动热路径：4 次移动后覆盖层仍等于拖动前的分区 ⇒ 探针没有真的拖到线，本臂无鉴别力");
+        var commitsBeforeEcho = ov.ProbeHostCommits;
+        ov.Update(stale);                                   // 宿主把它那份滞后值回灌（产品就这么做）
+        if (!ReferenceEquals(ov.Partition, optimistic))
+            throw new InvalidOperationException(
+                $"拖动热路径：宿主回灌滞后值把线拽回了 覆盖层={WeightsText(ov.Partition)} 应为={WeightsText(optimistic)}" +
+                "⇒ 每提交一次回退一格，用户读到的是拖动抖动（ApplyHostEcho 的拖动守卫失效）");
+        if (!ov.ProbeHasPendingCommit)
+            throw new InvalidOperationException(
+                "拖动热路径：回灌把欠宿主的那一笔清掉了 ⇒ 松手后宿主停在被回退的位置上");
+        if (ov.ProbeHostCommits != commitsBeforeEcho)
+            throw new InvalidOperationException(
+                "拖动热路径：收到回灌时又向宿主提交了一次 ⇒ 提交-回灌-提交的正反馈");
+        ov.ProbeRelease();
+        if (!PartitionWeightsEqual(_partition, optimistic))
+            throw new InvalidOperationException(
+                $"拖动热路径：回灌之后松手，宿主={WeightsText(_partition)} ≠ 覆盖层拖动终值 {WeightsText(optimistic)}");
+        Console.WriteLine($"  拖动回灌不回拽 ✓ 滞后值 {WeightsText(stale)} 被挡下，乐观值保住并如期结算" +
+                          $"（4 次移动 → 累计 {ov.ProbeHostCommits} 次提交）");
+
+        // ── ④ 拖动中宿主换形状：必须整份收下，且旧几何的欠账当场作废 ──────
+        var other = OtherShape(shapes, cols, rows, lanes);
+        ov.ProbeGrabHandle(0);
+        for (var i = 1; i <= 4; i++)
+            ov.ProbeMoveTo(x0 + Span * 0.5 * i, 0.5);
+        if (!ov.ProbeHasPendingCommit)
+            throw new InvalidOperationException(
+                $"拖动热路径：换形状臂的前置不成立——4 次移动没有留下欠账" +
+                $"（每次提交耗时 >16ms 或合并已关闭，参见 ①）");
+        var commitsBeforeReshape = ov.ProbeHostCommits;
+        // 走宿主的真实权威入口（加/减路、网格预设、C 键最终都落到这一套动作上）
+        await EnterGridShapeAsync(other.Cols, other.Rows);
+        if (ov.Partition.Cols != other.Cols || ov.Partition.Rows != other.Rows)
+            throw new InvalidOperationException(
+                $"拖动热路径：宿主把形状换成 {other.Cols}x{other.Rows} 却被拖动守卫吞掉，" +
+                $"覆盖层仍停在 {ov.Partition.Cols}x{ov.Partition.Rows}" +
+                "⇒ 松手时那笔旧几何的欠账会把新形状拽回旧格表（画面停在错格上，此后每拍都错）");
+        if (ov.ProbeHasPendingCommit)
+            throw new InvalidOperationException(
+                "拖动热路径：换形状后旧几何的欠账还在 ⇒ 松手会把它补发给新形状");
+        ov.ProbeRelease();
+        if (ov.ProbeHostCommits != commitsBeforeReshape)
+            throw new InvalidOperationException(
+                $"拖动热路径：换形状后松手仍补发了一次（{commitsBeforeReshape} → {ov.ProbeHostCommits}）" +
+                "⇒ 旧形状的过期值覆盖了新形状");
+        if (!PartitionWeightsEqual(_partition, ov.Partition) ||
+            _partition.Cols != other.Cols || _partition.Rows != other.Rows)
+            throw new InvalidOperationException(
+                $"拖动热路径：收尾两侧不一致 宿主={_partition.Cols}x{_partition.Rows} {WeightsText(_partition)} " +
+                $"覆盖层={ov.Partition.Cols}x{ov.Partition.Rows} {WeightsText(ov.Partition)}");
+        Console.WriteLine($"  拖动中换形状 ✓ 换到 {other.Cols}x{other.Rows} 被整份收下、欠账作废，" +
+                          "松手不再补发旧几何");
+
+        await EnterGridShapeAsync(cols, rows);
+    }
+
+    /// <summary>给「拖动中换形状」那一臂挑一个<b>与当前不同、且装得下全部 lane</b>的朝向。
+    ///
+    /// <para>优先用该路数自己的朝向候选（C 键就给这些）；≥7 路只有 3×3 一个候选时退回
+    /// <c>(cols+1, rows)</c> —— 真实的换形状来源之一是<b>网格布局预设</b>
+    /// （<c>OnGridPreset → GridPartition.Resolve(presetCols, presetRows)</c>），
+    /// 预设能给出不在朝向候选里的形状，所以这个靶子是生产里会出现的，不是夹具臆造的。</para></summary>
+    private static (int Cols, int Rows) OtherShape(
+        System.Collections.Immutable.ImmutableList<(int Cols, int Rows)> shapes, int cols, int rows, int lanes)
+    {
+        foreach (var s in shapes)
+            if (s.Cols != cols || s.Rows != rows)
+                return (s.Cols, s.Rows);
+        var alt = (Cols: cols + 1, Rows: rows);
+        if (alt.Cols * alt.Rows < lanes)
+            throw new InvalidOperationException(
+                $"拖动热路径：{lanes} 条 lane 找不到与 {cols}x{rows} 不同且装得下的朝向（试 {alt.Cols}x{alt.Rows}={alt.Cols * alt.Rows} 格）");
+        return alt;
+    }
+
+    /// <summary>两份分区的形状与权重<b>逐位</b>相等（结算类判据用，刻意不给容差：
+    /// 比较的就是同一个 double 值，容差只会掩盖「补发了另一拍」这种错）。</summary>
+    private static bool PartitionWeightsEqual(GridPartition a, GridPartition b)
+        => a.Cols == b.Cols && a.Rows == b.Rows
+        && a.ColumnWeights.SequenceEqual(b.ColumnWeights)
+        && a.RowWeights.SequenceEqual(b.RowWeights);
+
+    private static string WeightsText(GridPartition p)
+    {
+        // 一律 InvariantCulture：这是给人读的权重表，zh-CN 下把小数点印成逗号会让读表人数错列数。
+        string F(double w) => w.ToString("0.#####", System.Globalization.CultureInfo.InvariantCulture);
+        return $"{p.Cols}x{p.Rows}[c={string.Join(",", p.ColumnWeights.Select(F))}," +
+            $"r={string.Join(",", p.RowWeights.Select(F))}]";
     }
 
     /// <summary>P6 单元：对比模式下**再拖入一路**（占格集合没变、路数变了）时，新路必须以"停用"落地。
@@ -4090,7 +4782,10 @@ public partial class MainWindow : Window
     private async Task RouteAddedWhileSetUnchangedUnit(string videoPath)
     {
         await EnsureRoutesAsync(2, videoPath);
-        EnterCompareMode(CompareMode.Ab);
+        // 合并后的网格是一路一格、没有"未占格的路"，能造出这个形状的只有左右拉动（恒两格铺满）。
+        if (!EnterCompareOverlay())
+            throw new InvalidOperationException(
+                $"夹具：无法进入左右拉动（素材 {_sync.Count} 路），本判据要的「2 格 + 多出一路」摆不出来");
         await System.Threading.Tasks.Task.Delay(300);
         if (_sync.Count != 2 || !_sync.IsRouteActive(0) || !_sync.IsRouteActive(1))
             throw new InvalidOperationException(
@@ -4105,51 +4800,54 @@ public partial class MainWindow : Window
             throw new InvalidOperationException($"夹具：追加第 3 路未生效，_sync.Count={_sync.Count}");
         await System.Threading.Tasks.Task.Delay(600);   // 新路就绪 + 延后一拍的启用态下发
 
-        // 前提必须是"仍在 AB（2 格）"：若打开新媒体把模式改了，这条判据的对象就不存在，
+        // 前提必须是"仍在左右拉动（2 格铺满）"：若打开新媒体把态切走了，这条判据的对象就不存在，
         // 要明说而不是让下面的断言去背这个锅。
-        if (!_compareActive || _compareMode != CompareMode.Ab)
+        if (!_compareActive || !_compareOverlayActive)
         {
-            Console.WriteLine($"  新路即停用：**跳过**（追加后模式变为 active={_compareActive} " +
-                              $"mode={_compareMode}，已不是 2 格的 AB，没有\"多出的路\"可判）");
-            RecordSelfTestSkip("新路即停用：追加后已不在 2 格的 AB，无多余路可判");
+            Console.WriteLine($"  新路即停用：**跳过**（追加后 active={_compareActive} " +
+                              $"拉动={_compareOverlayActive}，已不是 2 格铺满，没有\"多出的路\"可判）");
+            RecordSelfTestSkip("新路即停用：追加后已不在左右拉动的两格里，无多余路可判");
             return;
         }
         if (_sync.IsRouteActive(2))
             throw new InvalidOperationException(
-                "AB（2 格）下新加的第 3 路仍是启用态：发布门只比索引集时 {0,1} 加一路还是 {0,1}，" +
+                "左右拉动（2 格铺满）下新加的第 3 路仍是启用态：发布门只比索引集时 {0,1} 加一路还是 {0,1}，" +
                 "事件不发 ⇒ 新路按默认值 Active=true 落地并被一起解码+呈现");
         await AssertRouteActivityAsync(3, 2, "新路即停用");
-        EnterGridMode();
+        ExitGridCompare();
         await System.Threading.Tasks.Task.Delay(300);
     }
 
     private Unit[] BuildUnits(string videoPath)
     {
         var routes3 = Math.Max(3, _sync.Count);
-        var maxMode3 = CompareLayout.AvailableModes(routes3)[^1];
+        var shape3 = GridPartition.ShapesFor(routes3)[^1];   // 该路数下"格数最多"的朝向，替代旧 maxShape
         return new[]
         {
-            new Unit("lane.add-remove-contract", 2, CompareMode.Ab,
+            new Unit("lane.add-remove-contract", 2, (2, 1),
                 new[] { "对比-加减路契约" }, async () =>
                 {
                     await AssertLaneAddRemoveContractAsync("单元");
-                    // 不带对比模式时也要能跑：再验一遍非对比路径（AB 之外没有格表遮蔽）
+                    // 不带对比模式时也要能跑：再验一遍非对比路径（无格表遮蔽）
                     ExitCompareMode();
                     await AssertLaneAddRemoveContractAsync("单元-非对比");
                 }),
-            new Unit("cells.swap", 3, CompareMode.Ab, new[] { "对比-左右互换" },
+            new Unit("cells.swap", 3, (3, 1), new[] { "对比-左右互换" },
                 async () => await AssertSwapCompareCellsAsync(Math.Max(3, _sync.Count))),
             new Unit("cells.rotate", 3, null, new[] { "对比-轮换画面" },
                 async () => await AssertRotateCompareCellsAsync(Math.Max(3, _sync.Count))),
             new Unit("align.modes", 3, null, new[] { "对比-对齐模式" },
-                async () => await AssertCompareAlignModesAsync(Math.Max(3, _sync.Count), maxMode3)),
-            new Unit("magnify.seamless", 2, CompareMode.Ab, new[] { "无缝放大 z=2" },
+                async () => await AssertCompareAlignModesAsync(Math.Max(3, _sync.Count), shape3)),
+            new Unit("magnify.seamless", 2, (2, 1), new[] { "无缝放大", "无缝放大 z=2" },
                 async () =>
                 {
                     var n = _sync.Count;
                     AssertCompareMagnifyGates(n);
-                    var applied = await AssertCompareMagnifyAsync(n, CompareMode.Ab,
-                        zoom: 2.0, cropX: 0.25, cropY: 0.25);
+                    // 拼合后每路窗口 == 整对比区 ⇒ 同样的 z 要占 N 倍像素，倍率按预算取
+                    var zTest = AffordableMagnifyZoom(n);
+                    AssertMagnifyBudgetRefusal(n, zTest);
+                    var applied = await AssertCompareMagnifyAsync(n, (2, 1),
+                        zoom: zTest, cropX: 0.25, cropY: 0.25);
                     // z>1 时窗口必然大于格 ⇒ 一次都没下发就是没接线，这条有牙
                     if (applied == 0) throw new InvalidOperationException("单元：没有任何一路真正进入放大状态");
                     _cropTotal += applied;
@@ -4160,39 +4858,42 @@ public partial class MainWindow : Window
                 async () =>
                 {
                     var n = _sync.Count;
-                    EnterCompareMode(CompareMode.Ab);
+                    EnterCompareMode();
                     await System.Threading.Tasks.Task.Delay(200);
-                    AssertCompareOverlay(n, CompareMode.Ab);
-                    AssertCellsDriveLayout(n, CompareMode.Ab, "进入 AB");
-                    // 只是累计，不据此判红：AB 下"窗口恰好等于格"时合法地一个区域都不用下发
+                    var (c, r) = (_partition.Cols, _partition.Rows);
+                    AssertCompareOverlay(n, c, r);
+                    AssertCellsDriveLayout(n, "进入网格对比");
+                    // 只是累计，不据此判红：不放大时"窗口恰好等于格"合法地一个区域都不用下发
                     //（AssertCompareCrop 内部会核对回读，0 次它自己会打"0/N 路设了区域"）。
-                    _cropTotal += AssertCompareCrop(n, "进入 AB");
+                    _cropTotal += AssertCompareCrop(n, "进入网格对比");
                 }),
             new Unit("layout.mode-sweep", 3, null, new[] { "对比-切换" },
                 async () =>
                 {
+                    // 合并后"扫模式"= 扫该路数下的全部朝向候选（C 键的完整一圈）
                     var n = _sync.Count;
-                    foreach (var m in CompareLayout.AvailableModes(n))
+                    foreach (var (c, r) in GridPartition.ShapesFor(n))
                     {
-                        EnterCompareMode(m);
-                        await System.Threading.Tasks.Task.Delay(150);
-                        AssertCompareOverlay(n, m);
-                        AssertCellsDriveLayout(n, m, $"模式 {m}");
+                        await EnterGridShapeAsync(c, r);
+                        AssertCompareOverlay(n, c, r);
+                        AssertCellsDriveLayout(n, $"朝向 {c}x{r}");
                     }
                 }),
-            new Unit("variants.shape", 4, CompareMode.Abcd, new[] { "对比-模式变体" },
+            new Unit("variants.shape", 4, (2, 2), new[] { "对比-模式变体" },
                 async () => await AssertCompareModeVariantsAsync(_sync.Count)),
-            new Unit("magnify.wheel", 2, CompareMode.Ab, new[] { "对比-滚轮无缝放大" },
-                async () => { _cropTotal += await AssertCompareWheelMagnifyAsync(_sync.Count, CompareMode.Ab); }),
+            new Unit("magnify.wheel", 2, (2, 1), new[] { "对比-滚轮无缝放大" },
+                async () => { _cropTotal += await AssertCompareWheelMagnifyAsync(_sync.Count, (2, 1)); }),
             new Unit("exit.cleanup", 2, null, new[] { "对比-退出" },
                 async () =>
                 {
                     var n = _sync.Count;
-                    EnterCompareMode(CompareMode.Ab);
+                    EnterCompareMode();
                     await System.Threading.Tasks.Task.Delay(150);
                     ExitCompareMode();
                     await System.Threading.Tasks.Task.Delay(150);
-                    if (_layoutOverlay is null || _layoutOverlay.IsOverlayVisible)
+                    if (BenchKeepLayoutOverlayOnExit)
+                        RecordSelfTestSkip("FC_KEEP_LAYOUTOVERLAY=1：本轮按住了 HideOverlay ⇒「退出后覆盖层已隐藏」未判");
+                    else if (_layoutOverlay is null || _layoutOverlay.IsOverlayVisible)
                         throw new InvalidOperationException("单元：退出后覆盖层仍可见（HideOverlay 未生效）");
                     if (Grid.CellOverride is not null)
                         throw new InvalidOperationException("单元：退出后 CellOverride 未清空（非对比路径会被污染）");
@@ -4204,18 +4905,27 @@ public partial class MainWindow : Window
             new Unit("layout.split-relayout", 3, null, new[] { "对比-分割驱动重排" },
                 async () =>
                 {
-                    var ms = CompareLayout.AvailableModes(_sync.Count);
+                    var (c, r) = GridPartition.ShapesFor(_sync.Count)[^1];
                     // 只累计、不据此判红：格与窗口恰好对齐时合法地 0 次下发
-                    _cropTotal += await SplitRelayoutUnitAsync(_sync.Count, ms[^1]);
+                    _cropTotal += await SplitRelayoutUnitAsync(_sync.Count, c, r);
                 }),
-            new Unit("entry.split", 5, null, new[] { "模式-分屏入口" },
-                async () => await SplitEntryUnit(_sync.Count)),
+            new Unit("entry.grid-compare", 5, null, new[] { "模式-分屏入口", "网格对比入口" },
+                async () => await GridCompareEntryUnit(_sync.Count)),
             new Unit("entry.grid", 3, null, new[] { "模式-网格入口" },
                 async () => await GridEntryUnit(_sync.Count)),
             new Unit("view.mode-column", 2, null, new[] { "视图模式列" },
                 async () => await ViewModeColumnUnit(_sync.Count)),
             new Unit("view.split-line-hit", 3, null, new[] { "分割线命中" },
                 async () => await SplitLineHitUnit(_sync.Count)),
+            new Unit("view.mosaic-tile", 3, null, new[] { "拼合铺块", "分区拼合" },
+                async () =>
+                {
+                    var (c, r) = GridPartition.ShapesFor(Grid.Count)[^1];
+                    await EnterGridShapeAsync(c, r);
+                    AssertMosaicTiling(_sync.Count, $"{c}x{r}");
+                }),
+            new Unit("view.drag-commit", 2, null, new[] { "拖动热路径", "分割线拖动合并提交" },
+                async () => await DragCommitUnit(_sync.Count)),
             new Unit("view.route-activity", 5, null, new[] { "路启用态" },
                 async () => await RouteActivityUnit(_sync.Count)),
             new Unit("sync.seek-parks", 4, null, new[] { "单路受控Seek" },
@@ -4238,8 +4948,11 @@ public partial class MainWindow : Window
         _sync.Clear();
         Grid.SetCount(0, _realMode);
         Grid.SetCount(routes, _realMode);
-        _coordinator.OpenFiles(Enumerable.Repeat(videoPath, routes).ToList(), autoPlay: false);
+        // 素材池为空时 BuildMediaList 与旧的 Enumerable.Repeat 逐字等价；FC_STEPS 单元宿主也走这里，
+        // 所以多素材轮必须由**同一份**排布驱动，否则"完整剧本跑多素材、单元宿主跑单素材"会分叉。
+        _coordinator.OpenFiles(BuildMediaList(videoPath, routes), autoPlay: false);
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(25);
+
         while (DateTime.UtcNow < deadline)
         {
             var snaps = _sync.ReadAllSnapshots();
@@ -4300,7 +5013,7 @@ public partial class MainWindow : Window
                           $"{string.Join(", ", picked.Select(u => u.Id))}");
         foreach (var u in picked)
         {
-            if (u.Mode is { } m) { EnterCompareMode(m); await System.Threading.Tasks.Task.Delay(150); }
+            if (u.Shape is { } sh) await EnterGridShapeAsync(sh.Cols, sh.Rows);
             _step = u.Id;
             if (u.Id.StartsWith("magnify.", StringComparison.Ordinal)) _cropCapableSelected = true;
             await StepNamedAsync(u.Id, u.Body);
@@ -4332,9 +5045,29 @@ public partial class MainWindow : Window
         return true;
     }
 
-    private async System.Threading.Tasks.Task RunCompareModeTestAsync(string videoPath, int routes)
+    private async System.Threading.Tasks.Task RunCompareModeTestAsync(
+        string videoPath, int routes, IReadOnlyList<string>? extraVideos = null)
     {
         routes = Math.Clamp(routes, 2, 9);
+        // 多素材入口（#29）：路数之后的参数都当额外素材，按路轮转。校验一律 fail-closed ——
+        // 传了却不存在的文件不能被静默忽略，那样各路会退化成单素材，而下一条判据会因此"合法地"记未判，
+        // 读表的人以为跑了多素材、其实没跑。
+        if (extraVideos is { Count: > 0 })
+        {
+            foreach (var v in extraVideos)
+            {
+                if (File.Exists(v)) continue;
+                Console.Error.WriteLine($"comparemodetest: 额外素材不存在 {v}");
+                ExitSelfTest(2);
+                return;
+            }
+            _benchMediaPool = extraVideos;
+        }
+        else
+        {
+            _benchMediaPool = Array.Empty<string>();
+        }
+
         // docs/41 #16；复核修正：原 300s 与 run_all.sh 的 `timeout 300` **完全相等** ⇒
         // 看门狗永远抢不到外部 kill 之前，等于没有兜底。取 240s 留出 60s 让看门狗
         // 打印卡住的步骤名并以 code=3 退出，排障信息才不会随外部 kill 一起丢失。
@@ -4363,8 +5096,11 @@ public partial class MainWindow : Window
 
             _step = "对比-打开多路";
             Grid.SetCount(routes, _realMode);
-            _coordinator.OpenFiles(Enumerable.Repeat(videoPath, routes).ToList(), autoPlay: false);
-            Console.WriteLine($"comparemodetest: 请求打开 {routes} 路（{(_realMode ? "真实" : "演示")}），等待就绪...");
+            _coordinator.OpenFiles(BuildMediaList(videoPath, routes), autoPlay: false);
+            var mediaKinds = DistinctMediaCount(videoPath);
+            Console.WriteLine($"comparemodetest: 请求打开 {routes} 路（{(_realMode ? "真实" : "演示")}），" +
+                              $"素材 {mediaKinds} 种{(_benchMediaPool.Count > 0 ? "（多素材轮转）" : "（同一份重复）")}，等待就绪...");
+
 
             var readyDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
             while (DateTime.UtcNow < readyDeadline)
@@ -4385,65 +5121,71 @@ public partial class MainWindow : Window
             await System.Threading.Tasks.Task.Delay(600);
 
             _step = "对比-进入";
-            EnterCompareMode(CompareMode.Ab);
+            EnterCompareMode();
             // 覆盖窗 Show → OnOpened 装钩子发生在同一轮消息泵内，这里给一拍余量
             await System.Threading.Tasks.Task.Delay(300);
-            await StepAsync(() => { AssertCompareOverlay(routes, CompareMode.Ab); });
-            await StepAsync(() => { AssertCellsDriveLayout(routes, CompareMode.Ab, "进入 AB"); });
+            var enterShape = (_partition.Cols, _partition.Rows);
+            await StepAsync(() => { AssertCompareOverlay(routes, enterShape.Cols, enterShape.Rows); });
+            await StepAsync(() => { AssertCellsDriveLayout(routes, "进入网格对比"); });
             // 裁剪（SetWindowRgn）接线：区域必须真的被下发且回读一致，Win32 路径另做端到端往返
-            cropApplied += await StepAsync<int>(() => Task.FromResult(AssertCompareCrop(routes, "进入 AB")));
-            AssertCropWin32RoundTrip("进入 AB");
+            cropApplied += await StepAsync<int>(() => Task.FromResult(AssertCompareCrop(routes, "进入网格对比")));
+            AssertCropWin32RoundTrip("进入网格对比");
 
-            // 加路/减路契约（AB 下的那一支：新 lane 落在 2 格表之外 ⇒ 必然不可见 + 必须有提示）
+            // 加路/减路契约（网格那一支：新 lane 一定多出一格 ⇒ 必须可见；只有拉动那一支才要求
+            // "超出两格就隐藏 + 必须提示"，两条都在同一判据里各测一次）
             _step = "对比-加减路契约";
             await StepAsync(async () => { await AssertLaneAddRemoveContractAsync("comparemodetest"); });
 
-            // 逐级切到可用集合中的每个模式，验证"按路数自动收敛"与"格表随模式改变"
-            var modes = CompareLayout.AvailableModes(routes);
-            Console.WriteLine($"comparemodetest: 路数={routes} 可用模式=[{string.Join(", ", modes)}]");
-            foreach (var m in modes)
+            // 逐级扫过该路数下的全部朝向候选（= 用户按 C 键的一圈），
+            // 验证"朝向 ↔ 格表 ↔ 覆盖层手柄"三者始终一致（旧实现扫的是 AvailableModes）。
+            var shapes = GridPartition.ShapesFor(routes);
+            Console.WriteLine($"comparemodetest: 路数={routes} 可用朝向=" +
+                              $"[{string.Join(", ", shapes.Select(s => $"{s.Cols}x{s.Rows}"))}]");
+            foreach (var sh in shapes)
             {
-                _step = $"对比-切换 {m}";
-                EnterCompareMode(m);
-                await System.Threading.Tasks.Task.Delay(150);
-                await StepAsync(() => { AssertCompareOverlay(routes, m); });
-                await StepAsync(() => { AssertCellsDriveLayout(routes, m, $"模式 {m}"); });
+                _step = $"对比-切换 {sh.Cols}x{sh.Rows}";
+                await EnterGridShapeAsync(sh.Cols, sh.Rows);
+                await StepAsync(() => { AssertCompareOverlay(routes, sh.Cols, sh.Rows); });
+                await StepAsync(() => { AssertCellsDriveLayout(routes, $"朝向 {sh.Cols}x{sh.Rows}"); });
             }
+            var maxShape = shapes[^1];
 
-            // 核心验收点：拖动分割手柄 ⇒ SplitChanged ⇒ 重算格表 ⇒ 画面跟着变。
+            // 核心验收点：拖动分割手柄 ⇒ PartitionChanged ⇒ 重算格表 ⇒ 画面跟着变。
             // 直接走宿主回调（覆盖层的拖动最终就是调它）。
             //
             // ⚠ 断言形式（此处曾是有缺陷的写法，勿改回）：**不能**要求"宽和高都要变"。
-            // AB 的第 0 格是**通高**的（ComputeCells 给 A 的 Height 恒为 1，见 CompareLayout），
-            // 拖动竖直分割线只改 X ⇒ 只有格宽变，格高本就不应该变。旧写法在 2 路下必然误报；
-            // 4 路（十字分割，宽高都变）恰好掩盖了它，才一直没被暴露。
+            // 一条竖分割线只改宽度，被它隔开的那一列本就通高 ⇒ 格高不变是**正确**的。
+            // 旧写法在 2 路下必然误报；4 路（十字）恰好掩盖了它，才一直没被暴露。
             //
-            // 正确形式：用 ComputeCells(mode, 旧split) 与 ComputeCells(mode, 新split) 各自**独立复算**
-            // 出期望矩形，断言实际 Bounds 确实由前者迁到后者。对 Ab/Abc/Abcd 一律成立，
-            // 且只要"重排没生效"（Bounds 停在旧 split 的值）就判红 —— 鉴别力不降。
+            // 正确形式：用拖动前后的 partition.ComputeCells() 各自**独立复算**期望矩形，
+            // 断言实际 Bounds 确实由前者迁到后者；对任何朝向一律成立，且只要"重排没生效"
+            // （Bounds 停在旧值）就判红 —— 鉴别力不降。
             _step = "对比-分割驱动重排";
-            var maxMode = modes[modes.Count - 1];
-            cropApplied += await StepAsync<int>(async () => await SplitRelayoutUnitAsync(routes, maxMode));
+            cropApplied += await StepAsync<int>(async () =>
+                await SplitRelayoutUnitAsync(routes, maxShape.Cols, maxShape.Rows));
 
             // #22：放大镜浮窗坐标。放在这里是因为**只有多格布局才具备鉴别力**——
             // 被测路（原点离容器最远的那一格）与容器原点差数百 DIP，"漏换算"必然判红；
             // 单路布局下这个差只有 1px（--selftest 里那条是同一断言的低鉴别力版本）。
             // 必须在"无缝放大"之前：放大后窗口尺寸被刻意放大，几何含义不同。
             _step = "放大镜浮窗坐标";
-            await StepAsync(async () => { await AssertMagnifierFollowsCursorAsync(routes, $"对比 {maxMode}"); });
+            await StepAsync(async () => { await AssertMagnifierFollowsCursorAsync(routes, $"对比 {maxShape.Cols}x{maxShape.Rows}"); });
 
             // ── 无缝放大（子窗口放大 + 偏移 + 裁剪）：默认关闭，这里显式启用后逐项验证 ──
             // 必须放在"退出"之前、且结束前复位：否则后续断言（期望 Bounds == 格）会失败。
             _step = "对比-放大闸门";
             await StepAsync(() => { AssertCompareMagnifyGates(routes); });
             _step = "对比-无缝放大";
-            cropApplied += await StepAsync<int>(async () => await AssertCompareMagnifyAsync(routes, maxMode, zoom: 2.0, cropX: 0.25, cropY: 0.25));
+            // 倍率按预算取：拼合后每路窗口 == 整对比区，9 路 z=2 是 88.6 Mpx，超预算就该被拒
+            var zoomAffordable = AffordableMagnifyZoom(routes);
+            await StepAsync(() => { AssertMagnifyBudgetRefusal(routes, zoomAffordable); });
+            cropApplied += await StepAsync<int>(async () => await AssertCompareMagnifyAsync(routes, maxShape, zoom: zoomAffordable, cropX: 0.25, cropY: 0.25));
             _step = "对比-放大复位";
             await StepAsync(async () => { await AssertCompareMagnifyResetAsync(routes); });
 
             // ── 滚轮 → 无缝放大：生产 UI 的触发路径（此前内核完整但没有任何 UI 入口）──
             _step = "对比-滚轮无缝放大";
-            cropApplied += await StepAsync<int>(async () => await AssertCompareWheelMagnifyAsync(routes, maxMode));
+            cropApplied += await StepAsync<int>(async () => await AssertCompareWheelMagnifyAsync(routes, maxShape));
 
             // ── 左右互换 / 格→路映射 ──
             _step = "对比-左右互换";
@@ -4454,7 +5196,7 @@ public partial class MainWindow : Window
 
             // ── 分辨率对齐模式（相对 / 像素级）──
             _step = "对比-对齐模式";
-            await StepAsync(async () => { await AssertCompareAlignModesAsync(routes, maxMode); });
+            await StepAsync(async () => { await AssertCompareAlignModesAsync(routes, maxShape); });
 
             // ── 模式变体：AB 竖 / ABC 三列（含"三列有两条竖线 ⇒ 两个手柄"）──
             _step = "对比-模式变体";
@@ -4465,19 +5207,37 @@ public partial class MainWindow : Window
             // 因此后面既有的"退出对比模式"断言（含 AssertCompareCropCleared）不受影响。
             cropApplied += await StepAsync<int>(async () => await AssertCompareOverlayAsync(routes, "叠加"));
 
+            // ── 布局编辑器（自由拼接）二级窗：**模态交互探针** ──
+            // 为什么单列一步：本项目对"覆盖窗口上的交互控件"从未实测（docs/30:189 P6），
+            // 编辑器整条路径都压在"模态窗上的按钮/画布点击能否正常交互"上 ⇒ 先量出读数再依赖。
+            await StepAsync(async () => { await AssertLayoutEditorAsync(routes); });
+
             // ── 模式家族入口（docs/31 阶段 3）：菜单 / 快捷键的三项入口必须真的可用 ──
             // 这一段专盯用户点名的 5~9 路场景：
             //   ① 分屏入口按路数收敛（≥4 路 → ABCD），且**只显示前 4 路**（第 5~9 路隐藏）；
             //   ② 网格入口退出对比模式 ⇒ **全部路数恢复可见**，排版与 GridLayout.ComputeGrid
             //      独立复算的结果一致（9 路 = 3×3）；
             //   ③ 退出后区域 / 覆盖层复原（本段末尾 + 下面的"对比-退出"各钉一次）。
-            // 期望值一律来自 Core 的纯函数（CoerceMode / CellCount / ComputeGrid），不回读 Grid 内部状态。
-            _step = "模式-分屏入口";
-            await StepAsync(async () => await SplitEntryUnit(routes));
+            // 期望值一律来自 Core 的纯函数（`GridPartition.CellCount` / `GridLayout.ComputeGrid`），不回读 Grid 内部状态。
+            // （原文写的是 `CoerceMode`，那个方法已随视图模式合并撤除 —— 注释比代码旧会误导下一次改动。）
+            _step = "模式-网格对比入口";
+            await StepAsync(async () => await GridCompareEntryUnit(routes));
 
             // ── 网格入口：必须退出对比模式，并把 2~9 路全部恢复成均匀网格 ──
             _step = "模式-网格入口";
             await StepAsync(async () => await GridEntryUnit(routes));
+
+            // ── #22 的第二臂：**均匀网格**（非对比态）下再跑一次放大镜坐标判据 ──
+            // 拼合排布把各路窗口原点都放到容器原点 ⇒ 上面那条 Δ 核对按定义失去鉴别力（判据自己会
+            // 打印"不适用"）。而它要抓的缺陷类（把 surface 局部坐标当容器坐标）只有在
+            // **各路原点互不重合**的布局里才可表达 —— 网格入口之后正是这个构型（9 路 3×3，
+            // 最后一格的原点离容器数百 DIP），所以牙齿挪到这里钉住。
+            _step = "放大镜浮窗坐标-均匀网格";
+            await StepAsync(async () =>
+            {
+                if (_compareActive) ExitCompareMode();   // 双保险：这一步必须在非对比态跑
+                await AssertMagnifierFollowsCursorAsync(routes, $"均匀网格 {routes} 路");
+            });
 
             // ── 视图模式一列（菜单顶部三项）：勾选 ↔ 真实状态 ↔ G/V/S 真实键盘路由 ──
             _step = "视图模式列";
@@ -4489,13 +5249,34 @@ public partial class MainWindow : Window
             _step = "分割线命中";
             await StepAsync(async () => await SplitLineHitUnit(routes));
 
+            // ── 拖动热路径：覆盖层自己的「合并提交 / 松手结算 / 宿主回灌」三臂 ──
+            // 上面所有拖动类判据都直接调宿主回调，绕开了这一段 ⇒ 这一段今天必须有测量。
+            // ── 拼合铺块：各路窗口铺满对比区、区域裁出自己那一块，几块严丝合缝拼回整幅 ──
+            // 这条是"网格对比"被纠正后的语义验收（旧排布每格显示缩小版整幅，拖线只在改尺寸）。
+            _step = "拼合铺块";
+            await StepAsync(async () =>
+            {
+                await EnterGridShapeAsync(maxShape.Cols, maxShape.Rows);
+                AssertMosaicTiling(routes, $"{maxShape.Cols}x{maxShape.Rows}");
+                AssertGdiHonorsRegion(routes, $"{maxShape.Cols}x{maxShape.Rows}");
+                // 尺寸判据只钉住"裁没裁"；"每格画的是不是自己那一路的画面"要比内容，
+                // 而内容判据在单素材下恒真 ⇒ 传了第二种素材才判，没传就登记未判（#29）。
+                AssertRouteContentsDiffer(routes, $"{maxShape.Cols}x{maxShape.Rows}", videoPath);
+
+            });
+
+            _step = "拖动热路径";
+            await StepAsync(async () => await DragCommitUnit(routes));
+
             // ── 路启用态：没占格的路必须停用（不解码/不呈现），切回全部占格时能恢复且同位 ──
             _step = "路启用态";
             await StepAsync(async () => await RouteActivityUnit(routes));
 
             _step = "对比-退出";
             ExitCompareMode();            await System.Threading.Tasks.Task.Delay(150);
-            if (_layoutOverlay is null || _layoutOverlay.IsOverlayVisible)
+            if (BenchKeepLayoutOverlayOnExit)
+                RecordSelfTestSkip("FC_KEEP_LAYOUTOVERLAY=1：本轮按住了 HideOverlay ⇒「退出后覆盖层已隐藏」未判");
+            else if (_layoutOverlay is null || _layoutOverlay.IsOverlayVisible)
                 throw new InvalidOperationException("退出后覆盖层仍可见（HideOverlay 未生效）");
             // 退出后必须回到既有均匀网格：格表覆盖被清空，且此前被隐藏的路重新可见。
             if (Grid.CellOverride is not null)
@@ -4534,7 +5315,15 @@ public partial class MainWindow : Window
             }
             else if (_stepFailures == 0)
             {
-                Console.WriteLine($"comparemodetest: 已执行项全部通过 ✓（另有 {_skippedUnits} 项被选择器跳过，**未验**）");
+                // 跳过有**两种**来源，以前一句"被选择器跳过"把它们混在一起 ⇒ 没设选择器的那一轮
+                // 会同时打出"未设选择器：全部验收点均执行"和"1 项被选择器跳过"两句自相矛盾的话，
+                // 而后者其实是"判据自己登记了没有鉴别力 / 素材不符"。两种都要点名报数。
+                var skippedInBody = _stepOutcomes.Count(o =>
+                    o.StartsWith("SKIP", StringComparison.Ordinal) && o.Contains("体内登记跳过"));
+                var skippedBySelector = _skippedUnits - skippedInBody;
+                Console.WriteLine($"comparemodetest: 已执行项全部通过 ✓（另有 {_skippedUnits} 项跳过：" +
+                                  $"选择器未选 {skippedBySelector} 项、判据自报「没鉴别力/素材不符」{skippedInBody} 项，" +
+                                  "**都不算验过**）");
                 code = 0;
             }
             else
@@ -4573,7 +5362,11 @@ public partial class MainWindow : Window
     // 参数本就是为此预留的。不给则走生产默认值（66.4 Mpx），此时能观察到"闸门拒绝"。
     //
     // 输出约定（供外部脚本解析，勿改格式）：
-    //   #BENCHPHASE name=<baseline|magnified> zoom=<z> t0=<epochMs> t1=<epochMs> wall=<s> fps=<n> ...
+    //   #BENCHPHASE name=<baseline|magnified> zoom=<z> t0=<epochMs> t1=<epochMs> wall=<s> fps=<n>
+    //               clock=<s> clockRatio=<0..> valid=<yes|NO> hitches=[..] presented=[..]
+    //     clockRatio = 媒体时钟推进 / 墙钟。<0.8 时 valid=NO ⇒ 素材跑到末尾或播放被 park，
+    //     那一档的 fps **不是吞吐读数**（2026-10-01：720p 派生件只有 12.0s，两阶段+预热就超，
+    //     z=2 阶段报 wall=8.08/clock=1.34，fps 因此虚低到个位）。bench 此时报 exit=4 SKIPPED。
     //   #BENCHGEOM zoom=<z> gate=<accept|reject> totalMpx=<n> estMpx=<n> windowPx=<w>x<h> ...
     private async System.Threading.Tasks.Task RunMagnifyBenchAsync(
         string videoPath, int routes, double zoom, int secondsPerPhase, double budgetMpx)
@@ -4631,7 +5424,7 @@ public partial class MainWindow : Window
             Console.WriteLine($"magnifybench: {routes} 路就绪 ✓");
 
             await System.Threading.Tasks.Task.Delay(600);
-            var modes = CompareLayout.AvailableModes(routes);
+            var shapes = GridPartition.ShapesFor(Math.Max(routes, Grid.Count));
 
             // 闸门的像素预算 = 对比区面积 × z² ⇒ 窗口大小直接决定闸门会不会放行。
             // 默认按用户配置恢复的窗口跑（真实形态）；置 _3FC_BENCH_MAXIMIZE=1 则先最大化，
@@ -4644,7 +5437,7 @@ public partial class MainWindow : Window
             }
 
             _step = "基准-进入对比";
-            EnterCompareMode(modes[modes.Count - 1]);
+            await EnterGridShapeAsync(shapes[^1].Cols, shapes[^1].Rows);
             await System.Threading.Tasks.Task.Delay(400);
 
             // 播放（不循环）：素材够长即可；用与 multitest 相同的入口
@@ -4689,7 +5482,7 @@ public partial class MainWindow : Window
                 return;
             }
 
-            var (deltas, fps) = await SampleBenchPhaseAsync("magnified", zoom, secondsPerPhase);
+            var (deltas, fps, magnifiedClockOk) = await SampleBenchPhaseAsync("magnified", zoom, secondsPerPhase);
 
             // ── 平移提交成本实测（docs/26 那条"不要逐帧 SetWindowRgn"当初是估算，没有数）──
             // 对比模式当前拖动是"松手才一次提交"，所以"实时提交到底贵不贵"从来没有读数；
@@ -4756,11 +5549,21 @@ public partial class MainWindow : Window
             }
 
             // 判据：放大后仍持续出帧。0 增长 = 渲染死了（卡死/崩溃前兆），如实报 1。
+            // ⚠ 但"0 增长"有两种成因，必须分开：**媒体时钟也没走** ⇒ 素材跑到末尾（夹具问题，
+            //   不是产品停滞）；**时钟照走而画面不出帧** ⇒ 真停滞。混在一起报会把 EOF 说成渲染故障。
             var stalledRoutes = deltas.Count(d => d <= 0);
             ResetCompareMagnify();
             UpdateLayout();
             await System.Threading.Tasks.Task.Delay(200);
 
+            if (!magnifiedClockOk)
+            {
+                Console.WriteLine(
+                    $"magnifybench: 放大后 {fps:F2} fps/路（**不采信**：媒体时钟没走满，见上面那条 ⚠）");
+                Console.WriteLine("magnifybench: 未完成（exit=4 SKIPPED）");
+                code = 4;
+                return;
+            }
             Console.WriteLine(
                 $"magnifybench: 放大后平均 {fps:F2} fps/路，停滞路数={stalledRoutes}/{deltas.Length}");
             if (stalledRoutes > 0)
@@ -4786,7 +5589,7 @@ public partial class MainWindow : Window
     /// 这是唯一能反映"真的在出帧"的指标（位置推进只说明解码线程在跑，可能是丢帧硬撑）。</para>
     /// <para>每 1s 采一次并检测"本区间内零增长"：单次零增长记一次 hitch（可能是渲染器切换的瞬时抖动），
     /// 而**整段零增长**才算停滞 —— 直接拿整段增量判 0 会把瞬时抖动误报成卡死。</para></summary>
-    private async System.Threading.Tasks.Task<(long[] deltas, double fps)> SampleBenchPhaseAsync(
+    private async System.Threading.Tasks.Task<(long[] deltas, double fps, bool clockAdvanced)> SampleBenchPhaseAsync(
         string name, double zoom, int seconds)
     {
         var t0 = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -4816,12 +5619,25 @@ public partial class MainWindow : Window
             deltas[i] = end[i].presented - start[i].presented;
         var avgFps = wall > 0 && deltas.Length > 0 ? deltas.Sum() / wall / deltas.Length : 0;
         var clockSec = (posEnd - posStart) / (double)TimeSpan.TicksPerSecond;
+        var clockRatio = wall > 0 ? clockSec / wall : 0;
+        // ⚠ **时钟没走满 ⇒ 这一档测的不是吞吐**：素材跑到末尾（本仓 720p 派生件正好 12.0s / 720 帧，
+        //   两阶段 + 预热就超了）或播放被 park。此时 presented 停止增长，fps 会读成个位数，
+        //   看起来像"放大让帧率崩了"。2026-10-01 实测：拼合与对照两臂的 z=2 阶段都报
+        //   wall=8.08 / clock=1.34~1.43 ⇒ 那两个 10.69 / 8.89 fps 全是 EOF 假信号。
+        //   它与"真停滞"要分开：**媒体时钟在走而画面不出帧**才是停滞（原判据），
+        //   **时钟自己没走**是夹具耗尽 ⇒ 判 SKIPPED，不报 fps。
+        var clockAdvanced = clockRatio >= 0.8;
 
         Console.WriteLine(
             $"#BENCHPHASE name={name} zoom={zoom} t0={t0} t1={t1} wall={wall:F2} fps={avgFps:F2} " +
-            $"clock={clockSec:F2} hitches=[{string.Join(",", hitches)}] presented=[{string.Join(",", deltas)}]");
+            $"clock={clockSec:F2} clockRatio={clockRatio:F2} valid={(clockAdvanced ? "yes" : "NO")} " +
+            $"hitches=[{string.Join(",", hitches)}] presented=[{string.Join(",", deltas)}]");
+        if (!clockAdvanced)
+            Console.WriteLine(
+                $"magnifybench: ⚠ 阶段 {name} 的媒体时钟只推进 {clockSec:F2}s / 墙钟 {wall:F2}s" +
+                " ⇒ 素材跑到末尾或播放被停，**这一档的 fps 不进任何结论**（换更长素材或缩短 -Seconds）");
         Console.Out.Flush();
-        return (deltas, avgFps);
+        return (deltas, avgFps, clockAdvanced);
     }
 
     /// <summary>打印本阶段的实际几何：**按 GetWindowRect 累加各路子 HWND 的真实像素**（这才是
@@ -4830,7 +5646,7 @@ public partial class MainWindow : Window
     private void ReportBenchGeometry(double zoom, bool accepted, int routes, double budgetOverride)
     {
         var scaling = TopLevel.GetTopLevel(Grid)?.RenderScaling ?? RenderScaling;
-        var cells = CompareLayout.ComputeCells(_compareMode, _compareSplit);
+        var cells = _partition.ComputeCells();
         double totalMpx = 0;
         var sizes = new System.Collections.Generic.List<string>();
         for (var i = 0; i < routes; i++)
@@ -4853,9 +5669,9 @@ public partial class MainWindow : Window
         Console.Out.Flush();
     }
 
-    /// <summary>断言覆盖层处于可用状态：已进入、可见、钩子已装、逐像素透明、模式/分割可读。
+    /// <summary>断言覆盖层处于可用状态：已进入、可见、钩子已装、逐像素透明、分区形状与手柄数可读且相符。
     /// 任一不满足即抛 —— 这些正是"接线是否真的生效"的判据，静默通过等于没验证。</summary>
-    private void AssertCompareOverlay(int routes, CompareMode expected)
+    private void AssertCompareOverlay(int routes, int cols, int rows)
     {
         if (!_compareActive)
             throw new InvalidOperationException("对比模式未进入（可能被 B3 fail-fast 自动退出，见上方日志）");
@@ -4880,15 +5696,24 @@ public partial class MainWindow : Window
             throw new InvalidOperationException(
                 "覆盖层未排在主窗口之上（顶层 Z 序）⇒ 分割线会被视频子 HWND 盖住（airspace 退化）");
 
-        if (overlay.Mode != expected)
-            throw new InvalidOperationException($"模式不符：{overlay.Mode} != {expected}");
-
-        var available = CompareLayout.AvailableModes(routes);
-        if (!available.Contains(overlay.Mode))
-            throw new InvalidOperationException($"{routes} 路下 {overlay.Mode} 不在可用集合 [{string.Join(", ", available)}]");
+        // 覆盖层持有的必须就是宿主那份分区（两条路径共用一份几何；各算一份迟早漂移，
+        // 表现是"线条在动、画面不动"）。形状与手柄数量按夹具独立算一遍再比，不回读宿主字段。
+        var overlayPartition = overlay.Partition;
+        if (overlayPartition.Cols != cols || overlayPartition.Rows != rows)
+            throw new InvalidOperationException(
+                $"覆盖层形状 {overlayPartition.Cols}x{overlayPartition.Rows} != 期望 {cols}x{rows}");
+        var expectedHandles = Math.Max(0, cols - 1) + Math.Max(0, rows - 1);
+        if (overlayPartition.HandleCount != expectedHandles)
+            throw new InvalidOperationException(
+                $"{cols}x{rows} 应有 {expectedHandles} 条可拖分割线，覆盖层报 {overlayPartition.HandleCount}");
+        if (overlay.HandlePositions().Length != expectedHandles)
+            throw new InvalidOperationException(
+                $"覆盖层实际画了 {overlay.HandlePositions().Length} 个手柄，规则要求 {expectedHandles} 个");
 
         Console.WriteLine(
-            $"comparemodetest: 模式={overlay.Mode} 分割=({overlay.Split.X:F3},{overlay.Split.Y:F3}) " +
+            $"comparemodetest: 分区={overlayPartition.Cols}x{overlayPartition.Rows} " +
+            $"手柄={expectedHandles} 边界=[{string.Join(" ", overlay.HandlePositions().Select(
+                hp => $"({hp.X:F3},{hp.Y:F3})"))}] " +
             $"透明={overlay.AchievedTransparency} 钩子={overlay.HitTestHookInstalled} 可见={overlay.IsOverlayVisible} " +
             $"owner={overlay.OwnerHwndAttached} topmost={overlay.HasTopmostStyle} " +
             $"高于主窗口={overlay.IsAboveHostInZOrder} ✓");
@@ -4899,14 +5724,15 @@ public partial class MainWindow : Window
     /// <para>判据（对每一路逐一核对，不看聚合值）：</para>
     /// <list type="bullet">
     /// <item><description>第 i 路（i &lt; 格数）可见，且其 <c>Bounds</c> 等于
-    /// <see cref="CompareLayout.ComputeCells"/> 第 i 格乘上对比区实际尺寸（含与
-    /// <c>ArrangeOverride</c> 相同的 1px 内缩）——容差 1 DIP，吸收浮点与像素对齐误差；</description></item>
-    /// <item><description>第 i 路（i ≥ 格数）被隐藏 —— 这是"格数 &lt; 路数时只显示前 N 路"策略的断言。</description></item>
+    /// <see cref="GridPartition.ComputeCells"/> 第 i 格乘上对比区实际尺寸（含与
+    /// <c>ArrangeOverride</c> 相同的 1px 内缩）——容差 1 DIP，吸收浮点与像素对齐误差；</description>
+    /// <item><description>合并态下格数 ≡ lane 数，所以"<b>每一路都可见</b>"本身就是判据：
+    /// 一旦哪天又退回"固定 2~4 格、多余路隐藏"，这里立刻红。</description></item>
     /// </list>
     ///
-    /// <para>期望值由 <see cref="CompareLayout.ComputeCells"/> <b>独立复算</b>，不是回读 Grid 内部状态，
+    /// <para>期望值由 <see cref="GridPartition.ComputeCells"/> <b>独立复算</b>，不是回读 Grid 内部状态，
     /// 因此能真正发现"格表没被用于布局"（Bounds 仍是均匀网格）这类回归。</para></summary>
-    private void AssertCellsDriveLayout(int routes, CompareMode mode, string label)
+    private void AssertCellsDriveLayout(int routes, string label)
     {
         UpdateLayout(); // 强制一次布局，把 InvalidateMeasure 落地
 
@@ -4915,24 +5741,47 @@ public partial class MainWindow : Window
         if (w <= 0 || h <= 0)
             throw new InvalidOperationException($"{label}：对比区尺寸非法 {w:F1}x{h:F1}");
 
-        var cells = CompareLayout.ComputeCells(mode, _compareSplit);
+        if (_compareOverlayActive)
+            throw new InvalidOperationException(
+                $"{label}：左右拉动态下格表是「两路铺满」，不该走本判据（另有揭示区断言）");
+
+        var cells = _partition.ComputeCells();
+        // 拼合模式下"格"不再是窗口的尺寸，而是这一路该露出的**区域** ⇒ 各路窗口都铺满对比区，
+        // Bounds 不再携带"显示在哪一块"。判据跟着语义换成两层：① 窗口 == 整容器（拼合排布生效）；
+        // ② 回读窗口区域 == 它那一格（格表真的决定了露出哪一块）。②需要区域已下发 ⇒ 本判据
+        // 自己走一次生产入口 ApplyCompareCrop（内部按区域去重，几何没变时是一次字典查询）。
+        var mosaic = Grid.MosaicWindows;
+        if (mosaic) ApplyCompareCrop();
         for (var i = 0; i < routes; i++)
         {
             var s = Grid.GetSurface(i) ?? throw new InvalidOperationException($"{label}：第 {i} 路缺失");
 
             if (i >= cells.Length)
             {
-                if (s.IsVisible)
-                    throw new InvalidOperationException(
-                        $"{label}：第 {i} 路超出 {mode} 的 {cells.Length} 格，应被隐藏却仍可见");
-                continue;
+                // 合并态走不到这里：格数 ≡ lane 数。真走到了就是格数规则被改坏，必须点名。
+                throw new InvalidOperationException(
+                    $"{label}：第 {i} 路超出 {_partition.Cols}x{_partition.Rows} 的 {cells.Length} 格 —— " +
+                    "网格对比的基准是一路一格，不该有路被挤到格表之外");
             }
 
             if (!s.IsVisible)
-                throw new InvalidOperationException($"{label}：第 {i} 路应可见（{mode} 第 {i} 格）却不可见");
+                throw new InvalidOperationException(
+                    $"{label}：第 {i} 路应可见（{_partition.Cols}x{_partition.Rows} 第 {i} 格）却不可见");
 
-            var c = cells[i];
-            var exp = ExpectedBounds(c, w, h);
+            if (mosaic)
+            {
+                var scaling = TopLevel.GetTopLevel(Grid)?.RenderScaling ?? RenderScaling;
+                var gotWin = CompareCropPlanner.ToPhysicalRect(s.Bounds, scaling);
+                var expWin = CompareCropPlanner.ToPhysicalRect(new Rect(0, 0, w, h), scaling);
+                if (!BlockClose(gotWin, expWin))
+                    throw new InvalidOperationException(
+                        $"{label}：第 {i} 路窗口 {gotWin} 未铺满对比区 {expWin} ⇒ 拼合排布没生效，" +
+                        "这一路显示的还是「缩小版整幅」而不是自己那一块");
+                AssertRouteBlockAt(i, CellOfRoute(i, cells, label), label);
+                continue;
+            }
+
+            var exp = ExpectedBounds(CellOfRoute(i, cells, label), w, h);
             var got = s.Bounds;
             if (!BoundsClose(got, exp))
                 throw new InvalidOperationException(
@@ -4940,8 +5789,10 @@ public partial class MainWindow : Window
         }
 
         Console.WriteLine(
-            $"comparemodetest: [{label}] 格表驱动布局 ✓ 格数={cells.Length} 对比区={w:F1}x{h:F1} " +
-            $"分割=({_compareSplit.X:F3},{_compareSplit.Y:F3}) 各路 Bounds 与 ComputeCells 一致");
+            $"comparemodetest: [{label}] 格表驱动布局 ✓ 形状={_partition.Cols}x{_partition.Rows} " +
+            $"格数={cells.Length} 对比区={w:F1}x{h:F1} " +
+            $"手柄={_partition.HandleCount} 边界=[{string.Join(" ", _partition.HandlePositions().Select(
+                hp => $"({hp.X:F3},{hp.Y:F3})"))}] 各路{(mosaic ? "窗口铺满对比区且区域==格" : " Bounds 与 ComputeCells 一致")}");
     }
 
     /// <summary>把归一化格矩形换算成 <see cref="CompareGridView"/> 实际排布出的 DIP 矩形：
@@ -4950,16 +5801,84 @@ public partial class MainWindow : Window
         new(c.X * areaW + 1, c.Y * areaH + 1,
             Math.Max(0, c.Width * areaW - 2), Math.Max(0, c.Height * areaH - 2));
 
+    // ══════════ 拼合（mosaic）下的统一观测量：第 i 路"实际露出的那块" ══════════
+    //
+    // 排布语义换了，判据的**观测量**必须跟着换：旧的是"窗口 == 格"，格表直接写在 Bounds 上；
+    // 拼合是"窗口 == 整对比区 + 区域裁出自己那一块"，各路 Bounds 全都相同、不再携带位置信息。
+    // 于是"这一路显示在哪一块"只能从 Win32 窗口区域回读 —— 下面三个 helper 是这一件事的
+    // 唯一表述点，所有按格判定的单元都走它，避免每个单元各写一份回读。
+
+    /// <summary>路 → 它应当占的那一格。必须用 <see cref="CompareGridView.CellIndexOfRoute"/>
+    /// 反查（与生产 <c>ApplyCompareCrop</c> 同一个方向）：互换 / 轮换之后"格↔路"不再是恒等，
+    /// 按路号直取 <c>cells[i]</c> 会把判据钉在错的块上（2026-10-01 的实读判红：2x3 下第 0 路
+    /// 回读 Y=712、期望 Y=0）。</summary>
+    private CellRect CellOfRoute(int route, CellRect[] cells, string label)
+    {
+        var index = Grid.CellIndexOfRoute(route);
+        if (index < 0 || index >= cells.Length)
+            throw new InvalidOperationException(
+                $"{label}：第 {route} 路不在 {_partition.Cols}x{_partition.Rows} 的 {cells.Length} 格里" +
+                $"（映射={(Grid.CellRoute is { } r ? string.Join(",", r) : "恒等")}）");
+        return cells[index];
+    }
+
+    /// <summary>某一路<b>实际露出</b>的容器坐标物理矩形。
+    /// <para>拼合：窗口原点 + <c>GetWindowRgnBox</c> 回读的区域（区域是唯一能表达"露出哪一块"的
+    /// 观测量）；回读到"无区域"时原样返回窗口矩形 —— 拼合下那就是"这一路铺满全屏、盖住邻居"，
+    /// 由调用方的判据点名，不在这里替它辩解。</para>
+    /// <para>非拼合（左右拉动、或未来的整窗排布）：窗口本身就是那一块，区域只裁 Avalonia
+    /// 向外取整的 ≤1px 外扩 ⇒ 直接返回窗口矩形。</para></summary>
+    private Rect32 RouteVisibleRectPx(int route, double scaling, string label)
+    {
+        var s = Grid.GetSurface(route) ?? throw new InvalidOperationException($"{label}：第 {route} 路缺失");
+        if (s.Hwnd == nint.Zero)
+            throw new InvalidOperationException($"{label}：第 {route} 路子 HWND 未创建，区域无从回读");
+        var win = CompareCropPlanner.ToPhysicalRect(s.Bounds, scaling);
+        if (!Grid.MosaicWindows) return win;
+        var type = ReadWindowRegion(s.Hwnd, out var box);
+        return type is RegionTypeSimple or RegionTypeComplex
+            ? new Rect32(win.X + box.X, win.Y + box.Y, box.Width, box.Height)
+            : win;
+    }
+
+    /// <summary>某一路<b>应当露出</b>的容器坐标物理矩形 = 它那一格。
+    /// 口径与生产同源但**分别复算**：拼合用不留缝的 <c>MosaicRegionDip</c>（留缝会在两块之间
+    /// 露出父窗底色，拼合当场破功），其余用内缩 1px 的 <c>CellToContainerDip</c>。</summary>
+    private Rect32 ExpectedBlockPx(CellRect cell, double areaW, double areaH, double scaling)
+        => CompareCropPlanner.ToPhysicalRect(
+            Grid.MosaicWindows ? CompareCropPlanner.MosaicRegionDip(cell, areaW, areaH)
+                               : CompareCropPlanner.CellToContainerDip(cell, areaW, areaH), scaling);
+
+    /// <summary>物理矩形比较，容差 1px：期望与实际都经 <see cref="CompareCropPlanner.ToPhysicalRect"/>
+    /// 同一套取整，1px 只吸收 DIP→物理的取整残差，不吸收几何错（几何错在这里是整块级别）。</summary>
+    private static bool BlockClose(Rect32 got, Rect32 exp) =>
+        Math.Abs(got.X - exp.X) <= 1 && Math.Abs(got.Y - exp.Y) <= 1 &&
+        Math.Abs(got.Width - exp.Width) <= 1 && Math.Abs(got.Height - exp.Height) <= 1;
+
+    /// <summary>断言：第 <paramref name="route"/> 路实际露出的块 == 格表里它那一格。
+    /// 拼合与非拼合共用（差异全在 <see cref="RouteVisibleRectPx"/> 与
+    /// <see cref="ExpectedBlockPx"/> 两个口径里）。</summary>
+    private void AssertRouteBlockAt(int route, CellRect cell, string label)
+    {
+        var scaling = TopLevel.GetTopLevel(Grid)?.RenderScaling ?? RenderScaling;
+        var got = RouteVisibleRectPx(route, scaling, label);
+        var exp = ExpectedBlockPx(cell, Grid.Bounds.Width, Grid.Bounds.Height, scaling);
+        if (!BlockClose(got, exp))
+            throw new InvalidOperationException(
+                $"{label}：第 {route} 路露出的块 {got} != 格表期望 {exp}" +
+                $"（{(Grid.MosaicWindows ? "窗口区域没跟着格表迁" : "窗口没跟着格表挪")}）");
+    }
+
     /// <summary>DIP 矩形比较：容差 1 DIP，吸收浮点与像素对齐误差。</summary>
     private static bool BoundsClose(Rect got, Rect exp) =>
         Math.Abs(got.X - exp.X) <= 1.0 && Math.Abs(got.Y - exp.Y) <= 1.0 &&
         Math.Abs(got.Width - exp.Width) <= 1.0 && Math.Abs(got.Height - exp.Height) <= 1.0;
 
-    /// <summary>归一化格矩形是否相等（浮点容差远小于 <see cref="CompareLayout.Epsilon"/> 量级）。</summary>
+    /// <summary>归一化格矩形是否相等（浮点容差远小于 <see cref="GridPartition.Epsilon"/> 量级）。</summary>
     private static bool CellEquals(CellRect a, CellRect b) =>
-        Math.Abs(a.X - b.X) <= CompareLayout.Epsilon && Math.Abs(a.Y - b.Y) <= CompareLayout.Epsilon &&
-        Math.Abs(a.Width - b.Width) <= CompareLayout.Epsilon &&
-        Math.Abs(a.Height - b.Height) <= CompareLayout.Epsilon;
+        Math.Abs(a.X - b.X) <= GridPartition.Epsilon && Math.Abs(a.Y - b.Y) <= GridPartition.Epsilon &&
+        Math.Abs(a.Width - b.Width) <= GridPartition.Epsilon &&
+        Math.Abs(a.Height - b.Height) <= GridPartition.Epsilon;
 
     // ══════════ #22：放大镜浮窗坐标换算验证 ══════════
     //
@@ -5058,10 +5977,13 @@ public partial class MainWindow : Window
                 $"{label}：容器 {containerSize} 放不下放大镜 {MagnifierOverlay.WidthPx}×{MagnifierOverlay.HeightPx}，" +
                 "钳制会掩盖坐标错误，本环境无法判别");
 
-        // 选原点离容器原点最远的一路
+        // 选原点离容器原点最远的一路。⚠ 多路时**必须排除参照那一路本身**（下面按 GetSurface(0) 当参照）：
+        // 拼合排布下所有路的原点都 == 容器原点，"最远"会退化成第 0 路，于是 target == reference、
+        // 整个 Win32 核对被 ReferenceEquals 挡掉 ⇒ 这一步**静默什么都不判**。从第 1 路起选，
+        // 两条路都会走到判据：均匀网格给出数百 DIP 的真核对，拼合给出"不适用"的明说。
         PlayerSurface? target = null;
         var targetOrigin = default(Point);
-        for (var i = 0; i < routes; i++)
+        for (var i = routes > 1 ? 1 : 0; i < routes; i++)
         {
             var s = Grid.GetSurface(i);
             if (s is null || !s.IsVisible || s.Bounds.Width <= 0 || s.Bounds.Height <= 0) continue;
@@ -5095,16 +6017,45 @@ public partial class MainWindow : Window
                 if (Math.Abs(avDelta.X) + Math.Abs(avDelta.Y) > 20)
                 {
                     if (Math.Abs(avDelta.X - winDelta.X) > 3 || Math.Abs(avDelta.Y - winDelta.Y) > 3)
+                    {
+                        // 判红之前先补一段**只加读数、不改判决**的有界重测。
+                        // 起因：这条红 10-03 一天里中了 4/24 轮（不是先前记的 1/36），
+                        // 而且三轮的读数**逐字节相同**（Avalonia Δ=(1024.7,474.7) Win32 Δ=(-1.3,-1.3)）
+                        // ⇒ 不像竞态，像确定性状态。但"判据读得太早（几何晚到）"与"产品真没落地"
+                        // 是两种完全不同的修法，光看这一行分不开（docs/50 §三十一之四）。
+                        // 红照旧判 —— 不拿"再等等就好了"把一个真缺陷买成绿灯。
+                        var late = winDelta;
+                        var landedAt = 0;
+                        for (var pump = 1; pump <= 8; pump++)
+                        {
+                            await System.Threading.Tasks.Task.Delay(50);
+                            UpdateLayout();
+                            var q0 = ReadWindowRectPx(reference.Hwnd);
+                            var q1 = ReadWindowRectPx(target.Hwnd);
+                            if (!q0.IsValid || !q1.IsValid) break;
+                            late = new Point((q1.X - q0.X) / scaling, (q1.Y - q0.Y) / scaling);
+                            if (Math.Abs(late.X - avDelta.X) <= 3 && Math.Abs(late.Y - avDelta.Y) <= 3)
+                            { landedAt = pump; break; }
+                        }
                         throw new InvalidOperationException(
                             $"{label}：TranslatePoint 与 GetWindowRect 给出的子窗口相对位移不符：" +
                             $"Avalonia Δ=({avDelta.X:F1},{avDelta.Y:F1}) Win32 Δ=({winDelta.X:F1},{winDelta.Y:F1})" +
-                            "（子 HWND 未按 Bounds 落地 ⇒ 换算所依赖的几何不可信）");
+                            $"｜再泵布局 8 次后 Win32 Δ=({late.X:F1},{late.Y:F1})" +
+                            (landedAt > 0 ? $"（第 {landedAt} 次落地 ⇒ 几何晚到，判据读得太早）"
+                                          : "（8 次仍未落地 ⇒ 子 HWND 真没按 Bounds 落地）") +
+                            "；换算所依赖的几何不可信");
+                    }
                     Log($"   Win32 核对 ✓ 子窗口相对位移 Avalonia=({avDelta.X:F1},{avDelta.Y:F1}) " +
                         $"== Win32=({winDelta.X:F1},{winDelta.Y:F1})");
                 }
                 else
                 {
-                    Log($"   ⚠ 两路相对位移仅 ({avDelta.X:F1},{avDelta.Y:F1}) DIP，过小无法判别，跳过 Win32 核对");
+                    // 明写"不适用"而不是"跳过"：Δ≈0 在**拼合排布**下是构造性的（各路窗口原点 == 容器原点），
+                    // 不是"这环境测不了"。那条缺陷类（把 surface 局部坐标当容器坐标）只有在各路原点
+                    // 互不重合的布局里可表达 ⇒ 同一判据在剧本里另有一次跑在**均匀网格**上（那里有牙齿）。
+                    Log($"   不适用：两路相对位移仅 ({avDelta.X:F1},{avDelta.Y:F1}) DIP —— " +
+                        "拼合排布下各路窗口原点就是容器原点，本核对无鉴别力；" +
+                        "牙齿在「放大镜浮窗坐标-均匀网格」那一步（各路原点相差数百 DIP）");
                 }
             }
             else
@@ -5244,35 +6195,46 @@ public partial class MainWindow : Window
             Log("   ⚠ 放大镜与任何视频面矩形都不相交，本场景不判别 airspace 遮挡（不静默当通过）");
 
         // ④ 自愈验证：给"补插"装牙。
-        //    为什么要这一断言：条件补插上线后连跑 20 轮全绿、且 补插次数 恒为 0 ⇒ 现实的
-        //    Z 序反转一次都没发生，"全绿"证明不了兜底路径可用（无牙/未生效一类）。
-        //    夹具用**已知必然造成反转**的那次调用：SetWindowPos 的 hWndInsertAfter 语义是
-        //    "插到谁之后（=之下）"，把主窗句柄传进去就是把覆盖窗亲手塞到主窗底下
-        //    （实测：那样跑的批次 12 次读数 11 次 Below，对照基线 3/22）——比现实更苛刻。
-        //    ⚠ 变异验牙：把 ReassertAboveOwner 里的 HWND_TOP 换成主窗句柄，本断言必须判红。
-        var beforeReassert = _magnifierWindow.ZOrderReasserts;
-        if (!SetWindowPos(overlayHwnd, mainHwnd, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE))
-            throw new InvalidOperationException(
-                $"{label}：注入失败（SetWindowPos 返回 false）⇒ 夹具没落地，本断言无牙，不能算通过。");
-        var injected = _magnifierWindow.QueryZOrderPosition();
-        if (injected != Controls.MagnifierOverlayWindow.ZOrderPosition.Below)
-            throw new InvalidOperationException(
-                $"{label}：注入后覆盖窗读到的不是 Below 而是 {injected} ⇒ 夹具失效，本断言无牙，不能算通过。");
-        // 只走真实产品路径（指针移动 → UpdateAt → PresentationChanged → 宿主的 ShowOverlay），
-        // 绝不在这里直接调 ReassertAboveOwner —— 那等于我自己叫我修，测不出接线是否成立。
-        Magnifier.UpdateAt(target, local, scaling);
-        Dispatcher.UIThread.RunJobs();
-        var afterHeal = _magnifierWindow.QueryZOrderPosition();
-        Log($"   自愈取证：注入后={injected} 走产品路径后={afterHeal} " +
-            $"补插次数 {beforeReassert}→{_magnifierWindow.ZOrderReasserts}");
-        if (afterHeal != Controls.MagnifierOverlayWindow.ZOrderPosition.Above)
-            throw new InvalidOperationException(
-                $"{label}：覆盖窗被压到主窗之下后，走一遍产品路径仍未回到主窗之上（P1-4 会在真机发生）——" +
-                "查 MagnifierOverlayWindow.ReassertAboveOwner 的插入点（必须 HWND_TOP，不是 owner 句柄）。");
-        if (_magnifierWindow.ZOrderReasserts == beforeReassert)
-            throw new InvalidOperationException(
-                $"{label}：Z 序虽已回到主窗之上，但补插计数未动 ⇒ 是别处（或系统自己）修的序，" +
-                "本产品兜底路径并未生效，判据不算通过。");
+        //    ⚠ 测量档 <c>FC_SKIP_ZINJECT=1</c> 只把这一段拿掉（其余照跑）⇒ 单变量比崩溃产出率。
+        //    跳过时**登记为未判**，绝不允许悄悄算通过。
+        void SelfHealArm()
+        {
+            // ④ 自愈验证：给"补插"装牙。
+            //    为什么要这一断言：条件补插上线后连跑 20 轮全绿、且 补插次数 恒为 0 ⇒ 现实的
+            //    Z 序反转一次都没发生，"全绿"证明不了兜底路径可用（无牙/未生效一类）。
+            //    夹具用**已知必然造成反转**的那次调用：SetWindowPos 的 hWndInsertAfter 语义是
+            //    "插到谁之后（=之下）"，把主窗句柄传进去就是把覆盖窗亲手塞到主窗底下
+            //    （实测：那样跑的批次 12 次读数 11 次 Below，对照基线 3/22）——比现实更苛刻。
+            //    ⚠ 变异验牙：把 ReassertAboveOwner 里的 HWND_TOP 换成主窗句柄，本断言必须判红。
+            var beforeReassert = _magnifierWindow.ZOrderReasserts;
+            if (!SetWindowPos(overlayHwnd, mainHwnd, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE))
+                throw new InvalidOperationException(
+                    $"{label}：注入失败（SetWindowPos 返回 false）⇒ 夹具没落地，本断言无牙，不能算通过。");
+            var injected = _magnifierWindow.QueryZOrderPosition();
+            if (injected != Controls.MagnifierOverlayWindow.ZOrderPosition.Below)
+                throw new InvalidOperationException(
+                    $"{label}：注入后覆盖窗读到的不是 Below 而是 {injected} ⇒ 夹具失效，本断言无牙，不能算通过。");
+            // 只走真实产品路径（指针移动 → UpdateAt → PresentationChanged → 宿主的 ShowOverlay），
+            // 绝不在这里直接调 ReassertAboveOwner —— 那等于我自己叫我修，测不出接线是否成立。
+            Magnifier.UpdateAt(target, local, scaling);
+            Dispatcher.UIThread.RunJobs();
+            var afterHeal = _magnifierWindow.QueryZOrderPosition();
+            Log($"   自愈取证：注入后={injected} 走产品路径后={afterHeal} " +
+                $"补插次数 {beforeReassert}→{_magnifierWindow.ZOrderReasserts}");
+            if (afterHeal != Controls.MagnifierOverlayWindow.ZOrderPosition.Above)
+                throw new InvalidOperationException(
+                    $"{label}：覆盖窗被压到主窗之下后，走一遍产品路径仍未回到主窗之上（P1-4 会在真机发生）——" +
+                    "查 MagnifierOverlayWindow.ReassertAboveOwner 的插入点（必须 HWND_TOP，不是 owner 句柄）。");
+            if (_magnifierWindow.ZOrderReasserts == beforeReassert)
+                throw new InvalidOperationException(
+                    $"{label}：Z 序虽已回到主窗之上，但补插计数未动 ⇒ 是别处（或系统自己）修的序，" +
+                    "本产品兜底路径并未生效，判据不算通过。");
+        }
+        if (BenchSkipMagnifierZInject)
+            RecordSelfTestSkip("FC_SKIP_ZINJECT=1 ⇒ 不执行「把覆盖窗注入到主窗之下 + 走产品路径自愈」那一段"
+                + "（§十八 的对照臂）；本步除它以外没有别的判别内容 ⇒ 记为未判，不是通过");
+        else
+            SelfHealArm();
 
         Magnifier.HideOverlay();
         Log($"✅ 放大镜浮窗坐标 ✓ {label}：surface {target.Index} 原点=({targetOrigin.X:F1},{targetOrigin.Y:F1}) " +
@@ -5301,7 +6263,7 @@ public partial class MainWindow : Window
         var w = Grid.Bounds.Width;
         var h = Grid.Bounds.Height;
         var scaling = TopLevel.GetTopLevel(Grid)?.RenderScaling ?? RenderScaling;
-        var cells = CompareLayout.ComputeCells(_compareMode, _compareSplit);
+        var cells = _partition.ComputeCells();
         var applied = 0;
 
         for (var i = 0; i < routes; i++)
@@ -5310,8 +6272,11 @@ public partial class MainWindow : Window
             if (s.Hwnd == nint.Zero)
                 throw new InvalidOperationException($"{label}：第 {i} 路子 HWND 未创建，裁剪无从验证");
 
-            // 格数 < 路数时（如 4 路用 AB）多余的路被隐藏，它们不该有区域。
-            if (!s.IsVisible || i >= cells.Length)
+            // 该路显示在哪一格由"格→路"映射决定（互换 / 轮换之后不是第 i 格）。
+            // 按路号直取 cells[i] 会拿别的路的格当期望（2026-10-01 实读判红：2x3 下第 0 路
+            // 回读 Y=712、期望 Y=0 —— 红的是判据，不是产品）。
+            var cellIndex = Grid.CellIndexOfRoute(i);
+            if (!s.IsVisible || cellIndex < 0 || cellIndex >= cells.Length)
             {
                 var hidden = ReadWindowRegion(s.Hwnd, out var hiddenBox);
                 if (hidden != RegionTypeError)
@@ -5321,8 +6286,12 @@ public partial class MainWindow : Window
             }
 
             // 期望值独立复算（与生产代码同一条换算路径，但输入来自公开几何）
-            var cellPx = CompareCropPlanner.ToPhysicalRect(
-                CompareCropPlanner.CellToContainerDip(cells[i], w, h), scaling);
+            // 拼合模式下区域口径是**不留缝**的 MosaicRegionDip（与生产同一函数，见其注释：
+            // 留缝会在两块之间露出父窗底色，拼合当场破功）。
+            var regionDip = Grid.MosaicWindows
+                ? CompareCropPlanner.MosaicRegionDip(cells[cellIndex], w, h)
+                : CompareCropPlanner.CellToContainerDip(cells[cellIndex], w, h);
+            var cellPx = CompareCropPlanner.ToPhysicalRect(regionDip, scaling);
             var windowPx = CompareCropPlanner.ToPhysicalRect(s.Bounds, scaling);
             var plan = CompareCropPlanner.Plan(windowPx, cellPx);
             var type = ReadWindowRegion(s.Hwnd, out var box);
@@ -5355,8 +6324,11 @@ public partial class MainWindow : Window
 
         Console.WriteLine(
             $"comparemodetest: [{label}] 裁剪接线已走通 ✓ {applied}/{cells.Length} 路设了区域且回读一致" +
-            $"（区域 == 格在窗口内的位置；0 路表示该几何下窗口恰好等于格、无需裁剪；" +
-            $"被裁掉的是 Avalonia 向外取整产生的 ≤1px 外扩）；缩放={scaling:0.##} 对比区={w:F1}x{h:F1}DIP");
+            (Grid.MosaicWindows
+                ? "（拼合：区域 == 本格，窗口越界部分全部裁掉 ⇒ 几块拼回一整幅）"
+                : "（区域 == 格在窗口内的位置；0 路表示该几何下窗口恰好等于格、无需裁剪；" +
+                  "被裁掉的是 Avalonia 向外取整产生的 ≤1px 外扩）") +
+            $"；缩放={scaling:0.##} 对比区={w:F1}x{h:F1}DIP");
         return applied;
     }
 
@@ -5435,11 +6407,23 @@ public partial class MainWindow : Window
         if (cleared != RegionTypeError)
             throw new InvalidOperationException($"{label}：Clear 后仍有区域 type={cleared} box={leftover}");
 
+        // 本单元绕过了 ApplyCropRegion 去清 OS 区域，而 _compareCropApplied 还记着上一个方案 ⇒
+        // 生产入口的去重会认为"已经设过了"而不再下发。旧的排布下这只是 ≤1px 的外扩回归（看不出来），
+        // 拼合模式下"没有区域"= 这一路铺满整幅、盖住邻居，且后面每个按区域回读的单元都会跟着错。
+        // 所以先把这条账抹掉，再走一次生产入口把区域补回本格。
+        _compareCropApplied.Remove(0);
+        ApplyCompareCrop();
+        if (Grid.MosaicWindows && ReadWindowRegion(hwnd, out var restored) == RegionTypeError)
+            throw new InvalidOperationException(
+                $"{label}：端到端探针清完区域后，生产入口没有把第 0 路的区域补回来 " +
+                "（拼合模式下这一路此后铺满整幅，后续单元的读数都不可信）");
+
         Console.WriteLine(
             $"comparemodetest: [{label}] SetWindowRgn 端到端 ✓ " +
-            $"格={cellDip.Width:F0}x{cellDip.Height:F0}DIP → {cellPx.Width}x{cellPx.Height}px（缩放 {scaling:0.##}）；" +
-            $"放大窗口 {bigPx.Width}x{bigPx.Height}px → 下发区域 {r}（= 格在窗口内的位置）回读一致；" +
-            $"Clear 后 type={cleared}(0=ERROR=无区域)");
+            $"基准矩形（第 0 路当前窗口）{cellDip.Width:F0}x{cellDip.Height:F0}DIP → " +
+            $"{cellPx.Width}x{cellPx.Height}px（缩放 {scaling:0.##}）；" +
+            $"按其 2 倍造出放大窗口 {bigPx.Width}x{bigPx.Height}px → 下发区域 {r}（= 基准矩形在窗口内的位置）" +
+            $"回读一致；Clear 后 type={cleared}(0=ERROR=无区域)");
     }
 
     // GetWindowRgn / GetRgnBox 的返回码（wingdi.h）
@@ -5486,6 +6470,298 @@ public partial class MainWindow : Window
             $"超预算({CompareMagnifyPixelBudget / 1e6:0.#}Mpx) 拒绝 / z=1 等价关闭");
     }
 
+    /// <summary>当前路数与对比区尺寸下<b>买得起</b>的放大档（封顶 2.0，低于 1.05 直接判红）。
+    ///
+    /// <para>推导与生产闸门同一条算术，但由判据<b>自己</b>从公开几何复算、不回读实现的中间量。
+    /// 基准<b>随实际排布变</b>（这条在对照臂上错过一次：写死拼合口径会让非拼合臂判红"闸门失效"）：
+    /// <b>拼合</b>下每路窗口 == 整个对比区 ⇒ <c>总像素 = 路数 × 对比区面积 × z²</c>；
+    /// <b>非拼合</b>（对照臂 / 历史形态）每路窗口 == 自己那一格，而 Σ格 == 对比区 ⇒
+    /// <c>总像素 = 对比区面积 × z²</c>，与路数无关。两者都须 ≤
+    /// <see cref="CompareMagnifyPixelBudget"/> ⇒ 解出 z。乘 0.95 是安全系数：估算取的是整数面积，
+    /// 真实排布有 ≤1px 的取整差，贴着边界跑会随窗口尺寸抖动而随机被拒。</para>
+    ///
+    /// <para><b>为什么判据的倍率要跟着预算走</b>：这几条单元验的是<b>机制</b>（窗口被排到 z 倍、
+    /// 区域回读等于换算值、OS 窗口真的搬到那个尺寸、块落在正确那一格），不是某个写死的倍率。
+    /// 拼合把基线像素抬了一个 N 倍 ⇒ 本机 9 路 z=2 需要 88.6 Mpx、超过 66.4 Mpx 出货预算，
+    /// 那时"被闸门拒绝并写明原因"才是正确行为。所以几何判据按买得起的最大档跑，
+    /// 另由 <see cref="AssertMagnifyBudgetRefusal"/> 钉住"买不起的那一档确实被拒"。</para>
+    ///
+    /// <para>各路等分辨率 ⇒ 相对/像素级对齐的有效倍率相同（z_i = z），本式对两者都成立；
+    /// 夹具本来就是同一份素材开 N 路。若哪天夹具改成混分辨率，像素级对齐下还要逐路再乘
+    /// <c>(W_i/minW)²</c>（见 <see cref="CompareCropPlanner.AlignedZoom"/>），届时这里必须跟着改。</para></summary>
+    private double AffordableMagnifyZoom(int routes)
+    {
+        var wDip = Grid.Bounds.Width;
+        var hDip = Grid.Bounds.Height;
+        if (wDip <= 0 || hDip <= 0) return 2.0;   // 布局未落地：调用方自己会因尺寸非法判红，这里不替它决定
+        var areaPx = CompareCropPlanner.ToPhysicalRect(new Rect(0, 0, wDip, hDip), CompareCropScaling());
+        // **按实际排布算基准**（这条在对照臂上错过一次：写死拼合口径会让对照臂判红"闸门失效"）：
+        //   拼合 ⇒ 每路窗口 == 整对比区 ⇒ 跨路总量 = 路数 × 面积 × z²；
+        //   非拼合 ⇒ 每路窗口 == 自己那一格，而 Σ格 == 面积 ⇒ 总量 = 面积 × z²，与路数无关。
+        var spanMpx = (double)areaPx.Width * areaPx.Height * (Grid.MosaicWindows ? Math.Max(1, routes) : 1);
+        var cap = Math.Sqrt(CompareMagnifyPixelBudget / spanMpx);
+        var z = Math.Min(2.0, 0.95 * cap);
+        if (!(z > 1.05))
+            throw new InvalidOperationException(
+                $"{routes} 路 × 对比区 {areaPx.Width}x{areaPx.Height}px 下 z=1 就要 {spanMpx / 1e6:0.#} Mpx，" +
+                $"连 1.05 倍都超出 {CompareMagnifyPixelBudget / 1e6:0.#} Mpx 预算 ⇒ " +
+                "本判据在这个规模上没有可跑的放大档（不降标跑空转，直接判红）");
+        return z;
+    }
+
+    /// <summary>闸门的牙：<b>买不起的那一档必须被拒</b>，且拒绝后不得留下放大状态。
+    /// 若本规模本来就买得起 2.0（几何判据就是按 2.0 跑的），这一档没有"自然被拒"可言，
+    /// 于是按 <see cref="ForcedRefusalBudget"/> 注入一个小预算把<b>同一条拒绝分支</b>逼出来 ——
+    /// 否则"超预算时那句用户看得见的上限提示"在默认档上从没被执行过（判据写了 ≠ 判据在跑）。
+    ///
+    /// <para>注入走完必须把放大状态<b>原样退回并读回核对</b>（见 <see cref="RestoreMagnifyStateAndVerify"/>），
+    /// 后面的几何判据才不是跑在被这条子判据动过的场地上。</para></summary>
+    private void AssertMagnifyBudgetRefusal(int routes, double zTest)
+    {
+        // 拒绝分支有**两条入口**，两条都得跑，不然"被拒时那句上限提示"就有半边从没执行过：
+        //   ① 自然拒绝 —— 路数够多 ⇒ z=2 本来就买不起（9 路档走这条）；
+        //   ② 构造拒绝 —— 路数少、z=2 买得起 ⇒ 传一个小预算把同一条分支逼出来。
+        // 之前只有 ①，于是这条判据在 5 路档恒打"不适用"，而**发布门禁 [7/11] 正是硬写 5 路**
+        // （tools/发布门禁.ps1:492）⇒ 那句用户看得见的提示在门禁里等于从没被验过（2026-10-01 查明）。
+        var natural = zTest < 2.0 - 1e-9;
+        var testBudget = natural ? CompareMagnifyPixelBudget : ForcedRefusalBudget(routes);
+        if (testBudget <= 0)
+        {
+            // fail-closed：连预算都算不出来 ⇒ 注入根本没发生，这条子判据本次什么都没量到。
+            var none = $"放大预算闸门 未判：{routes} 路下算不出一个「z=2 超预算、但仍有放大余量」的预算值" +
+                       $"（对比区 {Grid.Bounds.Width:F0}x{Grid.Bounds.Height:F0}DIP 尚未落地 ⇒ 预算 {testBudget:0.##}）";
+            RecordSelfTestSkip(none);
+            Console.WriteLine($"comparemodetest: {none}");
+            return;
+        }
+
+        // 注入不是免费的：SetCompareMagnify 在**像素估算之前**就刷新 _compareAlign / _compareMagnifySources
+        // （那是"像素级对齐低估显存"的前置修复，见 MainWindow.CompareCrop.cs:446 的注释），
+        // 所以**被拒绝的那一次调用也会留痕**；一旦被接受（正是要防的分支漂移）连 zoom 与
+        // _compareMagnifyBudget 都带着小预算落了地。⇒ 先快照，跑完无条件退回，末尾读回核对。
+        var before = CaptureMagnifyState();
+        bool accepted = false;
+        bool activeAfterCall = false;
+        double estimatedMpx = 0;
+        string? userVisible = null;
+        try
+        {
+            accepted = SetCompareMagnify(2.0, 0.25, 0.25, testBudget);
+            estimatedMpx = EstimateCompareMagnifyPixels(2.0) / 1e6;   // 闸门刚比过的那两个数
+            userVisible = StatusInfo.Text;                             // 拒绝的用户可见面（状态栏）
+            activeAfterCall = CompareMagnifyActive;
+        }
+        finally
+        {
+            RestoreMagnifyStateAndVerify(before,
+                $"放大预算闸门 z=2 注入（预算 {testBudget / 1e6:0.##} Mpx）");
+        }
+
+        if (accepted && natural)
+        {
+            var areaPx = CompareCropPlanner.ToPhysicalRect(
+                new Rect(0, 0, Grid.Bounds.Width, Grid.Bounds.Height), CompareCropScaling());
+            var spanMpx = (double)areaPx.Width * areaPx.Height *
+                          (Grid.MosaicWindows ? Math.Max(1, routes) : 1);
+            throw new InvalidOperationException(
+                $"{routes} 路{(Grid.MosaicWindows ? "拼合" : "非拼合")}下 z=2 需要约 " +
+                $"{spanMpx * 4.0 / 1e6:0.#} Mpx，已超出本次给的 {testBudget / 1e6:0.#} Mpx 预算却仍被接受" +
+                " ⇒ 像素估算与真实窗口尺寸脱节（闸门形同虚设）");
+        }
+        if (activeAfterCall && !accepted && !(before.Zoom > 1.0))
+            throw new InvalidOperationException("超预算被拒后仍处于放大状态（窗口会保持 z 倍大）");
+
+        if (accepted)
+        {
+            // 构造档没能把拒绝分支逼出来（估算口径变了 / 那段检查搬了位）⇒ 那句提示本次仍未被执行过。
+            // 记**未判**并带上两个观测值；绝不因为"z=2 确实被接受"而记绿（自然档的接受是判红，见上）。
+            RecordSelfTestSkip(
+                $"放大上限提示 未判：注入预算 {testBudget / 1e6:0.##} Mpx 下 z=2 的实估算只有 " +
+                $"{estimatedMpx:0.#} Mpx（对比区 {Grid.Bounds.Width:F0}x{Grid.Bounds.Height:F0}DIP、" +
+                $"{routes} 路{(Grid.MosaicWindows ? "拼合" : "非拼合")}）⇒ 没走到超预算拒绝分支，" +
+                "用户看得见的上限提示本次没被执行");
+            return;
+        }
+
+        Console.WriteLine($"comparemodetest: 放大预算闸门 ✓ {routes} 路下 z=2 被拒并写明原因" +
+                          $"（{(natural ? "自然档：真实预算 " : "构造档：逼出同一条拒绝分支，预算 ")}" +
+                          $"{testBudget / 1e6:0.##} Mpx、闸门实估算 {estimatedMpx:0.#} Mpx；" +
+                          $"几何判据按买得起的 z={zTest:0.##} 跑）");
+        AssertZoomCeilingHintAgainstOsWindows(testBudget, userVisible);
+    }
+
+    /// <summary>放大状态的完整快照 —— 只给 <see cref="RestoreMagnifyStateAndVerify"/> 用。
+    ///
+    /// <para><b>为什么连 align / 源尺寸数组 / 状态栏一起存</b>：<see cref="SetCompareMagnify"/>
+    /// 在估算之前就先刷新 <c>_compareAlign</c> 与 <c>_compareMagnifySources</c>，
+    /// <c>RejectCompareMagnify</c> 又一定写状态栏 ⇒ 即便本次调用被拒绝也已经留痕；
+    /// 只回滚 zoom/budget 是**不完整**的退回。</para></summary>
+    private sealed record MagnifySnapshot(
+        double Zoom, double CropX, double CropY, double Budget, double RejectedZoom,
+        CompareAlign Align, PixelSize[] Sources, string BudgetNote, string AlignNote,
+        string Status, CellMagnify? GridParam);
+
+    private MagnifySnapshot CaptureMagnifyState() =>
+        new(_compareZoom, _compareCropX, _compareCropY, _compareMagnifyBudget, _compareMagnifyRejectedZoom,
+            _compareAlign, _compareMagnifySources, _compareMagnifyBudgetNote, _compareAlignNote,
+            StatusInfo.Text ?? string.Empty, Grid.CellMagnify);
+
+    /// <summary>退回快照并<b>读回核对</b>（不假设"被拒绝就不必收尾"，也不假设"赋了值就等于退回"）。
+    ///
+    /// <para><c>Grid.CellMagnify</c> 必须<b>按引用</b>写回：<see cref="PushCompareMagnifyToGrid"/>
+    /// 的按值去重 <c>SameMagnify</c> 在参数值相等时会**拒绝赋值**（ Sources 每次新建实例但逐元素相等 ⇒
+    /// 判定为"没变"），于是排版可以一直拿着注入那一次的参数；而这里要的是"退回注入前那一份"，
+    /// 只能直接写属性，再走一次生产入口把区域按退回后的几何重发。</para></summary>
+    private void RestoreMagnifyStateAndVerify(MagnifySnapshot before, string label)
+    {
+        _compareZoom = before.Zoom;
+        _compareCropX = before.CropX;
+        _compareCropY = before.CropY;
+        _compareMagnifyBudget = before.Budget;
+        _compareAlign = before.Align;
+        _compareMagnifySources = before.Sources;
+        _compareMagnifyRejectedZoom = before.RejectedZoom;
+        _compareMagnifyBudgetNote = before.BudgetNote;
+        _compareAlignNote = before.AlignNote;
+        if (!string.Equals(StatusInfo.Text, before.Status, StringComparison.Ordinal))
+            StatusInfo.Text = before.Status;
+        Grid.CellMagnify = before.GridParam;      // 按引用退回，见方法说明
+        ScheduleCompareCrop();                    // 区域按退回后的几何重发一次（走生产入口，带去重）
+
+        // 一次读回核对：字段本身 + 由字段派生的两个可见后果（是否处于放大态、排版拿到的参数）。
+        // 残留一个小预算的后果是后面每条几何判据都在"z=2 被误拒"的场地上跑，所以这必须是判红不是提示。
+        var drift = new System.Collections.Generic.List<string>();
+        if (Math.Abs(_compareMagnifyBudget - before.Budget) > 1e-9)
+            drift.Add($"预算残留：{_compareMagnifyBudget / 1e6:0.##} Mpx ≠ {before.Budget / 1e6:0.##} Mpx");
+        if (Math.Abs(_compareZoom - before.Zoom) > 1e-12 ||
+            Math.Abs(_compareCropX - before.CropX) > 1e-12 ||
+            Math.Abs(_compareCropY - before.CropY) > 1e-12)
+            drift.Add($"放大参数：{_compareZoom:0.##}@({_compareCropX:0.###},{_compareCropY:0.###}) " +
+                      $"≠ {before.Zoom:0.##}@({before.CropX:0.###},{before.CropY:0.###})");
+        if (CompareMagnifyActive != (before.Zoom > 1.0))
+            drift.Add($"放大态：{CompareMagnifyActive} ≠ 注入前的 {before.Zoom > 1.0}");
+        if (!ReferenceEquals(Grid.CellMagnify, before.GridParam))
+            drift.Add($"排版参数没退回（Grid.CellMagnify={(Grid.CellMagnify is null ? "null" : "另一份实例")}）");
+        if (!ReferenceEquals(_compareMagnifySources, before.Sources))
+            drift.Add("源尺寸数组的引用变了");
+        if (_compareAlign != before.Align)
+            drift.Add($"对齐模式：{_compareAlign} ≠ {before.Align}");
+        if (!string.Equals(StatusInfo.Text, before.Status, StringComparison.Ordinal))
+            drift.Add($"状态栏停在「{StatusInfo.Text}」（注入前是「{before.Status}」）");
+        if (drift.Count > 0)
+            throw new InvalidOperationException(
+                $"{label} 之后放大状态没退回原样：{string.Join("；", drift)} " +
+                "⇒ 后面的几何判据跑在被这条子判据动过的场地上（小预算残留还会让 z=2 被误拒）");
+    }
+
+    /// <summary>给"路数少、z=2 买得起"的那一档算一个**构造预算**，把同一条超预算拒绝分支逼出来。
+    ///
+    /// <para>取值规则：令 <c>budget = 2 × 跨度</c>（跨度 = 排布口径下 z=1 的总像素）。于是
+    /// z=2 需要 4×跨度 > budget ⇒ 必拒；而 <c>zMax = √(budget/跨度) = 1.414 > 1</c> ⇒ 提示句走
+    /// "约可到 N 倍"那半边分支（不是"已没有放大余量"那半边）。两条半边都由
+    /// <see cref="AssertZoomCeilingHintAgainstOsWindows"/> 按 OS 实测窗口面积对账。</para>
+    ///
+    /// <para>返回 0 表示算不出来（布局还没落地），调用方据此<b>登记未判</b>
+    /// （<see cref="RecordSelfTestSkip"/>）而不是硬跑，也绝不记绿。</para></summary>
+    private double ForcedRefusalBudget(int routes)
+    {
+        var wDip = Grid.Bounds.Width;
+        var hDip = Grid.Bounds.Height;
+        if (!(wDip > 0) || !(hDip > 0)) return 0;
+        var areaPx = CompareCropPlanner.ToPhysicalRect(new Rect(0, 0, wDip, hDip), CompareCropScaling());
+        var span = (double)areaPx.Width * areaPx.Height *
+                   (Grid.MosaicWindows ? Math.Max(1, routes) : 1);
+        if (!(span > 0)) return 0;
+        return 2.0 * span;
+    }
+
+    /// <summary>把"约可到 N 倍"那句提示读实：它是拒绝消息的尾巴，只在闸门判红那一路才拼出来，
+    /// 之前**从没被任何一次运行打印过**（写了没跑过的分支）。
+    ///
+    /// <para>对账用**独立参照**而不是同一套算术：提示里的块数取自格表/路数，这里改用
+    /// <c>GetWindowRect</c> 实测的单路窗口像素 ×「有几个路真有窗口」反解 zMax。两者口径一致才放行
+    /// ⇒ 谁把块数写回 1（正是本轮修掉的那个老估算缺陷），这句提示就会把上限吹高 √路数 倍，
+    /// 而 OS 侧真实面积会当场把它拆穿。</para>
+    ///
+    /// <para><paramref name="userVisible"/> = 拒绝那一刻的状态栏原文（由调用方在退回之前取好）。
+    /// 只有"格式化函数会输出这句"是不够的 —— 它必须真的出现在用户看得见的那条文案里，
+    /// 这正是本判据要钉的东西（<c>RejectCompareMagnify</c> 在对比态一定写状态栏）。</para></summary>
+    private void AssertZoomCeilingHintAgainstOsWindows(double budget, string? userVisible)
+    {
+        var hint = DescribeCompareZoomCeiling(budget);
+        if (hint.Length == 0)
+            throw new InvalidOperationException("超预算拒绝却给出空提示 ⇒ 用户只看到「超预算」三个字，不知道还能到几倍");
+
+        var tail = hint.TrimStart('，');
+        // 对比态外 RejectCompareMagnify 按设计不写状态栏 ⇒ 不拿它虚判，只核对提示本身。
+        if (_compareActive)
+        {
+            if (userVisible is null)
+                throw new InvalidOperationException("超预算拒绝却没取到状态栏原文 ⇒ 无法确认那句提示真的给了用户");
+            if (!userVisible.Contains(tail, StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    $"超预算拒绝却没把上限提示送到用户可见处：状态栏=「{userVisible}」，期望含「{tail}」" +
+                    " ⇒ 拒绝文案与提示函数脱节（判据核对的这句从没出现在真实文案里）");
+        }
+
+        if (!Grid.MosaicWindows)
+        {
+            // 非拼合（FC_NOMOSAIC=1 对照臂）下每路窗口就是自己那一格，OS 面积反解不出提示里的块数。
+            // 与 4260 那条拼合专属判据同一口径：**明写不适用**、不登记 SKIP —— 对照臂本来就是来看
+            // "关掉拼合会怎样"的，登记 SKIP 会把整条 magnify 单元（其余四条几何断据真的判过了）抹成 SKIP。
+            Console.WriteLine($"comparemodetest: 放大上限提示 不适用（非拼合）：{hint.TrimStart('，')}");
+            return;
+        }
+
+        // OS 实测：z=1 被拒之后每路窗口就是整对比区，路数 × 单路面积 = 真实占用的像素块。
+        var windows = 0;
+        double unitPx = 0;
+        for (var i = 0; i < Grid.Count; i++)
+        {
+            var s = Grid.GetSurface(i);
+            if (s is null || s.Hwnd == IntPtr.Zero) continue;
+            var r = ReadWindowRectPx(s.Hwnd);
+            if (!r.IsValid || r.Width <= 0 || r.Height <= 0) continue;
+            windows++;
+            unitPx = (double)r.Width * r.Height;
+        }
+        if (windows < 2 || unitPx <= 0)
+        {
+            // 拼合下本应有 N 个真窗口；连第 2 个都读不到 ⇒ 独立参照不存在，这条子判据只剩"自己验自己"。
+            // fail-closed：登记未判并带上观测值，不因为"提示非空、格式也对"就记绿。
+            var noOs = $"放大上限提示 未判：拼合下 OS 侧只读到 {windows} 个有效窗口" +
+                       $"（Grid.Count={Grid.Count}、单路面积 {unitPx / 1e6:0.##} Mpx）⇒ 没有独立参照可反解 zMax，" +
+                       $"待核对的提示是「{tail}」";
+            RecordSelfTestSkip(noOs);
+            Console.WriteLine($"comparemodetest: {noOs}");
+            return;
+        }
+
+        var m = System.Text.RegularExpressions.Regex.Match(hint, @"约可到 ([0-9.]+) 倍");
+        var claimsNoHeadroom = hint.Contains("没有放大余量");
+        var implied = Math.Sqrt(budget / (windows * unitPx));
+        if (claimsNoHeadroom)
+        {
+            if (implied > 1.05)
+                throw new InvalidOperationException(
+                    $"提示说「已没有放大余量」，但按 OS 实测的 {windows} 路 × {unitPx / 1e6:0.##} Mpx 反解还能到 {implied:0.##} 倍" +
+                    "⇒ 提示用的面积比真实分配面积大（或块数口径不对）");
+            Console.WriteLine($"comparemodetest: 放大上限提示 ✓ 「没有放大余量」与 OS 实测反解 {implied:0.##} 倍一致" +
+                $"（{windows} 路 × {unitPx / 1e6:0.##} Mpx）");
+            return;
+        }
+        if (!m.Success || !double.TryParse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture, out var claimed))
+            throw new InvalidOperationException($"提示句里取不出倍数：\"{hint.TrimStart('，')}\"");
+        // 0.## 只留两位小数 ⇒ 量化误差 ≤0.005；给 12% 容差已经远小于"块数写成 1"造成的 √路数 倍偏差。
+        if (Math.Abs(claimed - implied) > implied * 0.12)
+            throw new InvalidOperationException(
+                $"放大上限提示与 OS 实测不符：提示说 {claimed:0.##} 倍，按 {windows} 路 × {unitPx / 1e6:0.##} Mpx " +
+                $"反解是 {implied:0.##} 倍（提示/实测 = {claimed / implied:0.##}）⇒ 提示里的块数或面积口径不对" +
+                $"（把块数写回 1 就会正好差 √{windows} = {Math.Sqrt(windows):0.##} 倍）");
+        Console.WriteLine($"comparemodetest: 放大上限提示 ✓ 「约可到 {claimed:0.##} 倍」与 OS 实测反解 {implied:0.##} 倍一致" +
+            $"（{windows} 路 × {unitPx / 1e6:0.##} Mpx，预算 {budget / 1e6:0.#} Mpx）");
+    }
+
     /// <summary>
     /// 启用无缝放大后逐路验证五件事（期望值全部由 <see cref="CompareCropPlanner.Magnify"/>
     /// <b>独立复算</b>，不是回读生产状态）：
@@ -5515,7 +6791,7 @@ public partial class MainWindow : Window
     /// <param name="label">日志与步骤名里的用例名（默认"无缝放大"；滚轮那条传"滚轮无缝放大"）。
     /// 只影响显示，不影响任何一条判决。</param>
     private async System.Threading.Tasks.Task<int> AssertCompareMagnifyAsync(
-        int routes, CompareMode mode, double zoom, double cropX, double cropY,
+        int routes, (int Cols, int Rows) shape, double zoom, double cropX, double cropY,
         PixelPoint? originOverride = null, string? label = null)
     {
         _step = $"{label ?? "无缝放大"} z={zoom}";
@@ -5537,9 +6813,12 @@ public partial class MainWindow : Window
         var w = Grid.Bounds.Width;
         var h = Grid.Bounds.Height;
         var scaling = TopLevel.GetTopLevel(Grid)?.RenderScaling ?? RenderScaling;
-        var cells = CompareLayout.ComputeCells(_compareMode, _compareSplit);
+        var cells = _partition.ComputeCells();
         var applied = 0;
         var letterboxSeen = 0;
+        // 有多少路"整格落在放大视野之外"（判据②的空交集分支）。0 也要如实报，
+        // 否则读日志的人会以为那条判据每轮都判过。
+        var outsideView = 0;
         // 本步实际看到的**最小** letterbox 修正量（DIP）。打它是为了不让"修正量小到判据看不见"
         // 冒充成绿灯 —— 那等于这一项在某种几何下静默失效。
         var minCorr = double.MaxValue;
@@ -5550,13 +6829,20 @@ public partial class MainWindow : Window
         var routeSources = new PixelSize[routes];
         for (var i = 0; i < routes; i++) routeSources[i] = ReadSourceSize(i);
         var minSrc = CompareCropPlanner.MinSourceSize(routeSources);
+        // 判据⑥的前提：各路源尺寸**相同**（自测夹具就是同一份素材开 N 路）。不同时放大窗口本就
+        // 各不相同（像素级对齐要按各自分辨率给倍率），那条一致性判据不成立。
+        var sameSourceForAll = minSrc.Width > 0;
+        for (var i = 0; i < routes && sameSourceForAll; i++)
+            if (routeSources[i].Width > 0 && routeSources[i] != minSrc) sameSourceForAll = false;
+        var osRects = new System.Collections.Generic.List<Rect32>();
 
         for (var i = 0; i < routes; i++)
         {
             var s = Grid.GetSurface(i) ?? throw new InvalidOperationException($"第 {i} 路缺失");
             if (s.Hwnd == nint.Zero) throw new InvalidOperationException($"第 {i} 路子 HWND 未创建");
 
-            if (!s.IsVisible || i >= cells.Length)
+            var cellIndex = Grid.CellIndexOfRoute(i);
+            if (!s.IsVisible || cellIndex < 0 || cellIndex >= cells.Length)
             {
                 var hidden = ReadWindowRegion(s.Hwnd, out var hiddenBox);
                 if (hidden != RegionTypeError)
@@ -5566,7 +6852,14 @@ public partial class MainWindow : Window
 
             // 期望值独立复算（输入取自公开几何 + 每路真实媒体信息）
             var src = routeSources[i];
-            var cellDip = CompareCropPlanner.CellToContainerDip(cells[i], w, h);
+            // 拼合 + 放大：放大作用在**整幅拼合视图**上（基准 = 整个对比区），再与本路那一格求交
+            // ⇒ 各路仍只露出自己那一块，块与块的拼合关系不被放大破坏。
+            // 非拼合（左右拉动不用放大，故这条实际是历史形态）：基准 = 本格，窗口 = 格的 z 倍。
+            var mosaic = Grid.MosaicWindows;
+            var cellDip = mosaic
+                ? CompareCropPlanner.MosaicRegionDip(cells[cellIndex], w, h)
+                : CompareCropPlanner.CellToContainerDip(cells[cellIndex], w, h);
+            var baseDip = mosaic ? new Rect(0, 0, w, h) : cellDip;
 
             // ⚠ 入参的 zoom/cropX/cropY 是**共用**值，而像素级对齐下生产是逐路取
             //   <c>CellMagnify.ZoomOf(i)/CropOf(i)</c> 的（crop 的坐标域从"源归一化位置"变成
@@ -5585,11 +6878,31 @@ public partial class MainWindow : Window
                 ciY = CompareCropPlanner.AlignedCrop(cropY, zoom, src.Height, minSrc.Height);
             }
 
-            var geom = CompareCropPlanner.Magnify(cellDip, zi, ciX, ciY, src.Width, src.Height);
+            var geom = CompareCropPlanner.Magnify(baseDip, zi, ciX, ciY, src.Width, src.Height);
             var cellPx = CompareCropPlanner.ToPhysicalRect(cellDip, scaling);
+            var basePx = CompareCropPlanner.ToPhysicalRect(baseDip, scaling);
             // 期望窗口的物理矩形取**换算值**（而不是回读 Bounds）：下面要拿它去核对 OS 窗口，
             // 用 Bounds 会变成"自己验证自己"。
             var winPx = CompareCropPlanner.ToPhysicalRect(geom.WindowDip, scaling);
+            // 放大后"露出的那块"（容器坐标 DIP）：窗口相对的区域平移到容器系，拼合再与格求交。
+            var contentDip = new Rect(geom.RegionDip.X + geom.WindowDip.X,
+                                      geom.RegionDip.Y + geom.WindowDip.Y,
+                                      geom.RegionDip.Width, geom.RegionDip.Height);
+            var visibleDip = mosaic ? CompareCropPlanner.Intersect(contentDip, cellDip) : contentDip;
+
+            // 拼合下这一格可能与"放大后的视野"**完全没有交集**（例如某一列被拖到 5% 权重下界、
+            // 窄于画面的 letterbox 黑边）。这时生产必须**清掉**这一路的区域：留着上一次的区域，
+            // 各路窗口相同（相对对齐）时看着还是黑边无害，但像素级对齐/混分辨率下各路窗口不同 ⇒
+            // 这一路显示的是别人视野里的那一块，拼合当场错位，而屏幕上看不出来。
+            if (mosaic && (visibleDip.Width <= 0 || visibleDip.Height <= 0))
+            {
+                outsideView++;
+                if (ReadWindowRegion(s.Hwnd, out var staleBox) != RegionTypeError)
+                    throw new InvalidOperationException(
+                        $"第 {i} 路的格 {cellDip} 整个在放大后的视野 {contentDip} 之外，" +
+                        $"却仍带着区域 {staleBox} ⇒ 显示的是上一次方案裁出来的那块（错位且不重叠检查也会挂）");
+                continue;
+            }
 
             // ① 排版：窗口 == 换算出的放大窗口（放大真的生效）
             var got = s.Bounds;
@@ -5598,10 +6911,12 @@ public partial class MainWindow : Window
                 throw new InvalidOperationException(
                     $"第 {i} 路窗口未按放大方案排布：Bounds={got} 期望 {geom.WindowDip}（z={zoom}）");
 
-            // 窗口尺寸必须是格的 z 倍（这是"内核按更高分辨率重渲染"的前提）
-            if (Math.Abs(winPx.Width - cellPx.Width * zi) > 2 || Math.Abs(winPx.Height - cellPx.Height * zi) > 2)
+            // 窗口尺寸必须是**基准**（拼合=整对比区 / 非拼合=本格）的 z 倍
+            // （这是"内核按更高分辨率重渲染"的前提）
+            if (Math.Abs(winPx.Width - basePx.Width * zi) > 2 || Math.Abs(winPx.Height - basePx.Height * zi) > 2)
                 throw new InvalidOperationException(
-                    $"第 {i} 路窗口尺寸 {winPx.Width}x{winPx.Height} 不是格 {cellPx.Width}x{cellPx.Height} 的 {zi} 倍");
+                    $"第 {i} 路窗口尺寸 {winPx.Width}x{winPx.Height} 不是{(mosaic ? "对比区" : "格")} " +
+                    $"{basePx.Width}x{basePx.Height} 的 {zi} 倍");
 
             // ①b 真正落到 OS 窗口上：GetWindowRect 读回的子 HWND 尺寸必须也是 z 倍。
             //     只断言 Avalonia 的 Bounds 不够 —— Bounds 是托管侧排布结果，
@@ -5643,6 +6958,8 @@ public partial class MainWindow : Window
                     "（Avalonia 排布了但没落到 Win32 窗口 ⇒ 内核拿不到更大的 swapchain）");
             }
 
+            osRects.Add(actual);   // 判据⑥要用：这一路的 OS 窗口矩形（已确认尺寸落到期望值）
+
             // ①c OS 窗口搬到了正确位置：屏幕坐标 == 容器屏幕原点 + 容器坐标下的期望窗口。
             //     这一条把"平移"真正钉死 —— 区域回读只证明区域被设上，证明不了窗口在哪。
             if (origin is { } o &&
@@ -5651,27 +6968,62 @@ public partial class MainWindow : Window
                     $"第 {i} 路子 HWND 屏幕位置 ({actual.X},{actual.Y}) != 容器原点 ({o.X},{o.Y}) + " +
                     $"期望窗口 ({winPx.X},{winPx.Y}) = ({o.X + winPx.X},{o.Y + winPx.Y})（平移未落地）");
 
-            // ② 区域：回读 == 期望物理区域
-            var expected = CompareCropPlanner.ToPhysicalRect(geom.RegionDip, scaling);
+            // ② 区域：回读块（窗口原点 + 区域，换算到容器坐标）== 期望块。
+            //    比容器坐标而不是窗口相对坐标：拼合下期望块是"放大后的视野 ∩ 本格"，
+            //    窗口原点本身是负的/放大的，两边各自取整后在容器系里比只差一个取整残差。
             var type = ReadWindowRegion(s.Hwnd, out var box);
             if (type is not (RegionTypeSimple or RegionTypeComplex))
                 throw new InvalidOperationException($"第 {i} 路放大后应已裁剪，回读却 type={type}（0=无区域）");
-            if (box != expected)
-                throw new InvalidOperationException(
-                    $"第 {i} 路回读区域 {box} != 期望 {expected}（换算或 DPI 不一致）");
+            var expected = CompareCropPlanner.ToPhysicalRect(visibleDip, scaling);
+            var gotBlock = new Rect32(winPx.X + box.X, winPx.Y + box.Y, box.Width, box.Height);
+            if (mosaic)
+            {
+                if (!BlockClose(gotBlock, expected))
+                    throw new InvalidOperationException(
+                        $"第 {i} 路回读区域换算到容器坐标 {gotBlock} != 期望 {expected}" +
+                        $"（窗口相对回读 {box}，窗口 {winPx}，放大后的视野 {contentDip}，格 {cellDip}）");
+            }
+            else
+            {
+                // 非拼合沿用**逐字相等**的窗口相对比较（期望 = Magnify 的 RegionDip 过 ToPhysical）：
+                // 两侧是同一套取整，没有取整域差异可言，±1 的容差只会掩盖错位。
+                var expectedRel = CompareCropPlanner.ToPhysicalRect(geom.RegionDip, scaling);
+                if (box != expectedRel)
+                    throw new InvalidOperationException(
+                        $"第 {i} 路回读区域 {box} != 期望 {expectedRel}（换算或 DPI 不一致）");
+            }
 
-            // ③ 区域必须**居中**落在格里：窗口原点 + 区域原点 == 格原点 + 居中偏移。
-            //    补丁前偏移恒为 0（钉在左上角），补丁后 = (格 - 区域)/2（见 CompareCropPlanner.Magnify）。
-            //    ⚠ 容差取 2px 而不是 1px：居中量是在 **DIP** 域算的，而窗口原点与区域原点各自
-            //    经 ToPhysical 独立取整 ⇒ 两侧各差 1px 时合计可到 2px，这不是几何错、是取整域。
-            //    区域小于格本身不是缺陷（宽高比失配时 fit/zoom < 格），那一圈由
-            //    CompareGridView.Render 补成黑底，别把它当"留洞"。
-            var expX = cellPx.X + (cellPx.Width - box.Width) / 2.0;
-            var expY = cellPx.Y + (cellPx.Height - box.Height) / 2.0;
-            if (Math.Abs((winPx.X + box.X) - expX) > 2 || Math.Abs((winPx.Y + box.Y) - expY) > 2)
-                throw new InvalidOperationException(
-                    $"第 {i} 路区域未居中落在格里：窗口原点 {winPx.X},{winPx.Y} + 区域原点 {box.X},{box.Y} " +
-                    $"!= 格原点 {cellPx.X},{cellPx.Y} + 居中偏移 ({expX - cellPx.X:F1},{expY - cellPx.Y:F1})");
+            // ③ 非拼合：区域必须**居中**落在格里（补丁前钉左上角，补丁后 (格-区域)/2，
+            //    见 CompareCropPlanner.Magnify）。容差 2px：居中量在 DIP 域算，而窗口原点与区域
+            //    原点各自经 ToPhysical 取整 ⇒ 两侧各差 1px 时合计可到 2px，这是取整域不是几何错。
+            if (!mosaic)
+            {
+                var expX = cellPx.X + (cellPx.Width - box.Width) / 2.0;
+                var expY = cellPx.Y + (cellPx.Height - box.Height) / 2.0;
+                if (Math.Abs((winPx.X + box.X) - expX) > 2 || Math.Abs((winPx.Y + box.Y) - expY) > 2)
+                    throw new InvalidOperationException(
+                        $"第 {i} 路区域未居中落在格里：窗口原点 {winPx.X},{winPx.Y} + 区域原点 {box.X},{box.Y} " +
+                        $"!= 格原点 {cellPx.X},{cellPx.Y} + 居中偏移 ({expX - cellPx.X:F1},{expY - cellPx.Y:F1})");
+            }
+            else
+            {
+                // ③ 拼合：块必须**在自己那一格内**，且视野覆盖到这一格时块必须**等于整格**。
+                //    只看回读与公开几何（不取判据②的换算结果），所以它抓的是另一类坏法：
+                //    越界 = 忘了与格求交，会盖住邻居；无端小于格 = 放大后的视野明明在，
+                //    格内却露出一圈黑底。区域小于格本身不是缺陷（格超出视野那部分是正常的画面边缘）。
+                if (gotBlock.X < cellPx.X - 1 || gotBlock.Y < cellPx.Y - 1 ||
+                    gotBlock.X + gotBlock.Width > cellPx.X + cellPx.Width + 1 ||
+                    gotBlock.Y + gotBlock.Height > cellPx.Y + cellPx.Height + 1)
+                    throw new InvalidOperationException(
+                        $"第 {i} 路放大后的块 {gotBlock} 越出它那一格 {cellPx} ⇒ 会盖住邻居的画面，拼合破功");
+                var covered = contentDip.X <= cellDip.X + 1e-9 && contentDip.Y <= cellDip.Y + 1e-9 &&
+                              contentDip.X + contentDip.Width >= cellDip.X + cellDip.Width - 1e-9 &&
+                              contentDip.Y + contentDip.Height >= cellDip.Y + cellDip.Height - 1e-9;
+                if (covered && (gotBlock.Width < cellPx.Width - 1 || gotBlock.Height < cellPx.Height - 1))
+                    throw new InvalidOperationException(
+                        $"第 {i} 路的视野 {contentDip} 已覆盖整格 {cellDip}，回读块却只有 " +
+                        $"{gotBlock.Width}x{gotBlock.Height}（格 {cellPx}）⇒ 格内露出黑底");
+            }
 
             // ④ 区域在窗口内（否则 SetWindowRgn 会静默裁掉越界部分）
             if (box.X < -1 || box.Y < -1 ||
@@ -5687,8 +7039,8 @@ public partial class MainWindow : Window
             if (!fitIsWindow)
             {
                 letterboxSeen++;
-                var naive = new Rect(ciX * cellDip.Width * zi, ciY * cellDip.Height * zi,
-                                     cellDip.Width, cellDip.Height);
+                var naive = new Rect(ciX * baseDip.Width * zi, ciY * baseDip.Height * zi,
+                                     baseDip.Width, baseDip.Height);
                 // 两侧都是同一批公开纯函数的<b>浮点</b>结果（不涉及 OS 区域回读）⇒ 这里必须用
                 // 浮点等值，不能沿用像素级容差：4 路 + 4K 素材下 2×2 的格宽高比几乎等于源的 16:9，
                 // 修正量本身只有约 0.5 单位，用 ~1 的像素容差会把"修正已生效"读成"未生效"
@@ -5711,13 +7063,126 @@ public partial class MainWindow : Window
         if (applied == 0)
             throw new InvalidOperationException($"z={zoom} 下没有任何一路真正进入放大状态（接线未走到）");
 
+        // ⑥ **屏幕空间**的一致性：各路窗口的 OS 矩形必须两两相同（相对对齐 + 各路同分辨率时，
+        //     换算给每一路的 WindowDip 是同一个矩形）。为什么单独钉这一条：判据②/③比的是
+        //     "窗口原点 + 回读区域"，两侧都用同一套理想算术 ⇒ 只要 OS 将每一路**同样地**摆偏 1px，
+        //     两边就对得上，而屏幕上拼合缝会整体离开分割线 1px（叠加模式有"线与接缝对齐"那条判据，
+        //     拼合放大态此前没有对应读数）。这里直接比 GetWindowRect 实测值，不取理想算术。
+        var mosaicNow = Grid.MosaicWindows;
+        if (mosaicNow && sameSourceForAll)
+        {
+            var ref0 = osRects[0];
+            for (var i = 1; i < osRects.Count; i++)
+            {
+                var r = osRects[i];
+                if (!r.IsValid || !ref0.IsValid) continue;   // 读不到交给上面①b 的等待/判红
+                if (Math.Abs(r.X - ref0.X) > 1 || Math.Abs(r.Y - ref0.Y) > 1 ||
+                    Math.Abs(r.Width - ref0.Width) > 1 || Math.Abs(r.Height - ref0.Height) > 1)
+                    throw new InvalidOperationException(
+                        $"放大态各路窗口的 OS 矩形不一致：第 0 路 {ref0} vs 第 {i} 路 {r}" +
+                        "⇒ 拼合缝会整体离开画出的分割线（同一份换算给出的明明是同一个矩形）");
+            }
+            Console.WriteLine($"comparemodetest: [{shape.Cols}x{shape.Rows}] 放大态窗口一致性 ✓ " +
+                $"{osRects.Count} 路的 GetWindowRect 两两相同（{ref0.Width}x{ref0.Height} @({ref0.X},{ref0.Y})，容差 1px）");
+        }
+        else if (mosaicNow)
+        {
+            Console.WriteLine("comparemodetest: 放大态窗口一致性 不适用：各路源尺寸不同，窗口本就不同矩形");
+        }
+
         Console.WriteLine(
-            $"comparemodetest: [{mode}] {label ?? "无缝放大"} ✓ z={zoom} 裁剪=({cropX:F2},{cropY:F2}) " +
-            $"{applied} 路窗口放大且区域回读一致；对比区={w:F0}x{h:F0}DIP 缩放={scaling:0.##}；" +
+            $"comparemodetest: [{shape.Cols}x{shape.Rows}] {label ?? "无缝放大"} ✓ z={zoom:0.###} 裁剪=({cropX:F2},{cropY:F2}) " +
+            $"{applied} 路窗口放大且区域回读一致；整格在视野外（必须无区域）{outsideView} 路；" +
+            $"对比区={w:F0}x{h:F0}DIP 缩放={scaling:0.##}；" +
             $"letterbox 修正生效 {letterboxSeen} 路（格宽高比 != 源宽高比" +
             (letterboxSeen > 0 ? $"，最小修正量 {minCorr:0.###}DIP" : string.Empty) + "）；" +
             $"OS 窗口尺寸/位置已按 GetWindowRect 核对{(origin is null ? "（容器屏幕原点未知，跳过位置核对）" : "")}");
+        if (mosaicNow)
+        {
+            // 正常布局下 outsideView 恒为 0 ⇒ 上面那条"整格在视野外必须无区域"的分支写了没跑过。
+            // 专门造一次极端分割把它跑实（内部会自己复位格表）。
+            await AssertMagnifySliverOutsideViewAsync(label ?? "无缝放大");
+        }
         return applied;
+    }
+
+    /// <summary>定向夹具：把第一列拖到权重下界，让那一格整个落到**放大后视野之外**，
+    /// 要求这一路**没有区域**（留着上一次的区域 = 显示别人视野里的那块，拼合当场错位，而屏幕上看不出来）。
+    ///
+    /// <para><b>为什么要专门造</b>：正常布局里每格都与视野有交集（2026-10-01 实测 5 路 2x3 全部
+    /// 有交集），于是判据里那条空交集分支属于"写了从没跑过"—— 与它同族的第一个漏网 bug
+    /// （命中测试恒返回第 0 路）正是因为没跑过才没人发现。</para>
+    /// <para><b>前置不成立就明写不适用</b>：拖完仍有交集（黑边比最窄格还窄）、或对齐模式不是相对
+    /// （像素级下逐路倍率/裁剪不同，本夹具不复算那套换算）⇒ 打印说明，不冒充通过。</para></summary>
+    private async System.Threading.Tasks.Task AssertMagnifySliverOutsideViewAsync(string label)
+    {
+        var saved = _partition;
+        var wDip = Grid.Bounds.Width;
+        var hDip = Grid.Bounds.Height;
+        if (wDip <= 0 || hDip <= 0) return;
+        var scaling = TopLevel.GetTopLevel(Grid)?.RenderScaling ?? RenderScaling;
+        try
+        {
+            if (saved.HandleCount == 0 || saved.HandleAxisAt(0) != SplitAxis.X)
+            {
+                Console.WriteLine($"  视野外格判据 不适用：{_partition.Cols}x{_partition.Rows} 的第一条手柄不是竖线");
+                return;
+            }
+            if (_compareAlign != CompareAlign.Relative)
+            {
+                Console.WriteLine($"  视野外格判据 不适用：当前是对齐={_compareAlign}，本夹具不复算逐路倍率/裁剪");
+                return;
+            }
+
+            // 把手柄 0 拖到最左：权重模型的下界是 MinSpanFraction（5%），所以这一列会被钳到
+            // 最窄（≈77 DIP），而本机 letterbox 黑边半宽 ≈135 DIP ⇒ 该格整个落到视野之外。
+            OnPartitionChanged(saved.WithHandleDragged(0, 0.0, 0.5));
+            UpdateLayout();
+            ApplyCompareCrop();
+            await System.Threading.Tasks.Task.Delay(120);   // 让排在一拍后的裁剪/ShowInBounds 落地
+            UpdateLayout();
+            ApplyCompareCrop();
+
+            var cells = _partition.ComputeCells();
+            var sliverRoute = Grid.RouteIndexOfCell(0);
+            var s = sliverRoute >= 0 ? Grid.GetSurface(sliverRoute) : null;
+            if (cells.Length == 0 || s is null || s.Hwnd == nint.Zero || !s.IsVisible)
+            {
+                Console.WriteLine("  视野外格判据 不适用：拖窄第一列后没有可判的那一路");
+                return;
+            }
+
+            // 与判据②同一套公开纯函数复算这一格的"应当露出的块"（只是换了几何，不是另一套算术）
+            var src = ReadSourceSize(sliverRoute);
+            var geom = CompareCropPlanner.Magnify(new Rect(0, 0, wDip, hDip), _compareZoom,
+                _compareCropX, _compareCropY, src.Width, src.Height);
+            var contentDip = new Rect(geom.RegionDip.X + geom.WindowDip.X,
+                                      geom.RegionDip.Y + geom.WindowDip.Y,
+                                      geom.RegionDip.Width, geom.RegionDip.Height);
+            var cellDip = CompareCropPlanner.MosaicRegionDip(cells[0], wDip, hDip);
+            var visible = CompareCropPlanner.Intersect(contentDip, cellDip);
+            if (visible.Width > 0 && visible.Height > 0)
+            {
+                Console.WriteLine($"  视野外格判据 不适用：拖到最窄后该格 {cellDip.Width:F1}x{cellDip.Height:F1}DIP " +
+                                  $"仍与视野 {contentDip.Width:F1}x{contentDip.Height:F1}DIP 有交集（黑边不够宽）");
+                return;
+            }
+
+            var type = ReadWindowRegion(s.Hwnd, out var stale);
+            if (type != RegionTypeError)
+                throw new InvalidOperationException(
+                    $"{label}·视野外格：第 {sliverRoute} 路的格 {cellDip} 整个在放大视野 {contentDip} 之外，" +
+                    $"却仍带着区域 {stale}（type={type}）⇒ 它显示的是上一次方案裁出来的那块，" +
+                    "各路窗口不同时就是别人的画面");
+            Console.WriteLine($"  视野外格 ✓ 拖到最窄（{cellDip.Width:F1}x{cellDip.Height:F1}DIP 全在黑边里）" +
+                              $"后第 {sliverRoute} 路无区域（GetWindowRgn=ERROR）");
+        }
+        finally
+        {
+            OnPartitionChanged(saved);
+            UpdateLayout();
+            ApplyCompareCrop();
+        }
     }
 
     /// <summary>由第 0 路的"屏幕矩形 − 容器坐标矩形"反推对比区左上角在屏幕上的物理坐标。
@@ -5737,8 +7202,11 @@ public partial class MainWindow : Window
         return new PixelPoint(rect.X - bounds.X, rect.Y - bounds.Y);
     }
 
-    /// <summary>断言复位后子窗口回到格尺寸、放大参数清空 —— 否则退出对比模式后放大窗口会盖住相邻路。
-    /// <para>同样必须 async：<c>ResetCompareMagnify</c> 只改排版，把子 HWND 搬回格尺寸的是
+    /// <summary>断言复位后各路窗口回到**该回的形态**、放大参数清空。
+    /// <para>拼合模式：窗口回到整对比区（不再被放大到 z 倍）、区域回到各自那一格；
+    /// 非拼合：窗口回到格尺寸。两种形态都必须让 OS 窗口真的搬回去 ——
+    /// 否则内核仍按放大后的分辨率渲染，白烧显存。</para>
+    /// <para>同样必须 async：<c>ResetCompareMagnify</c> 只改排版，把子 HWND 搬回去的是
     /// <c>AfterRender</c> 的 <c>ShowInBounds</c>，需要让出一拍 Dispatcher 才能观察到。</para></summary>
     private async System.Threading.Tasks.Task AssertCompareMagnifyResetAsync(int routes)
     {
@@ -5756,11 +7224,28 @@ public partial class MainWindow : Window
 
         var w = Grid.Bounds.Width;
         var h = Grid.Bounds.Height;
-        var cells = CompareLayout.ComputeCells(_compareMode, _compareSplit);
+        var scaling = TopLevel.GetTopLevel(Grid)?.RenderScaling ?? RenderScaling;
+        var cells = _partition.ComputeCells();
+        var mosaic = Grid.MosaicWindows;
         for (var i = 0; i < routes; i++)
         {
             var s = Grid.GetSurface(i);
-            if (s is null || !s.IsVisible || i >= cells.Length) continue;
+            var cellIndex = Grid.CellIndexOfRoute(i);
+            if (s is null || !s.IsVisible || cellIndex < 0 || cellIndex >= cells.Length) continue;
+
+            if (mosaic)
+            {
+                // 复位在拼合下的含义：窗口不再被放大到对比区的 z 倍（回到恰好铺满），
+                // 区域回到本格（放大时它是"格 ∩ 放大后的视野"，通常小于格）。
+                var win = CompareCropPlanner.ToPhysicalRect(s.Bounds, scaling);
+                var expWin = CompareCropPlanner.ToPhysicalRect(new Rect(0, 0, w, h), scaling);
+                if (!BlockClose(win, expWin))
+                    throw new InvalidOperationException(
+                        $"复位后第 {i} 路窗口 {win} 未回到对比区 {expWin}（放大尺寸没退掉 ⇒ 内核仍在按更大的 swapchain 渲染）");
+                AssertRouteBlockAt(i, cells[cellIndex], "无缝放大-复位后");
+                continue;
+            }
+
             var exp = CompareCropPlanner.CellToContainerDip(cells[i], w, h);
             var got = s.Bounds;
             if (Math.Abs(got.Width - exp.Width) > 1.5 || Math.Abs(got.Height - exp.Height) > 1.5 ||
@@ -5768,7 +7253,6 @@ public partial class MainWindow : Window
                 throw new InvalidOperationException($"复位后第 {i} 路窗口未回到格尺寸：Bounds={got} 期望 {exp}");
 
             // OS 窗口也必须回到格尺寸（否则内核仍按放大后的分辨率渲染，白烧显存）
-            var scaling = TopLevel.GetTopLevel(Grid)?.RenderScaling ?? RenderScaling;
             var expPx = CompareCropPlanner.ToPhysicalRect(exp, scaling);
             var actual = ReadWindowRectPx(s.Hwnd);
             if (Math.Abs(actual.Width - expPx.Width) > 2 || Math.Abs(actual.Height - expPx.Height) > 2)
@@ -5776,7 +7260,7 @@ public partial class MainWindow : Window
                     $"复位后第 {i} 路子 HWND 尺寸 {actual.Width}x{actual.Height} != 格 {expPx.Width}x{expPx.Height}");
         }
 
-        Console.WriteLine("comparemodetest: 无缝放大复位 ✓ 子窗口回到格尺寸、放大参数已清空");
+        Console.WriteLine($"comparemodetest: 无缝放大复位 ✓ {(mosaic ? "窗口回到整对比区、区域回到各自那一格" : "子窗口回到格尺寸")}、放大参数已清空");
     }
 
     /// <summary>滚轮 → 无缝放大链路（生产 UI 的触发路径）。
@@ -5801,9 +7285,9 @@ public partial class MainWindow : Window
     /// 换判据不是"为了让它变绿"：放大态判据的五件套（排版 == 放大窗口、OS 尺寸、OS 位置、区域回读、
     /// 区域居中落在格里、letterbox 修正生效）逐条覆盖旧的裁剪判据，且期望值同样由公开纯函数独立复算，
     /// 判决强度不降。若换成正确判据后仍红，那就是真缺陷，保留红色。</para></summary>
-    private async System.Threading.Tasks.Task<int> AssertCompareWheelMagnifyAsync(int routes, CompareMode mode)
+    private async System.Threading.Tasks.Task<int> AssertCompareWheelMagnifyAsync(int routes, (int Cols, int Rows) shape)
     {
-        EnterCompareMode(mode);
+        await EnterGridShapeAsync(shape.Cols, shape.Rows);
         await System.Threading.Tasks.Task.Delay(200);
         UpdateLayout();
 
@@ -5845,7 +7329,7 @@ public partial class MainWindow : Window
         try
         {
             applied = await AssertCompareMagnifyAsync(
-                routes, mode, _compareZoom, _compareCropX, _compareCropY,
+                routes, shape, _compareZoom, _compareCropX, _compareCropY,
                 originOverride: originBeforeMagnify, label: "滚轮无缝放大");
         }
         finally
@@ -5890,13 +7374,99 @@ public partial class MainWindow : Window
                 $"({_compareCropX:F4},{_compareCropY:F4})，播种值 ({cropXSeed:F4},{cropYSeed:F4})。" +
                 "拖动中必须按 ~60Hz 合并提交一次（--magnifybench 的 [平移提交] 实测 p95 0.27ms、" +
                 "34 次/秒零 hitch），否则用户看到的就是\"拖着不动、松手才跳\"");
-        if (Math.Abs(_compareCropY - cropYSeed) > 1e-9)
+
+        // ⚠ 这里原先还顺带断言"纵轴必须一动不动"，那是**建在操作系统游标上**的判据：
+        // OnSurfaceMove 内部自己再读一次 GetCursorPos，于是 dy = "播种取值之后到本次调用之前"
+        // 游标真的被挪了多少。RTSS/别的程序/人手动碰一下鼠标 ⇒ 偶发判红（2026-09-30 全轮跑出
+        // cropY 0.0600→0.0624 一例；随后 12 次交错 A/B 两臂均 0 红 ⇒ 与当晚两处降增量改动无关）。
+        // 那是 harness 自己在测量环境抖动，不是产品两轴串了 ⇒ 生产链路这一处只保留它真正能立的
+        // 主张（"没松手就已经提交"）；两轴独立改由下面那条**不碰游标**的确定性判据来钉。
+        if (Math.Abs(_compareCropY - cropYSeed) > 1e-9 && GetCursorPos(out var jitterCheck))
+            Console.WriteLine(
+                $"comparemodetest: 拖动实时提交：纵轴记到 Δcrop={_compareCropY - cropYSeed:+0.0000;-0.0000}" +
+                $"（OnSurfaceMove 自读 GetCursorPos，播种后游标被移动就会产生它，只登记不判红；" +
+                $"两轴独立由下一条判据验）");
+
+        // 两轴独立：走同一条累积/提交实现，但**位移是传进来的**，不经过操作系统游标 ⇒ 确定性。
+        // dx=+24、dy=0 ⇒ 纵轴必须逐位不动；若哪天换算把两轴混到一起（或除错分母），这里必红。
+        var axisXSeed = _compareCropX;
+        var axisYSeed = _compareCropY;
+        AccumulateComparePan(24, 0);
+        CommitComparePan();
+        if (!(_compareCropX < axisXSeed - 1e-9))
             throw new InvalidOperationException(
-                $"拖动只该动横轴，纵轴却从 {cropYSeed:F4} 变成 {_compareCropY:F4} ⇒ 两轴换算串了");
+                $"两轴独立判据前置失效：喂入 (dx=24, dy=0) 后横轴没动（{axisXSeed:F4}→{_compareCropX:F4}）" +
+                "⇒ 这一枪会因'什么都没变'而恒真，不能当通过");
+        if (Math.Abs(_compareCropY - axisYSeed) > 1e-12)
+            throw new InvalidOperationException(
+                $"拖动只该动横轴，纵轴却从 {axisYSeed:F4} 变成 {_compareCropY:F4} ⇒ 两轴换算串了" +
+                "（本条不读游标，红了就是产品的换算错，不是环境抖动）");
+
+        // ── 平移**幅度**判据（2026-10-01 新增，因为拼合改了基准）────────────────
+        // 上面两条只判"动了没有 / 另一轴没动"，**不判动多少** ⇒ 换算系数错 2 倍也能全绿。
+        // 而拼合恰好把这件事变成活的：`Magnify` 的基准现在是**整个对比区**（窗口 == 对比区），
+        // 旧的"窗口 == 格"几何里除的是格宽。日志实证（2x3、z=1.15、scaling 1.5）：dx=24px 让
+        // crop 走 0.0181，反解除数 884 DIP = (1537/2)×1.15 = 半宽格×z，正确应是 1537×1.15=1768
+        // ⇒ 横轴快了 2 倍、纵轴（1/3 高格）快 3 倍，且钳位让"拖到底"只用掉一半行程。
+        // 期望值只取公开几何（对比区宽 + 当前倍率 + 对齐模式的量程），不调生产的私有换算。
+        // ⚠ 只在**拼合**下判：非拼合（对照臂 FC_NOMOSAIC / 历史形态）的基准是"光标所在那一格"，
+        //    而光标位置不由本夹具控制 ⇒ 期望值算不出来，硬判就是随机红 ⇒ 明写不适用，不静默跳过。
+        if (!Grid.MosaicWindows)
+        {
+            Console.WriteLine("  平移幅度 不适用：非拼合排布的基准是光标所在那一格，光标位置不可控");
+        }
+        else
+        {
+            var magZoom = _compareZoom;
+            var magPixel = _compareAlign == CompareAlign.Pixel;
+            // 播种到量程中段：贴 0 或贴上界时钳位会把两种换算洗成同一个结果（那是"顶到头"，不是判据）。
+            var magMaxCrop = magPixel ? 1.0 : CompareCropPlanner.MaxCropFraction(magZoom);
+            if (!SetCompareMagnify(magZoom, magMaxCrop * 0.5, magMaxCrop * 0.5))
+                throw new InvalidOperationException("平移幅度判据前置失败：无法把 crop 播到量程中段");
+            UpdateLayout();
+            var magScale = CompareCropScaling();
+            if (!(magScale > 0)) magScale = 1.0;
+            const int MagDragPx = 60;                   // 物理像素，够小不至于一步推到钳位
+            var magBaseDip = Grid.Bounds.Width;         // 拼合：窗口铺满对比区 ⇒ 基准就是对比区
+            var magDivisor = magBaseDip * (magPixel ? magZoom - 1.0 : magZoom);
+            var magExpected = (MagDragPx / magScale) / magDivisor;
+            // 夹具自检：期望值必须与"按格宽换算"的那个候选**差得远**，否则这一枪没有鉴别力
+            // （1 列 1 行时两者重合 ⇒ 明说"本形状判不了"，而不是让绿冒充验过）。
+            var magCellDivisor = Math.Max(1, _partition.ComputeCells()[0].Width * Grid.Bounds.Width)
+                                 * (magPixel ? magZoom - 1.0 : magZoom);
+            if (magCellDivisor <= 0 || Math.Abs(magDivisor - magCellDivisor) / magExpected < 0.2)
+            {
+                Console.WriteLine($"  平移幅度 不适用：本形状（{_partition.Cols}x{_partition.Rows}）下" +
+                                  "『按对比区』与『按格』两种基准相差 <20%，量不出差别");
+            }
+            else
+            {
+                var magXSeed = _compareCropX;
+                AccumulateComparePan(MagDragPx, 0);
+                CommitComparePan();
+                var magActual = magXSeed - _compareCropX;
+                if (_compareCropX <= 1e-9 || Math.Abs(_compareCropX - magMaxCrop) < 1e-9)
+                    throw new InvalidOperationException(
+                        $"平移幅度判据前置失效：这一枪把 crop 推到钳位边界（{magXSeed:F4}→{_compareCropX:F4}）" +
+                        "⇒ 顶到头的差值不能当读数，请缩小位移或换倍率");
+                if (Math.Abs(magActual - magExpected) > magExpected * 0.08)
+                    throw new InvalidOperationException(
+                        $"平移换算系数不对：喂入 dx={MagDragPx}px（= {MagDragPx / magScale:F1} DIP）应推进 crop " +
+                        $"{magExpected:F5}（基准=对比区 {magBaseDip:F1} DIP × z{(magPixel ? "−1" : "")}" +
+                        $"={magDivisor:F1}），实际推进 {magActual:F5}（{magXSeed:F4}→{_compareCropX:F4}，" +
+                        $"是期望的 {magActual / magExpected:F2} 倍）" +
+                        "⇒ 拼合下窗口==整对比区，基准取错就是『手拖 1px、画面走 N px』");
+                Console.WriteLine(
+                    $"  平移幅度 ✓ dx={MagDragPx}px → Δcrop={magActual:F5}（期望 {magExpected:F5}，" +
+                    $"对比区 {magBaseDip:F1}DIP，z={magZoom:0.##}，" +
+                    $"{(magPixel ? "像素级量程 z−1" : "相对量程 z")}，形状 {_partition.Cols}x{_partition.Rows}）");
+            }
+        }
 
         Console.WriteLine(
             $"comparemodetest: 拖动实时提交 ✓ 未松手即提交，crop ({cropXSeed:F4},{cropYSeed:F4}) → " +
-            $"({_compareCropX:F4},{_compareCropY:F4})（纵轴未动）");
+            $"({_compareCropX:F4},{_compareCropY:F4})；两轴独立另测一条 (dx=24,dy=0)：横轴 " +
+            $"{axisXSeed:F4}→{_compareCropX:F4}、纵轴 {axisYSeed:F4}→{_compareCropY:F4} 逐位未动");
 
         // 缩到底必须退出放大：连续反向滚动，倍率单调回落到 1
         var guard = 0;
@@ -5921,9 +7491,10 @@ public partial class MainWindow : Window
 
     /// <summary>「左右互换」（格→路映射的最小入口）。
     ///
-    /// <para><b>判据</b>：互换后<b>第 1 路占据原第 0 路的矩形、第 0 路占据原第 1 路的矩形</b>；
-    /// 再点一次必须还原。期望值取自"互换前实测的 Bounds"，不是复算 —— 这里要验的正是
-    /// "两路的位置真的被对调了"，复算会与实现同源。</para>
+    /// <para><b>判据</b>：互换后<b>第 1 路占据原第 0 路的那一块、第 0 路占据原第 1 路的那一块</b>；
+    /// 再点一次必须还原。期望值取自"互换前实测的<b>露出块</b>"（拼合模式 = 窗口原点 + 回读区域），
+    /// 不是复算 —— 这里要验的正是"两路的位置真的被对调了"，复算会与实现同源。
+    /// 互换前后各路窗口 Bounds 恒等于整对比区、毫无鉴别力，观测量只能是区域。</para>
     ///
     /// <para><b>前置：两格矩形必须不同</b>。默认 0.5/0.5 的 AB 两格等宽等高、只有 X 不同
     /// （仍有鉴别力），但拖成 0.35 后宽高也不同 ⇒ 断言更强，且能抓住"只换了宽没换位置"
@@ -5936,34 +7507,37 @@ public partial class MainWindow : Window
     {
         if (routes < 2) throw new InvalidOperationException($"互换需要 ≥2 路，当前 {routes} 路");
 
-        EnterCompareMode(CompareMode.Ab);
+        EnterCompareMode();
         await System.Threading.Tasks.Task.Delay(150);
-        // 非对称分割：让两格的宽高也不同，避免"只换位置没换尺寸"的错误逃过断言
-        OnCompareSplitChanged(new SplitParams(0.35, 0.6));
+        // 非对称分割：让相邻两格宽高不同，避免"只换位置没换尺寸"的错误逃过断言
+        OnPartitionChanged(_partition.WithHandleDragged(0, 0.35, 0.6));
         UpdateLayout();
         await System.Threading.Tasks.Task.Delay(150);
         UpdateLayout();
+        ApplyCompareCrop();
 
-        var s0 = Grid.GetSurface(0) ?? throw new InvalidOperationException("互换：第 0 路缺失");
-        var s1 = Grid.GetSurface(1) ?? throw new InvalidOperationException("互换：第 1 路缺失");
-        var before0 = s0.Bounds;
-        var before1 = s1.Bounds;
+        var scaling = TopLevel.GetTopLevel(Grid)?.RenderScaling ?? RenderScaling;
+        var before0 = RouteVisibleRectPx(0, scaling, "互换前");
+        var before1 = RouteVisibleRectPx(1, scaling, "互换前");
 
-        if (BoundsClose(before0, before1))
+        if (BlockClose(before0, before1))
             throw new InvalidOperationException(
-                $"互换断言空转：两格矩形相同（{before0}），互换后无法区分（请检查分割参数是否生效）");
+                $"互换断言空转：两路露出的块相同（{before0}），互换后无法区分" +
+                "（拼合下观测量是窗口区域，它没跟着格表走 ⇒ 先查裁剪下发）");
 
         OnSwapCompareCells(this, new Avalonia.Interactivity.RoutedEventArgs());
         UpdateLayout();
-        await System.Threading.Tasks.Task.Delay(200);
+        await System.Threading.Tasks.Task.Delay(200);   // 让 OnSwapCompareCells 排的那一拍裁剪落地
         UpdateLayout();
 
-        if (!BoundsClose(s1.Bounds, before0))
+        var after1 = RouteVisibleRectPx(1, scaling, "互换后");
+        var after0 = RouteVisibleRectPx(0, scaling, "互换后");
+        if (!BlockClose(after1, before0))
             throw new InvalidOperationException(
-                $"互换后第 1 路未占据原第 0 路的矩形：Bounds={s1.Bounds} 期望 {before0}");
-        if (!BoundsClose(s0.Bounds, before1))
+                $"互换后第 1 路未占据原第 0 路的块：{after1} 期望 {before0}");
+        if (!BlockClose(after0, before1))
             throw new InvalidOperationException(
-                $"互换后第 0 路未占据原第 1 路的矩形：Bounds={s0.Bounds} 期望 {before1}");
+                $"互换后第 0 路未占据原第 1 路的块：{after0} 期望 {before1}");
 
         // 再点一次必须还原（幂等）—— 也顺带证明"互换是可逆的呈现操作"
         OnSwapCompareCells(this, new Avalonia.Interactivity.RoutedEventArgs());
@@ -5971,16 +7545,16 @@ public partial class MainWindow : Window
         await System.Threading.Tasks.Task.Delay(200);
         UpdateLayout();
 
-        if (!BoundsClose(s0.Bounds, before0))
+        if (!BlockClose(RouteVisibleRectPx(0, scaling, "再次互换后"), before0))
             throw new InvalidOperationException(
-                $"再次互换未还原：第 0 路 Bounds={s0.Bounds} 期望 {before0}");
-        if (!BoundsClose(s1.Bounds, before1))
+                $"再次互换未还原：第 0 路露出的块 {RouteVisibleRectPx(0, scaling, "再次互换后")} 期望 {before0}");
+        if (!BlockClose(RouteVisibleRectPx(1, scaling, "再次互换后"), before1))
             throw new InvalidOperationException(
-                $"再次互换未还原：第 1 路 Bounds={s1.Bounds} 期望 {before1}");
+                $"再次互换未还原：第 1 路露出的块 {RouteVisibleRectPx(1, scaling, "再次互换后")} 期望 {before1}");
 
         Console.WriteLine(
-            $"comparemodetest: 左右互换 ✓ 两路矩形对调后还原（{before0.Width:F0}x{before0.Height:F0} ↔ " +
-            $"{before1.Width:F0}x{before1.Height:F0}）");
+            $"comparemodetest: 左右互换 ✓ 两路露出的块对调后还原（{before0.Width}x{before0.Height}px ↔ " +
+            $"{before1.Width}x{before1.Height}px，观测量=窗口区域回读）");
     }
 
     /// <summary>分辨率对齐模式（<see cref="CompareAlign"/>）的两条真机契约。
@@ -6003,19 +7577,39 @@ public partial class MainWindow : Window
     ///
     /// <para>另一半（各路分辨率<b>不同</b>时必须真的对齐）由 <c>CompareCropPlannerAlignTests</c>
     /// 在纯算术层穷举 —— 真机要凑不同分辨率的素材，且肉眼判断不了"露出的像素数是否相同"。</para></summary>
-    private async System.Threading.Tasks.Task AssertCompareAlignModesAsync(int routes, CompareMode mode)
+    private async System.Threading.Tasks.Task AssertCompareAlignModesAsync(int routes, (int Cols, int Rows) shape)
     {
-        EnterCompareMode(mode);
+        await EnterGridShapeAsync(shape.Cols, shape.Rows);
         await System.Threading.Tasks.Task.Delay(150);
         UpdateLayout();
 
+        // 前提检查（#29 多素材入口当场顶出来的新面）：像素级对齐下逐路**有效倍率** z_i = z·W_i/minW，
+        // 源尺寸不同 ⇒ 按"各路同尺寸"估出来的 z 会被显存闸门**正确地**拒掉。
+        // 实测（720p + 4K 两路、1x2 拼合、z=2）：4K 路等效 6 倍 ⇒ `对齐模式测试：像素级对齐下启用放大失败`。
+        // 那不是缺陷，是本条判据的前提没了 —— 本节文档原文就写着"本自测用同一素材复制多路 ⇒ 各路源分辨率相同"。
+        // ⇒ 混尺寸时登记**未判**：既不记红（闸门没错），也不记绿（这条没量到东西）。
+        var srcSizes = ReadCompareMagnifySources();
+        var distinctSrc = srcSizes.Select(p => $"{p.Width}x{p.Height}").Distinct().ToArray();
+        if (distinctSrc.Length > 1)
+        {
+            RecordSelfTestSkip($"对齐模式：本轮混了 {distinctSrc.Length} 种源尺寸（{string.Join("/", distinctSrc)}）" +
+                               "⇒ 前提「各路源分辨率相同」不成立，像素级下 z_i=z·W_i/minW 会把 z 顶到闸门之外 ⇒ 未判" +
+                               "（不同分辨率的对齐已由 CompareCropPlannerAlignTests 在算术层穷举）");
+            Console.WriteLine("  对比-对齐模式：**跳过**（混尺寸，未验证 ≠ 通过）");
+            return;
+        }
+
         var savedAlign = _settings.CompareAlign;
+        // 本用例验的是"逐路参数与对齐模式"的算术，与具体倍率无关 ⇒ 倍率按预算取
+        //（拼合后 9 路 z=2 超预算，被拒才是正确行为；见 AffordableMagnifyZoom）。
+        var zoomAffordable = AffordableMagnifyZoom(routes);
         try
         {
             // 相对对齐（默认）：逐路结果必须等于共用值
             _settings.CompareAlign = (int)CompareAlign.Relative;
-            if (!SetCompareMagnify(2.0, 0.25, 0.25))
-                throw new InvalidOperationException("对齐模式测试：相对对齐下启用放大失败");
+            if (!SetCompareMagnify(zoomAffordable, 0.25, 0.25))
+                throw new InvalidOperationException(
+                    $"对齐模式测试：相对对齐下启用放大失败（z={zoomAffordable:0.##} 被闸门拒绝）");
             UpdateLayout();
             await System.Threading.Tasks.Task.Delay(200);
             var rel = Grid.CellMagnify
@@ -6040,8 +7634,9 @@ public partial class MainWindow : Window
 
             // 像素级对齐：等分辨率 ⇒ 必须与上面完全一致
             _settings.CompareAlign = (int)CompareAlign.Pixel;
-            if (!SetCompareMagnify(2.0, 0.25, 0.25))
-                throw new InvalidOperationException("对齐模式测试：像素级对齐下启用放大失败");
+            if (!SetCompareMagnify(zoomAffordable, 0.25, 0.25))
+                throw new InvalidOperationException(
+                    $"对齐模式测试：像素级对齐下启用放大失败（z={zoomAffordable:0.##} 被闸门拒绝）");
             UpdateLayout();
             await System.Threading.Tasks.Task.Delay(200);
             UpdateLayout();
@@ -6135,33 +7730,37 @@ public partial class MainWindow : Window
     {
         if (routes < 2) throw new InvalidOperationException($"轮换需要 ≥2 路，当前 {routes} 路");
 
-        EnterCompareMode(CompareMode.Ab);
+        EnterCompareMode();
         await System.Threading.Tasks.Task.Delay(150);
-        OnCompareSplitChanged(new SplitParams(0.35, 0.6));
+        OnPartitionChanged(_partition.WithHandleDragged(0, 0.35, 0.6));
         UpdateLayout();
         await System.Threading.Tasks.Task.Delay(150);
         UpdateLayout();
+        ApplyCompareCrop();
 
+        var scaling = TopLevel.GetTopLevel(Grid)?.RenderScaling ?? RenderScaling;
         var s0 = Grid.GetSurface(0) ?? throw new InvalidOperationException("轮换：第 0 路缺失");
         var s1 = Grid.GetSurface(1) ?? throw new InvalidOperationException("轮换：第 1 路缺失");
-        var start0 = s0.Bounds;
-        var start1 = s1.Bounds;
+        // 观测量 = 各路**实际露出的那块**（拼合下 = 窗口原点 + 回读区域）。Bounds 在此模式下
+        // 恒等于整对比区，拿它判"谁搬到哪一格"完全没有鉴别力。
+        var start0 = RouteVisibleRectPx(0, scaling, "轮换前");
+        var start1 = RouteVisibleRectPx(1, scaling, "轮换前");
 
         OnRotateCompareCells(this, new Avalonia.Interactivity.RoutedEventArgs());
         UpdateLayout();
-        await System.Threading.Tasks.Task.Delay(200);
+        await System.Threading.Tasks.Task.Delay(200);   // 让轮换排的那一拍裁剪落地
         UpdateLayout();
 
-        // ① 轮换生效的正确观测物：**第 1 路搬进了第 0 路原来的那一格**。
-        // ⚠ 这里不能再拿"第 0 路的 Bounds 变没变"当代理 —— 格数少于路数时（3 路用 AB）第 0 路
-        //   会掉出格表，而 Avalonia 对 `IsVisible=false` 的控件**不回写 Bounds**：
-        //   ArrangeOverride 里那句 `s.Arrange(new Rect(0,0,0,0))` 不落地，Bounds 停在旧值
-        //   （2026-09-26 首次执行到本步的判红读数：映射确实是 [1,2]、Grid.CellRoute 也是 [1,2]，
-        //   只有第 0 路的 Bounds 没动 ⇒ 空转的是判据，不是产品）。
-        var cellCount = CompareLayout.CellCount(_compareMode);
-        if (!BoundsClose(s1.Bounds, start0))
+        // ① 轮换生效的正确观测物：**第 1 路搬进了第 0 路原来的那一块**。
+        // ⚠ 观测量必须是区域而不是 Bounds（拼合下后者恒定）；且被撤下的那一路会被 ClearCompareCrop
+        //   清掉区域 ⇒ RouteVisibleRectPx 回落到整窗，与任何一格的期望都不相符，
+        //   所以"掉出格表"这一支仍按可见性单独判（见下面的 routes > cellCount 分支）。
+        var cellCount = _partition.CellCount;
+        var after1 = RouteVisibleRectPx(1, scaling, "轮换后");
+        var after0 = RouteVisibleRectPx(0, scaling, "轮换后");
+        if (!BlockClose(after1, start0))
         {
-            FailReadings($"轮换后第 1 路没有占据第 0 格（s1.Bounds={s1.Bounds} 期望={start0}）：轮换未生效");
+            FailReadings($"轮换后第 1 路没有占据第 0 格（露出块={after1} 期望={start0}）：轮换未生效");
         }
         if (routes > cellCount)
         {
@@ -6169,10 +7768,10 @@ public partial class MainWindow : Window
             if (s0.IsVisible)
                 FailReadings($"轮换后第 0 路仍在显示（格数={cellCount} < 路数={routes}，它不该有格）");
         }
-        else if (BoundsClose(s0.Bounds, start0))
+        else if (BlockClose(after0, start0))
         {
             // 路数 == 格数时每一路都有格可站 ⇒ 位置必须真的变
-            FailReadings($"轮换后第 0 路位置未变（Bounds={s0.Bounds}）：轮换未生效（空转）");
+            FailReadings("轮换后第 0 路位置未变（露出块没动）：轮换未生效（空转）");
         }
 
         void FailReadings(string why)
@@ -6180,27 +7779,29 @@ public partial class MainWindow : Window
             // 只记录读数、不改判决：OnRotateCompareCells 有四个提前 return 的闸门
             //（_compareActive / 叠加 / 格数<2 / 路数<2），红必须说清卡在哪个。
             Log($"[读数] 轮换判据：{why} ｜ Grid.Count={Grid.Count} _sync.Count={_sync.Count} " +
-                $"_compareActive={_compareActive} 叠加={CompareOverlayActive} 模式={_compareMode} " +
-                $"格数={cellCount} 路数={routes} " +
+                $"_compareActive={_compareActive} 叠加={CompareOverlayActive} 形状={_partition.Cols}x{_partition.Rows} " +
+                $"格数={cellCount} 路数={routes} 拼合={Grid.MosaicWindows} " +
                 $"_compareRoute=[{(_compareRoute is null ? "null" : string.Join(",", _compareRoute))}] " +
                 $"Grid.CellRoute=[{(Grid.CellRoute is null ? "null" : string.Join(",", Grid.CellRoute))}] " +
-                $"第0路 前={start0} 后={s0.Bounds} 可见={s0.IsVisible} ｜ 第1路 前={start1} 后={s1.Bounds}");
+                $"第0路 前={start0} 后={after0} 可见={s0.IsVisible} ｜ " +
+                $"第1路 前={start1} 后={after1} 可见={s1.IsVisible}");
             throw new InvalidOperationException(why);
         }
         // ③ 每一格的占用者必须是"格号 + 1 mod 路数"（映射是合法排列）。
-        //    ⚠ 判据必须看"哪一路站到了这一格上"，不能看"两格的矩形互不相同"：
-        //    格数 < 路数时被撤下的那一路带着**陈旧 Bounds**（见 ① 的说明），
-        //    于是它与真正占着那一格的那一路读出同一个矩形 ⇒ 旧写法在 3/4 路假红
-        //    （原判据 2026-09-26 首次执行即判红："两格矩形相同 (1.33,1.33,464.67,748)"）。
+        //    ⚠ 判据必须看"哪一路站到了这一格上"，不能拿两格的矩形互不相同当代理：
+        //    格数 < 路数时被撤下的那一路没有区域 ⇒ 回落成整窗，与真正占着那一格的那一路
+        //    读不出区别（原判据 2026-09-26 首次执行即判红："两格矩形相同 (1.33,1.33,464.67,748)"）。
         var cellRects = new[] { start0, start1 };
         for (var c = 0; c < cellRects.Length; c++)
         {
             var expectRoute = (c + 1) % routes;
             var occ = Grid.GetSurface(expectRoute)
                       ?? throw new InvalidOperationException($"轮换：第 {expectRoute} 路缺失");
-            if (!BoundsClose(occ.Bounds, cellRects[c]))
+            var occRect = RouteVisibleRectPx(expectRoute, scaling, "轮换逐格核对");
+            if (!occ.IsVisible || !BlockClose(occRect, cellRects[c]))
                 FailReadings($"轮换后第 {c} 格应由第 {expectRoute} 路占据：" +
-                             $"该路 Bounds={occ.Bounds} 期望={cellRects[c]}（映射不是合法排列，或被撤下的路没让位）");
+                             $"该路露出块={occRect} 期望={cellRects[c]} 可见={occ.IsVisible}" +
+                             "（映射不是合法排列，或被撤下的路没让位）");
         }
 
         // ② 再轮换 (routes-1) 次 ⇒ 共 routes 次，必须回到起点
@@ -6210,118 +7811,136 @@ public partial class MainWindow : Window
         await System.Threading.Tasks.Task.Delay(200);
         UpdateLayout();
 
-        if (!BoundsClose(s0.Bounds, start0))
+        var back0 = RouteVisibleRectPx(0, scaling, "轮换整周期后");
+        if (!BlockClose(back0, start0))
             throw new InvalidOperationException(
-                $"轮换 {routes} 次后第 0 路未回到起点：Bounds={s0.Bounds} 期望 {start0}" +
+                $"轮换 {routes} 次后第 0 路未回到起点：露出块={back0} 期望 {start0}" +
                 "（周期应为路数；若等于格数，则格数 < 路数时永远轮换不到没显示的路）");
         // "回到起点"必须是一次**真实的往返**而不是陈旧读数：格数 < 路数时第 0 路在周期中途
-        // 是不可见的（①已判过），所以这里要它重新可见 —— 否则本条会因 Bounds 不回写而构造恒等。
+        // 是不可见的（①已判过），所以这里要它重新可见 —— 否则本条会因区域没跟着重下发而构造恒等。
         if (!s0.IsVisible)
             throw new InvalidOperationException(
                 $"轮换 {routes} 次后第 0 路仍不可见：中途被撤下后没有真的回到格上");
-        if (!BoundsClose(s1.Bounds, start1))
+        var back1 = RouteVisibleRectPx(1, scaling, "轮换整周期后");
+        if (!BlockClose(back1, start1))
             throw new InvalidOperationException(
-                $"轮换 {routes} 次后第 1 路未回到起点：Bounds={s1.Bounds} 期望 {start1}");
+                $"轮换 {routes} 次后第 1 路未回到起点：露出块={back1} 期望 {start1}");
 
         Console.WriteLine($"comparemodetest: 轮换画面 ✓ 周期 = 路数 {routes}（可轮换到全部 {routes} 路）");
     }
 
-    /// <summary>模式变体（AB 竖 / ABC 三列）。
+    /// <summary>朝向变体（合并后 = 该 lane 数下 <see cref="GridPartition.ShapesFor"/> 的全部候选）。
     ///
-    /// <para><b>为什么数据驱动的模式循环不够</b>：<c>AvailableModes</c> 的循环确实会切到这两个变体，
-    /// 但 <c>AssertCellsDriveLayout</c> 只验"各路 Bounds == 格表"，对<b>变体的定义性形状</b>没有
-    /// 鉴别力 —— 若 <c>ComputeCells</c> 漏改分支（落进 default 画成左右两格），格数仍然吻合，
-    /// 那条断言<b>照样判绿</b>（C# 对带 <c>_ =&gt;</c> 兜底的 switch 不报 CS8509，编译期也没有保护）。
-    /// 故这里补两条"形状"断言：竖分必须<b>通宽</b>、三列必须<b>通高</b>。</para>
-    ///
-    /// <para>再加一条覆盖层判据：三列必须有<b>两个</b>手柄（两条竖线各一个），
-    /// 且手柄必须落在格的右边界上 —— 否则第二条线"可拖但看不见抓手"。</para></summary>
+    /// <para><b>为什么数据驱动的循环不够</b>：sweep 单元只验"各路 Bounds == 格表"，对每种朝向的
+    /// <b>定义性形状</b>没有鉴别力 —— 1×2（上下两格）若被实现成左右两格，格数照样吻合、Bounds
+    /// 照样与格表自洽。旧实现靠 <c>ComputeCells</c> 的分支画形状，漏改一支会静默落进
+    /// <c>_ =&gt;</c> 兜底（C# 不报 CS8509）；新模型是一套权重公式，同类错误变成了
+    /// "轴向给错"和"拖一条线串到另一条"，所以这里逐朝向钉三条：</para>
+    /// <list type="number">
+    /// <item><description>单行必须<b>通高</b>、单列必须<b>通宽</b>，且每行宽度之和 == 1（无缝）；</description></item>
+    /// <item><description>手柄数量 = 内部竖线 + 内部横线，各落在自己那条线的<b>内部</b>边界上且互不重合
+    /// —— 否则第二条线"可拖但看不见抓手"，或两条线共用一个抓手；</description></item>
+    /// <item><description>拖第 0 条线时，<b>其余线一格都不位移</b>。旧的那份 <c>SplitParams</c>
+    /// 只有两个自由度、两条竖线共用一份参数，"拖 A|B 的分隔条却改变了 B|C 的分界"是真实发生过的
+    /// 缺陷形态；权重模型下这条必须由判据守住，而不是靠构造显然。</description></item>
+    /// </list>
+    /// <para>覆盖范围先打印出来：不写的话一句"朝向变体 ✓"会让人以为所有构型都跑过了。</para></summary>
     private async System.Threading.Tasks.Task AssertCompareModeVariantsAsync(int routes)
     {
-        var available = CompareLayout.AvailableModes(routes);
+        // 形状是关于"格 vs lane"的事，故按 lane 数枚候选（用路数会在别的单元留下空占位 lane 时
+        // 出现"装不下"的假红，判据本身与素材路数无关）。
+        var lanes = Grid.Count;
+        var shapes = GridPartition.ShapesFor(lanes);
+        Console.WriteLine($"  朝向变体 覆盖范围（{routes} 路 / {lanes} 条 lane）：[" +
+                          $"{string.Join(", ", shapes.Select(s => $"{s.Cols}x{s.Rows}"))}]");
 
-        // 覆盖范围先说清楚：ABC 三列那一支在 2 路下不会执行（AvailableModes 不含它）。
-        // 不写出来的话，一句 "对比-模式变体 ✓" 会让人以为两个变体都验过了。
-        Console.WriteLine(
-            $"  模式变体 覆盖范围：AB 竖={(available.Contains(CompareMode.AbVertical) ? "跑" : "**跳过**")}" +
-            $" + ABC 三列={(available.Contains(CompareMode.AbcColumns) ? "跑" : "**跳过**")}" +
-            $"（{routes} 路可用模式=[{string.Join(", ", available)}]）");
-
-        if (available.Contains(CompareMode.AbVertical))
+        foreach (var (cols, rows) in shapes)
         {
-            EnterCompareMode(CompareMode.AbVertical);
-            await System.Threading.Tasks.Task.Delay(200);
-            UpdateLayout();
-            AssertCellsDriveLayout(routes, CompareMode.AbVertical, "AB 竖");
+            await EnterGridShapeAsync(cols, rows);
+            var label = $"{cols}x{rows}";
+            AssertCellsDriveLayout(lanes, $"朝向 {label}");
 
-            var cells = CompareLayout.ComputeCells(CompareMode.AbVertical, _compareSplit);
-            if (cells.Length != 2) throw new InvalidOperationException($"AB 竖应是 2 格，实际 {cells.Length}");
-            // 定义性形状：两格通宽、上下相接 ⇒ 漏改成"左右分"时宽度不是 1，立刻判红
-            if (Math.Abs(cells[0].Width - 1.0) > 1e-6 || Math.Abs(cells[1].Width - 1.0) > 1e-6)
+            var cells = _partition.ComputeCells();
+            if (cells.Length != Math.Min(lanes, cols * rows))
                 throw new InvalidOperationException(
-                    $"AB 竖的两格未通宽（{cells[0].Width:0.###} / {cells[1].Width:0.###}）—— 被画成了左右分栏");
-            if (Math.Abs(cells[0].Height + cells[1].Height - 1.0) > 1e-6)
-                throw new InvalidOperationException("AB 竖的两格高度之和 != 1（未上下相接）");
+                    $"{label} 格数 {cells.Length} ≠ 应有 {Math.Min(lanes, cols * rows)}（lane {lanes}）");
 
-            if (CompareLayout.HandleAxisAt(CompareMode.AbVertical, 0) != SplitAxis.Y)
-                throw new InvalidOperationException("AB 竖的手柄轴不是横分割（SplitAxis.Y）");
+            // ① 定义性形状
+            if (rows == 1)
+                for (var i = 0; i < cells.Length; i++)
+                    if (Math.Abs(cells[i].Height - 1.0) > 1e-6)
+                        throw new InvalidOperationException(
+                            $"{label} 第 {i} 格未通高（{cells[i].Height:0.###}）—— 凭空多出一条横分割");
+            if (cols == 1)
+                for (var i = 0; i < cells.Length; i++)
+                    if (Math.Abs(cells[i].Width - 1.0) > 1e-6)
+                        throw new InvalidOperationException(
+                            $"{label} 第 {i} 格未通宽（{cells[i].Width:0.###}）—— 上下两格被画成了左右两格");
 
+            if (lanes >= cols * rows)
+                for (var r = 0; r < rows; r++)
+                {
+                    var sumW = 0.0;
+                    var right = 0.0;
+                    for (var c = 0; c < cols; c++)
+                    {
+                        var cell = cells[r * cols + c];
+                        sumW += cell.Width;
+                        right = Math.Max(right, cell.X + cell.Width);
+                    }
+                    if (Math.Abs(sumW - 1.0) > 1e-6 || Math.Abs(right - 1.0) > 1e-6)
+                        throw new InvalidOperationException(
+                            $"{label} 第 {r} 行未铺满：列宽之和={sumW:0.#####} 最右端={right:0.#####}");
+                }
+
+            // ② 手柄数量、轴向、落点
             var handles = _layoutOverlay?.HandlePositions()
                           ?? throw new InvalidOperationException("覆盖层未创建");
-            if (handles.Length != 1)
-                throw new InvalidOperationException($"AB 竖应只有 1 个手柄，实际 {handles.Length}");
-            if (Math.Abs(handles[0].X - 0.5) > 1e-6)
-                throw new InvalidOperationException($"AB 竖的手柄不在横线中点：X={handles[0].X:0.###}");
-
-            Console.WriteLine("comparemodetest: AB 竖 ✓ 两格通宽上下相接、手柄在横线中点");
-        }
-
-        if (available.Contains(CompareMode.AbcColumns))
-        {
-            EnterCompareMode(CompareMode.AbcColumns);
-            await System.Threading.Tasks.Task.Delay(200);
-            UpdateLayout();
-            AssertCellsDriveLayout(routes, CompareMode.AbcColumns, "ABC 三列");
-
-            var cells = CompareLayout.ComputeCells(CompareMode.AbcColumns, _compareSplit);
-            if (cells.Length != 3) throw new InvalidOperationException($"ABC 三列应是 3 格，实际 {cells.Length}");
-            // 定义性形状：三格通高、左右相接
-            for (var i = 0; i < cells.Length; i++)
-                if (Math.Abs(cells[i].Height - 1.0) > 1e-6)
-                    throw new InvalidOperationException(
-                        $"ABC 三列第 {i} 格未通高（{cells[i].Height:0.###}）—— 被画成了非三列布局");
-            if (Math.Abs(cells[0].X) > 1e-6 ||
-                Math.Abs(cells[0].X + cells[0].Width - cells[1].X) > 1e-6 ||
-                Math.Abs(cells[1].X + cells[1].Width - cells[2].X) > 1e-6 ||
-                Math.Abs(cells[2].X + cells[2].Width - 1.0) > 1e-6)
-                throw new InvalidOperationException("ABC 三列的三格未左右相接铺满");
-
-            // 两条竖线 ⇒ 两个手柄，且都落在对应格的右边界上（与几何同源）
-            var handles = _layoutOverlay?.HandlePositions()
-                          ?? throw new InvalidOperationException("覆盖层未创建");
-            if (handles.Length != 2)
+            var expectedHandles = (cols - 1) + (rows - 1);
+            if (handles.Length != expectedHandles)
                 throw new InvalidOperationException(
-                    $"ABC 三列应有 2 个手柄（两条竖线），实际 {handles.Length}");
-            if (Math.Abs(handles[0].X - handles[1].X) < 1e-6)
-                throw new InvalidOperationException("ABC 三列的两个手柄重合（用户无法分别抓住）");
-            for (var i = 0; i < 2; i++)
+                    $"{label} 应有 {expectedHandles} 条可拖分割线，覆盖层给了 {handles.Length} 个手柄");
+            for (var i = 0; i < handles.Length; i++)
             {
-                var edge = cells[i].X + cells[i].Width;
-                if (Math.Abs(handles[i].X - edge) > 1e-6)
+                var isVertical = _partition.HandleAxisAt(i) == SplitAxis.X;
+                if (isVertical != i < cols - 1)
                     throw new InvalidOperationException(
-                        $"ABC 三列第 {i} 个手柄（X={handles[i].X:0.###}）与第 {i} 列右边界（{edge:0.###}）不重合");
+                        $"{label} 第 {i} 个手柄轴向错（前 {cols - 1} 个必须是竖线）");
+                if (lanes >= cols * rows)
+                {
+                    var onEdge = cells.Any(cc => isVertical
+                        ? Math.Abs(handles[i].X - (cc.X + cc.Width)) < 1e-6 && cc.X + cc.Width < 1 - 1e-9
+                        : Math.Abs(handles[i].Y - (cc.Y + cc.Height)) < 1e-6 && cc.Y + cc.Height < 1 - 1e-9);
+                    if (!onEdge)
+                        throw new InvalidOperationException(
+                            $"{label} 第 {i} 个手柄（{handles[i].X:0.####},{handles[i].Y:0.####}）" +
+                            "不在任何一格的内部边界上 —— 线画在一处、抓手在另一处");
+                }
+            }
+            for (var a = 0; a < handles.Length; a++)
+                for (var b = a + 1; b < handles.Length; b++)
+                    if (Math.Abs(handles[a].X - handles[b].X) < 1e-6
+                        && Math.Abs(handles[a].Y - handles[b].Y) < 1e-6)
+                        throw new InvalidOperationException($"{label} 的手柄 {a} 与 {b} 重合（无法分别抓住）");
+
+            // ③ 拖第 0 条线不得串到别的线（≥3 列才有"下一条线"可串）
+            if (cols >= 3)
+            {
+                var before = _partition.HandlePositions();
+                var dragged = _partition.WithHandleDragged(0, 0.2, 0.5);
+                var after = dragged.HandlePositions();
+                if (Math.Abs(after[0].X - 0.2) > 1e-6)
+                    throw new InvalidOperationException(
+                        $"{label}：第 0 条线没跟到 0.2（实际 {after[0].X:0.####}）");
+                for (var i = 1; i < before.Length; i++)
+                    if (Math.Abs(before[i].X - after[i].X) > 1e-6 || Math.Abs(before[i].Y - after[i].Y) > 1e-6)
+                        throw new InvalidOperationException(
+                            $"{label}：拖第 0 条线后，第 {i} 条线从 {before[i]} 被带到 {after[i]}（拖动串线）");
             }
 
-            Console.WriteLine(
-                $"comparemodetest: ABC 三列 ✓ 三格通高左右相接、两个手柄分别在 " +
-                $"{handles[0].X:0.###} / {handles[1].X:0.###}");
+            Console.WriteLine($"comparemodetest: 朝向 {label} ✓ {cells.Length} 格、{handles.Length} 条线、" +
+                              "通高/通宽与无缝均吻合" + (cols >= 3 ? "、拖动不串线" : ""));
         }
-
-        // 变体断言会切模式，末尾回到本段的起始模式（maxMode 由调用方决定），
-        // 避免后续"退出对比模式"那一段拿到的模式与它进入时的不一致。
-        EnterCompareMode(available[available.Count - 1]);
-        await System.Threading.Tasks.Task.Delay(150);
-        UpdateLayout();
     }
 
     // ══════════ 叠加模式（ICAT Single Screen，docs/31 阶段 2）验证 ══════════
@@ -6349,13 +7968,14 @@ public partial class MainWindow : Window
 
         if (!CompareOverlayActive)
             throw new InvalidOperationException($"{label}：进入后 CompareOverlayActive 仍为 false");
-        if (!_compareActive || _compareMode != CompareMode.Ab)
+        if (!_compareActive)
             throw new InvalidOperationException(
-                $"{label}：叠加必须建立在对比模式 AB 之上（当前 active={_compareActive} mode={_compareMode}）");
+                $"{label}：左右拉动必须建立在网格对比态之上（当前 active={_compareActive}）");
 
-        // 用一个确定的分割位置，再走生产路径下发区域（期望值见下）
-        var split = new SplitParams(0.7, 0.5);
-        OnCompareSplitChanged(split);
+        // 用一个确定的揭示位置，再走生产路径下发区域（期望值见下）。
+        // 拖动目标由 Core 的 WithHandleDragged 给出 —— 与用户真实拖动同一条换算。
+        var split = _wipePartition.WithHandleDragged(0, 0.7, 0.5);
+        OnPartitionChanged(split);
         UpdateLayout();
         ApplyCompareCrop();
 
@@ -6367,40 +7987,62 @@ public partial class MainWindow : Window
         if (a.Hwnd == nint.Zero || b.Hwnd == nint.Zero)
             throw new InvalidOperationException($"{label}：子 HWND 未创建，叠加无从验证");
 
-        // ① 两路都铺满整个对比区（期望值由 ExpectedBounds 独立复算，不读 Grid 的内部格表）
+        // ① 每一路都铺满整个对比区（期望值由 ExpectedBounds 独立复算，不读 Grid 的内部格表）。
+        //    "铺满"是拉动的载体语义：只有窗口是整幅，内核才把整幅渲染进来，各带才拼得回一整幅。
+        //    ⚠ 旧实现在这里断言"第 2 路起必须不可见"—— 那正是被用户报为"加路失效"的行为
+        //    （带表长度恒 2 ⇒ 多出来的 lane 被隐藏）。N 带语义下**每一条带都承载一路且都可见**，
+        //    故本判据改为"逐路都铺满且都可见"，见下方 ①b。
         var full = ExpectedBounds(new CellRect(0, 0, 1, 1), w, h);
         if (!BoundsClose(a.Bounds, full))
             throw new InvalidOperationException($"{label}：A 路未铺满对比区：Bounds={a.Bounds} 期望 {full}");
         if (!BoundsClose(b.Bounds, full))
             throw new InvalidOperationException($"{label}：B 路未铺满对比区：Bounds={b.Bounds} 期望 {full}");
-        for (var i = 2; i < routes; i++)
-            if (Grid.GetSurface(i)?.IsVisible != false)
-                throw new InvalidOperationException($"{label}：叠加模式只呈现前 2 路，第 {i} 路却仍可见");
 
-        // ②③④ 两路区域互补（期望值独立复算 + Win32 回读核对）。两路铺满 ⇒ 窗口物理矩形应当一致。
+        // ①b N 带语义：参与对比的每一路都必须可见且铺满 —— 这是"加路不再失效"的直接判据。
+        //     旧判据恰好相反（要求 2 路以上不可见），所以它长期把本缺陷判绿。
+        for (var i = 2; i < routes; i++)
+        {
+            var s = Grid.GetSurface(i)
+                ?? throw new InvalidOperationException($"{label}：第 {i} 路缺失（N 带下每路都该有带）");
+            if (!s.IsVisible)
+                throw new InvalidOperationException(
+                    $"{label}：左右拉动下第 {i} 路不可见 —— N 带必须逐路承载一路（这正是「加路失效」的旧行为）");
+            if (!BoundsClose(s.Bounds, full))
+                throw new InvalidOperationException(
+                    $"{label}：第 {i} 路未铺满对比区：Bounds={s.Bounds} 期望 {full}");
+        }
+        if (WipeBandCount != routes)
+            throw new InvalidOperationException(
+                $"{label}：拉动带数 {WipeBandCount} != 参与路数 {routes}（带表必须跟着路数走）");
+
+        // ②③④ 各带区域互补（期望值独立复算 + Win32 回读核对）。各路窗口都铺满 ⇒ 物理矩形应当一致。
         var winA = CompareCropPlanner.ToPhysicalRect(a.Bounds, scaling);
         var winB = CompareCropPlanner.ToPhysicalRect(b.Bounds, scaling);
         if (Math.Abs(winA.Width - winB.Width) > 1 || Math.Abs(winA.Height - winB.Height) > 1)
             throw new InvalidOperationException(
                 $"{label}：两路窗口物理尺寸不一致（A={winA.Width}x{winA.Height} B={winB.Width}x{winB.Height}）");
 
-        var applied = AssertOverlayComplement(label, "水平 split=0.70", a.Hwnd, b.Hwnd, winA, winB,
-            split.X, vertical: false);
+        // ⚠ N 带下判据从"两路互补"推广为"逐带铺满且两两不重叠"：
+        //   · 旧写法假设只有两路且第 1 路的区域一直延伸到窗口末端（[split, span]），
+        //     这在 N≥3 时不成立（第 1 路只占第 2 条带，后面还有其它带）。
+        //   · 现在的观测物仍是 Win32 回读的区域（GetWindowRgn/GetRgnBox），期望值独立复算。
+        var applied = AssertWipeBandsTile(label, "水平 split=0.70",
+            split.PrimaryBoundary(), vertical: false);
 
         // 拖动分割线必须驱动揭示区 —— 这正是"滑块揭示"的链路（OnCompareSplitChanged 即覆盖层回调）
-        var dragSplit = new SplitParams(0.25, 0.5);
-        OnCompareSplitChanged(dragSplit);
+        var dragSplit = _wipePartition.WithHandleDragged(0, 0.25, 0.5);
+        OnPartitionChanged(dragSplit);
         UpdateLayout();
         ApplyCompareCrop();
-        applied += AssertOverlayComplement(label, "拖动 split=0.25", a.Hwnd, b.Hwnd, winA, winB,
-            dragSplit.X, vertical: false);
+        applied += AssertWipeBandsTile(label, "拖动 split=0.25",
+            dragSplit.PrimaryBoundary(), vertical: false);
 
-        // 垂直揭示：同一份逻辑只换矩形（内部方向开关；两个方向都由 _compareSplit.X 驱动）
+        // 垂直揭示：同一份逻辑只换矩形（内部方向开关；两个方向都读同一条 PrimaryBoundary）
         SetCompareOverlayAxis(OverlayAxis.Vertical);
         UpdateLayout();
         ApplyCompareCrop();
-        applied += AssertOverlayComplement(label, "垂直 split=0.25", a.Hwnd, b.Hwnd, winA, winB,
-            dragSplit.X, vertical: true);
+        applied += AssertWipeBandsTile(label, "垂直 split=0.25",
+            dragSplit.PrimaryBoundary(), vertical: true);
 
         SetCompareOverlayAxis(OverlayAxis.Horizontal);
         UpdateLayout();
@@ -6410,12 +8052,21 @@ public partial class MainWindow : Window
         // 接缝是子 HWND 物理矩形内的 px 分界（还要过 +1 内缩与取整）。差在 1px 级是几何必然，
         // 但"线在这儿、画面接缝在那儿"两道是分得出来的 —— 用 ≤1.5 DIP 把这条界钉住，
         // 真漂了就有读数，而不是留一条"可能差 1px"的口头账。
-        var seamType = ReadWindowRegion(b.Hwnd, out var seamBox);
+        //
+        // ⚠ N 带语义下这条判据的**观测物要改**：旧写法读"B（第 1 路）区域的右边缘"当接缝 ——
+        //   那在两路时成立（B 铺 [split,1]，右边缘即窗口右沿），N 带时**不成立**
+        //   （第 1 路只占第 2 条带，它的右边缘是第 2 条带的末端，与第 1 条线无关）。
+        //   现在改成：接缝 = 第 0 条带（第 0 路）区域的**右边缘**，与覆盖层画出的**第一条线**比对。
+        //   这才是"线在这儿、画面接缝在那儿"那句话的原意。
+        var seamType = ReadWindowRegion(a.Hwnd, out var seamBox);
         if (seamType is not (RegionTypeSimple or RegionTypeComplex))
-            throw new InvalidOperationException($"{label}：取线与接缝的对齐读数时 B 路没有区域（type={seamType}）");
-        var seamDip = (winB.X + seamBox.X + seamBox.Width) / scaling;
-        var lineDip = _compareSplit.X * (_layoutOverlay?.Bounds.Width
+            throw new InvalidOperationException(
+                $"{label}：取线与接缝的对齐读数时第 0 路没有区域（type={seamType}）");
+        // 区域是窗口相对坐标 ⇒ 加上窗口物理原点才是容器坐标
+        var seamDip = (winA.X + seamBox.X + seamBox.Width) / scaling;
+        var lineDip = _wipePartition.PrimaryBoundary() * (_layoutOverlay?.Bounds.Width
             ?? throw new InvalidOperationException($"{label}：覆盖层不存在，无从取得画线位置"));
+        // 第一条线在覆盖层上的位置：N 带下就是 _wipePartition 的第一条内部边界
         if (Math.Abs(seamDip - lineDip) > 1.5)
             throw new InvalidOperationException(
                 $"{label}：画出的分割线（{lineDip:F1} DIP）不在揭示接缝（{seamDip:F1} DIP）上，" +
@@ -6441,10 +8092,22 @@ public partial class MainWindow : Window
 
         await System.Threading.Tasks.Task.Delay(150); // 让退出时排的那一拍落地
         UpdateLayout();
-        var abCells = CompareLayout.ComputeCells(CompareMode.Ab, _compareSplit);
+        ApplyCompareCrop();
+        var abCells = _partition.ComputeCells();   // 退出拉动后回到网格的那一组格
         for (var i = 0; i < Math.Min(routes, abCells.Length); i++)
         {
             var s = Grid.GetSurface(i) ?? throw new InvalidOperationException($"{label}：退出叠加后第 {i} 路缺失");
+            if (Grid.MosaicWindows)
+            {
+                // 拼合下窗口 == 整对比区，"回到网格"的可观测后果是**区域回到各自那一格**
+                var win = CompareCropPlanner.ToPhysicalRect(s.Bounds, scaling);
+                var expWin = CompareCropPlanner.ToPhysicalRect(new Rect(0, 0, w, h), scaling);
+                if (!BlockClose(win, expWin))
+                    throw new InvalidOperationException(
+                        $"{label}：退出叠加后第 {i} 路窗口 {win} 未回到对比区 {expWin}");
+                AssertRouteBlockAt(i, CellOfRoute(i, abCells, label), $"{label} 退出叠加后");
+                continue;
+            }
             var exp = ExpectedBounds(abCells[i], w, h);
             if (!BoundsClose(s.Bounds, exp))
                 throw new InvalidOperationException(
@@ -6455,20 +8118,698 @@ public partial class MainWindow : Window
         return applied;
     }
 
+    /// <summary>布局编辑器（自由拼接）二级窗的<b>模态交互探针</b> + 几何往返判据。
+    ///
+    /// <para><b>为什么必须有这一步（P6 前置）</b>：本项目对"覆盖/无边框透明窗口上的交互控件"
+    /// （<c>LayoutOverlayWindow</c> / <c>FloatingTransportWindow</c> 那一类 <c>WS_EX_NOACTIVATE</c>
+    /// 窗口上的按钮与下拉）**从未实测过**能否正常交互 —— <c>docs/30:189</c> 列为 P6 待实测，
+    /// 代码注释记着"这正是当初用『轮换』键代替自选源的原因"。
+    /// 编辑器做成普通模态窗正是为了绕开它，但"绕开了"这件事本身也必须有读数，
+    /// 否则就只是把未验证换了个地方。</para>
+    ///
+    /// <para><b>探针测什么</b>：程序化走<b>与用户同一条路径</b>（<c>SplitForTest</c> /
+    /// <c>MergeForTest</c> / <c>SetRouteForTest</c> 都转调私有的生产处理器，不复制判断），
+    /// 断言：① 窗口能建立并真的 <c>Show</c>（平台层没拒绝）；② 按钮可用态随选择变化；
+    /// ③ 切分/合并/设路真的改变了几何；④ 确定后回传的布局与窗口内一致（往返不丢信息）；
+    /// ⑤ 取消不改变宿主布局。</para>
+    ///
+    /// <para><b>为什么不驱动真实的鼠标事件</b>：<c>--selftest</c> 跑在无头意图的自动化里，
+    /// 合成指针事件需要窗口有真实焦点，而本项目的自动化档刻意不抢焦点。
+    /// 因此探针覆盖的是"控件存在 + 生产处理器可被驱动 + 几何正确"，
+    /// <b>不</b>声称覆盖"真人用鼠标点中按钮"——那一条仍需人工目视（会记进 SKIP 说明）。</para></summary>
+    private async System.Threading.Tasks.Task AssertLayoutEditorAsync(int routes)
+    {
+        var label = "布局编辑器";
+
+        // 前置：必须在拉动态（编辑器是拉动的一种呈现形态）
+        if (!_compareOverlayActive && !EnterCompareOverlay())
+        {
+            RecordSelfTestSkip($"{label}：进不了左右拉动（素材 {routes} 路），编辑器无从验证");
+            return;
+        }
+        await System.Threading.Tasks.Task.Delay(200);
+
+        var start = MosaicLayout.FromGridPartition(_wipePartition);
+        var win = new Views.MosaicLayoutEditorWindow(start, Math.Max(1, Grid.Count));
+        try
+        {
+            // ① 窗口能建立并显示（平台层没拒绝创建）
+            win.Show(this);
+            await System.Threading.Tasks.Task.Delay(200);
+            if (!win.IsVisible)
+                throw new InvalidOperationException($"{label}：窗口 Show 后 IsVisible=false（平台层拒绝了显示）");
+
+            // ② 初始布局 == 传入的起始布局（往返的第一个方向）
+            if (!win.CurrentLayout.SameAs(start))
+                throw new InvalidOperationException(
+                    $"{label}：编辑器初始布局与传入的不一致（块数 {win.CurrentLayout.Tiles.Length} vs {start.Tiles.Length}）");
+
+            // ③ 未选块时不该给操作（避免"点了没反应"）；选中后应可用
+            win.SelectTileForTest(-1);
+            if (win.SplitEnabledForTest)
+                throw new InvalidOperationException($"{label}：没有选中块时切分按钮仍可用（用户点了会没反应）");
+            win.SelectTileForTest(0);
+            if (!win.SplitEnabledForTest)
+                throw new InvalidOperationException($"{label}：选中块后切分按钮仍不可用");
+
+            // ④ 竖切：块数 +1，且新块拿到下一路（"切开后两块显示不同路"）
+            var before = win.CurrentLayout.Tiles.Length;
+            win.SplitForTest(SplitAxis.X);
+            var afterSplit = win.CurrentLayout;
+            if (afterSplit.Tiles.Length != before + 1)
+                throw new InvalidOperationException(
+                    $"{label}：竖切后块数 {before}→{afterSplit.Tiles.Length}（期望 +1）");
+            if (afterSplit.Tiles[0].Route == afterSplit.Tiles[1].Route)
+                throw new InvalidOperationException(
+                    $"{label}：切开后两块显示同一路（等于「切了没反应」）");
+
+            // ⑤ 几何不变式必须仍然成立（编辑器改布局的每一步都不能破坏它）
+            AssertMosaicInvariants(afterSplit, $"{label} 竖切后");
+
+            // ⑥ 横切：再 +1，且得到含横竖混排的形态（自由拼接的核心能力）
+            win.SplitForTest(SplitAxis.Y);
+            var afterSplit2 = win.CurrentLayout;
+            if (afterSplit2.Tiles.Length != before + 2)
+                throw new InvalidOperationException(
+                    $"{label}：横切后块数 {before + 1}→{afterSplit2.Tiles.Length}（期望 +1）");
+            AssertMosaicInvariants(afterSplit2, $"{label} 横切后");
+            if (!afterSplit2.LogicalLines().Any(l => l.Axis == SplitAxis.X) ||
+                !afterSplit2.LogicalLines().Any(l => l.Axis == SplitAxis.Y))
+                throw new InvalidOperationException(
+                    $"{label}：横竖各切一次后应同时存在竖线与横线（横竖自由组合的核心能力）");
+
+            // ⑦ 设路：把第 0 块设为第 2 路（若路数够）
+            if (Grid.Count >= 2)
+            {
+                win.SelectTileForTest(0);
+                win.SetRouteForTest(1);
+                if (win.CurrentLayout.Tiles[0].Route != 1)
+                    throw new InvalidOperationException(
+                        $"{label}：设路未生效（第 0 块 route={win.CurrentLayout.Tiles[0].Route}，期望 1）");
+            }
+
+            // ⑧ 合并：把第 1 块并回第 0 块（先让它们同路）
+            win.SelectTileForTest(0);
+            win.SetRouteForTest(0);
+            win.SelectTileForTest(1);
+            win.SetRouteForTest(0);
+            var beforeMerge = win.CurrentLayout.Tiles.Length;
+            win.SelectTileForTest(0);
+            win.MergeForTest();
+            if (win.CurrentLayout.Tiles.Length >= beforeMerge)
+            {
+                // 不合并是允许的（可能拼起来不是矩形）——但必须给出可见原因，不能静默
+                if (string.IsNullOrWhiteSpace(win.StatusTextForTest))
+                    throw new InvalidOperationException($"{label}：合并未生效且状态行没有任何说明（静默）");
+            }
+            else
+            {
+                AssertMosaicInvariants(win.CurrentLayout, $"{label} 合并后");
+            }
+
+            // ⑨ 确定 ⇒ 回传布局与窗口内一致（往返不丢信息）
+            var expected = win.CurrentLayout;
+            win.AcceptForTest();
+            await System.Threading.Tasks.Task.Delay(150);
+            if (!win.Accepted || win.Result is null)
+                throw new InvalidOperationException($"{label}：确定后 Accepted/Result 未置位");
+            if (!win.Result.SameAs(expected))
+                throw new InvalidOperationException($"{label}：回传布局与窗口内不一致（往返丢信息）");
+
+            // ⑩ 应用回宿主：宿主布局 == 编辑器结果，且区域真的重下发
+            SetWipeMosaicForTest(win.Result);
+            await System.Threading.Tasks.Task.Delay(150);
+            UpdateLayout();
+            ApplyCompareCrop();
+            if (!WipeMosaicActive || WipeMosaic is null)
+                throw new InvalidOperationException($"{label}：应用后宿主未进入自由拼接形态");
+            if (!WipeMosaic.SameAs(win.Result))
+                throw new InvalidOperationException($"{label}：宿主布局与编辑器结果不一致");
+            AssertMosaicInvariants(WipeMosaic, $"{label} 应用到宿主后");
+
+            // ⑪ 每一路都必须拿到区域（否则那一路画面不被裁 ⇒ 盖住别人）
+            var scaling = TopLevel.GetTopLevel(Grid)?.RenderScaling ?? RenderScaling;
+            for (var r = 0; r < Grid.Count; r++)
+            {
+                var s = Grid.GetSurface(r);
+                if (s is null || s.Hwnd == nint.Zero) continue;
+                var participates = WipeMosaic.TilesOfRoute(r).Length > 0;
+                var hasRegion = TryCompareVisibleBlocksPx(r, out var blocks) && blocks.Length > 0;
+                if (participates && !hasRegion)
+                    throw new InvalidOperationException(
+                        $"{label}：第 {r} 路参与了拼接却没有下发区域（它不会被裁 ⇒ 会盖住其它路）");
+                if (!participates && hasRegion)
+                    throw new InvalidOperationException(
+                        $"{label}：第 {r} 路没参与拼接却仍有区域（会露出一块不属于它的画面）");
+            }
+
+            Log($"{label} ✓ 模态窗可建立、按钮可用态随选择变化、切分/设路/合并走生产处理器、" +
+                $"确定回传往返一致、应用后 {WipeMosaic.Tiles.Length} 块 / {WipeMosaic.RouteCount} 路均有区域");
+            Console.WriteLine($"{label} ✓ {WipeMosaic.Tiles.Length} 块 / {WipeMosaic.RouteCount} 路；" +
+                              "⚠ 真实鼠标点击按钮仍需人工目视（自动化档不合成指针事件、不抢焦点）");
+
+            // ⑬ 自由拼接的**线段拖动**必须真的能改块表（此前 DragWipeLine 写了但没接线，
+            //    表现为"线画出来了、能命中、却拖不动"—— 由审查轮查出）
+            await AssertFreeformLineDragAsync();
+
+            // ⑭ 「选择路」对话框（同一 P6 风险面，同样必须量出读数）
+            // ⚠ 先撤掉自由拼接再测选择路：两个模态窗连着开、且中间让 6 路窗口同时铺满呈现，
+            //    会把这个进程的**并发交换链数 N** 一直顶在高位 —— 而 docs/43 已定案
+            //    "崩溃率 ∝ N"（RTSS 钩子竞态）。判据没必要为了省一步还原而抬高暴露面。
+            SetWipeMosaicForTest(null);
+            await System.Threading.Tasks.Task.Delay(200);
+            UpdateLayout();
+            ApplyCompareCrop();
+            await AssertRoutePickerAsync(routes);
+        }
+        finally
+        {
+            try { win.Close(); } catch { /* 窗口已关或平台拒绝：不影响判据结论 */ }
+            // 还原：退出自由拼接回到 N 带，避免影响后续单元
+            SetWipeMosaicForTest(null);
+            await System.Threading.Tasks.Task.Delay(100);
+        }
+    }
+
+    /// <summary>自由拼接的<b>线段拖动</b>判据：拖动必须真的改变块表，且三条不变式仍成立。
+    ///
+    /// <para><b>为什么要单独一条</b>：审查轮发现 <c>DragWipeLine</c> / <c>HitWipeLineAt</c>
+    /// 写了却**没有任何调用者** —— 自由拼接的线画出来了、能命中、却**拖不动**。
+    /// 更关键的是：当时 <c>MosaicLayout.DragLine</c> 有 Core 单测覆盖，
+    /// 于是"Core 逻辑正确"掩盖了"UI 层根本没接线"。本判据打在<b>生产入口</b>上
+    /// （<c>OnFreeformLineDragged</c>，与真实拖动同一条路径），专门堵这个缺口。</para>
+    ///
+    /// <para><b>同时验保守取舍的可见后果</b>：<c>DragLine</c> 对"不干净的层"会拒绝移动
+    /// （返回原布局）。若拖动被拒，判据要求**块表不变**（不能出现"拖动改了别处"的半吊子状态）。</para></summary>
+    private async System.Threading.Tasks.Task AssertFreeformLineDragAsync()
+    {
+        const string label = "自由拼接拖动";
+
+        // 造一个规整的拼接（两列），保证至少有一条"干净层"的线可拖
+        var start = MosaicLayout.Single().Split(0, SplitAxis.X, 0.5);
+        SetWipeMosaicForTest(start);
+        await System.Threading.Tasks.Task.Delay(250);
+        UpdateLayout();
+        ApplyCompareCrop();
+
+        if (!WipeMosaicActive || WipeMosaic is null)
+            throw new InvalidOperationException($"{label}：未能进入自由拼接形态");
+
+        var linesBefore = _layoutOverlay?.FreeformLineCount ?? 0;
+        if (linesBefore == 0)
+            throw new InvalidOperationException(
+                $"{label}：覆盖层上报的自由拼接线段数为 0（线没画出来，也就无从拖）");
+
+        var before = WipeMosaic!;
+        var lineIndex = 0;
+        var oldPos = before.LogicalLines()[lineIndex].Position;
+
+        // 走生产入口（与真实拖动同一条）：→ DragWipeLine → 回灌线段表
+        OnFreeformLineDragged(lineIndex, 0.75);
+        await System.Threading.Tasks.Task.Delay(200);
+        UpdateLayout();
+        ApplyCompareCrop();
+
+        var after = WipeMosaic!;
+        if (after.SameAs(before))
+            throw new InvalidOperationException(
+                $"{label}：拖动第 {lineIndex} 条线（{oldPos:F3}→0.75）后块表**没有变化** —— " +
+                "这条线拖不动（DragWipeLine 未被接线，或该层被判为不干净）");
+
+        var newPos = after.LogicalLines()[lineIndex].Position;
+        if (Math.Abs(newPos - 0.75) > 0.01)
+            throw new InvalidOperationException(
+                $"{label}：拖动后线位置 {newPos:F3} 与目标 0.75 相差过大");
+
+        // 拖动不得破坏三条不变式
+        AssertMosaicInvariants(after, $"{label} 拖动后");
+
+        // 区域必须重下发（否则块表变了、画面没变）
+        var anyRegion = false;
+        for (var r = 0; r < Grid.Count && !anyRegion; r++)
+            anyRegion = TryCompareVisibleBlocksPx(r, out var blks) && blks.Length > 0;
+        if (!anyRegion)
+            throw new InvalidOperationException($"{label}：拖动后没有任何路下发区域（画面不会跟着变）");
+
+        Log($"{label} ✓ 线段可拖：第 {lineIndex} 条 {oldPos:F3}→{newPos:F3}，块表已变、不变式成立、区域已重下发");
+        Console.WriteLine($"{label} ✓ 线 {lineIndex}: {oldPos:F3} → {newPos:F3}；" +
+                          $"覆盖层线段数 {linesBefore} → {_layoutOverlay?.FreeformLineCount ?? 0}");
+
+        // 收尾：回到 N 带，避免污染后续单元
+        SetWipeMosaicForTest(null);
+        await System.Threading.Tasks.Task.Delay(150);
+        UpdateLayout();
+        ApplyCompareCrop();
+    }
+
+    /// <summary>「选择路」对话框探针：窗口可建立、行数随带数、重复路被如实提示、确认回传映射。
+    ///
+    /// <para><b>为什么单列</b>：它与布局编辑器同一块未验证风险面（模态窗上的控件交互），
+    /// 且它承载一个用户明确要求的能力（"手动指定多路"）。判据要证明的是
+    /// **映射真的能生效**、以及**不相邻重复会被如实说明**（否则用户配好后看到只显示一处会以为坏了）。</para></summary>
+    private async System.Threading.Tasks.Task AssertRoutePickerAsync(int routes)
+    {
+        const string label = "选择路";
+
+        var bandCount = Math.Max(1, WipeBandCount);
+        var dlg = new Views.RoutePickerWindow(null, bandCount, Math.Max(1, Grid.Count));
+        try
+        {
+            dlg.Show(this);
+            await System.Threading.Tasks.Task.Delay(200);
+            if (!dlg.IsVisible)
+                throw new InvalidOperationException($"{label}：窗口 Show 后 IsVisible=false（平台层拒绝了显示）");
+
+            // ① 行数 == 带数
+            if (dlg.RowCountForTest != bandCount)
+                throw new InvalidOperationException(
+                    $"{label}：行数 {dlg.RowCountForTest} != 带数 {bandCount}");
+
+            // ② 初始为恒等 ⇒ 第 i 条带显示第 i 路
+            var identity = dlg.CurrentRoutes();
+            for (var i = 0; i < identity.Length; i++)
+                if (identity[i] != Math.Min(i, Math.Max(0, Grid.Count - 1)))
+                    throw new InvalidOperationException(
+                        $"{label}：初始映射不是恒等（第 {i} 行 = 路 {identity[i]}）");
+
+            // ③ 指定"两条带显示同一路"，确认回传必须**保留重复**（不得被静默去重）
+            if (bandCount >= 2 && Grid.Count >= 1)
+            {
+                dlg.SetRowForTest(0, 0);
+                dlg.SetRowForTest(1, 0);
+                var r = dlg.CurrentRoutes();
+                if (r[0] != 0 || r[1] != 0)
+                    throw new InvalidOperationException(
+                        $"{label}：重复路被改写（得到 [{string.Join(",", r)}]，期望前两项都是 0）");
+            }
+
+            // ④ 不相邻重复必须被**说明**（不能静默）
+            if (bandCount >= 3)
+            {
+                dlg.SetRowForTest(0, 0);
+                dlg.SetRowForTest(1, Math.Min(1, Grid.Count - 1));
+                dlg.SetRowForTest(2, 0);
+                var status = dlg.StatusTextForTest;
+                if (string.IsNullOrWhiteSpace(status) || !status.Contains("不相邻"))
+                    throw new InvalidOperationException(
+                        $"{label}：第 1、3 条带同为一路（不相邻）时未给出说明（状态行='{status}'）");
+            }
+
+            // ⑤ 加/减带的行数边界（不静默：到边界时状态行要有说明）
+            var before = dlg.RowCountForTest;
+            dlg.AddRowForTest();
+            if (dlg.RowCountForTest != Math.Min(before + 1, Core.Display.WipeBands.MaxBands))
+                throw new InvalidOperationException(
+                    $"{label}：加带后行数 {before}→{dlg.RowCountForTest}（期望 +1 或到上限 {Core.Display.WipeBands.MaxBands}）");
+
+            // ⑥ 确认 ⇒ 结果非空且与窗口一致
+            var expected = dlg.CurrentRoutes();
+            dlg.AcceptForTest();
+            await System.Threading.Tasks.Task.Delay(150);
+            if (!dlg.Accepted || dlg.Result is null)
+                throw new InvalidOperationException($"{label}：确认后 Accepted/Result 未置位");
+            if (dlg.Result.Length != expected.Length)
+                throw new InvalidOperationException(
+                    $"{label}：回传映射长度 {dlg.Result.Length} != 窗口内 {expected.Length}");
+            for (var i = 0; i < expected.Length; i++)
+                if (dlg.Result[i] != expected[i])
+                    throw new InvalidOperationException(
+                        $"{label}：回传映射第 {i} 项 {dlg.Result[i]} != 窗口内 {expected[i]}");
+
+            // ⑦ 应用到宿主：带数与映射真的生效，且区域跟着重下发
+            SetWipeRoutesForTest(dlg.Result);
+            await System.Threading.Tasks.Task.Delay(200);
+            UpdateLayout();
+            ApplyCompareCrop();
+            var applied = WipeRoutes;
+            if (applied is null || applied.Length != dlg.Result.Length)
+                throw new InvalidOperationException(
+                    $"{label}：应用到宿主后带数 {applied?.Length.ToString() ?? "null"} != {dlg.Result.Length}");
+            for (var i = 0; i < applied.Length; i++)
+                if (applied[i] != dlg.Result[i])
+                    throw new InvalidOperationException(
+                        $"{label}：宿主第 {i} 条带的路 {applied[i]} != 选定 {dlg.Result[i]}");
+
+            // ⑧ 重复路下"同一路占两条带"必须两处都有区域（相邻时并集可表达）
+            var dupRoute = -1;
+            for (var i = 1; i < applied.Length; i++)
+                if (applied[i] == applied[i - 1]) { dupRoute = applied[i]; break; }
+            if (dupRoute >= 0 && TryCompareVisibleBlocksPx(dupRoute, out var dupBlocks))
+            {
+                if (dupBlocks.Length < 2)
+                    throw new InvalidOperationException(
+                        $"{label}：第 {dupRoute} 路占两条相邻带，却只下发 {dupBlocks.Length} 块区域");
+            }
+
+            // ⑨ 不相邻重复 ⇒ 必须真的建出**镜像槽**（否则那一路只能显示一处）
+            await AssertWipeMirrorAsync(applied);
+
+            Log($"{label} ✓ 窗口可建立、行数随带数、重复路不被去重、不相邻重复有说明、" +
+                $"确认回传一致、应用到宿主 {applied.Length} 条带生效");
+            Console.WriteLine($"{label} ✓ {applied.Length} 条带 / 映射 [{string.Join(",", applied)}]");
+        }
+        finally
+        {
+            try { dlg.Close(); } catch { /* 已关或平台拒绝 */ }
+            // 还原恒等映射，避免影响后续单元
+            SetWipeRoutesForTest(null);
+            await System.Threading.Tasks.Task.Delay(100);
+        }
+    }
+
+    /// <summary>镜像判据：不相邻重复必须真的建出镜像槽，且镜像与源路<b>同位</b>。
+    ///
+    /// <para><b>为什么这是本功能最关键的判据</b>：镜像的整个价值是"同一路出现在两条带上
+    /// 仍显示<b>同一画面</b>"。若镜像漂移，用户看到的就变成"两条带显示同一路的不同时刻" ——
+    /// 而那正是他要用来做细节对照的东西，错一帧这功能就是假的。</para>
+    ///
+    /// <para><b>观测物</b>：① 槽数（真的多了一个会话）；② 镜像槽的 <c>MirrorOf</c> 指向源路；
+    /// ③ 两条带的承载槽<b>不同</b>（若相同就是"两条带抢一个 HWND"，镜像拿不到区域）；
+    /// ④ 镜像与源路的<b>媒体位置一致</b>（核心）；⑤ 移除该映射后镜像被释放（不留孤儿）。</para></summary>
+    private async System.Threading.Tasks.Task AssertWipeMirrorAsync(int[] routes)
+    {
+        const string label = "路镜像";
+
+        // 找一组"不相邻重复"：同一路出现在被别的路隔开的两条带上
+        var nonAdjacentRoute = -1;
+        for (var i = 0; i < routes.Length; i++)
+        {
+            for (var j = i + 2; j < routes.Length; j++)
+            {
+                if (routes[i] != routes[j]) continue;
+                var separated = false;
+                for (var k = i + 1; k < j; k++) if (routes[k] != routes[i]) { separated = true; break; }
+                if (separated) { nonAdjacentRoute = routes[i]; break; }
+            }
+            if (nonAdjacentRoute >= 0) break;
+        }
+        if (nonAdjacentRoute < 0)
+        {
+            RecordSelfTestSkip($"{label}：本轮带表 [{string.Join(",", routes)}] 没有不相邻重复，镜像无从验证");
+            return;
+        }
+
+        // 触发镜像收敛（走生产入口）
+        SetWipeRoutesForTest(routes);
+        await System.Threading.Tasks.Task.Delay(600);   // 建会话 + 打开是异步的
+        UpdateLayout();
+        ApplyCompareCrop();
+
+        var mirrors = _sync.Mirrors();
+        var forRoute = System.Linq.Enumerable.Where(mirrors, m => m.Source == nonAdjacentRoute).ToArray();
+        if (forRoute.Length == 0)
+        {
+            // ⚠ 建不出来**不是静默通过**：那一路只会显示一处。
+            //   两件事都要断言：
+            //   ① 状态栏必须说出来（否则用户看到空带却没有任何解释 —— 与用户最初报的
+            //      "点了没反应"是同一类静默失效）；
+            //   ② 而且这条说明必须**熬过随后那次状态栏重算**（ApplyRouteActivity 会调
+            //      NotifyCompareOverlay 整条重写）。本判据第一版只判"有说明"，而
+            //      当时 TryCreateMirror 直接写 StatusInfo —— 那次写入随后就被冲掉了。
+            await System.Threading.Tasks.Task.Delay(400);   // 让延后那一拍（Post 的 ApplyRouteActivity）落地
+            var statusNow = StatusInfo.Text ?? string.Empty;
+            if (!statusNow.Contains("镜像") && !statusNow.Contains("留空") && !statusNow.Contains("mirror"))
+                throw new InvalidOperationException(
+                    $"{label}：第 {nonAdjacentRoute + 1} 路需镜像但未建成，**且状态栏没有任何说明**" +
+                    $"（当前状态栏='{statusNow}'）—— 用户会看到一处空带却不知为何");
+            Console.WriteLine($"{label} ⚠ 镜像未建成，但状态栏已如实说明（熬过了重算）：" +
+                              $"'{statusNow.Substring(0, Math.Min(60, statusNow.Length))}…'");
+            return;
+        }
+
+        // ③ 两条带的承载槽必须不同
+        var bandA = System.Linq.Enumerable.First(System.Linq.Enumerable.Range(0, routes.Length)
+            .Where(i => routes[i] == nonAdjacentRoute));
+        var bandB = System.Linq.Enumerable.Last(System.Linq.Enumerable.Range(0, routes.Length)
+            .Where(i => routes[i] == nonAdjacentRoute));
+        var slotA = SlotOfBand(bandA);
+        var slotB = SlotOfBand(bandB);
+        if (slotA == slotB)
+            throw new InvalidOperationException(
+                $"{label}：第 {bandA + 1} 与第 {bandB + 1} 条带都解析到槽 {slotA}" +
+                "（同一 HWND 只能在一个位置 ⇒ 必然有一处显示不出来）");
+
+        // ④ 核心：镜像与源路媒体位置一致
+        var srcSnap = _sync.Slots[nonAdjacentRoute].Session.ReadSnapshot();
+        var mirSnap = _sync.Slots[slotB].Session.ReadSnapshot();
+        if (srcSnap is null || mirSnap is null)
+            throw new InvalidOperationException($"{label}：镜像或源路读不到快照");
+        var diff = Math.Abs(srcSnap.Position100ns - mirSnap.Position100ns);
+        if (diff > 30_0000)   // 30ms
+            throw new InvalidOperationException(
+                $"{label}：镜像与源路不同位（Δ={diff / 10000.0:F1}ms，源 {srcSnap.Position100ns} / 镜像 {mirSnap.Position100ns}）" +
+                " —— 两条带会显示同一路的不同时刻，功能意义丧失");
+
+        // ⑤ 两处都必须真的下发区域（否则有一处是空白）
+        if (!TryCompareVisibleBlocksPx(slotA, out var blocksA) || blocksA.Length == 0)
+            throw new InvalidOperationException($"{label}：第 {bandA + 1} 条带（槽 {slotA}）没有区域");
+        if (!TryCompareVisibleBlocksPx(slotB, out var blocksB) || blocksB.Length == 0)
+            throw new InvalidOperationException($"{label}：第 {bandB + 1} 条带（槽 {slotB}）没有区域");
+
+        Log($"{label} ✓ 不相邻重复建出镜像槽 {slotB}（源 {nonAdjacentRoute}）、两条带槽不同、" +
+            $"镜像与源路同位（Δ={diff / 10000.0:F2}ms）、两处均有区域");
+        Console.WriteLine($"{label} ✓ 源路 {nonAdjacentRoute} / 镜像槽 {slotB}；" +
+                          $"第 {bandA + 1}、{bandB + 1} 条带分别由槽 {slotA}、{slotB} 承载；Δ={diff / 10000.0:F2}ms");
+
+        // ⑥ 撤回映射 ⇒ 镜像必须被释放（不留孤儿：那是永久泄漏 + 白烧解码）
+        SetWipeRoutesForTest(MakeIdentityWipeRoutes(routes.Length));
+        await System.Threading.Tasks.Task.Delay(400);
+        var after = _sync.Mirrors();
+        if (after.Length >= mirrors.Length)
+            throw new InvalidOperationException(
+                $"{label}：撤掉重复映射后镜像未被释放（{mirrors.Length} → {after.Length}）—— 会留下孤儿会话");
+        Console.WriteLine($"{label} ✓ 撤回映射后镜像已释放（{mirrors.Length} → {after.Length}）");
+
+        // ⑦ 还要把 **lane 数**收回去：镜像占的那条 lane 在镜像释放后不会自动消失，
+        //    而后续单元（如「模式-网格对比入口」）判的是"格数 == lane 数"。
+        //    留着多出来的一条（或几条）空 lane 会让它判红 —— 实测踩到过：
+        //    `网格对比入口的格数 5 ≠ lane 数 6`。
+        //    ⇒ 判据必须自己把夹具还原干净，不能指望"下一个单元会自己收敛"。
+        //
+        //    ⚠ 收回的目标是**素材路数**（_sync.Count 去掉镜像），不是 routes.Length：
+        //      传进来的 routes 是"带表"（可能比路数长，例如选路后的 [0,1,0,3,4,4] 有 6 带
+        //      而素材只有 5 路）⇒ 按 routes.Length 收会**收不干净**。
+        //      本行第一版正是这么写的，于是打印出"已收回 6"却仍留着 6 条 lane。
+        var targetLanes = _sync.Count - _sync.Mirrors().Length;
+        if (targetLanes < 1) targetLanes = 1;
+        if (Grid.Count != targetLanes)
+        {
+            Grid.SetCount(targetLanes, _realMode);
+            UpdateLayout();
+            ApplyCompareCrop();
+            await System.Threading.Tasks.Task.Delay(150);
+        }
+        if (Grid.Count != targetLanes)
+            throw new InvalidOperationException(
+                $"{label}：探针收尾未把 lane 数收回 {targetLanes}（实际 {Grid.Count}）—— 会污染后续单元");
+        Console.WriteLine($"{label} ✓ lane 数已收回 {targetLanes}（不污染后续单元）");
+    }
+
+    /// <summary>拼接的三条不变式（不重叠 / 铺满 / 每块为正）。Core 单测里也有一份，
+    /// 但真机路径上必须再判一次 —— 编辑器与宿主是两条独立的写入路径，
+    /// 只靠 Core 单测证明不了"宿主应用后仍然合法"。</summary>
+    private static void AssertMosaicInvariants(MosaicLayout m, string what)
+    {
+        if (m.Tiles.Length == 0)
+            throw new InvalidOperationException($"{what}：拼接为空");
+
+        var area = 0.0;
+        for (var i = 0; i < m.Tiles.Length; i++)
+        {
+            var a = m.Tiles[i].Rect;
+            if (!(a.Width > 0) || !(a.Height > 0))
+                throw new InvalidOperationException($"{what}：第 {i} 块尺寸非正 {a.Width}x{a.Height}");
+            area += a.Width * a.Height;
+            for (var j = i + 1; j < m.Tiles.Length; j++)
+            {
+                var b = m.Tiles[j].Rect;
+                var overlap = a.X < b.X + b.Width - 1e-9 && b.X < a.X + a.Width - 1e-9 &&
+                              a.Y < b.Y + b.Height - 1e-9 && b.Y < a.Y + a.Height - 1e-9;
+                if (overlap)
+                    throw new InvalidOperationException($"{what}：第 {i} 块 {a} 与第 {j} 块 {b} 重叠");
+            }
+        }
+        if (Math.Abs(area - 1.0) > 1e-6)
+            throw new InvalidOperationException($"{what}：面积和 {area:F9} != 1（有缝或越界）");
+    }
+
+    /// <summary>断言左右拉动下 <b>N 条带铺满且两两不重叠</b>，并逐条与 Win32 回读的区域核对。
+    ///
+    /// <para><b>为什么取代了旧的"两路互补"判据</b>：旧判据假设拉动恒两格，于是断言
+    /// "B 铺 <c>[0, split]</c>、A 铺 <c>[split, span]</c>"。N 带之后第 1 路只占<b>第 2 条带</b>
+    /// （其右侧还有其它带），旧期望值必然对不上。判据的<b>不变式本身没变</b>：
+    /// 各带两两不重叠、并集恰好铺满整窗 —— 这正是"可见结果与 Z 序无关"的全部依据。</para>
+    ///
+    /// <para><b>期望值独立复算</b>：用公开的 <c>WipeBands.PartitionBoundaries</c> + 与生产同一套
+    /// 取整/钳制算术重算各带矩形，再与 <c>GetWindowRgn</c>/<c>GetRgnBox</c> 回读的逐条核对。
+    /// 生产代码不维护区域状态，故这不是自证。</para>
+    ///
+    /// <para><b>为什么逐路都读</b>：同一路可能占多条带（用户可指定重复路），
+    /// 故一条带一条带地核对，并断言"每条带确实归它该归的那一路"。</para></summary>
+    /// <returns>核对通过的带数（供调用方累计）。</returns>
+    private int AssertWipeBandsTile(string label, string what, double ignoredSplit, bool vertical)
+    {
+        var areaW = Grid.Bounds.Width;
+        var areaH = Grid.Bounds.Height;
+        if (areaW <= 0 || areaH <= 0)
+            throw new InvalidOperationException($"{label}[{what}]：对比区尺寸非法 {areaW}x{areaH}");
+
+        var scaling = TopLevel.GetTopLevel(Grid)?.RenderScaling ?? RenderScaling;
+        var axis = vertical ? WipeAxis.Vertical : WipeAxis.Horizontal;
+
+        // 独立复算：从**实际分区**取界标（分区是本次判据的输入，不是生产的私有状态），
+        // 再按与 WipeBands 同一套口径换算成窗口相对物理像素。
+        var boundaries = WipeBands.PartitionBoundaries(_wipePartition, axis);
+        var bandCount = boundaries.Length - 1;
+        if (bandCount < 1)
+            throw new InvalidOperationException($"{label}[{what}]：分区没有带（boundaries={boundaries.Length}）");
+
+        var checkedBands = 0;
+
+        // ★ 绝对期望：带数必须等于**参与对比的路数**（而不是"与分区自洽"）。
+        //   为什么必须有这一条：下面逐带核对的期望值全部**从分区本身取出**，
+        //   于是"分区只有 2 带"这种退化（正是用户报的「恒两格」旧行为）反而完全自洽、
+        //   逐带核对照样全绿 —— 实测确认过：`nobands` 变异（Partition 恒返回 2）
+        //   在只有"自洽"判据时**没有被判红**。故这里必须钉一个**不依赖分区**的期望。
+        //
+        //   ⚠ 判"是否恒等"不能写成 `WipeRoutes is null`：EnterCompareOverlay 会把
+        //     `_wipeRoutes ??= MakeIdentityWipeRoutes(...)` 填成**非 null 的恒等表**，
+        //     于是那个条件恒不成立（第一版就是这么写的，变异臂照样全绿）。
+        //     改成逐项检查"第 i 条带的路号 == i"。
+        var routesTable = WipeRoutes;
+        var identity = routesTable is not { Length: > 0 };
+        if (!identity)
+        {
+            identity = true;
+            for (var i = 0; i < routesTable!.Length; i++)
+                if (routesTable[i] != i) { identity = false; break; }
+        }
+        if (identity)
+        {
+            var expectBands = Math.Max(1, _sync.Count);
+            if (bandCount != expectBands)
+                throw new InvalidOperationException(
+                    $"{label}[{what}]：恒等映射下带数 {bandCount} != 参与路数 {expectBands}" +
+                    " —— 多出来的路会被隐藏（这正是用户报的「加路失效」旧行为）");
+        }
+
+        // 逐带核对：每条带应落在"显示它的那一路"的窗口区域里。
+        for (var band = 0; band < bandCount; band++)
+        {
+            var route = WipeRouteOfBand(band);
+            var s = Grid.GetSurface(route)
+                ?? throw new InvalidOperationException($"{label}[{what}]：第 {band} 条带指向的路 {route} 不存在");
+
+            // 该路实际下发的区域集合（生产路径写下的账）——同一条带可能只是它的其中一块。
+            if (!TryCompareVisibleBlocksPx(route, out var blocks) || blocks.Length == 0)
+                throw new InvalidOperationException(
+                    $"{label}[{what}]：第 {band} 条带的路 {route} 没有任何区域下发（拉动下每路都必须被裁）");
+
+            // ⚠ 区域的坐标语义是**窗口相对 + 物理像素**，所以尺寸基准必须取该路**窗口的物理矩形**，
+            //    不能用 Grid.Bounds（那是 DIP，且是容器的而非窗口的）。
+            //    本判据第一版就是拿 DIP 当物理用，于是期望 [0,466] 而实际 [2,2 698x1122]，
+            //    把正确行为读成了"带与区域不符"。
+            var winPx = CompareCropPlanner.ToPhysicalRect(s.Bounds, scaling);
+            var span = vertical ? winPx.Height : winPx.Width;
+            var ortho = vertical ? winPx.Width : winPx.Height;
+            if (span <= 0 || ortho <= 0)
+                throw new InvalidOperationException($"{label}[{what}]：第 {band} 条带的窗口物理尺寸非法 {winPx}");
+
+            // 该带应有的**窗口相对**范围：界标 × 窗口在该轴上的物理尺寸
+            var b0 = boundaries[band];
+            var b1 = boundaries[band + 1];
+            if (!double.IsFinite(b0)) b0 = 0;
+            if (!double.IsFinite(b1)) b1 = 1;
+            var px0 = (int)Math.Round(b0 * span, MidpointRounding.AwayFromZero);
+            var px1 = (int)Math.Round(b1 * span, MidpointRounding.AwayFromZero);
+            // 与生产同一套取整/钳制口径：整窗宽度小于带数时的钳制会让末段贴到 span
+            if (px1 > span) px1 = span;
+
+            // 只要"这一路确实覆盖了该带的起止范围"即算通过（取整差 ≤1px 属正常）。
+            var covered = false;
+            foreach (var blk in blocks)
+            {
+                if (!blk.IsValid) continue;
+                var s0 = vertical ? blk.Y : blk.X;
+                var s1 = s0 + (vertical ? blk.Height : blk.Width);
+                var oLen = vertical ? blk.Width : blk.Height;
+                if (Math.Abs(s0 - px0) <= 1 && Math.Abs(s1 - px1) <= 1 && Math.Abs(oLen - ortho) <= 1)
+                {
+                    covered = true;
+                    break;
+                }
+            }
+            if (!covered)
+                throw new InvalidOperationException(
+                    $"{label}[{what}]：第 {band} 条带（路 {route}）在其窗口 {winPx.Width}x{winPx.Height} 内" +
+                    $"期望覆盖 [{px0},{px1}]×{ortho}，" +
+                    $"实际区域集合 [{string.Join(", ", System.Linq.Enumerable.Select(blocks, x => $"[{x.X},{x.Y} {x.Width}x{x.Height}]"))}]" +
+                    " —— 带与区域不符（重叠/留缝/裁错块）");
+
+            checkedBands++;
+        }
+
+        // 铺满 + 不重叠：按**实际下发的区域**检查（不是拿界标自己跟自己对账 ——
+        // 那样只能证明界标单调，证明不了 Win32 收到的区域真的铺满）。
+        var cuts = new List<(int Start, int End)>();
+        for (var band = 0; band < bandCount; band++)
+        {
+            var route = WipeRouteOfBand(band);
+            if (!TryCompareVisibleBlocksPx(route, out var blocks) || blocks.Length == 0)
+                throw new InvalidOperationException($"{label}[{what}]：第 {band} 条带的路 {route} 无区域，无法核对铺满");
+            foreach (var blk in blocks)
+            {
+                if (!blk.IsValid) continue;
+                var s0 = vertical ? blk.Y : blk.X;
+                var len = vertical ? blk.Height : blk.Width;
+                cuts.Add((s0, s0 + len));
+            }
+        }
+        cuts.Sort((x, y) => x.Start.CompareTo(y.Start));
+
+        var spanPx = vertical
+            ? CompareCropPlanner.ToPhysicalRect(Grid.GetSurface(WipeRouteOfBand(0))!.Bounds, scaling).Height
+            : CompareCropPlanner.ToPhysicalRect(Grid.GetSurface(WipeRouteOfBand(0))!.Bounds, scaling).Width;
+        if (cuts.Count > 0)
+        {
+            if (cuts[0].Start != 0)
+                throw new InvalidOperationException(
+                    $"{label}[{what}]：首块不从窗口原点起（{cuts[0].Start}）—— 会露出父窗口底色");
+            var lastEnd = cuts[0].End;
+            for (var i = 1; i < cuts.Count; i++)
+            {
+                if (cuts[i].Start > lastEnd)
+                    throw new InvalidOperationException(
+                        $"{label}[{what}]：块之间留缝（{lastEnd} → {cuts[i].Start}）—— 会露出父窗口底色");
+                if (cuts[i].Start < lastEnd)
+                    throw new InvalidOperationException(
+                        $"{label}[{what}]：块之间重叠（{lastEnd} vs {cuts[i].Start}）—— 重叠会让 Z 序重新决定可见性");
+                if (cuts[i].End > lastEnd) lastEnd = cuts[i].End;
+            }
+            if (lastEnd != spanPx)
+                throw new InvalidOperationException(
+                    $"{label}[{what}]：块的并集到 {lastEnd} 而非窗口边缘 {spanPx} —— 没有铺满整窗");
+        }
+
+        Console.WriteLine(
+            $"comparemodetest: [{label}/{what}] {bandCount} 条带铺满且两两不重叠 ✓（逐带核对 {checkedBands} 条）");
+        return checkedBands;
+    }
+
     /// <summary>断言叠加模式下两路区域<b>互补且互不重叠</b>：B 铺 <c>[0, splitPx]</c>、
     /// A 铺 <c>[splitPx, span]</c> —— 无缝、无重叠、并集 = 整窗。这正是"可见结果与 Z 序无关"的
     /// 全部依据：重叠会让 Z 序重新决定可见性，留缝会露出父窗口底色，两者都是用户直接看得见的不对。
     ///
-    /// <para>期望值独立复算（窗口物理矩形 + split 比例取整 + 与生产同一套 <c>[1, span-1]</c> 钳制），
-    /// 再与 <c>GetWindowRgn</c>/<c>GetRgnBox</c> 回读的矩形逐项核对。生产代码不维护区域状态，
-    /// 故这不是自证。</para></summary>
-    /// <returns>本轮核对通过的区域数（恒为 2：A 与 B 各一处）。</returns>
+    /// <para><b>⚠ 本方法只服务"恒两路"的旧形态</b>（<c>WipeBands.MaxBands</c> 之外的兼容路径与
+    /// 历史读数）。N 带（≥3）请用 <see cref="AssertWipeBandsTile"/> —— 那里的不变式相同，
+    /// 但期望值按带算，不假设第 1 路延伸到窗口末端。</para></summary>
+    /// <returns>本轮核对通过的区域数（2：A 与 B 各一处）。</returns>
     private static int AssertOverlayComplement(string label, string what, nint hwndA, nint hwndB,
         Rect32 winA, Rect32 winB, double split, bool vertical)
     {
         var span = vertical ? winB.Height : winB.Width;   // 分割轴上的边长
         var px = (int)Math.Round(split * span, MidpointRounding.AwayFromZero);
-        if (px < 1) px = 1;               // 与 OverlayRevealPlan 同一套钳制（split=0 ⇒ B 只余 1px）
+        if (px < 1) px = 1;               // 与 WipeBands 同一套钳制（split=0 ⇒ B 只余 1px）
         if (px > span - 1) px = span - 1; // split=1 ⇒ A 只余 1px（此时 A 绝不能用 Clear）
 
         var expB = vertical ? new Rect32(0, 0, winB.Width, px) : new Rect32(0, 0, px, winB.Height);
@@ -6541,6 +8882,204 @@ public partial class MainWindow : Window
     /// <summary>回读窗口区域：<c>GetWindowRgn</c> 把窗口区域拷进我们给的 hRgn（**不转移所有权**，
     /// 故必须自己 DeleteObject），再用 <c>GetRgnBox</c> 取外接矩形。
     /// 返回区域类型：0(ERROR) = 该窗口没有区域。</summary>
+    /// <summary>断言：GDI 兜底路线在拼合下**认得**这一路的窗口区域 —— 抓回尺寸必须等于"这一路露出来的那一块"，
+    /// 而不是整窗（整窗 == 整个对比区）。
+    ///
+    /// <para><b>为什么拼合下这条必须单独钉</b>：每路子窗口的矩形恒等于整个对比区，露出哪一块完全由
+    /// <c>SetWindowRgn</c> 决定；而 <c>GdiFrameCapture</c> 两条子路径都只按 <c>GetWindowRect</c> 取图。
+    /// ⇒ 不认区域时<b>各路返回的是同一张屏幕合成图</b>：导出得到"整幅拼图"而不是该路画面，
+    /// 缩略图与逐路抓帧全被串成同一个内容。这是<b>静默</b>错误 —— 图本身是好的，只是不属于这一路。</para>
+    ///
+    /// <para><b>鉴别力从哪来</b>：期望值不从 GDI 自己那里拿，而是 <see cref="ReadWindowRegion"/> 走
+    /// <c>GetWindowRgn</c>+<c>GetRgnBox</c> 回读的真实窗口区域；该回读的<b>坐标口径</b>已由
+    /// <c>AssertCompareCrop</c> 拿独立复算的格表逐路对过（含"2x3 下第 0 路 Y=712、期望 0"那次真红），
+    /// 所以这里只需再钉"抓回尺寸 == 那一块尺寸"，不重新推一遍换算。另外两处"会退化成恒真"的形态
+    /// （没有区域 / 区域不小于窗口）都直接判红而不是跳过。</para>
+    ///
+    /// <para>⚠ 本判据<b>直接实例化</b> <c>GdiFrameCapture</c> 测兜底路线本身，因此不依赖
+    /// <c>FC_FORCE_GDI_ROUTE</c>；那个测量档是给端到端人工复现留的。</para></summary>
+    /// <summary>本轮验收档的**素材池**（任务 #29；口径见 `docs/50` §二十一"残余未证的一块"）。
+    ///
+    /// <para>只在 `--comparemodetest &lt;video&gt; &lt;routes&gt; &lt;video2 …&gt;` 的路数之后还给了文件时非空。
+    /// 空 ⇒ 所有打开点退回"同一份素材按路数重复"，与既往行为逐字相同（既有 29 条判据的夹具不受影响）。</para>
+    ///
+    /// <para>为什么必须有多素材：账本里那条判据在单素材下**恒真**——各路本来就一样。
+    /// 只有喂进不同内容，"各路交出同一张图"才既是可观察的、又是错的。</para></summary>
+    private IReadOnlyList<string> _benchMediaPool = Array.Empty<string>();
+
+    /// <summary>按素材池排每一路打开哪个文件；池为空时等价于旧的 <c>Enumerable.Repeat</c>。</summary>
+    private List<string> BuildMediaList(string videoPath, int routes)
+    {
+        if (_benchMediaCountIncludingPrimary(videoPath) <= 1)
+            return Enumerable.Repeat(videoPath, routes).ToList();
+        var pool = new List<string> { videoPath };
+        pool.AddRange(_benchMediaPool);
+        var list = new List<string>(routes);
+        for (var i = 0; i < routes; i++) list.Add(pool[i % pool.Count]);
+        return list;
+    }
+
+    /// <summary>素材池里到底有几种**不同**素材（按完整路径归一，忽略大小写）。
+    /// 判据拿它决定"能判"还是"必须记未判"——不许拿"传了几个参数"当"内容真的不同"。</summary>
+    private int DistinctMediaCount(string videoPath) => _benchMediaCountIncludingPrimary(videoPath);
+
+    private int _benchMediaCountIncludingPrimary(string videoPath)
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            System.IO.Path.GetFullPath(videoPath)
+        };
+        foreach (var v in _benchMediaPool)
+            set.Add(System.IO.Path.GetFullPath(v));
+        return set.Count;
+    }
+
+    /// <summary>整张位图的**有效像素字节**（按 stride 逐行、丢掉行尾对齐字节）喂 SHA256，返回前 12 位。</summary>
+    private static string PixelHashSha256Short(System.Drawing.Bitmap bmp)
+    {
+        var rect = new System.Drawing.Rectangle(0, 0, bmp.Width, bmp.Height);
+        var data = bmp.LockBits(rect, System.Drawing.Imaging.ImageLockMode.ReadOnly, bmp.PixelFormat);
+        try
+        {
+            using var sha = System.Security.Cryptography.SHA256.Create();
+            var bpp = System.Drawing.Bitmap.GetPixelFormatSize(data.PixelFormat) / 8;
+            var useful = data.Width * bpp;
+            var row = new byte[Math.Abs(data.Stride)];
+            for (var y = 0; y < data.Height; y++)
+            {
+                System.Runtime.InteropServices.Marshal.Copy(
+                    IntPtr.Add(data.Scan0, y * data.Stride), row, 0, row.Length);
+                sha.TransformBlock(row, 0, useful, null, 0);
+            }
+            sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+            return System.Convert.ToHexString(sha.Hash!).Substring(0, 12);
+        }
+        finally { bmp.UnlockBits(data); }
+    }
+
+    /// <summary>是不是"整幅黑"（16×9 网格采样）。GDI 对 flip-model 内容本来就不可靠
+    /// （<c>Platform/GdiFrameCapture.cs</c> 文件头的实测警告），所以黑帧必须**记未判**而不是判红：
+    /// 全黑是"这台机器看不到内容"，不是"路号没参与"。</summary>
+    private static bool LooksAllBlack(System.Drawing.Bitmap bmp)
+    {
+        var stepX = Math.Max(1, bmp.Width / 16);
+        var stepY = Math.Max(1, bmp.Height / 9);
+        for (var y = 0; y < bmp.Height; y += stepY)
+            for (var x = 0; x < bmp.Width; x += stepX)
+            {
+                var c = bmp.GetPixel(x, y);
+                if (c.R != 0 || c.G != 0 || c.B != 0) return false;
+            }
+        return true;
+    }
+
+    /// <summary>拼合下各路 GDI 抓回的**内容必须两两不同**（前提：本轮真的喂了 ≥2 种素材）。
+    ///
+    /// <para>它钉的是尺寸判据（<see cref="AssertGdiHonorsRegion"/>）钉不住的那一半：
+    /// "兜底路线路号不参与 ⇒ 各路拿到同一张屏幕合成图"在尺寸上也能被抓，但
+    /// **"渲染侧路号不参与"（每格都画同一份画面）**尺寸完全正常 ⇒ 只有内容能把它和正确形态分开。
+    /// 单素材下这条恒真 ⇒ 必须 <c>RecordSelfTestSkip</c>，不许记 PASS（SKIP 不当 PASS 是本仓既有纪律）。</para></summary>
+    private void AssertRouteContentsDiffer(int routes, string label, string videoPath)
+    {
+        if (!_compareActive || !Grid.MosaicWindows)
+            throw new InvalidOperationException(
+                $"GDI内容互异：当前不是拼合态（compare={_compareActive} mosaic={Grid.MosaicWindows}）⇒ 夹具断了");
+        var kinds = DistinctMediaCount(videoPath);
+        if (kinds < 2)
+        {
+            RecordSelfTestSkip($"GDI内容互异：本轮素材只有 {kinds} 种 ⇒ 各路内容本来就一样，这条判据恒真 ⇒ 未判" +
+                               "（判它需要 --comparemodetest <video> <routes> <video2 …>）");
+            Console.WriteLine($"  GDI内容互异：**跳过**（单素材恒真，未验证 ≠ 通过，{label}）");
+            return;
+        }
+
+        var gdi = new _3FCompare.App.Capture.GdiFrameCapture();
+        var seen = new List<(int idx, string hash, string size)>();
+        var black = new List<int>();
+        for (var i = 0; i < routes; i++)
+        {
+            var s = Grid.GetSurface(i) ?? throw new InvalidOperationException($"{label}：第 {i} 路缺失");
+            if (!s.IsVisible || s.Hwnd == nint.Zero) continue;
+            var bmp = gdi.Capture(s.Hwnd);
+            if (bmp is null)
+                throw new InvalidOperationException(
+                    $"{label}：第 {i} 路 GDI 抓回 null ⇒ 无从比内容（成因见 app 日志的 [Capture] … why= 行）");
+            try
+            {
+                if (bmp.Width < 16 || bmp.Height < 16)
+                    throw new InvalidOperationException(
+                        $"{label}：第 {i} 路抓回 {bmp.Width}x{bmp.Height} 太小 ⇒ 采样无从鉴别，夹具断了");
+                if (LooksAllBlack(bmp)) { black.Add(i); continue; }
+                seen.Add((i, PixelHashSha256Short(bmp), $"{bmp.Width}x{bmp.Height}"));
+            }
+            finally { bmp.Dispose(); }
+        }
+
+        if (seen.Count < 2)
+        {
+            RecordSelfTestSkip($"GDI内容互异：{kinds} 种素材里只有 {seen.Count} 路能看到非黑内容" +
+                               $"（黑帧路号 [{string.Join(",", black)}]；GDI 对 flip-model 本就不可靠）⇒ 未判");
+            Console.WriteLine($"  GDI内容互异：**跳过**（可比路不足 2，{label}，未验证 ≠ 通过）");
+            return;
+        }
+
+        for (var a = 0; a < seen.Count; a++)
+            for (var b = a + 1; b < seen.Count; b++)
+                if (seen[a].hash == seen[b].hash)
+                    throw new InvalidOperationException(
+                        $"{label}：第 {seen[a].idx} 路与第 {seen[b].idx} 路的 GDI 抓帧**逐字节相同**" +
+                        $"（{seen[a].size}，SHA256 前 12 位 {seen[a].hash}）而本轮喂了 {kinds} 种不同素材" +
+                        "⇒ 路号没参与取图/渲染：各路拿到的是同一张图（导出与缩略图会串成同一个内容）");
+
+        Console.WriteLine($"  GDI内容互异 ✓ {seen.Count} 路两两内容哈希不同（{kinds} 种素材，{label}）；" +
+                          "尺寸判据钉不到的「渲染侧串图」这一半也被盯住了");
+    }
+
+    private void AssertGdiHonorsRegion(int routes, string label)
+    {
+        if (!_compareActive || !Grid.MosaicWindows)
+            throw new InvalidOperationException(
+                $"GDI兜底-拼合裁块：当前不是拼合态（compare={_compareActive} mosaic={Grid.MosaicWindows}）⇒ 夹具断了");
+        var scaling = TopLevel.GetTopLevel(Grid)?.RenderScaling ?? RenderScaling;
+        var gdi = new _3FCompare.App.Capture.GdiFrameCapture();
+        var checkedAny = 0;
+        for (var i = 0; i < routes; i++)
+        {
+            var s = Grid.GetSurface(i) ?? throw new InvalidOperationException($"{label}：第 {i} 路缺失");
+            if (!s.IsVisible || s.Hwnd == nint.Zero) continue;
+
+            var type = ReadWindowRegion(s.Hwnd, out var box);
+            if (type == RegionTypeError)
+                throw new InvalidOperationException(
+                    $"{label}：第 {i} 路在拼合态却没有窗口区域 ⇒ 块没铺上，本判据无从鉴别");
+            var windowPx = CompareCropPlanner.ToPhysicalRect(s.Bounds, scaling);
+            if (box.Width >= windowPx.Width && box.Height >= windowPx.Height)
+                throw new InvalidOperationException(
+                    $"{label}：第 {i} 路区域 {box.Width}x{box.Height} 没小于整窗 {windowPx.Width}x{windowPx.Height}" +
+                    "⇒ 等于没裁，这条判据会退化成恒真，不许当通过");
+
+            var bmp = gdi.Capture(s.Hwnd);
+            if (bmp is null)
+                throw new InvalidOperationException(
+                    $"{label}：第 {i} 路 GDI 抓回 null（兜底路线本身坏了，不是裁没裁的问题）");
+            try
+            {
+                if (bmp.Width != box.Width || bmp.Height != box.Height)
+                    throw new InvalidOperationException(
+                        $"{label}：第 {i} 路 GDI 抓回 {bmp.Width}x{bmp.Height}，而该路露出的那一块是 " +
+                        $"{box.Width}x{box.Height}（整窗 {windowPx.Width}x{windowPx.Height}）" +
+                        "⇒ 兜底路线不认窗口区域，各路会拿到同一张屏幕合成图（导出与缩略图会串成同一个内容）");
+            }
+            finally { bmp.Dispose(); }
+            checkedAny++;
+        }
+        if (checkedAny == 0)
+            throw new InvalidOperationException(
+                $"{label}：一条都没查（所有路都不可见或没有子 HWND）⇒ 这条判据根本没跑，不许记成通过");
+        Console.WriteLine(
+            $"comparemodetest: [GDI兜底-拼合裁块] ✓ {checkedAny} 路：抓回尺寸 == GetWindowRgn 回读的区域尺寸（{label}，整窗铺满对比区）");
+    }
+
     private static int ReadWindowRegion(nint hwnd, out Rect32 box)
     {
         box = default;

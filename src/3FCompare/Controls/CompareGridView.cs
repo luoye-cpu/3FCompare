@@ -226,15 +226,15 @@ public sealed class CompareGridView : Control
     /// <summary>非均匀对比格表（归一化 0~1，长度 = 该模式的格数，索引即 A/B/C/D 顺序）。
     ///
     /// <para><b>null（默认）时走既有的均匀 N×M 网格逻辑</b>——普通网格浏览路径不经过这里，
-    /// 因此本次改动对该路径零影响。仅由 <c>MainWindow</c> 在对比模式（AB/ABC/ABCD）下
-    /// 用 <see cref="CompareLayout.ComputeCells"/> 的结果设置；退出对比模式时置回 null。</para>
+    /// 因此本次改动对该路径零影响。由 <c>MainWindow</c> 在网格对比（合并）态下用
+    /// <see cref="GridPartition.ComputeCells"/> 的结果设置；退出对比态时置回 null。</para>
     ///
-    /// <para>与 <see cref="SetGridLayout"/> 的关系：两者互斥使用，同时设置时本属性优先
-    /// （对比模式是"非均匀格表"，均匀预设无法表达）。</para>
+    /// <para>与 <see cref="SetGridLayout"/> 的关系：合并后两者不再互斥 —— 预设只决定
+    /// <b>形状</b>（几乘几），本属性给出该形状下**带权重**的具体格表；预设改变形状时
+    /// 宿主会重新解析分区（见 <c>MainWindow.OnGridPreset</c>）。</para>
     ///
-    /// <para>长度可以<b>小于</b>路数（例如 4 路用 AB 模式只有 2 格）：此时只显示前
-    /// <c>Length</c> 路，其余 <see cref="PlayerSurface"/> 隐藏——与
-    /// <see cref="CompareLayout.AvailableModes"/> 允许"4 路选 AB 只看其中 2 路"的规则一致。</para></summary>
+    /// <para>长度可以<b>小于</b>路数：此时只显示前 <c>Length</c> 路，其余 <see cref="PlayerSurface"/>
+    /// 隐藏。合并后的网格态恒有"格数 ≡ lane 数"，这条只剩左右拉动（恒两格铺满）还会触发。</para></summary>
     public CellRect[]? CellOverride
     {
         get => _cellOverride;
@@ -246,6 +246,40 @@ public sealed class CompareGridView : Control
             InvalidateMeasure();
         }
     }
+
+    /// <summary><b>拼合（mosaic）模式</b>：每路的子窗口都铺满整个对比区，"这一路只露出哪一块"
+    /// 完全由 <c>SetWindowRgn</c> 的区域决定（区域 = <see cref="CellOverride"/> 给它的格）。</summary>
+    ///
+    /// <para><b>为什么需要它（这是"网格对比"的正确语义）</b>：合并后的模式要的是
+    /// <b>一个画面被切成几块、每块由不同路渲染</b> —— 四格拼起来是一整幅完整画面，
+    /// 拖动分割线改变的是"哪一块归哪一路"，而<b>画面本身不动、不被拉伸</b>。
+    /// 旧的排布（窗口 == 格）做不到这件事：内核把<b>整幅</b>画面 fit 进窗口，窗口是格 ⇒
+    /// 每格显示的是"整幅缩小版"，拖动只是在改每格的缩放尺寸。
+    /// 而"每格显示整幅的 1/N 切片"需要<b>各向异性</b>的源矩形取景，内核只有
+    /// <c>SetViewTransform(zoom, panX, panY)</c>（单一 zoom + 被钳制的 pan，见
+    /// <c>VideoRenderer.cpp:5083-5113</c>），表达不了 <c>cw ≠ ch</c> 的切片
+    /// ⇒ 只能走窗口层：窗口铺满、区域裁出自己那一块。左右拉动（叠加模式）已经用同一机制
+    /// 跑通了"两路铺满 + 互补半区"，本属性是把它推广到 N 块。</para>
+    ///
+    /// <para><b>代价必须写清楚</b>：每路的 backbuffer 从"格大小"变成"对比区大小" ⇒
+    /// 总交换链面积 = <b>路数 × 对比区</b>（旧排布是 1 × 对比区）。这是本语义的固有成本，
+    /// 不是可优化掉的浪费；像素预算闸门与崩溃带（N 条并发交换链）都必须按这个数读。</para>
+    ///
+    /// <para><b>只在 <see cref="CellOverride"/> 非空时有意义</b>（对比态）：均匀网格没有区域语义，
+    /// 打开它只会让所有路叠在一起。置位/清除时须与 <see cref="CellOverride"/> 同一处，
+    /// 否则会出现"窗口铺满但没人下发区域"的全遮挡状态。</para>
+    public bool MosaicWindows
+    {
+        get => _mosaicWindows;
+        set
+        {
+            if (_mosaicWindows == value) return;
+            _mosaicWindows = value;
+            InvalidateMeasure();
+        }
+    }
+
+    private bool _mosaicWindows;
 
     /// <summary>格 → 路的映射。<c>null</c>（默认）或空数组时为<b>恒等</b>：第 i 格显示第 i 路。
     ///
@@ -361,9 +395,12 @@ public sealed class CompareGridView : Control
                 // （4 路用 AB / AB 竖分）时它会给出 >= cells.Length 的值。只判 < 0 会让 Measure
                 // 先于 Arrange 崩掉（ArrangeOverride 一直是双侧守卫，见下方 cellIndex >= cells.Length）。
                 var c = cells[cell >= 0 && cell < cells.Length ? cell : cells.Length - 1];
-                _surfaces[i].Measure(new Size(
-                    Math.Max(0, c.Width * availableSize.Width),
-                    Math.Max(0, c.Height * availableSize.Height)));
+                // 拼合模式：量测必须给**整容器**，因为窗口就是整容器（可见范围靠区域裁出来）。
+                // 按格量测会让 DesiredSize 小于实际排布 ⇒ NativeControlHost 的子 HWND 尺寸
+                // 与排布不一致，裁出来的块会缺一角。
+                var mw = _mosaicWindows ? availableSize.Width : Math.Max(0, c.Width * availableSize.Width);
+                var mh = _mosaicWindows ? availableSize.Height : Math.Max(0, c.Height * availableSize.Height);
+                _surfaces[i].Measure(new Size(mw, mh));
             }
             _hint.Measure(availableSize);
             return availableSize;
@@ -419,6 +456,27 @@ public sealed class CompareGridView : Control
                 s.IsVisible = true;
                 vis.Add(i);
                 var c = cells[cellIndex];
+
+                // ── 拼合模式：窗口铺满整个对比区，"露出哪一块"完全交给 SetWindowRgn ──
+                // 刻意<b>不留 1px 缝隙</b>：缝隙的意义是"邻居的边框不被自己盖住"，而这里各路画面
+                // 本来就重叠，可见范围由互不重叠的区域决定 ⇒ 留缝等于在拼合处留一条父窗底色，
+                // "四块拼成整幅"当场破功。区域的对应口径见 CompareCropPlanner.MosaicRegionDip。
+                if (_mosaicWindows)
+                {
+                    var full = new Rect(0, 0, finalSize.Width, finalSize.Height);
+                    if (_cellMagnify is { Zoom: > 1.0 } mz)
+                    {
+                        // 拼合 + 放大：把"整幅拼合视图"放大 z 倍（Magnify 以整容器为格来算窗口），
+                        // 每路仍只裁自己那一格 ⇒ 放大是整体的，格与格之间的拼合关系不被破坏。
+                        var mcrop = mz.CropOf(i);
+                        var msrc = mz.SourceOf(i);
+                        full = CompareCropPlanner.Magnify(
+                            full, mz.ZoomOf(i), mcrop.CropX, mcrop.CropY, msrc.Width, msrc.Height).WindowDip;
+                    }
+                    s.Arrange(full);
+                    continue;
+                }
+
                 // 与均匀路径同样留 1px 缝隙（选中边框不互相覆盖），并同样钳到 0：
                 // 负尺寸 Rect 会让子 HWND 定位到非法尺寸（Win32 只认 16 位有符号），见下方注释。
                 var r = new Rect(

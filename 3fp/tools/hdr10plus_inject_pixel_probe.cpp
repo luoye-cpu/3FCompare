@@ -47,7 +47,7 @@ static void DumpPixels(const char* label) {
     FFF3FPSnapshot snapshot;
     memset(&snapshot, 0, sizeof(snapshot));
     snapshot.size = sizeof(snapshot);
-    snapshot.version = 8;
+    snapshot.version = 20;
     FFF3FP_GetSnapshot(g_player, &snapshot);
     printf("%s: peak=%u windows=%u degrade=%u serial=%llu\n", label,
         snapshot.sourcePeakNits, snapshot.dynamicMetadataWindows,
@@ -57,7 +57,7 @@ static void DumpPixels(const char* label) {
         FFF3FPVideoPixelProbe probe;
         memset(&probe, 0, sizeof(probe));
         probe.size = sizeof(probe);
-        probe.version = 1;
+        probe.version = 20;
         probe.x = points[i][0];
         probe.y = points[i][1];
         if (FFF3FP_ReadVideoPixel(g_player, &probe) != FFFResult::Success) {

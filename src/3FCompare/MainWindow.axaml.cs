@@ -1,4 +1,4 @@
-﻿﻿﻿using System;
+using System;
 using _3FCompare.Themes;
 using System.IO;
 using System.Linq;
@@ -77,11 +77,14 @@ public partial class MainWindow : Window
     // ── 多路对比布局覆盖层（阶段 3.1 接线，见 docs/26）──
     /// <summary>分割线 + 可拖动手柄的覆盖窗口。首次进入对比模式时创建，退出只 Hide（可复用）。</summary>
     private LayoutOverlayWindow? _layoutOverlay;
-    /// <summary>当前对比模式；路数变化时经 <see cref="CompareLayout.CoerceMode"/> 收敛。</summary>
-    private CompareMode _compareMode = CompareMode.Ab;
-    /// <summary>当前分割参数；由覆盖层 <c>SplitChanged</c> 回灌。</summary>
-    private SplitParams _compareSplit = SplitParams.Default(CompareMode.Ab);
-    /// <summary>对比模式是否已进入（未进入时不驱动覆盖层）。</summary>
+    /// <summary>当前网格分区（形状 + 各列/行权重）。路数或预设变化时经
+    /// <see cref="GridPartition.Retune"/> 收敛；分割线拖动由覆盖层回灌新分区。</summary>
+    private GridPartition _partition = GridPartition.Uniform(2, 2, 1);
+    /// <summary>左右拉动（叠加）专用的那一条揭示线：形状恒为 2 路单分割，
+    /// 位置就是"露出 B 的比例"。与 <see cref="_partition"/> 分开存，退出拉动时网格的
+    /// 分格宽度才不会被揭示位置顶掉。</summary>
+    private GridPartition _wipePartition = GridPartition.Uniform(2, 2, 1);
+    /// <summary>合并态是否已激活（未激活 = 均匀网格，无覆盖层、不可拖分割线）。</summary>
     private bool _compareActive;
 
     /// <summary>上一次观察到的叠加模式状态。仅用于在组件日志里把"叠加开/关"识别成一次状态跃迁
@@ -138,6 +141,10 @@ public partial class MainWindow : Window
         if (cmdArgs.Length >= 2 &&
             cmdArgs[1] is "--selftest" or "--screentest" or "--multitest" or "--sessiontest"
                        or "--comparemodetest" or "--magnifybench"
+                       // --dragbench 同为自测态（分割线拖动的提交成本实测，见 MainWindow.DragBench.cs）：
+                       // 漏这一行 ⇒ 测试窗口的几何会在退出时被 SaveWindowGeometry 写进用户 settings.json
+                       // （与 --sessiontest 的历史坑同类）。
+                       or "--dragbench"
                        // --autodemo 同样是"测试态"：无人值守演示会把自己的窗口几何写进
                        // 用户 settings.json（SaveWindowGeometry 只以 _selfTestMode 把关），
                        // 与 --sessiontest 的历史坑完全同类（docs/45 P1-3）。
@@ -288,6 +295,16 @@ public partial class MainWindow : Window
         // 对比模式的 Win32 裁剪接线（新逻辑全部在 MainWindow.CompareCrop.cs，此处只挂时机）
         WireCompareCrop();
 
+        // 外部色彩变换模块的解锁入口（docs/78）：**只有盘上有那枚模块且它没解锁**时
+        // Core 侧才会来请求一次；注册与否就是"有没有人能弹框"——
+        // 自测 / 无人值守模式刻意不注册 ⇒ 恒不提示（否则无人值守会被一个模态框挂死）。
+        // 请求发生在后台线程上，所以这里负责切回 UI 线程；绝不 await（打开编排的关键路径）。
+        if (!_selfTestMode)
+        {
+            _3FCompare.Core.Backend.ColorTransformUnlock.RegisterRequester(
+                () => Dispatcher.UIThread.InvokeAsync(() => Views.UnlockCodeDialog.ShowAsync(this)));
+        }
+
         // 自动化 selftest / screentest / multitest 模式（GetCommandLineArgs 返回进程原始参数）
         var args = cmdArgs;
         // 自测/压力测试模式：退出前会 Close() 窗口以销毁子 HWND，
@@ -307,10 +324,13 @@ public partial class MainWindow : Window
             _ = RunMultitestAsync(args[2],
                 args.Length >= 4 && int.TryParse(args[3], out var r) ? r : 4,
                 args.Length >= 5 && int.TryParse(args[4], out var d) ? d : 30);
-        // --comparemodetest <video> [routes=3]：多路对比覆盖层接线验证（docs/26 阶段 3.1）
+        // --comparemodetest <video> [routes=3] [video2 …]：多路对比覆盖层接线验证（docs/26 阶段 3.1）
+        // 路数之后的参数是**额外素材**（#29）：给了就按路轮转，内容互异那条判据才有鉴别力；
+        // 不给与既往逐字相同（同一份素材重复打开 N 路）。
         else if (args.Length >= 3 && args[1] == "--comparemodetest")
             _ = RunCompareModeTestAsync(args[2],
-                args.Length >= 4 && int.TryParse(args[3], out var cr) ? cr : 3);
+                args.Length >= 4 && int.TryParse(args[3], out var cr) ? cr : 3,
+                args.Length >= 5 ? args[4..] : Array.Empty<string>());
         // --magnifybench <video> <routes> <zoom> [secondsPerPhase=8] [budgetMpx=0(默认闸门)]：
         // 无缝放大的稳态显存/吞吐实测（显存由外部脚本按 PID 采样，见 .review_pr/gpu_probe.ps1）
         else if (args.Length >= 5 && args[1] == "--magnifybench")
@@ -319,6 +339,10 @@ public partial class MainWindow : Window
                 double.TryParse(args[4], out var bz) ? bz : 2.0,
                 args.Length >= 6 && int.TryParse(args[5], out var bs) ? bs : 8,
                 args.Length >= 7 && double.TryParse(args[6], out var bb) ? bb : 0);
+        // --dragbench <video> <routes>：分割线拖动的**宿主提交成本**实测（新增档，实现全在
+        // MainWindow.DragBench.cs；参数个数判据也写在方法里 ShouldRunDragBench，与上面的白名单同源）。
+        else if (ShouldRunDragBench(args))
+            _ = RunDragBenchAsync(args[2], int.TryParse(args[3], out var dr) ? dr : 5);
         // ⚠ 参数个数不足的兜底（docs/41 P0-2）：白名单在 cmdArgs.Length >= 3 时就置
         //    _selfTestMode，而各模式的分派要求 4~5 个参数（--screentest>=4、--magnifybench>=5）。
         //    漏了这里 ⇒ 不进入任何自测分支 ⇒ 启动完整 GUI 且永不退出，
@@ -345,10 +369,8 @@ public partial class MainWindow : Window
         _3FCompare.Core.Diagnostics.AppLog.Error(module, ex);
         try
         {
-            await Views.MessageBox.Show(this, LanguageManager.T("Msg_AppName"),
-                // TODO: 补本地化键（Msg_OperationFailed）——语言表现在没有"操作失败"条目，
-                // 且 Localization/ 不在本次改动范围内，先用 Loc 保持中英并列。
-                $"{userMessage}\n\n{Loc("错误：", "Error: ")}{ex.Message}",
+            await Views.MessageBox.Show(this, LanguageManager.T("Msg_OperationFailed"),
+                $"{userMessage}\n\n{ex.Message}",
                 LanguageManager.T("Settings_Ok"));
         }
         catch
@@ -475,23 +497,11 @@ public partial class MainWindow : Window
         }
         if (!_settings.AutoEnterCompare) return;
 
-        // 已在对比模式里就别再进一次：EnterSplitMode 对"已是目标模式"有保护，但追加文件使
-        // 路数从 2 变 3 时目标模式真的会从 AB 变 ABC ⇒ 命中 EnterCompareMode 的
-        // `SplitParams.Default(...)`，把用户已拖好的分割位置重置掉。这里先保住分割参数，
-        // 再让模式按新路数收敛 —— 用户拖过的位置比"模式必须严格匹配路数"更重要。
-        // 只在"进入前就已经在对比模式里"时才保住分割参数：否则 keepSplit 是上一次会话的
-        // 残留值，会用它覆盖掉 EnterSplitMode 刚设好的居中初值（表现为"第一次自动进模式，
-        // 分割线却停在上次拖过的位置"）。
-        var wasActive = _compareActive;
-        var keepSplit = _compareSplit;
-        EnterSplitMode();
-        if (wasActive && _compareActive && _compareSplit != keepSplit)
-        {
-            _compareSplit = keepSplit.Clamp();
-            _layoutOverlay?.Update(_compareMode, _compareSplit);
-            ApplyCompareLayout();
-            ScheduleCompareCrop();
-        }
+        // 合并态的进入是幂等的：已在该态时直接返回，故"追加文件让路数从 2 变 3"
+        // 不会把用户已拖好的分割位置重置成均匀（旧实现要为此先抄一份 keepSplit，
+        // 因为 EnterCompareMode 当时无条件写 SplitParams.Default(...)）。
+        // 路数变化本身经 SyncCompareModeToRouteCount → Retune 处理：形状不变则权重原样保住。
+        EnterCompareMode();
     }
 
     /// <summary>路数超上限的可见提示（D12）。
@@ -742,6 +752,23 @@ public partial class MainWindow : Window
 
     private void AddSlotPlaceholder()
     {
+        // ── 左右拉动下「加路」= 选择文件并**真正多开一路**（用户 2026-10-07 决策）──
+        // 为什么在拉动下改语义：用户报的原始症状是"在左右拉动对比的时候，加路功能失效"，
+        // 而他要的是"这个对比也应该支持多路"。在拉动下只加一条**空** lane 是没有意义的
+        // （拉动每条带都要显示一路画面，空 lane 没有画面可显示）——
+        // 所以拉动下这个键的语义是"再加一路素材进来对比"，与网格下"扩一条空 lane"不同。
+        // 两者的分野在注释与自测里都写明，避免下次有人按网格的契约去改这一支。
+        if (_compareOverlayActive)
+        {
+            if (_sync.Count >= _3FCompare.Services.PlaybackCoordinator.MaxRoutes)
+            {
+                NotifyRouteLimit(0, 1);
+                return;
+            }
+            _ = AddRouteViaPickerAsync();
+            return;
+        }
+
         var target = LaneCountAfterAdd(Grid.Count);
         if (target == Grid.Count)
         {
@@ -750,21 +777,59 @@ public partial class MainWindow : Window
         }
         Grid.SetCount(target, _realMode);
         UpdateStatus();
+    }
 
-        // 对比模式下格表可能短于 lane 数（AB 只有 2 格），新加的那条 lane 会被 Grid 直接隐藏
-        // （CompareGridView.ArrangeOverride）——画面看不到，就必须让状态栏说清楚，否则这个键
-        // 读起来是"点了没反应"。写在 UpdateStatus 之后：它会整体重算状态栏。
-        if (_compareActive)
+    /// <summary>拉动下「加路」的实现：弹文件选择 → 经既有打开路径**追加**一路 → 让新路拿到自己那条带。
+    ///
+    /// <para><b>为什么复用 <c>OpenPaths</c> 而不是自己建会话</b>：打开编排涉及配额、原子闸门、
+    /// 失败归还、自动播放意图、会话快照落盘等一整套逻辑（<c>PlaybackCoordinator</c> 的
+    /// <c>OpenFilesCore</c>），自己再写一份必然与它漂移。既有路径本身就是**追加**语义
+    /// （<c>ComputeOpenCount</c> 对 <c>existing</c> 取余量），正是这里要的。</para>
+    ///
+    /// <para><b>顺序</b>：先开文件（会话进来会经 <c>UpdateStatus → SyncCompareModeToRouteCount</c>
+    /// 收敛路数），再扩带表 —— 于是"新路有带可落"与"带数跟着路数"两件事由既有汇聚点收口，
+    /// 不必在这里手工同步两份计数。</para></summary>
+    private async System.Threading.Tasks.Task AddRouteViaPickerAsync()
+    {
+        try
         {
-            var cells = CompareLayout.CellCount(_compareMode);
-            if (target > cells)
+            var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
             {
-                var name = CompareModeName(_compareMode);
-                StatusInfo.Text = Loc(
-                    $"已加到第 {target} 条 lane，但 {name} 只显示前 {cells} 路，新加的一条看不到（按 C 切换模式）。",
-                    $"Lane {target} added, but {name} shows only the first {cells} lane(s) — the new one is hidden (press C to change mode).");
-            }
+                Title = LanguageManager.T("Pb_AddRoute"),
+                AllowMultiple = false,
+                FileTypeFilter = new[]
+                {
+                    new FilePickerFileType("Media")
+                    {
+                        Patterns = new[] { "*.mp4", "*.mkv", "*.mov", "*.webm", "*.avi", "*.ts", "*.m2ts", "*.flv", "*.wmv" },
+                    },
+                    FilePickerFileTypes.All,
+                },
+            });
+            if (files is not { Count: > 0 }) return;   // 用户取消：不动现状
+
+            var paths = files.Select(f => f.TryGetLocalPath()).Where(p => p is not null).Cast<string>().ToList();
+            if (paths.Count == 0) return;
+
+            OpenPaths(paths);
         }
+        catch (Exception ex)
+        {
+            await ReportErrorAsync("Lane.AddRoute",
+                Loc("加路失败。", "Failed to add a route."), ex);
+        }
+    }
+
+    /// <summary>加路后该 lane 是否真的能在拉动里看到（用它自己的带去承载）。
+    /// <para>带表未被用户指定（恒等）时新 lane 必有自己那条带 ⇒ 恒 true；
+    /// 被指定过则不自动改写，返回它在不在表里。</para></summary>
+    private bool IsBandVisibleAfterAdd(int laneCount)
+    {
+        var routes = WipeRoutes;
+        if (routes is null || routes.Length == 0) return true;   // 恒等：第 i 条带就是第 i 路
+        var lane = laneCount - 1;
+        foreach (var r in routes) if (r == lane) return true;
+        return false;
     }
 
     private void RemoveLastSlot()
@@ -793,32 +858,54 @@ public partial class MainWindow : Window
     // 也是 LayoutOverlayWindow 文档里点名的默认 anchor。CenterPanel 虽包住它，但还叠放了
     // Magnifier 覆盖层，覆盖矩形会包含这些非对比区，故不选。
 
-    /// <summary>进入对比模式：按当前路数收敛模式后在对比区之上显示分割线覆盖层。
-    /// <para>最小入口，暂未接菜单/快捷键；将来从"视图"菜单调用即可。</para></summary>
-    internal void EnterCompareMode(CompareMode mode)
+    /// <summary>进入网格对比（合并态，快捷键 <c>G</c> / <c>V</c> 与菜单同一入口）：
+    /// 按当前路数解析形状后，在对比区之上显示分割线覆盖层。
+    ///
+    /// <para><b>合并了什么</b>：旧的"标准模式（均匀网格、全部路显示、<b>不可拖</b>）"与
+    /// "A/B 可拖动对比（AB/ABC/ABCD 固定形状、可拖、<b>只显示前 2~4 路</b>）"合成一项。
+    /// 基准取网格的渲染覆盖（一路一格，5~9 路全部显示、全部启用），再挂上可拖的分割线
+    /// （内部竖线 <c>cols-1</c> 条 + 横线 <c>rows-1</c> 条，最多 4 条）。形状仍由
+    /// <see cref="GridLayout.ResolveGrid"/> 按路数与预设解析，各列/行占多宽由
+    /// <see cref="GridPartition"/> 的权重决定。</para>
+    ///
+    /// <para><b>已是该态时不重进</b>：重进会把权重重置为均匀，用户拖好的分格宽度不该因为
+    /// 再按一次键被抹掉。路数变化走 <see cref="SyncCompareModeToRouteCount"/> 的
+    /// <see cref="GridPartition.Retune"/>，形状不变时同样保住权重。</para>
+    ///
+    /// <para><b>覆盖层不健康就退回均匀网格</b>：<see cref="VerifyOverlayDegradation"/> 是既有的
+    /// fail-fast —— 命中钩子没装上会吞掉整块对比区的鼠标，透明没拿到会盖住画面，
+    /// 两者都比"没有分割线"严重得多，故撤掉本态回到默认视图（旧实现退回的也是这个状态）。</para></summary>
+    internal void EnterCompareMode()
     {
-        // 叠加模式是 AB 的呈现变体，任何"切模式"的调用（含 C 键循环）都必须先退出它 ——
-        // 否则"两路铺满"的格表会与新模式的分格打架。见 MainWindow.CompareOverlay.cs。
+        // 左右拉动与本态互斥：它要"两路铺满 + 区域裁半区"，本态要"一路一格"。
         ExitCompareOverlay();
 
-        var count = _sync.Count;
-        if (CompareLayout.AvailableModes(count).Count == 0) return; // <2 路：对比功能未启动
+        // 两个计数各有职责，别混：**素材路数**决定"能不能对比"（少于 2 路没有对比对象），
+        // **网格 lane 数**决定铺几格（合并态取网格的渲染覆盖为基准：一条 lane 一格，
+        // 空占位 lane 也占格 —— 与今天的均匀网格完全同形，这是"以网格为基准"的字面含义）。
+        if (_sync.Count < 2) return;   // 不足 2 路素材：没有可对比的对象
+        if (_compareActive) return;    // 幂等：保住用户拖好的权重
 
-        _compareMode = CompareLayout.CoerceMode(mode, count);
-        _compareSplit = SplitParams.Default(_compareMode);
+        var (pc, pr) = GridLayout.OverrideOf(Grid.Preset);
+        _partition = GridPartition.Resolve(Grid.Count, Grid.SingleView, pc, pr);
         _compareActive = true;
 
-        // 组件日志：对比模式进入（含收敛后的实际模式与当时路数）。
+        // 组件日志：对比模式进入（含解析出的形状与当时的 lane/路数）。
         // 紧随其后的 VerifyOverlayDegradation 可能立刻降级退出 —— 那时日志里会看到
         // Enter 紧跟 Exit，这正是"覆盖层 fail-fast"的时序证据。
-        ComponentLog.Log(Comp.Overlay, "CompareModeEnter", -1, $"mode={_compareMode} routes={count}");
+        ComponentLog.Log(Comp.Overlay, "CompareModeEnter", -1,
+            $"grid={_partition.Cols}x{_partition.Rows} cells={_partition.CellCount} " +
+            $"lanes={Grid.Count} routes={_sync.Count} preset={Grid.Preset}");
 
         if (_layoutOverlay is null)
         {
             _layoutOverlay = new LayoutOverlayWindow();
-            _layoutOverlay.SplitChanged += OnCompareSplitChanged;
+            _layoutOverlay.PartitionChanged += OnPartitionChanged;
+            // 自由拼接的线段拖动是**另一条通道**（线段模型 ≠ 分区模型，见该事件的注释）。
+            // 不接这一条，自由拼接的线就只是画出来、能命中、却拖不动。
+            _layoutOverlay.FreeformLineDragged += OnFreeformLineDragged;
         }
-        _layoutOverlay.ShowOverlay(this, Grid, _compareMode, _compareSplit);
+        _layoutOverlay.ShowOverlay(this, Grid, ActivePartition());
 
         // 覆盖层只画线；真正的画面重排由 Grid 的格表覆盖驱动（见 ApplyCompareLayout）。
         // 放在 VerifyOverlayDegradation 之前：后者若 fail-fast 退出，会由 ExitCompareMode 置回 null。
@@ -832,32 +919,101 @@ public partial class MainWindow : Window
         VerifyOverlayDegradation();
     }
 
-    /// <summary>把「对比模式 + 分割参数」换算成归一化格表交给 <see cref="CompareGridView"/>，
-    /// 让分割线拖动真正改变画面排版（此前只有覆盖层的线条在动，视频格仍是均匀网格）。
+    /// <summary>当前该由覆盖层呈现、并由拖动回灌的那份分区：左右拉动用它自己的单条揭示线，
+    /// 其余情况就是网格分区。<para>只有一处"选哪份"的判断，避免绘制、命中、回灌三条路径各写一遍
+    /// （写歪的表现是"拖动动了网格，画出来的线却停在揭示位"）。</para></summary>
+    private GridPartition ActivePartition() => _compareOverlayActive ? _wipePartition : _partition;
+
+    /// <summary><b>测量用的排布对照开关</b>（只在 <c>FC_NOMOSAIC=1</c> 时生效）：把网格对比退回
+    /// "窗口 == 格"的历史形态，用来在<b>同一份二进制</b>上量"改成拼合到底改变了什么"
+    /// （每拍 present 的像素、出帧率、崩溃产出率）。与 <c>--magnifybench</c> 的
+    /// <c>_3FC_BENCH_MAXIMIZE</c> 同族（docs/50 §八 M12/M13）。
+    /// ⚠ 这不是产品选项，也不参与判据验收：拼合专属的那条判据（<c>view.mosaic-tile</c>）在
+    /// 本开关打开时明写"不适用"而不是悄悄通过，其余判据按 <c>Grid.MosaicWindows</c> 自己换口径。
+    /// 默认关 ⇒ 产品路径一次布尔判断，零行为改动。</summary>
+    private static readonly bool BenchNoMosaic =
+        System.Environment.GetEnvironmentVariable("FC_NOMOSAIC") == "1";
+
+    /// <summary><b>测量档：跳过放大镜的"注入 Below + 自愈"那一段</b>（只在 <c>FC_SKIP_ZINJECT=1</c> 生效）。
     ///
-    /// <para>未激活对比模式时传 <c>null</c> ⇒ Grid 回到既有均匀 N×M 逻辑，
-    /// 普通网格浏览路径行为完全不变（本次改动的兼容性前提）。</para>
+    /// <para>为什么要这个开关：要判"是不是动 owned 覆盖窗把 dxgi 那条带点着了"，只能单变量地
+    /// 把它关掉比产出率（见 docs/50 §十八）。⚠ 当初立这条的理由写的是"崩溃锁在开轮后 6.8 秒"——
+    /// 那个理由<b>已被否证</b>：7.8 秒是整轮的长度，干净会话同样停在 7.8/8.2 秒，秒数不是定位。
+    /// 开关本身保留（它已被量出否证结论，结论需要可复现的仪器），但不再当作候选机制。</para>
     ///
-    /// <para>格数由 <see cref="CompareLayout.CellCount"/> 决定（AB=2/ABC=3/ABCD=4），
-    /// 可以小于实际路数：Grid 只显示前 N 路并隐藏其余，避免"选了模式却看到不匹配的格数"。</para>
+    /// <para>与 <c>FC_NOMOSAIC</c> 同族：只为测量存在，不是产品选项；默认关 ⇒ 产品路径零改动，
+    /// 打开时那一步会被登记成<b>未判</b>而不是悄悄通过。</para></summary>
+    private static readonly bool BenchSkipMagnifierZInject =
+        System.Environment.GetEnvironmentVariable("FC_SKIP_ZINJECT") == "1";
+
+    /// <summary><b>测量档：退出对比模式时不隐藏布局覆盖层</b>（只在 <c>FC_KEEP_LAYOUTOVERLAY=1</c> 生效）。
     ///
-    /// <para><b>叠加模式（docs/31 阶段 2）</b>：它是 <see cref="CompareMode.Ab"/> 的呈现变体 ——
-    /// 两路都铺满整个对比区，谁露出来由 Z 序 + 窗口区域决定（见 <c>MainWindow.CompareOverlay.cs</c>）。
-    /// 故叠加激活时格表固定为"两路铺满"，而不是 AB 的左右分栏。</para></summary>
+    /// <para>为什么靶在这里：§二十 把死亡位置钉到了 <c>entry.grid</c>（<c>GridEntryUnit</c>）
+    /// 退出侧的尾端 —— 那一段最后一条组件事件固定是 <c>OverlayZOrder where=HideOverlay</c>，
+    /// 而<b>发这行的是 <see cref="LayoutOverlayWindow"/>，不是放大镜</b>（§十八 的归属更正）。
+    /// 要单变量判"是不是这个 owned 覆盖窗的 Hide 点了着 dxgi 那条带"，只能把它按住不动。</para>
+    ///
+    /// <para>与 <c>FC_NOMOSAIC</c> / <c>FC_SKIP_ZINJECT</c> 同族：只为测量存在，默认关 ⇒ 产品路径零改动。
+    /// 打开时"退出后覆盖层已隐藏"那两条判据会登记成<b>未判</b>而不是悄悄通过（见 SelfTest 的两处
+    /// <c>RecordSelfTestSkip</c>），并由 <c>[Overlay] KeepLayoutOverlay</c> 见证行自证臂真生效。</para></summary>
+    internal static readonly bool BenchKeepLayoutOverlayOnExit =
+        System.Environment.GetEnvironmentVariable("FC_KEEP_LAYOUTOVERLAY") == "1";
+
+    private static bool _keepLayoutOverlayWitnessed;
+
+    /// <summary><b>测量档：把每拍 9 连发的 <c>SetWindowRgn</c> 之间插一段间隔</b>
+    /// （<c>FC_REGION_SPACING_MS=N</c>，N∈[1,200]；未设或 0 ⇒ 与产品完全一致）。
+    ///
+    /// <para>为什么靶换成这里：<c>death-localize.py</c> 按 pid 切段读逐行日志后，死者的末条动作
+    /// 全部落在"一次派发里对多路子窗口连做窗口状态/区域操作"这一段 —— 9 条 <c>RegionApply</c>
+    /// 挤在 4 ms 内、或 <c>RouteActivity 启用 9/9 路</c> 之后数毫秒。窗口区域与 flip-model 交换链
+    /// 的交互本就是本项目已知高风险面（见 <c>ApplyCropRegion</c> 注释），而"背靠背连发"正是它唯一
+    /// 可单变量拆出来的那一半。</para>
+    ///
+    /// <para>只为测量存在：默认 0 ⇒ 产品路径是一次整数比较，零行为改动；>0 时会在组件日志落一条
+    /// <c>RegionSpacing ms=N</c> 见证行，A/B 两侧靠这条行自证臂有没有生效（<b>不靠"没崩"反推臂生效</b>）。
+    /// ⚠ 间隔是在 UI 线程上 <c>Thread.Sleep</c>，会真实拖慢那一拍派发 —— 这是测量代价，不是产品形态。</para></summary>
+    internal static readonly int BenchRegionApplySpacingMs = RegionSpacingFromEnv();
+
+    private static int RegionSpacingFromEnv()
+    {
+        var raw = System.Environment.GetEnvironmentVariable("FC_REGION_SPACING_MS");
+        return int.TryParse(raw, out var v) && v > 0 && v <= 200 ? v : 0;
+    }
+
+    /// <summary>把当前分区换算成归一化格表交给 <see cref="CompareGridView"/>，
+    /// 让分割线拖动真正改变画面排版（覆盖层自己那几条线只是装饰，格表才驱动子 HWND 重排）。
+    ///
+    /// <para>未激活对比时传 <c>null</c> ⇒ Grid 回到既有均匀 N×M 逻辑，
+    /// 普通网格浏览路径行为完全不变。</para>
+    ///
+    /// <para><b>合并态下格数 ≡ 路数</b>（一路一格），于是"只显示前 N 路、其余隐藏并停用"
+    /// 这件事在本态里不会发生；该语义只在左右拉动（恒两格、其余路隐藏）时保留。</para>
+    ///
+    /// <para><b>左右拉动</b>：它是"N 路铺满 + 区域裁各自那条带"的呈现变体（见
+    /// <c>MainWindow.CompareOverlay.cs</c>），故激活时格表是"路数份全幅"，
+    /// 长度 = 参与对比的路数（旧实现长度恒 2 ⇒ 第 3 路起被隐藏，用户点「加路」看不到变化）。</para></summary>
     private void ApplyCompareLayout()
     {
         var overlay = CompareOverlayActive;
         Grid.CellOverride = !_compareActive
             ? null
             : overlay
-                ? CompareOverlayLayout()
-                : CompareLayout.ComputeCells(_compareMode, _compareSplit);
+                ? CompareOverlayLayout(OverlayWindowCount, WipeMosaicActive)
+                : _partition.ComputeCells();
+
+        // 拼合（mosaic）：网格对比态下每路子窗口都铺满对比区，格表只用来决定"这一路露出哪一块"。
+        // 这是本模式的语义本身 —— 几块拼起来是<b>一整幅完整画面</b>，拖分割线改变的是
+        // "哪一块归哪一路"，画面不被逐格缩小。左右拉动不用它（它有自己的两路铺满 + 互补半区）。
+        // ⚠ 代价：各路 backbuffer 从"格大小"变成"对比区大小" ⇒ 总交换链面积 = 路数 × 对比区。
+        // 对照开关见 BenchNoMosaic：量"拼合到底改变了什么"用的测量臂，不是产品选项。
+        Grid.MosaicWindows = _compareActive && !overlay && !BenchNoMosaic;
 
         // 格→路映射。叠加模式下不生效：它的"露出哪一路"由窗口区域（互补半区）表达，
         // 再叠一层格映射会让两个机制互相打架（见 OnSwapCompareCells 的守卫）。
         Grid.CellRoute = !_compareActive || overlay
             ? null
-            : NormalizeRoute(CompareLayout.CellCount(_compareMode));
+            : NormalizeRoute(_partition.CellCount);
 
         // 组件日志：格表重排是"结构变化"（不是逐帧），值得逐次留痕。
         // 叠加开/关单独记一条跃迁事件——它把窗口区域的语义从"裁出格"换成"互补半区"，
@@ -866,13 +1022,32 @@ public partial class MainWindow : Window
         {
             if (overlay != _lastOverlayActive)
                 ComponentLog.Log(Comp.Overlay, overlay ? "OverlayOn" : "OverlayOff", -1,
-                    $"mode={_compareMode}");
+                    $"grid={_partition.Cols}x{_partition.Rows}");
 
             _lastOverlayActive = overlay;
             ComponentLog.Log(Comp.Overlay, "LayoutApplied", -1,
-                $"active={_compareActive} overlay={overlay} mode={_compareMode} " +
-                $"split={_compareSplit.X:0.###},{_compareSplit.Y:0.###}");
+                $"active={_compareActive} overlay={overlay} grid={_partition.Cols}x{_partition.Rows} " +
+                $"cells={_partition.CellCount} mosaic={Grid.MosaicWindows} " +
+                $"boundaries={DescribeBoundaries(_partition)}" + StepTag());
         }
+
+        // 布局落过地 ⇒ 刷新原生崩溃取证的模块表（内部按 2 秒节流，非 bench/未装时是一次布尔判断）。
+        // 为什么挂这里：`dxgi.dll` / 内核呈现相关模块都在**第一次合成**之后才加载，而表建在
+        // Program.Main 早期；不刷新就会把崩溃带里最有信息量的那一格（IP 落在哪个模块）
+        // 稳定读成 outside（2026-10-01 实测到过一次，见 NativeFaultRecorder.MaybeRefreshTable）。
+        _3FCompare.Diagnostics.NativeFaultRecorder.MaybeRefreshTable();
+    }
+
+    /// <summary>把分区的全部边界位置压成一行日志文本（拖动 / 换形状都读得回具体几何，
+    /// 而不是只看到"模式变了"）。</summary>
+    private static string DescribeBoundaries(GridPartition p)
+    {
+        var handles = p.HandlePositions();
+        if (handles.Length == 0) return "none";
+        var parts = new string[handles.Length];
+        for (var i = 0; i < handles.Length; i++)
+            parts[i] = $"{(p.HandleAxisAt(i) == SplitAxis.X ? 'v' : 'h')}{handles[i].X:0.###},{handles[i].Y:0.###}";
+        return string.Join(" ", parts);
     }
 
     /// <summary>格 → 路的映射（<c>route[格号] = 路号</c>）；<c>null</c> = 恒等（第 i 格显示第 i 路）。
@@ -939,7 +1114,7 @@ public partial class MainWindow : Window
     {
         if (!_compareActive || CompareOverlayActive) return; // 叠加下互换会与揭示区打架
 
-        var cellCount = CompareLayout.CellCount(_compareMode);
+        var cellCount = _partition.CellCount;
         if (cellCount < 2) return;
 
         var route = NormalizeRoute(cellCount) ?? IdentityRoute(cellCount);
@@ -969,7 +1144,7 @@ public partial class MainWindow : Window
     {
         if (!_compareActive || CompareOverlayActive) return; // 叠加下不动（同互换）
 
-        var cellCount = CompareLayout.CellCount(_compareMode);
+        var cellCount = _partition.CellCount;
         var routeCount = Math.Max(1, Grid.Count);
         if (cellCount < 2 || routeCount < 2) return;
 
@@ -1038,7 +1213,7 @@ public partial class MainWindow : Window
     internal void ExitCompareMode()
     {
         ComponentLog.Log(Comp.Overlay, "CompareModeExit", -1,
-            $"mode={_compareMode} overlay={CompareOverlayActive}");
+            $"grid={_partition.Cols}x{_partition.Rows} overlay={CompareOverlayActive}");
         _compareActive = false;
         // 叠加模式必须一并退出：它的两路"铺满"格表与 B 的窗口区域都要撤掉。
         // 先置 _compareActive=false 再调，ExitCompareOverlay 就只做"清状态 + 同步清区域"，不会重复排版。
@@ -1053,28 +1228,67 @@ public partial class MainWindow : Window
         ClearCompareCrop();
         // B6：必须走 HideOverlay 而不是 Hide —— 后者会走基类 Window.Hide，不解除对本窗口的
         // 跟随订阅（见 LayoutOverlayWindow.HideOverlay 的注释）。
-        _layoutOverlay?.HideOverlay();
+        if (BenchKeepLayoutOverlayOnExit)
+        {
+            // 测量档：按住这次 Hide，让"覆盖窗 Hide 是不是激励"能被单变量量出来（默认关 ⇒ 永不进这里）。
+            if (!_keepLayoutOverlayWitnessed)
+            {
+                _keepLayoutOverlayWitnessed = true;
+                ComponentLog.Log(Comp.Overlay, "KeepLayoutOverlay", -1,
+                    $"skippedHide=True overlay={_layoutOverlay is not null}");
+            }
+        }
+        else
+        {
+            _layoutOverlay?.HideOverlay();
+        }
     }
 
-    /// <summary>覆盖层拖动回调：回灌分割参数（覆盖层已做乐观本地更新，这里只同步宿主状态）。
+    /// <summary>覆盖层拖动回调：回灌新分区（覆盖层已做乐观本地更新，这里只同步宿主状态）。
     /// <para>这是"拖动真正改变画面"的关键一环：回灌 ⇒ 重算格表 ⇒ Grid 重排 ⇒ 视频格跟手。
-    /// 覆盖层线条本就由它自己的本地乐观值绘制，两者共用同一份 <see cref="CompareLayout.ComputeCells"/>
-    /// 结果，不会漂移。</para></summary>
-    private void OnCompareSplitChanged(SplitParams split)
+    /// 覆盖层线条本就由它自己的本地乐观值绘制，两者共用同一份
+    /// <see cref="GridPartition.ComputeCells"/> 结果，不会漂移。</para>
+    /// <para>左右拉动时回灌的是它自己那条揭示线（<see cref="_wipePartition"/>），
+    /// 网格的分格宽度不参与 —— 否则退出拉动会发现网格被揭示位置顶掉了。</para></summary>
+    private void OnPartitionChanged(GridPartition partition)
     {
-        _compareSplit = split;
+        // dragbench 计时入口（非 bench 态立即返回 0，一次布尔判断而已）：
+        // 本站点的 16ms 门槛背书的正是下面这三件事的成本，实测档见 MainWindow.DragBench.cs。
+        var dragBenchStart = DragBenchEnterCommit();
+
+        if (_compareOverlayActive) _wipePartition = partition;
+        else _partition = partition;
+
+        // ⚠ 自由拼接形态下覆盖层报回的仍是"它自己那份兼容分区"，而真正的几何是块表。
+        //    若在这里把分区当成真值，就会出现"拖了线、区域没跟着变"（两处各存一份几何）。
+        //    故自由拼接下**只刷新区域**，不动块表 —— 块表由 DragWipeLine 按线段语义更新。
+        if (_compareOverlayActive && WipeMosaicActive)
+        {
+            ComponentLog.Log(Comp.Overlay, "SplitChanged", -1,
+                $"freeform lines={WipeMosaic!.LogicalLines().Length}");
+            ScheduleCompareCrop();
+            DragBenchExitCommit(dragBenchStart);
+            return;
+        }
+
         // 组件日志：分割变化（拖动中可能连续触发）。它是裁剪重算的直接诱因，
         // 必须与随后的 RegionApply/RegionClear 成对出现才能还原时序。
-        ComponentLog.Log(Comp.Overlay, "SplitChanged", -1, $"x={split.X:0.###} y={split.Y:0.###}");
-        _layoutOverlay?.Update(_compareMode, _compareSplit);
+        ComponentLog.Log(Comp.Overlay, "SplitChanged", -1,
+            $"grid={partition.Cols}x{partition.Rows} boundaries={DescribeBoundaries(partition)}");
+        _layoutOverlay?.Update(partition);
         ApplyCompareLayout();
         // 分割参数变了 ⇒ 格表变了 ⇒ 裁剪矩形要重算（同样等布局落地后再下发）
         ScheduleCompareCrop();
+
+        DragBenchExitCommit(dragBenchStart);
     }
 
-    /// <summary>路数变化时自动收敛对比模式（<see cref="CompareLayout.CoerceMode"/>）；
-    /// 路数掉到 2 以下（可用模式集为空）、或对比区本身不再存在时直接退出对比模式。
-    /// <para>幂等：模式未变时不做任何事，可安全地每次 UpdateStatus 都调一次。</para></summary>
+    /// <summary>路数变化时把分区收敛到新形状（<see cref="GridPartition.Retune"/>）；
+    /// 路数掉到 2 以下、或对比区本身不再存在时直接退出。
+    /// <para>幂等：分区未变时不做任何事，可安全地每次 UpdateStatus 都调一次。</para>
+    /// <para><b>保住权重是这条路径的主要职责</b>：加一路就把用户拖好的分格宽度抹掉，
+    /// 读起来像"模式自己跳回去了"。Retune 在形状不变时原样搬运权重，只有形状真的变了
+    /// （2 路左右 → 3 路三列）才退回均匀。</para></summary>
     private void SyncCompareModeToRouteCount()
     {
         if (!_compareActive || _layoutOverlay is null) return;
@@ -1088,101 +1302,111 @@ public partial class MainWindow : Window
             return;
         }
 
-        var count = _sync.Count;
-        if (CompareLayout.AvailableModes(count).Count == 0)
+        // 素材少于 2 路就没有对比对象（lane 数可以更多，那只是空占位格）。
+        if (_sync.Count < 2)
         {
             ExitCompareMode();
             return;
         }
 
-        var coerced = CompareLayout.CoerceMode(_compareMode, count);
-        if (coerced == _compareMode) return;
-        _compareMode = coerced;
-        _compareSplit = _compareSplit.Clamp();
-        _layoutOverlay.Update(_compareMode, _compareSplit);
-        // 模式收敛后格数与形状都变了（例如 4 路 ABCD 掉到 3 路 → ABC），必须同步重排画面。
+        var (pc, pr) = GridLayout.OverrideOf(Grid.Preset);
+
+        // 左右拉动下带表必须跟着 lane 数长 —— 这是"加路不再失效"的另一半：
+        // OpenPaths 会把 Grid.Count 扩到能容纳新路（否则 surface 不够、打开被静默跳过），
+        // 而带表若不跟着长，新 lane 就落在格表之外、被 ArrangeOverride 隐藏 ⇒ 又是"加了看不到"。
+        // 收敛点放这里（与上面那句"UpdateStatus 是全部路数变更路径的共同汇聚点"同源），
+        // 而不是只挂在 AddSlotPlaceholder 上 —— 因为**拖放 / 菜单打开 / 会话重载**同样会让路数变。
+        //
+        // ⚠ 必须用**只改数据、不做布局**的版本：本方法由 UpdateStatus 调用，
+        //    而完整的 GrowWipeBandsTo 会调 ApplyCompareLayout + ScheduleCompareCrop
+        //    ⇒ 等于在"刷状态栏"里做布局并下发裁剪，重入且时序危险。
+        //    真机实测后果：启动 5 路档时进程直接原生崩溃（baseline 3/3 不崩、改后 3/3 崩）。
+        //    布局那部分交给本方法末尾既有的 ScheduleCompareCrop（它本就延后一拍）。
+        if (_compareOverlayActive && !WipeMosaicActive && Grid.Count > WipeBandCount)
+            GrowWipeBandsDataOnly(Grid.Count);
+
+        // 左右拉动期间网格分区不参与呈现（揭示线是另一份），但形状仍要跟 lane 数收敛，
+        // 否则退出拉动时会拿到一份"格数与 lane 数不符"的旧分区。
+        var retuned = _partition.Retune(Grid.Count, Grid.SingleView, pc, pr);
+        if (retuned.SameShape(_partition)) return;
+        _partition = retuned;
+        _layoutOverlay.Update(ActivePartition());
+        // 形状与格数都变了，必须同步重排画面并让裁剪跟着走。
         ApplyCompareLayout();
+        ScheduleCompareCrop();
     }
 
-    /// <summary>对比模式入口（快捷键 C）：单键循环「进入 → 逐级切换可用模式 → 退出」。
-    /// <list type="bullet">
-    /// <item>未进入 → 进入最小可用模式（2/3/4+ 路均为 AB）；</item>
-    /// <item>已进入 → 切到可用集合中的下一个模式；</item>
-    /// <item>已是最大可用模式 → 退出。</item>
-    /// </list>
+    /// <summary>换分格朝向（快捷键 C）：未进入则进入，已进入则在
+    /// <see cref="GridPartition.ShapesFor"/> 的候选里换到下一个（2 路：左右↔上下；
+    /// 3 路：三列↔三行↔2×2；4 路：2×2↔四列↔四行；5~6 路：3×2↔2×3；7~9 路只有 3×3）。
     ///
-    /// <para><b>为什么单键循环而不是三个按钮</b>：可用集合与"按路数自动收敛"完全由
-    /// <see cref="CompareLayout.AvailableModes"/> 决定（2 路→{AB}，3 路→{AB,ABC}，
-    /// ≥4 路→{AB,ABC,ABCD}），循环天然只走合法模式，无需在 UI 侧重复一份规则。
-    /// 路由到 <see cref="EnterCompareMode"/> 后，后者内部的
-    /// <see cref="CompareLayout.CoerceMode"/> 还会再收敛一次（双保险）。</para>
+    /// <para><b>不再"循环到末项即退出"</b>：旧实现把退出藏在 C 的末项里，是因为当时
+    /// "退出对比 = 回均匀网格"是唯一的退出口。合并后退出由 G 的开关语义负责（键是开关、
+    /// 菜单项是进入，与左右拉动同一约定），C 只管换朝向 ⇒ 用户不必靠多按几次来退出，
+    /// 也不会"想换朝向却把模式关掉了"。</para>
     ///
-    /// <para><b>进入失败不覆盖状态栏</b>：B3 的 fail-fast（<see cref="VerifyOverlayDegradation"/>）
-    /// 会在钩子/透明任一不满足时自动 <see cref="ExitCompareMode"/> 并写下原因；此处仅在
-    /// <c>_compareActive</c> 仍为 true 时才提示模式名，避免把失败原因冲掉。</para></summary>
-    private void CycleCompareMode()
+    /// <para>换朝向会把权重重置为均匀（形状都换了，旧权重没有对应的列可落），
+    /// 这是刻意的一致性取舍，状态栏会把这件事说出来。</para></summary>
+    private void CycleCompareShape()
     {
-        var modes = CompareLayout.AvailableModes(_sync.Count);
-        if (modes.Count == 0)
+        if (_sync.Count < 2)
         {
-            // 0/1 路：对比功能未启动，给出可见反馈（不静默）。
-            StatusInfo.Text = Loc("对比模式需要至少 2 路视频。", "Compare mode requires at least 2 routes.");
+            // 0/1 路：没有可对比的对象，给出可见反馈（不静默）。
+            StatusInfo.Text = Loc("网格对比需要至少 2 路视频。", "The grid compare view needs at least 2 lanes.");
             return;
         }
 
         if (!_compareActive)
         {
-            EnterCompareMode(modes[0]);
+            EnterCompareMode();
             if (_compareActive) NotifyCompareMode();
             return;
         }
 
-        var idx = modes.IndexOf(_compareMode);
-        if (idx >= 0 && idx < modes.Count - 1)
+        if (_compareOverlayActive)
         {
-            EnterCompareMode(modes[idx + 1]);
-            if (_compareActive) NotifyCompareMode();
+            // 左右拉动只有一条揭示线，"朝向"由它的 axis 开关决定，不参与这里的循环。
+            NotifyCompareOverlay();
             return;
         }
 
-        ExitCompareMode();
+        _partition = _partition.NextShape();
+        _layoutOverlay?.Update(_partition);
+        ApplyCompareLayout();
+        ScheduleCompareCrop();
         NotifyCompareMode();
     }
 
-    /// <summary>模式显示名（中英双份，供状态栏 / 提示复用）。
+    /// <summary>分格形状显示名（中英双份，供状态栏 / 提示复用）。
     ///
-    /// <para><b>为什么必须是带 <c>_ =&gt;</c> 兜底之外的显式分支</b>：<see cref="CompareMode"/> 现有
-    /// 五个取值，其中两个是变体（AB 竖 / ABC 三列）。若沿用原来的三分支 switch，
-    /// 变体会落进 default 显示成 "AB" —— 用户切到竖分却看到"对比模式：AB"，
-    /// 且 <b>不会报错</b>（C# 对带兜底的 switch 不报 CS8509）。显式列出每个取值，
-    /// 新增模式时这里必须跟着改；<c>ModeVariantTests</c> 只覆盖 Core，UI 侧的这份表
-    /// 由 <c>--comparemodetest</c> 的模式循环断言间接覆盖（每个可用模式都会被切到并显示）。</para></summary>
-    private static string CompareModeName(CompareMode mode) => Loc(
-        mode switch
-        {
-            CompareMode.Abc => "ABC",
-            CompareMode.AbcColumns => "ABC 三列",
-            CompareMode.Abcd => "ABCD",
-            CompareMode.AbVertical => "AB 竖",
-            _ => "AB",
-        },
-        mode switch
-        {
-            CompareMode.Abc => "ABC",
-            CompareMode.AbcColumns => "ABC (3 columns)",
-            CompareMode.Abcd => "ABCD",
-            CompareMode.AbVertical => "AB (vertical)",
-            _ => "AB",
-        });
+    /// <para><b>为什么每个形状都要显式列出</b>：旧的 <c>CompareModeName</c> 用三分支 switch
+    /// 兜底，变体一旦漏分支就静默显示成 "AB"（C# 对带 <c>_ =&gt;</c> 的 switch 不报 CS8509）。
+    /// 这里同样保留 <c>_ =&gt;</c> 兜底给 (1,1) 这类不该出现的组合，但已知的每种朝向都单独有名，
+    /// 新增朝向时不必再担心"名字掉进 default"。</para></summary>
+    private string CompareShapeName(GridPartition p) => (p.Cols, p.Rows) switch
+    {
+        (2, 1) => Loc("左右两格", "2 columns"),
+        (1, 2) => Loc("上下两格", "2 rows"),
+        (3, 1) => Loc("三列", "3 columns"),
+        (1, 3) => Loc("三行", "3 rows"),
+        (2, 2) => Loc("四宫格", "2×2 grid"),
+        (4, 1) => Loc("四列", "4 columns"),
+        (1, 4) => Loc("四行", "4 rows"),
+        (3, 2) => Loc("3 列 2 行", "3×2 grid"),
+        (2, 3) => Loc("2 列 3 行", "2×3 grid"),
+        (3, 3) => Loc("九宫格", "3×3 grid"),
+        _ => Loc($"{p.Cols} 列 {p.Rows} 行", $"{p.Cols}x{p.Rows} grid"),
+    };
 
-    /// <summary>在状态栏提示当前对比模式（或已退出）。文案走 <see cref="Loc"/>：
-    /// 语言表不在本次改动范围，与既有硬编码双语文案同一风格。</summary>
     /// <summary>"哪几路当前不干活"的状态栏后缀，读<b>实测</b>启用集合
     /// （<see cref="SyncController.InactiveRoutes"/>），不是拿格数去推"后几路"。
     ///
     /// <para><b>为什么必须读实测</b>：① 做过左右互换 / 轮换之后，没占格的未必是编号靠后的那几路；
     /// ② <c>Failed</c> 的路被 <c>SetActiveRoutes</c> 跳过、永远保持启用，按格数推会把它们也说成
     /// "已停用"，那是句假话。文案与判据同源，才不会各说各的。</para>
+    ///
+    /// <para><b>合并态下这个后缀恒为空</b>（一路一格，没有路被挤出去），它只在左右拉动
+    /// （两格装不下 N 路）时才有内容 —— 保留它而不是写死"全部显示"，就是因为读的是实测值。</para>
     ///
     /// <para><b>已知的一拍延迟</b>：模式变化时本函数被同步调用，而启用态是延后一拍才下发的
     /// （见 <see cref="ApplyRouteActivity"/>），所以切模式的那一瞬间可能还是旧集合；
@@ -1201,97 +1425,91 @@ public partial class MainWindow : Window
     {
         if (!_compareActive)
         {
-            StatusInfo.Text = Loc("已退出对比模式。", "Compare mode off.");
+            StatusInfo.Text = Loc("已回到均匀网格（无分割线）。按 G 用网格对比。",
+                                  "Back to the plain grid (no dividers). Press G for the grid compare view.");
             return;
         }
 
-        var name = CompareModeName(_compareMode);
-        // 格数 < 路数时（如 4 路用 AB 只看 2 路）显式告知哪几路没在干活，
-        // 否则用户会以为剩下几路"消失了"。读实测集合，理由见 DescribeDeactivatedRoutes。
-        var scope = DescribeDeactivatedRoutes();
-        StatusInfo.Text = Loc($"对比模式：{name}{scope}（按 C 切换 / 退出）",
-                              $"Compare mode: {name}{scope} (press C to cycle / exit)");
+        var name = CompareShapeName(_partition);
+        var scope = DescribeDeactivatedRoutes();   // 读实测集合，理由见该方法注释
+        StatusInfo.Text = Loc(
+            $"网格对比：{name}，{_partition.CellCount} 路全部显示，拖分割线调整各格占比{scope}（按 C 换分格 / 按 S 左右拉动，再按 G 退出）",
+            $"Grid compare: {name}, all {_partition.CellCount} lane(s) visible, drag a divider to resize cells{scope} (C changes the split, S the wipe, G exits)");
     }
 
-    // ══════════ 视图模式三态入口（docs/31 阶段 3）：左右拉动 / A-B 可拖动 / 标准 ══════════
+    // ══════════ 视图模式入口（合并后只剩两项：网格对比 / 左右拉动） ══════════
     //
-    // 三个入口共用同一套"以真实状态为准"的勾选刷新（RefreshCompareModeChecks），
-    // 菜单（视图 → 视图模式，菜单顶部那一列）与快捷键（S / V / G）走的是同一条路径，不会出现两套语义。
+    // 两项共用同一套"以真实状态为准"的勾选刷新（RefreshCompareModeChecks），
+    // 菜单（视图 → 视图模式）与快捷键（G / V / S）走同一条路径，不会出现两套语义。
+    //
+    // 旧三项里的"A/B 可拖动对比（V）"与"标准模式（G）"合成一项：基准取网格的渲染覆盖
+    // （一路一格、全部路显示），分割线取 A/B 的可拖动能力。V 键保留为同一入口的别名，
+    // 老键位不废；G 是<b>开关</b>（再按一次回无分割线的均匀网格），菜单项是<b>进入</b>语义
+    // —— 与左右拉动既有的约定一致。
 
-    /// <summary>A/B 可拖动对比入口（菜单「视图 → 视图模式 → A/B 可拖动对比」/ 快捷键 <c>V</c>，
-    /// 内部名沿用"分屏"）。
-    ///
-    /// <para><b>按路数收敛</b>：目标模式一律取 <see cref="CompareLayout.CoerceMode"/> 对
-    /// <see cref="CompareMode.Abcd"/> 的收敛结果 —— 2 路→AB、3 路→ABC、≥4 路→ABCD。
-    /// 于是 5~9 路点"分屏"会进入 ABCD 并<b>只显示前 4 路</b>（其余由
-    /// <c>CompareGridView.ArrangeOverride</c> 隐藏），这与 <c>NotifyCompareMode</c> 里
-    /// "显示前 N / 共 M 路"的提示一致。</para>
-    ///
-    /// <para><b>已是目标模式时不重进</b>：<see cref="EnterCompareMode"/> 会把分割参数重置为
-    /// <see cref="SplitParams.Default"/>，用户已拖好的分割位置不该因为再点一次"分屏"被抹掉。
-    /// 叠加是 AB 的呈现变体，此时只退出叠加（同一份分割参数被保留），不重进对比模式。</para></summary>
-    private void EnterSplitMode()
+    /// <summary>网格对比的"进入"入口（菜单项 / V 键）。已在态时不重进，
+    /// 于是再点一次不会把用户拖好的分格宽度重置成均匀；不足 2 路时给可见反馈而不是静默。</summary>
+    private void EnterGridCompare()
     {
-        if (CompareLayout.AvailableModes(_sync.Count).Count == 0)
+        if (_sync.Count < 2)
         {
-            StatusInfo.Text = Loc("对比模式需要至少 2 路视频。", "Compare mode requires at least 2 routes.");
+            StatusInfo.Text = Loc("网格对比需要至少 2 路视频。", "The grid compare view needs at least 2 lanes.");
             return;
         }
 
-        var target = CompareLayout.CoerceMode(CompareMode.Abcd, _sync.Count);
-        if (_compareActive && _compareMode == target)
-        {
-            if (_compareOverlayActive)
-            {
-                ExitCompareOverlay(); // 内部会回到 AB 左右分栏
-                NotifyCompareMode();
-            }
-            return;
-        }
-
-        EnterCompareMode(target);
-        // 进入失败（B3 fail-fast 自动降级）时不覆盖状态栏里的失败原因，同 CycleCompareMode。
+        EnterCompareMode();
+        // 进入失败（B3 fail-fast 自动降级）时不覆盖状态栏里的失败原因。
         if (_compareActive) NotifyCompareMode();
     }
 
-    /// <summary>标准模式入口（菜单「视图 → 视图模式 → 标准模式」/ 快捷键 <c>G</c>，内部名沿用"网格"）：
-    /// ⇒ <c>Grid.CellOverride</c> 置 null，Grid 回到既有的均匀 N×M 逻辑，被对比模式隐藏的路全部恢复
-    ///（2~9 路全部显示；排布由 <see cref="GridLayout.ComputeGrid"/> 决定）。
-    ///
-    /// <para>已经是网格（未进入对比模式）时直接返回：既不做无谓的"已退出"提示，也不重复下发裁剪。</para></summary>
-    private void EnterGridMode()
+    /// <summary>回到"无分割线的均匀网格"。<b>不在态时什么都不做</b> ——
+    /// 自测与旧 <c>EnterGridMode</c> 要的就是这个语义：G 键是开关（不在态时会进入），
+    /// 而"退回均匀网格"这一步不能反过来把模式打开，否则夹具的收尾会变成下一次的前置。</summary>
+    internal void ExitGridCompare()
     {
         if (!_compareActive && !_compareOverlayActive) return;
-        ExitCompareMode(); // 内部先退出叠加，再撤格表、复位无缝放大与窗口裁剪
+        ExitCompareMode(); // 内部先退出拉动，再撤格表、复位无缝放大与窗口裁剪
         NotifyCompareMode();
     }
 
-    /// <summary>刷新「视图 → 视图模式」三项的勾选与「对比选项」各项的可用状态。
+    /// <summary>G 键：网格对比的<b>开关</b>。已在该态（且不是左右拉动）则退回均匀网格，
+    /// 否则进入。<para>退出口只有这一个：旧实现靠"C 循环到末项"退出，合并后 C 只管换朝向，
+    /// 退出必须由一个明确的键承担。</para></summary>
+    internal void ToggleGridCompare()
+    {
+        if (_compareActive && !_compareOverlayActive)
+        {
+            ExitCompareMode();
+            NotifyCompareMode();
+            return;
+        }
+        EnterGridCompare();
+    }
+
+    /// <summary>刷新「视图 → 视图模式」两项的勾选与「对比选项」各项的可用状态。
     ///
-    /// <para><b>刷新时机</b>：父菜单 <c>SubmenuOpened</c> 时 + 三项被点击之后。
-    /// 前者保证"用 C / S / V / G 键或路数变化改了模式后，菜单里不会留下陈旧勾选"；
-    /// 后者是因为 Avalonia 的菜单交互处理器会<b>先</b>改 <c>IsChecked</c>（CheckBox 取反、
-    /// Radio 选中自己并取消同组其余项）、<b>再</b>触发 <c>Click</c> ——
-    /// 而"点一下"未必真的改得了状态（不足 2 路时进不了对比模式），不纠正就会与真实状态相反。</para>
+    /// <para><b>刷新时机</b>：父菜单 <c>SubmenuOpened</c> 时 + 项被点击之后。
+    /// 前者保证"用 G / V / S / C 键或路数变化改了模式后，菜单里不会留下陈旧勾选"；
+    /// 后者是因为 Avalonia 的菜单交互处理器会<b>先</b>改 <c>IsChecked</c>（Radio 选中自己并取消
+    /// 同组其余项）、<b>再</b>触发 <c>Click</c> —— 而"点一下"未必真的改得了状态（不足 2 路时
+    /// 进不了对比），不纠正就会与真实状态相反。</para>
     ///
-    /// <para>三项互斥，且判据只有一份真实状态：<c>_compareOverlayActive</c> = 左右拉动、
-    /// <c>_compareActive</c> 且非叠加 = A/B 可拖动（叠加是它的呈现变体，故必须先看叠加）、
-    /// 其余即标准模式。路数 &lt; 2 时后两项不可用（<see cref="CompareLayout.AvailableModes"/> 为空集合）。</para></summary>
+    /// <para>两项互斥，判据只有一份真实状态：<c>_compareOverlayActive</c> = 左右拉动、
+    /// <c>_compareActive</c> 且非叠加 = 网格对比。不足 2 路时两项都不可用，
+    /// 且此时两处都不会有勾（真实状态就是"均匀网格"）。</para></summary>
     private void RefreshCompareModeChecks()
     {
-        var canCompare = CompareLayout.AvailableModes(_sync.Count).Count > 0;
-        MenuViewAbSplit.IsEnabled = canCompare;
+        var canCompare = _sync.Count >= 2;
+        MenuViewStandard.IsEnabled = canCompare;
         MenuViewWipe.IsEnabled = canCompare;
-        MenuViewStandard.IsEnabled = true;
 
         MenuViewWipe.IsChecked = _compareOverlayActive;
-        MenuViewAbSplit.IsChecked = _compareActive && !_compareOverlayActive;
-        MenuViewStandard.IsChecked = !_compareActive;
+        MenuViewStandard.IsChecked = _compareActive && !_compareOverlayActive;
 
-        // 互换：只在"对比模式 + 非叠加 + 至少两格"时可用。叠加是"两路铺满 + 区域裁半区"，
+        // 互换：只在"网格对比 + 非拉动 + 至少两格"时可用。拉动是"两路铺满 + 区域裁半区"，
         // 互换会与它的揭示区打架（两者都靠窗口区域表达"露出哪一路"）。
         MenuModeSwap.IsEnabled = _compareActive && !_compareOverlayActive
-            && CompareLayout.CellCount(_compareMode) >= 2;
+            && _partition.CellCount >= 2;
         // 轮换需要"至少两路可换"，否则点它是空转（恒等轮换回自己）
         MenuModeRotate.IsEnabled = MenuModeSwap.IsEnabled && Grid.Count >= 2;
         MenuAutoCompare.IsChecked = _settings.AutoEnterCompare;
@@ -1565,6 +1783,11 @@ public partial class MainWindow : Window
         // ⇒ 一律改按格命中。未启用放大时本分支不进入，下面的既有循环逐字不变。
         if (CompareMagnifyActive && _compareActive) return HitCompareCellAt(windowPos);
 
+        // 拼合（mosaic）下**不需要放大也一样**：各路窗口恒等于整对比区，按 Bounds 命中会
+        // 永远返回第一个可见表面（= 第 0 路），放大镜/滚轮锚点/指针映射全部读到错的那一路。
+        // 这是拼合改写排布时最容易漏的一处 —— 窗口重叠了，而"重叠 + 区域裁开"在画面上看不出来。
+        if (_compareActive && Grid.MosaicWindows) return HitCompareCellAt(windowPos);
+
         foreach (var s in Grid.Surfaces)
         {
             if (!s.IsVisible) continue;
@@ -1575,15 +1798,16 @@ public partial class MainWindow : Window
         return null;
     }
 
-    /// <summary>按格命中（仅"对比模式 + 子窗口放大"时使用）。
+    /// <summary>按格命中（"对比模式 + 子窗口放大"或"对比模式 + 拼合"时使用）。
     ///
-    /// <para><b>为什么必须换</b>：放大后每一路的子窗口都是"格的 z 倍"且互相重叠，按
-    /// <c>Bounds</c> 命中会命中"最后一个覆盖该点的窗口"，与用户实际看到的那一格不一致
+    /// <para><b>为什么必须换</b>：这两种排布下各路子窗口都互相重叠（拼合时每路都铺满整对比区），
+    /// 按 <c>Bounds</c> 命中会命中"最后一个覆盖该点的窗口"，与用户实际看到的那一格不一致
     /// （窗口区域已经把越界部分裁掉了，但 Avalonia 侧读的是 <c>Bounds</c> 而不是区域）。</para>
     ///
     /// <para><b>为什么按格就够</b>：格互不重叠且铺满对比区，所以"点在哪个格里"是唯一确定的；
-    /// 格表与 <c>CompareGridView.ArrangeOverride</c> 共用 <see cref="CompareCropPlanner.CellToContainerDip"/>
-    /// 的同一套公式（自测 <c>AssertCellsDriveLayout</c> 钉住一致性），不会漂移。
+    /// 口径与**裁剪那一路同源**：拼合用不留缝的 <see cref="CompareCropPlanner.MosaicRegionDip"/>
+    /// （留 1px 缝的话，缝里的点击谁都归不到 ⇒ 表现为"线正好压在那儿却点不中这一格"），
+    /// 其余用内缩 1px 的 <see cref="CompareCropPlanner.CellToContainerDip"/>。
     /// 点落在所有格之外（对比区之外）时返回 null —— 与"没命中任何一路"语义相同。</para></summary>
     private PlayerSurface? HitCompareCellAt(Point windowPos)
     {
@@ -1595,7 +1819,8 @@ public partial class MainWindow : Window
         var h = Grid.Bounds.Height;
         if (w <= 0 || h <= 0) return null;
 
-        var cells = CompareLayout.ComputeCells(_compareMode, _compareSplit);
+        var cells = _partition.ComputeCells();
+        var mosaic = Grid.MosaicWindows;
         // 按格循环，再经"格→路"映射取对应的 PlayerSurface：
         // 互换 / 自选源之后"第 i 格"不一定还是"第 i 路"，按路循环会命中错的那一路。
         for (var cell = 0; cell < cells.Length; cell++)
@@ -1604,7 +1829,10 @@ public partial class MainWindow : Window
             if (routeIndex < 0) continue;
             var s = Grid.GetSurface(routeIndex);
             if (s is null || !s.IsVisible) continue;
-            if (CompareCropPlanner.CellToContainerDip(cells[cell], w, h).Contains(p)) return s;
+            var hitDip = mosaic
+                ? CompareCropPlanner.MosaicRegionDip(cells[cell], w, h)
+                : CompareCropPlanner.CellToContainerDip(cells[cell], w, h);
+            if (hitDip.Contains(p)) return s;
         }
         return null;
     }
@@ -1703,18 +1931,34 @@ public partial class MainWindow : Window
         return VisibleCenterFractions(sv);
     }
 
-    /// <summary>该路可见区中心（= 表面中心）正对着的源归一化坐标；会话不可用时返回 null。
+    /// <summary>该路<b>可见区</b>中心正对着的源归一化坐标；会话不可用或取不到点时返回 null。
     /// <para>两条缩放路径（单路 <see cref="WheelAnchorFractions"/> 与对比模式
     /// <c>TryHandleCompareWheel</c> 的相对对齐支）共用这一条，避免"同一个退化各写一份、
-    /// 一份跳一份不跳"。</para></summary>
+    /// 一份跳一份不跳"。</para>
+    ///
+    /// <para><b>"可见区中心"必须是这一路自己的那一块</b>。原先直接取 <c>surface.Bounds.Center</c>，
+    /// 在拼合下等于取"整个对比区的中心"：各路窗口恒等于整对比区 ⇒ 不管光标在哪一格，退化锚都是
+    /// 同一个组合画面中心，滚轮一滚每格都朝/离对比区中心滑（就是本方法注释一直警告的那类"一滚就飞"）。
+    /// 顺带修掉另一半更早的错：<c>Bounds</c> 是<b>父容器</b>坐标，而 <see cref="MapPointerToVideoFraction"/>
+    /// 要的是<b>窗口内</b>坐标，多格网格下前者自带一个格原点偏移。</para></summary>
     internal (double U, double V)? VisibleCenterFractions(PlayerSurface surface)
     {
         var slots = _sync.Slots;
         if (surface.Index < 0 || surface.Index >= slots.Count ||
             slots[surface.Index].Session is not { } session) return null;
-        var f = MapPointerToVideoFraction(surface, session, surface.Bounds.Center);
+        var f = MapPointerToVideoFraction(surface, session, VisibleCenterPointDip(surface));
         return f is { } g ? (g.U, g.V) : null;
     }
+
+    /// <summary>退化锚该用的那个点，<b>以该路窗口自己的客户区为坐标</b>（DIP）。
+    /// <para>优先用"这一路屏幕上真正露出的那一块"的中心 —— 那份账由
+    /// <see cref="TryCompareVisibleBlockDip"/> 从 <c>SetWindowRgn</c> 的实际下发结果里拿，
+    /// 与像素同源，不是第二次几何推算。没有下发过区域（未进对比裁剪、非拼合的窗口==格、
+    /// 叠加态分区过窄…）就退回整窗中心，仍是窗口内坐标。</para></summary>
+    internal Point VisibleCenterPointDip(PlayerSurface surface)
+        => TryCompareVisibleBlockDip(surface.Index, out var block)
+            ? new Point(block.X + block.Width / 2, block.Y + block.Height / 2)
+            : new Point(surface.Bounds.Width / 2, surface.Bounds.Height / 2);
 
     /// <summary>文件拖入（PlayerSurface 子 HWND/覆盖层 WM_DROPFILES 转发）。
     /// NativeControlHost 子 HWND 不是 OLE 拖放目标，Avalonia 顶层 Drop 事件收不到；
@@ -1775,7 +2019,7 @@ public partial class MainWindow : Window
         {
             AccumulateComparePan(dx, dy);
             var nowMs = Environment.TickCount64;
-            if (nowMs - _lastCompareCommitTicks >= 16)
+            if (nowMs - _lastCompareCommitTicks >= _3FCompare.Controls.LayoutOverlayWindow.GestureCommitIntervalMs)
             {
                 _lastCompareCommitTicks = nowMs;
                 CommitComparePan();   // 提交并清零累积量，松手时只补最后一段残余
@@ -1978,20 +2222,22 @@ public partial class MainWindow : Window
             // 故选一个不会被任何控件吞掉的组合；
             // ③ H 取「隐藏」首字母：三态里"完全隐藏"正是旧版做不到、需要新入口才能到达的一态。
             case Key.H when mods.HasFlag(KeyModifiers.Control): CycleSidebarMode(); break;
-            // 多路对比模式入口：单键循环「进入 → 逐级切换可用模式 → 退出」（见 CycleCompareMode）。
+            // 分格朝向循环（见 CycleCompareShape）：C 只换朝向，退出交给 G 的开关语义。
             // 选快捷键而非菜单：菜单要改 MainWindow.axaml 并新增本地化键，而 Localization/ 不在
             // 本次改动范围（docs/26 §四）；快捷键只动本文件这一处 switch，改动最小且零新依赖。
-            case Key.C when mods == KeyModifiers.None: CycleCompareMode(); break;
+            case Key.C when mods == KeyModifiers.None: CycleCompareShape(); break;
             // 叠加模式（对标 ICAT Single Screen，docs/31 阶段 2）开关：两路铺满 + B 置顶裁半。
             // 选 S 的依据：① 未被占用（全表只有 Ctrl+S 用于导出帧，见上）；② 语义对得上文档标题
             // "Single Screen"；③ 与 C（模式循环）分属"切模式"与"切呈现"两件事，不会混淆。
             case Key.S when mods == KeyModifiers.None: ToggleCompareOverlay(); break;
-            // 模式家族入口（docs/31 阶段 3）：V = 分屏、G = 网格（叠加沿用 S）。
-            // 选键依据：① 全表（本 switch + TimelineView 的 A/B + XAML 的 InputGesture）已核对，
-            // G / V 两个裸键此前均未被占用，且带修饰键的 Ctrl+G/Ctrl+V 不受影响（有 None 守卫）；
-            // ② 首字母对应 V(iew 的三种模式之一「分屏」) / G(rid)，与 C（循环）S（叠加）不冲突。
-            case Key.V when mods == KeyModifiers.None: EnterSplitMode(); break;
-            case Key.G when mods == KeyModifiers.None: EnterGridMode(); break;
+            // 视图模式两键（合并后只剩一个可拖网格态）：G = 它的<b>开关</b>（再按一次回无分割线的
+            // 均匀网格），V = 同一态的<b>进入</b>别名。
+            // 为什么留 V：它已在 README、出货说明与用户肌肉记忆里代表"可拖动分格"，撤掉等于
+            // 让老键位凭空失效；而它落到的态与 G 完全相同（EnterGridCompare），不产生第二套语义。
+            // 选键依据不变：全表（本 switch + TimelineView 的 A/B + XAML 的 InputGesture）核对过，
+            // G / V 两个裸键均未被占用，且带修饰键的 Ctrl+G/Ctrl+V 不受影响（有 None 守卫）。
+            case Key.V when mods == KeyModifiers.None: EnterGridCompare(); break;
+            case Key.G when mods == KeyModifiers.None: ToggleGridCompare(); break;
             // 底部栏折叠（docs/31 阶段 4）：T = 时间轴，Shift+T = 状态栏。
             // 选键依据：① 全表（本 switch + TimelineView 的 A/B + XAML 的 InputGesture）已核对，
             // T 与 Shift+T 此前均未被占用，且带其它修饰键的组合（Ctrl+T 等）因 None/Shift 守卫不受影响；
@@ -2483,12 +2729,26 @@ public partial class MainWindow : Window
 
     private void OnGridPreset(object? sender, RoutedEventArgs e)
     {
-        if (sender is MenuItem { Tag: string preset })
-            Grid.SetGridLayout(preset);
+        if (sender is not MenuItem { Tag: string preset }) return;
+        Grid.SetGridLayout(preset);
+
+        // 合并态的格表来自分区，**不**走 Grid 自己的均匀逻辑 —— 只改预设的话，
+        // "视图 → 网格布局"在这个态里就是一条看起来没反应的死菜单（旧标准模式下它是生效的）。
+        if (!_compareActive || _compareOverlayActive) return;
+
+        var (pc, pr) = GridLayout.OverrideOf(preset);
+        var (cols, rows) = GridLayout.ResolveGrid(Grid.Count, Grid.SingleView, pc, pr);
+        // 形状没变就什么都不做：预设从 auto 换成"恰好同形"的 3x3 不该把用户拖好的列宽抹掉。
+        if (cols == _partition.Cols && rows == _partition.Rows) return;
+        _partition = GridPartition.Uniform(Grid.Count, cols, rows);
+        _layoutOverlay?.Update(_partition);
+        ApplyCompareLayout();
+        ScheduleCompareCrop();
     }
 
-    /// <summary>「视图 → 视图模式」三项的统一入口。写法与 <see cref="OnGridPreset"/> 一致
-    ///（<c>Click</c> 事件 + <c>Tag</c> 字符串，不用 Command），保持本菜单风格统一。</summary>
+    /// <summary>「视图 → 视图模式」两项的统一入口。写法与 <see cref="OnGridPreset"/> 一致
+    ///（<c>Click</c> 事件 + <c>Tag</c> 字符串，不用 Command），保持本菜单风格统一。
+    /// <para>菜单是<b>进入</b>语义（网格项不会把已激活的态关掉），G 键才是开关。</para></summary>
     private void OnCompareModePreset(object? sender, RoutedEventArgs e)
     {
         if (sender is not MenuItem { Tag: string preset }) return;
@@ -2496,8 +2756,7 @@ public partial class MainWindow : Window
         switch (preset)
         {
             case "overlay": EnterCompareOverlay(); break; // 内部自带"需 ≥2 路"提示与状态栏通知
-            case "split": EnterSplitMode(); break;
-            case "grid": EnterGridMode(); break;
+            case "grid": EnterGridCompare(); break;       // 合并态（一路一格 + 可拖分割线）
             default: return;
         }
 
@@ -2821,6 +3080,9 @@ public partial class MainWindow : Window
         _settings.DefaultGridCols = s.DefaultGridCols;
         _settings.DefaultGridRows = s.DefaultGridRows;
         _settings.VrrTearingPresent = s.VrrTearingPresent;
+        // RTX VSR：会话级配置，同 VrrTearingPresent —— 只同步到内存中的 _settings，
+        // 由新会话建会话时读取；已开会话不热切换（内核该请求在 CreateSession 里登记）。
+        _settings.RtxVideoSuperResolution = s.RtxVideoSuperResolution;
         _settings.ScrubPreviewEnabled = s.ScrubPreviewEnabled;
         _settings.MinimapEnabled = s.MinimapEnabled;
         _settings.Language = s.Language;
@@ -2852,7 +3114,8 @@ public partial class MainWindow : Window
         var session = slot?.Session;
         _probe.AttachSession(session);
         _audioPanel.AttachSession(session, session?.ReadMediaInfo());
-        _mediaPanel.ShowMediaInfo(session?.ReadMediaInfo());
+        // 第二参数是内核的动态元数据来源读数（null = 内核无此导出，面板会显示"不支持"）。
+        _mediaPanel.ShowMediaInfo(session?.ReadMediaInfo(), ReadDynamicMetadataSource(session));
         // M5: bind magnifier to selected session so it can sample pixels
         Magnifier.AttachSession(session);
 
@@ -2878,17 +3141,36 @@ public partial class MainWindow : Window
         _offsetPanel.SetOffset(slot.Offset100ns, fps);
     }
 
+    /// <summary>指针这一次该算在<b>哪一路</b>头上（放大镜绑定与探针读点共用）。
+    ///
+    /// <para><b>为什么以位置为准、不以 <c>e.Source</c> 为准</b>：拼合下各路 <c>PlayerSurface</c>
+    /// 的 <c>Bounds</c> 恒等于整个对比区且互相重叠（越界部分靠 <c>SetWindowRgn</c> 裁掉），
+    /// 视觉树命中给出的只是"这一叠里最顶的那个"，与光标实际落在哪一格无关 ⇒
+    /// 放大镜会一直绑同一路、探针也一直读同一路。位置这条路走的是
+    /// <see cref="HitSurfaceAt"/>，而那正是判据 <c>AssertMosaicTiling</c> 第④条逐格钉住的那条
+    /// （也是滚轮锚点、平移、指针→源像素共用的那条），口径不再多一套。</para>
+    ///
+    /// <para><c>source</c> 仍然参与：非对比态（单路 / 均匀网格）下各路互不重叠，视觉树命中是准的，
+    /// 而位置此时可能落在对比区之外（面板留白）—— 两者取"位置命中优先、否则退回视觉树"，
+    /// 不会比原来少认一路。</para>
+    ///
+    /// <para>⚠ 这条改动只在"事件真的能到这里"时才有后果。子 HWND 自己吃掉
+    /// <c>WM_MOUSEMOVE</c>（<c>PlayerSurface</c> 的分支 <c>return 0</c> 不透传），所以视频区上方的
+    /// 移动能否到达 Avalonia 顶层<b>没有本机读数</b>；若根本到不了，症状是"放大镜在对比模式下不跟手"
+    /// 而不是"绑错路"，那是先于拼合的另一件事。两种解释的区分读数见
+    /// <c>tests/output/lane-b-bounds-audit.md</c> 的"没能确定 A"。</para></summary>
+    internal PlayerSurface? LaneForPointerOverlay(Visual? source, Point windowPos)
+    {
+        if (HitSurfaceAt(windowPos) is { } byPos) return byPos;
+        for (var v = source; v is not null; v = v.GetVisualParent())
+            if (v is PlayerSurface ps) return ps;
+        return null;
+    }
+
     /// <summary>中央区指针移动（隧道）：放大镜跟随 + 探针读点（选中表面）。</summary>
     private void OnGridPointerMoved(object? sender, PointerEventArgs e)
     {
-        if (e.Source is not Visual src) return;
-        PlayerSurface? surface = null;
-        var v = (Visual?)src;
-        while (v is not null)
-        {
-            if (v is PlayerSurface ps) { surface = ps; break; }
-            v = v.GetVisualParent();
-        }
+        var surface = LaneForPointerOverlay(e.Source as Visual, e.GetPosition(this));
         if (surface is null) return;
         var local = e.GetPosition(surface);
 
@@ -3434,6 +3716,12 @@ public partial class MainWindow : Window
     // ══════════ 自动化 selftest（走真实打开管线；WinForms RunSelfTest 断言移植） ══════════
 
     private static volatile string _step = "启动";
+
+    /// <summary>把"当前自测步骤"贴到组件日志 detail 末尾，让事后的崩溃点能**换算成步骤名**
+    /// （账本 §十九：死亡钉在步序而不是墙钟，可当时只能靠"第几次 `RegionApply`"这种剂量去猜步骤）。
+    /// <para>产品态 <see cref="_step"/> 恒为"启动"，多出来的这一段是无害噪声；不加开关是故意的 ——
+    /// 一旦开关决定"有没有步骤名"，崩溃轮就可能恰好没有那半句。</para></summary>
+    internal static string StepTag() => " step=" + _step;
 
     private static void Log(string msg)
     {

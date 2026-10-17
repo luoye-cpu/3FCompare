@@ -147,7 +147,7 @@ void Pump(int milliseconds) {
 FFF3FPSnapshot ReadSnapshot(FFF3FPHandle player) {
     FFF3FPSnapshot snapshot{};
     snapshot.size = sizeof(snapshot);
-    snapshot.version = 8;
+    snapshot.version = 20;
     const auto result = FFF3FP_GetSnapshot(player, &snapshot);
     if (result != FFFResult::Success) std::printf("  (GetSnapshot failed: %d)\n", static_cast<int>(result));
     return snapshot;
@@ -245,7 +245,7 @@ int main(int argc, char** argv) {
     std::printf("--- image info ---\n");
     FFF3FPImageInfo info{};
     info.size = sizeof(info);
-    info.version = 1;
+    info.version = 20;
     const auto getImageInfo = ResolveGetImageInfo();
     if (getImageInfo == nullptr) {
         std::printf("  GetImageInfo: 该内核未导出此函数（基线内核的预期结果）\n");

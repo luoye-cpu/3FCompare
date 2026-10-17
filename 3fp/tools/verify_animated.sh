@@ -58,3 +58,16 @@ done
 echo "" >> "$OUT"
 echo "通过 $PASS / 失败 $FAIL（共 $((PASS+FAIL))）" >> "$OUT"
 cat "$OUT"
+
+# 判据必须外泄给调用者。此前脚本以 `cat` 的退出码收尾 ⇒ 恒 0，逐条 FAIL 不会让任何
+# 上层门禁变红（"全绿 + 功能坏"）。一条都没跑到同样算红，不许报成"全过"。
+if [ "$((PASS+FAIL))" -eq 0 ]; then
+  echo "结果：判红（一条样张都没跑到）"
+  exit 1
+fi
+if [ "$FAIL" -ne 0 ]; then
+  echo "结果：判红（$FAIL 条失败 / 共 $((PASS+FAIL)) 条）"
+  exit 1
+fi
+echo "结果：判绿（$PASS 条全过）"
+exit 0

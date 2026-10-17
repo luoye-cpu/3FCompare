@@ -163,6 +163,42 @@ int main(int argc, char** argv) {
 
     printf("=== ST 2094-40 injection API ===\n");
 
+    /* Fail-closed fixture guard. Everything below needs the stream to still be
+     * delivering frames: a table installed after the last analysed frame changes
+     * nothing, so a fixture shorter than this assertion schedule reports "the injection
+     * API is broken" when what broke is the test. The six failures recorded in the
+     * ledger came from a 77 KB fixture that decodes exactly one frame. */
+    {
+        FFF3FPSnapshot guard;
+        unsigned long long presentedBefore, presentedAfter;
+        memset(&guard, 0, sizeof(guard));
+        guard.size = sizeof(guard);
+        guard.version = 20;
+        if (FFF3FP_GetSnapshot(g_player, &guard) != FFFResult::Success) {
+            printf("GUARD ABORT: snapshot unreadable, nothing was measured\n");
+            return 8;
+        }
+        presentedBefore = guard.presentedVideoFrames;
+        Pump(600);
+        if (FFF3FP_GetSnapshot(g_player, &guard) != FFFResult::Success) {
+            printf("GUARD ABORT: snapshot unreadable after the wait\n");
+            return 8;
+        }
+        presentedAfter = guard.presentedVideoFrames;
+        if (presentedAfter - presentedBefore < 5 || guard.dynamicMetadataWindows == 0) {
+            printf("GUARD FAIL: the fixture is not driving the mapping\n");
+            printf("  presented %llu -> %llu (need at least 5 new), frameIndex=%lld, "
+                "windows=%u, source=%u\n",
+                presentedBefore, presentedAfter, (long long)guard.frameIndex,
+                guard.dynamicMetadataWindows, ActiveSource());
+            printf("  run this suite against a multi-frame HDR10+ stream instead\n");
+            return 8;
+        }
+        printf("  fixture guard: presented %llu -> %llu, frameIndex=%lld, windows=%u\n",
+            presentedBefore, presentedAfter, (long long)guard.frameIndex,
+            guard.dynamicMetadataWindows);
+    }
+
     /* 1. No injection: the bitstream must be in charge. */
     printf("\n-- baseline (bitstream) --\n");
     Check(ActiveSource() == (unsigned)FFF3FPHdrMetadataSource::Bitstream,
@@ -268,7 +304,7 @@ int main(int argc, char** argv) {
         FFF3FPSnapshot snapshot;
         memset(&snapshot, 0, sizeof(snapshot));
         snapshot.size = sizeof(snapshot);
-        snapshot.version = 8;
+        snapshot.version = 20;
         if (FFF3FP_GetSnapshot(g_player, &snapshot) == FFFResult::Success) {
             printf("  snapshot: windows=%u degrade=%u peak=%u\n",
                 snapshot.dynamicMetadataWindows, snapshot.dynamicMetadataDegrade,
@@ -295,7 +331,7 @@ int main(int argc, char** argv) {
         FFF3FPSnapshot snapshot;
         memset(&snapshot, 0, sizeof(snapshot));
         snapshot.size = sizeof(snapshot);
-        snapshot.version = 8;
+        snapshot.version = 20;
         if (FFF3FP_GetSnapshot(g_player, &snapshot) == FFFResult::Success) {
             printf("  snapshot: windows=%u degrade=%u (4 = ToneMappingAbsent)\n",
                 snapshot.dynamicMetadataWindows, snapshot.dynamicMetadataDegrade);

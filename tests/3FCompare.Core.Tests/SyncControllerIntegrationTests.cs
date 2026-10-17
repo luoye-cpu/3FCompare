@@ -329,7 +329,128 @@ public class SyncControllerIntegrationTests
         finally { sync.Clear(); }
     }
 
+    /// <summary>#42 的"跳过见证"：master 在播、从路落到 Paused 且偏差 500ms。
+    ///
+    /// <para>这条同时钉两件事，缺一不可：
+    /// ① <b>语义没被观测改动带偏</b>——<c>Paused</c> 仍按 docs/41 #21 的决定**不校正**，位置分毫不动；
+    /// ② <b>"该校正却没人管"这件事现在有读数了</b>——判据侧看到的 0.25–0.40s 漂移与校正侧
+    ///   日志里的 90–150ms 差 2–4 倍，之前三条静默跳过路径（gate 忙 / master 非播 / 从路态排除）
+    ///   在日志里长得一模一样，分不出是哪一条。这一条把"态排除"那一条变成可断言的显式读数。</para>
+    /// <para>只读 <c>DriftSkipDiag()</c> 的字符串，不去反射私有计数——它本来就是给人看的判据面。</para>
+    /// </summary>
+    [Fact]
+    public void TickDrift_从路Paused大偏差_不校正但留下跳过见证()
+    {
+        var (sync, _) = CreateSync(3);
+        try
+        {
+            sync.Play();
+            sync.SeekTo(2 * TimeSpan.TicksPerSecond);
+            var drifted = 2 * TimeSpan.TicksPerSecond + 500 * TimeSpan.TicksPerMillisecond;
+            var follower = sync.Slots.ElementAt(1).Session;
+            follower.Seek(drifted);
+            follower.Pause();          // 只把这一路钉成 Paused，master 保持播放
+
+            sync.TickDrift();
+
+            Assert.Equal(drifted, follower.ReadSnapshot()!.Position100ns);   // ① 语义：不校正
+            var diag = sync.DriftSkipDiag();
+            Assert.Contains("Paused大偏差=1", diag);                          // ② 读数：记下了
+        }
+        finally { sync.Clear(); }
+    }
+
+    /// <summary>上一条的**反向臂**：同样 500ms 偏差，但从路是 Playing（会被正常校正）。
+    /// 没有这一条，上一条判据对"无条件把计数置 1"的坏实现也是绿的——那等于没测。
+    /// 两臂合起来才说明计的是"该管而没人管"，不是"只要有偏差就记一笔"。</summary>
+    [Fact]
+    public void TickDrift_同样偏差但Playing_被校正就不算跳过()
+    {
+        var (sync, _) = CreateSync(3);
+        try
+        {
+            sync.Play();
+            sync.SeekTo(2 * TimeSpan.TicksPerSecond);
+            sync.Slots.ElementAt(1).Session.Seek(
+                2 * TimeSpan.TicksPerSecond + 500 * TimeSpan.TicksPerMillisecond);
+
+            sync.TickDrift();
+
+            var m = sync.Slots.ElementAt(0).Session.ReadSnapshot()!.Position100ns;
+            Assert.Equal(m, sync.Slots.ElementAt(1).Session.ReadSnapshot()!.Position100ns);
+            // 反向断言要直白：计数必须还是 0（"被校正过"不该被记成"没人管"）
+            Assert.Contains("Paused大偏差=0", sync.DriftSkipDiag());
+        }
+        finally { sync.Clear(); }
+    }
+
+    /// <summary>#42 的代数核对（正臂）：漂移校正发出 Seek、内核那边真做成了一次 demuxer seek
+    /// ⇒ 下一拍把"代数已变"记进 <see cref="SyncController.DriftSkipDiag"/>，且<b>只记一次</b>。
+    ///
+    /// <para>为什么需要这一对：现场日志里 <c>→ Seek</c> 行每秒都在发、位置却从不回，
+    /// 而 <c>PlayerSession::Seek</c> 只是 <c>Enqueue</c> 并立刻返回 Success ⇒ "调用返回成功"
+    /// 根本不能证明 Seek 做成过。唯一的正面证据是内核只在 <c>av_seek_frame</c> 成功后
+    /// 才做的 <c>++snapshot_.timelineGeneration</c>。</para></summary>
+    [Fact]
+    public void TickDrift_Seek做成了_下一拍核对记为代数已变且只核对一次()
+    {
+        var clock = new ManualClock();
+        var (sync, _) = CreateSync(2, clock);
+        try
+        {
+            sync.Play();
+            sync.SeekTo(2 * TimeSpan.TicksPerSecond);
+            sync.Slots.ElementAt(1).Session.Seek(
+                2 * TimeSpan.TicksPerSecond + 500 * TimeSpan.TicksPerMillisecond);
+
+            sync.TickDrift();                                        // 这一拍发 Seek，还没资格核对
+            Assert.Contains("变=0 未变=0", sync.DriftSkipDiag());
+
+            clock.Advance(TimeSpan.FromMilliseconds(1050));
+            sync.TickDrift();                                        // 下一拍核对
+            Assert.Contains("变=1 未变=0", sync.DriftSkipDiag());
+            Assert.Equal(Pos(sync, 0), Pos(sync, 1));                // 位置也确实回来了
+
+            clock.Advance(TimeSpan.FromMilliseconds(1050));
+            sync.TickDrift();                                        // 第三次不该再重复计同一笔
+            Assert.Contains("变=1 未变=0", sync.DriftSkipDiag());
+        }
+        finally { sync.Clear(); }
+    }
+
+    /// <summary>上一条的**反向臂**：Seek 被接受、但内核里什么都没做成（<c>av_seek_frame</c>
+    /// 失败那条路径的建模，见 <see cref="FakeSession.SeekIsNoOp"/>）⇒ 必须记成"代数未变"。
+    ///
+    /// <para>没有这一臂，正臂对"无条件把 变 加一"的坏实现也是绿的。两臂合起来才说明
+    /// 这个读数计的是"那一次 Seek 在内核里到底做成没有"。</para></summary>
+    [Fact]
+    public void TickDrift_Seek没做成_下一拍核对记为代数未变()
+    {
+        var clock = new ManualClock();
+        var (sync, _) = CreateSync(2, clock);
+        try
+        {
+            sync.Play();
+            sync.SeekTo(2 * TimeSpan.TicksPerSecond);
+            var follower = (FakeSession)sync.Slots.ElementAt(1).Session;
+            var drifted = 2 * TimeSpan.TicksPerSecond + 500 * TimeSpan.TicksPerMillisecond;
+            follower.Position100ns = drifted;    // 直接摆位：不经过 Seek，免得把代数先动了
+            follower.SeekIsNoOp = true;
+            var gen0 = follower.TimelineGeneration;
+
+            sync.TickDrift();
+            clock.Advance(TimeSpan.FromMilliseconds(1050));
+            sync.TickDrift();
+
+            Assert.Contains("变=0 未变=1", sync.DriftSkipDiag());
+            Assert.Equal(gen0, follower.TimelineGeneration);         // 内核什么都没做
+            Assert.Equal(drifted, follower.Position100ns);           // 位置也没回 ⇒ 判据下一轮必然抓红
+        }
+        finally { sync.Clear(); }
+    }
+
     // ══════════ 漂移校正（docs/15 §3.3 / 交接 §2.4）补充覆盖 ══════════
+
     // 真实多路长片调参被上游崩溃（issue #7）阻塞，这里用 SimulatedEngine 3 路
     // 先把**可确定性验证**的语义面钉死：节流、阈值下界、只动 follower、尊重偏移、
     // 以及"1s 冷却 + 半帧阈值"这组参数能否每次都收敛。
@@ -462,6 +583,334 @@ public class SyncControllerIntegrationTests
             sync.LoopEnd100ns = TimeSpan.FromSeconds(3).Ticks;
             Assert.True(sync.LoopEnabled);
             Assert.Equal(TimeSpan.FromSeconds(3).Ticks, sync.LoopEnd100ns);
+        }
+        finally { sync.Clear(); }
+    }
+    // ══════════ #25：再启用后掉播的"可判别性"（诊断只报不补发）══════════
+    //
+    // 这一组测试钉的是 <c>docs/50</c> §二十二 那两例间歇红（2/25 = 8%）周围<b>已经确认</b>的行为，
+    // 不是未经确认的修复方案：机制还没分清"根本没请求起播"与"请求了但在队列里丢了"，
+    // 所以现在只允许加计数与告警，<b>不允许</b>自动补发 —— multitest 的判别实验正是靠
+    // "被有意停着的那一路不会被自动叫醒"这条语义活着，而 Core 里还没有"有意停"这个状态。
+
+    [Fact]
+    public void Reactivation_WhileGroupPaused_DoesNotRequestPlay()
+    {
+        var (sync, _) = CreateSync(3);
+        try
+        {
+            var all = new System.Collections.Generic.HashSet<int> { 0, 1, 2 };
+            sync.SetActiveRoutes(all);
+            var s1 = (FakeSession)sync.Slots[1].Session;
+            var playsBefore = s1.PlayCount;
+
+            sync.Pause();                                     // 整组不在播
+            sync.SetActiveRoutes(new System.Collections.Generic.HashSet<int> { 0 });
+            sync.SetActiveRoutes(all);                        // 再启用：此刻 WantPlaying=false
+
+            Assert.Equal(playsBefore, s1.PlayCount);          // 激活分支不请求起播
+            Assert.Equal(0, sync.Slots[1].PlayRequests);      // 连"请求过"的计数都不该有
+        }
+        finally { sync.Clear(); }
+    }
+
+    [Fact]
+    public void GroupPlay_RequestsPlayOnEveryActiveRoute_AndCountsIt()
+    {
+        var (sync, _) = CreateSync(3);
+        try
+        {
+            sync.SetActiveRoutes(new System.Collections.Generic.HashSet<int> { 0, 1, 2 });
+            sync.Play();
+
+            for (var i = 0; i < 3; i++)
+            {
+                Assert.True(sync.Slots[i].PlayRequests >= 1, $"第 {i} 路应被记到至少一次起播请求");
+                Assert.Equal(PlayerState.Playing, ((FakeSession)sync.Slots[i].Session).State);
+            }
+        }
+        finally { sync.Clear(); }
+    }
+
+    [Fact]
+    public void DetectLostPlay_NeedsTwoConsecutiveStalledTicks_AndNeverWakesTheRoute()
+    {
+        var (sync, _) = CreateSync(3);
+        try
+        {
+            sync.SetActiveRoutes(new System.Collections.Generic.HashSet<int> { 0, 1, 2 });
+            sync.Play();
+            var s1 = (FakeSession)sync.Slots[1].Session;
+            var playsAtStart = s1.PlayCount;
+
+            // 人为造出间歇红的形状：请求过了，但会话不在播放态（"排队瞬态"由"要连续两拍"挡掉）
+            s1.State = PlayerState.Paused;
+
+            sync.RetryPendingPlays();
+            Assert.Equal(1, sync.Slots[1].NotPlayingStreak);      // 单拍不报：那是正常的排队窗口
+
+            sync.RetryPendingPlays();
+            Assert.Equal(2, sync.Slots[1].NotPlayingStreak);      // 连续第二拍才认定掉了
+
+            // 只诊断不补发：检测器一条 Play 都不许替用户发出去
+            Assert.Equal(playsAtStart, s1.PlayCount);
+            Assert.Equal(PlayerState.Paused, s1.State);
+        }
+        finally { sync.Clear(); }
+    }
+
+    [Fact]
+    public void DetectLostPlay_SilentWhilePlaying_AndSilentForNeverRequestedRoute()
+    {
+        var (sync, _) = CreateSync(3);
+        try
+        {
+            sync.SetActiveRoutes(new System.Collections.Generic.HashSet<int> { 0, 1, 2 });
+            sync.Play();
+            for (var t = 0; t < 4; t++) sync.RetryPendingPlays();
+            Assert.Equal(0, sync.Slots[1].NotPlayingStreak);      // 健康态不该被报
+
+            // 另一头：从没请求过起播的路（上面 T1 的形状）也不该被同一条告警盖住 ——
+            // 否则"没请求"与"请求了又丢了"这两种成因就会被合并成一个假信号。
+            var sync2 = CreateSync(3).sync;      // 外层已占用 _ 这个弃元，嵌套作用域里不能再隐式推断
+            try
+            {
+                sync2.SetActiveRoutes(new System.Collections.Generic.HashSet<int> { 0, 1, 2 });
+                sync2.Pause();
+                ((FakeSession)sync2.Slots[1].Session).State = PlayerState.Paused;
+                for (var t = 0; t < 4; t++) sync2.RetryPendingPlays();
+                Assert.Equal(0, sync2.Slots[1].PlayRequests);
+                Assert.Equal(0, sync2.Slots[1].NotPlayingStreak);
+            }
+            finally { sync2.Clear(); }
+        }
+        finally { sync.Clear(); }
+    }
+
+    /// <summary>组播放扇出被内核状态守卫拒掉时，必须挂进既有的补发账（本轮实测驱动的最小修复）。
+    ///
+    /// <para>复现的是 2026-10-02 03:52:59.442 的形态：`Pause()` 与 `Play()` 在同一毫秒里背靠背扇出，
+    /// 处于 <c>Opening</c> 的那一路两边都被拒 ⇒ 修复前那次"要播"既不计数也不挂起，
+    /// 而先入队的 Pause 照常执行 ⇒ 该路永久停在 Paused，整组却在播。
+    /// 用 <c>GuardThrows</c> 的假会话把内核那条守卫搬进测试（假引擎旧默认是"不允许就静默 no-op"，
+    /// 那个形态根本表达不出这类丢失）。</para></summary>
+    [Fact]
+    public void GroupPlay_GuardRejection_IsHeldPendingAndRecoveredByRetry()
+    {
+        var (sync, _) = CreateSync(3);
+        try
+        {
+            sync.SetActiveRoutes(new System.Collections.Generic.HashSet<int> { 0, 1, 2 });
+            var r1 = (FakeSession)sync.Slots[1].Session;
+            var r2 = (FakeSession)sync.Slots[2].Session;
+            r1.GuardThrows = true; r2.GuardThrows = true;
+            r1.State = PlayerState.Paused;      // 守卫会接受 ⇒ 正对照
+            r2.State = PlayerState.Opening;     // 守卫会拒 ⇒ 被测那一路
+
+            sync.Play();
+
+            Assert.Equal(PlayerState.Playing, r1.State);
+            Assert.Equal(1, sync.Slots[1].PlayRequests);
+            // 被拒的那一路：请求**没有**被记成已发出（计数为 0），但必须挂起等补发
+            Assert.Equal(0, sync.Slots[2].PlayRequests);
+            Assert.True(sync.Slots[2].PlayPending, "组播放被守卫拒掉后必须挂 PlayPending，否则这一下要播永久丢失");
+            // 抛错仍要进既有的运行错误上报通道（这一条同时钉住"catch 里别把上报改掉/丢掉"）
+            Assert.Contains("播放第 2 路", sync.LastRuntimeError);
+
+            // 过渡态落定成 Paused（内核执行完那条 Pause）⇒ 下一拍补发应当真的叫醒
+            r2.State = PlayerState.Paused;
+            var woke = sync.RetryPendingPlays();
+
+            Assert.Equal(1, woke);
+            Assert.Equal(PlayerState.Playing, r2.State);
+            Assert.False(sync.Slots[2].PlayPending);
+        }
+        finally { sync.Clear(); }
+    }
+
+    /// <summary>修复不得越界：整组暂停时，挂着的补发意图不能把这一路叫醒（multitest 判别实验依赖）。</summary>
+    [Fact]
+    public void GroupPlay_GuardRejection_NeverWakesWhileGroupPaused()
+    {
+        var (sync, _) = CreateSync(3);
+        try
+        {
+            sync.SetActiveRoutes(new System.Collections.Generic.HashSet<int> { 0, 1, 2 });
+            var r2 = (FakeSession)sync.Slots[2].Session;
+            r2.GuardThrows = true;
+            r2.State = PlayerState.Opening;
+
+            sync.Play();                        // 触发一次被拒 ⇒ PlayPending=true
+            Assert.True(sync.Slots[2].PlayPending);
+
+            sync.Pause();                       // 整组改主意：不再要播
+            r2.State = PlayerState.Paused;      // 就算过渡态落定成"可播"，也不许被补发叫醒
+            var woke = sync.RetryPendingPlays();
+
+            Assert.Equal(0, woke);
+            Assert.Equal(PlayerState.Paused, r2.State);
+            Assert.False(sync.Slots[2].PlayPending);   // 意图不作数了 ⇒ 挂账要一并清掉，不许留到下次误补
+        }
+        finally { sync.Clear(); }
+    }
+
+    /// <summary>停用那一路的 `Pause` 被内核守卫拒掉时，`SetActiveRoutes` 的返回值仍必须计入这一次。
+    ///
+    /// <para>实测当日 616 次 <c>EngineException: Pause 失败: InvalidState</c> 全走这一支，
+    /// 而抛错会跳过 try 末尾的 <c>changed++</c> ⇒ 返回值把"翻过来的标志"报成 0；
+    /// 调用方（<c>MainWindow.Playback.cs:145</c>）拿 <c>changed == 0</c> 当"什么都没改"直接 return
+    /// ⇒ 状态栏与覆盖层这一拍根本不刷。牙：修复前这里拿到的是 <c>0</c>。</para></summary>
+    [Fact]
+    public void SetActiveRoutes_CountsTheFlipEvenWhenDeactivationPauseIsRejected()
+    {
+        var (sync, _) = CreateSync(3);
+        try
+        {
+            sync.Play();
+            var r2 = (FakeSession)sync.Slots[2].Session;
+            r2.GuardThrows = true;
+            r2.State = PlayerState.Opening;      // 过渡态：Pause 的守卫只放行 Playing ⇒ 必拒
+
+            var changed = sync.SetActiveRoutes(new System.Collections.Generic.HashSet<int> { 0, 1 });
+
+            Assert.Equal(1, changed);                    // 停用第 2 路：标志翻了就得计入，与 Pause 成没成无关
+            Assert.False(sync.IsRouteActive(2));         // 标志确实落地了
+            Assert.Equal(1, sync.InactiveRoutes().Count);
+        }
+        finally { sync.Clear(); }
+    }
+
+    // ── RA-01：挂账对**所有下标**生效，补发却从 i=1 起 ⇒ route 0（master）零覆盖 ──────────
+    // 上面那组同形用例（GroupPlay_GuardRejection_*）用的都是 Slots[2]，而
+    //   ① `ForEachSlot` 的守卫拒绝挂账写在循环体内，循环从 i=0 起 ⇒ master 也会被挂；
+    //   ② `RetryPendingPlays` 的循环从 **i=1** 起 ⇒ 下标 0 的 PlayPending 既不补发也不清零。
+    // 于是"master 这一路的要播永久丢失"这件事，测试面上一条都看不见。下面三条只打在 route 0 上。
+
+    /// <summary>master 被状态守卫拒掉的组起播，必须由 <see cref="SyncController.RetryPendingPlays"/> 补发。
+    ///
+    /// <para><b>判据为什么写成"补发到达会话"</b>：<c>PlayCount</c> 与 <c>State</c> 是会话侧的真读数
+    /// ——把 <c>PlayPending</c> 抹掉（哪怕顺带 <c>woke</c> 也报对）也能骗过"标志已清"这种判据，
+    /// 但那一条永远不会让 master 播起来。牙：修复前 <c>RetryPendingPlays()</c> 返回 0、
+    /// <c>PlayCount</c> 停在 1、master 停在 Paused。</para></summary>
+    [Fact]
+    public void GroupPlay_MasterGuardRejection_IsRetriedByPendingPlays()
+    {
+        var (sync, _) = CreateSync(3);
+        try
+        {
+            sync.SetActiveRoutes(new System.Collections.Generic.HashSet<int> { 0, 1, 2 });
+            var r0 = (FakeSession)sync.Slots[0].Session;    // master（被测下标）
+            var r1 = (FakeSession)sync.Slots[1].Session;    // 正对照：i≥1 走的是既有通路
+            r0.GuardThrows = true; r1.GuardThrows = true;
+            r0.State = PlayerState.Opening;     // 过渡态 ⇒ Play 的守卫必拒
+            r1.State = PlayerState.Paused;      // 守卫接受 ⇒ 这一路照常起播
+
+            sync.Play();
+
+            // 前置：对照组必须已经补得上，否则"红"可能来自我的夹具而不是 route 0。
+            Assert.Equal(PlayerState.Playing, r1.State);
+            Assert.Equal(1, sync.Slots[1].PlayRequests);
+            // master：这一下请求既没算"已发出"，也确实还挂在账上（扇出对 i=0 同样生效）
+            Assert.Equal(1, r0.PlayCount);                  // 只试过这一次，且被拒
+            Assert.Equal(PlayerState.Opening, r0.State);
+            Assert.Equal(0, sync.Slots[0].PlayRequests);
+            Assert.True(sync.Slots[0].PlayPending,
+                "组播放扇出的挂账对所有下标生效，master 也在这条账上");
+
+            // 过渡态落定成 Paused（内核那条 Pause 执行完）⇒ 这一拍该把 master 叫醒
+            r0.State = PlayerState.Paused;
+            var woke = sync.RetryPendingPlays();
+
+            Assert.Equal(1, woke);                            // 补发计数含下标 0
+            Assert.Equal(2, r0.PlayCount);                    // 补发**到达了会话**，不是只清标志
+            Assert.Equal(PlayerState.Playing, r0.State);
+            Assert.False(sync.Slots[0].PlayPending);
+        }
+        finally { sync.Clear(); }
+    }
+
+    /// <summary>补发覆盖 route 0 之后，<c>TickDriftCore</c> 的"master 非播放 ⇒ 整拍早退"才不再发生：
+    /// 从路那 300ms 的偏差被真的 Seek 回来。</summary>
+    [Fact]
+    public void GroupPlay_MasterRecoveredByRetry_ResumesWholeGroupCorrection()
+    {
+        var clock = new ManualClock();
+        var (sync, _) = CreateSync(2, clock);
+        try
+        {
+            var r0 = (FakeSession)sync.Slots[0].Session;
+            var r1 = (FakeSession)sync.Slots[1].Session;
+            r0.GuardThrows = true;
+            r0.State = PlayerState.Opening;
+            sync.Play();                                    // master 被拒，从路起播
+            Assert.True(sync.Slots[0].PlayPending);
+
+            r0.State = PlayerState.Paused;                  // 过渡态落定
+            Assert.Equal(1, sync.RetryPendingPlays());
+            Assert.Equal(PlayerState.Playing, r0.State);
+
+            r1.Position100ns = 300 * TimeSpan.TicksPerMillisecond;   // 从路漂 300ms（≫ 半帧 ≈20.8ms）
+            clock.Advance(TimeSpan.FromMilliseconds(1050));
+            sync.TickDrift();
+
+            Assert.Contains("master非播放=0", sync.DriftSkipDiag());
+            Assert.Equal(1, r1.SeekCount);                  // 校正这一拍真的发了 Seek
+            Assert.Equal(0L, r1.Position100ns);             // 拉回 expected = masterPos + offset = 0
+        }
+        finally { sync.Clear(); }
+    }
+
+    /// <summary>修复不得越界（route 0 版）：整组改主意暂停时，挂在 master 上的补发意图
+    /// 既不能把这一路叫醒，也必须**连同标志一起作废** —— 改前这里 <c>PlayPending</c> 永远滞留在 true，
+    /// 于是下一次组播放之外的任何读账动作都会读到一条早已不作数的挂账。</summary>
+    [Fact]
+    public void GroupPlay_MasterGuardRejection_NeverWakesWhileGroupPaused()
+    {
+        var (sync, _) = CreateSync(3);
+        try
+        {
+            sync.SetActiveRoutes(new System.Collections.Generic.HashSet<int> { 0, 1, 2 });
+            var r0 = (FakeSession)sync.Slots[0].Session;
+            r0.GuardThrows = true;
+            r0.State = PlayerState.Opening;
+            sync.Play();
+            Assert.True(sync.Slots[0].PlayPending);
+
+            sync.Pause();                       // 整组改主意：不再要播
+            r0.State = PlayerState.Paused;      // 就算过渡态落定成"可播"，也不许把 master 自动叫醒
+            var woke = sync.RetryPendingPlays();
+
+            Assert.Equal(0, woke);
+            Assert.Equal(PlayerState.Paused, r0.State);
+            Assert.False(sync.Slots[0].PlayPending);   // 意图不作数了 ⇒ 下标 0 的挂账也要一并清掉
+        }
+        finally { sync.Clear(); }
+    }
+
+    /// <summary>反证：只把 route 0 的 <c>PlayPending</c> 抹掉而<b>不补发</b>（= "另一种修法"的形状），
+    /// master 会永远停在非播放态，而早退是<b>整拍</b>的 ⇒ 全组（含从路）失去校正。
+    /// 这一条改前改后都该是绿的：它钉住的是"为什么清标志不算修好"。</summary>
+    [Fact]
+    public void MasterFlagClearedWithoutReissue_LeavesWholeGroupUncorrected()
+    {
+        var clock = new ManualClock();
+        var (sync, _) = CreateSync(2, clock);
+        try
+        {
+            var r0 = (FakeSession)sync.Slots[0].Session;
+            var r1 = (FakeSession)sync.Slots[1].Session;
+            r0.GuardThrows = true;
+            r0.State = PlayerState.Opening;
+            sync.Play();
+
+            sync.Slots[0].PlayPending = false;              // ← 只清标志，不重发
+            r1.Position100ns = 300 * TimeSpan.TicksPerMillisecond;
+            clock.Advance(TimeSpan.FromMilliseconds(1050));
+            sync.TickDrift();
+
+            Assert.Equal(PlayerState.Opening, r0.State);    // master 根本没起来
+            Assert.Contains("master非播放=1", sync.DriftSkipDiag());
+            Assert.Equal(0, r1.SeekCount);                  // 那 300ms 到这一拍结束仍无人管
         }
         finally { sync.Clear(); }
     }

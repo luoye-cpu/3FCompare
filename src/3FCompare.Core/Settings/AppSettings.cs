@@ -204,6 +204,26 @@ public sealed class AppSettings
     // ⇒ 它实际成了 ScrubPreviewEnabled 的文档，是错的。已删除；若真要实现 pacing，
     // 需先在内核导出该 API 再回来加属性（记忆条目：SetPacingConfig 不存在）。
 
+    /// <summary>RTX 视频超分辨率（内核扩展 <c>FFF3FP_SetVideoSuperResolution</c>）：
+    /// true = 新开的会话向驱动登记 VSR 请求（Auto 档），false = 从不请求（默认，与内核侧
+    /// <c>FFF3FPVideoSuperResolution::Off</c> 同口径——出货内核目前还没有该导出，默认必须
+    /// 是"关"，否则每次建会话都会撞一次缺导出）。
+    ///
+    /// <para>⚠ <b>本字段不能声称"画面被增强"</b>：内核逐帧判定七道门（NVIDIA 适配器、
+    /// 源格式、是否真在放大、源高度 360..1440、失败闩…），而状态里的 <c>active</c> 位
+    /// 只代表"驱动没有拒绝这次请求"——实测 <c>VideoProcessorGetStreamExtension</c> 对伪造的
+    /// GUID 也返回 S_OK，故受理本身不构成任何画质证据。画质档位（1-4/Auto）归 NVIDIA App /
+    /// NVIDIA 控制面板所有，本 API 既设不了也读不到。</para>
+    ///
+    /// <para>盘上的 <c>FFF.Native.dll</c> 没有该入口时（旧内核） setter 返回 false，
+    /// 只记一条告警级日志，不抛异常、不影响会话创建。</para>
+    ///
+    /// <para>与 <see cref="VrrTearingPresent"/> 同为会话级：改动只对<b>新打开的会话</b>生效，
+    /// 已开会话不热切换。同 <see cref="TimelineCollapsed"/> 一套约定：bool 无越界值，
+    /// 故<b>不必</b>进 <see cref="Normalize"/>，也<b>不必</b>递增 <see cref="CurrentVersion"/>
+    /// （老文件缺该字段时反序列化为 false = 既有行为）。</para></summary>
+    public bool RtxVideoSuperResolution { get; set; }
+
     /// <summary>时间轴拖动缩略图预览（默认开启）：拖动时每 150ms 抓帧显示弹窗。
     /// 低配设备可关闭，关闭后仅更新时间码和播放头，不触发 BitBlt 屏幕抓取。</summary>
     public bool ScrubPreviewEnabled { get; set; } = true;

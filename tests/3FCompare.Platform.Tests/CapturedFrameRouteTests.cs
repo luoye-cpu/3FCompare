@@ -92,4 +92,28 @@ public class CapturedFrameRouteTests
         Assert.Equal(CaptureRoute.Gdi, gdi.Route);
         Assert.NotEqual(wgc.Route, gdi.Route);
     }
+
+    /// <summary>兜底线对"根本不是窗口"的句柄必须交回 null，且**交不出尺寸错位的图**。
+    ///
+    /// <para>为什么单独钉这一条：验收档的 `拼合铺块` 里出现过一次"第 0 路 GDI 抓回 null"
+    /// （02:58:55.519），而 null 在这条线上有 6 条以上互斥成因，当时一条留痕都没有 ⇒ 事后无从归因。
+    /// 现在每条早退支路都写 `why=`，但"写了没跑过的自检"本身就是本仓记过的假绿源——
+    /// 这一条测试把其中两条支路**实际走一遍**（`hwnd=0` 与"矩形读不到"），
+    /// 证明埋点所在的代码路径是活的。</para>
+    ///
+    /// <para>夹具前提要断言：句柄 1 在本机不是窗口。不成立时直接判红，
+    /// 不许让它退化成"抓到了一张桌面图"这种看着通过的样子。</para>
+    /// </summary>
+    [Fact]
+    public void 兜底抓屏对无效句柄交回null且不交出错位图()
+    {
+        Assert.False(IsWindow(new nint(1)));        // 夹具前提
+        using var gdi = new GdiFrameCapture();
+
+        Assert.Null(gdi.Capture(nint.Zero));         // 支路 why=hwnd=0
+        Assert.Null(gdi.Capture(new nint(1)));       // 支路 why=顶层矩形读不到
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", ExactSpelling = true)]
+    private static extern bool IsWindow(nint hWnd);
 }

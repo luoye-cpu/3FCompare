@@ -584,6 +584,60 @@ public sealed class PlaybackCoordinator
         }
     }
 
+    /// <summary>为一个<b>镜像槽</b>创建会话：同一个文件、第二个输出窗口、与该路相同的设置。
+    ///
+    /// <para><b>为什么要专门一个入口</b>：镜像的会话必须与实际播放那一路用<b>相同</b>的设置
+    /// （硬件解码、色彩模式、scRGB 链、呈现节奏）—— 否则两处呈现的<b>颜色/亮度会不一致</b>，
+    /// 而"同一路"出现两处正是为了做细节对照，颜色不同这个功能就没有意义了。</para>
+    ///
+    /// <para><b>与 <see cref="OpenFiles"/> 的分工</b>：那条路是"打开新素材"的完整编排
+    /// （配额、批次、失败归还、自动播放、快照落盘）；镜像不走那套 —— 它不占"新路"配额，
+    /// 由 <c>MainWindow.SyncWipeMirrors</c> 在需要时按需创建/释放。
+    /// 故这里只做"建会话"这一件事，打开与状态由调用方处理。</para>
+    ///
+    /// <para><b>失败返回 null</b>（不抛）：镜像只是"多一处呈现"，创建失败应降级为
+    /// "那一处带留空 + 状态栏说明"，而不是把整个拉动态带崩。</para>
+    ///
+    /// <para><b>⚠ 必须传真实 HWND</b>（<paramref name="hwnd"/>）：内核的 <c>FFF3FP_Create</c>
+    /// 会校验输出窗口，传 <c>0</c> 直接返回 <c>InvalidArgument</c>
+    /// （实测日志：`镜像会话创建/打开失败：EngineException: FFF3FP_Create 失败: InvalidArgument`，
+    /// 表现为镜像永远建不出来 ⇒ 那一处带恒空白）。
+    /// 本方法第一版就是传 0、指望"稍后 AttachSession 再绑窗口"—— 内核不接受这个次序。</para></summary>
+    public IPlayerSession? CreateMirrorSession(string path, nint hwnd)
+    {
+        try
+        {
+            if (_closed) return null;
+            if (_realMode && hwnd == nint.Zero) return null;   // 真实模式无窗口必被内核拒，早退更省事
+
+            var session = _engine.CreateSession(new EngineSessionOptions
+            {
+                OutputWindow = hwnd,
+                HardwareDecode = _settings.HardwareDecode,
+                PreferredAdapterIndex = ResolveAdapterIndex(),
+                // Auto 按**镜像自己的窗口**解析显示器能力：镜像在另一条带上，
+                // 那条带所属窗口的 HDR 能力才是它该用的（与源路不一定同显示器）。
+                ColorMode = _3FCompare.Core.Settings.ColorModeHelper.Resolve(
+                    _settings.ColorMode,
+                    hwnd != 0 ? _3FCompare.Core.Display.DisplayCapabilities.ReadForWindow(hwnd) : null),
+                SdrScRgbMode = _settings.SdrScRgbMode,
+                TearingPresent = _settings.VrrTearingPresent,
+                // RTX VSR：会话级，改动后新开的会话生效（与 TearingPresent 同一约定）。
+                RtxVideoSuperResolution = _settings.RtxVideoSuperResolution,
+            });
+            // IPlayerSession 的打开是异步的（OpenAsync）：镜像不参与"批次结清"，
+            // 故这里同步等它完成 —— 打开失败要立刻知道（返回 null 让调用方降级），
+            // 而不是留一个永远没画面的会话占着解码器与交换链（那还会推高 N）。
+            session.OpenAsync(path).GetAwaiter().GetResult();
+            return session;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn("Mirror", $"镜像会话创建/打开失败（{path}）：{ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
     private async Task OpenFilesCore(OpenBatch batch, IReadOnlyList<string> files, bool autoPlay, Action? onAllOpened)
     {
         if (_closed) return;
@@ -676,6 +730,8 @@ public sealed class PlaybackCoordinator
                     // SDR 源是否经 scRGB 链呈现（0=从不 / 1=自动）。会话级：改动后新会话生效。
                     SdrScRgbMode = _settings.SdrScRgbMode,
                     TearingPresent = _settings.VrrTearingPresent,
+                    // RTX VSR：与镜像会话同值，否则同一路素材的两处呈现会有不同的缩放链。
+                    RtxVideoSuperResolution = _settings.RtxVideoSuperResolution,
                 });
                 surface.AttachSession(session);
                 _sync.AddSlot(session, path);
@@ -857,6 +913,8 @@ public sealed class PlaybackCoordinator
         switch (evt.Type)
         {
             case EngineEventType.Error:
+                // 先留痕，再判是否升级为"这一路失败"。
+                RecordEngineError(slot, evt.DetailJson);
                 // 用 System.Text.Json 解析 state 字段，避免字符串包含匹配的脆弱性
                 var isFailure = false;
                 const int FailureState = (int)PlayerState.Failed; // 内核 Failed=6
@@ -897,6 +955,16 @@ public sealed class PlaybackCoordinator
                 // 那些路径上没有任何托管调用点，所以 FC_TRACE_PAUSE 整轮看不到"谁按的停"（账本 §11.8）。
                 // 这里**只做留痕，不参与判决**：同步逻辑仍只读快照的 State，行为一字未改。
                 RecordStateTransition(slot, evt.DetailJson);
+                break;
+            case EngineEventType.OperationCompleted:
+                // #42 的第二条取证：内核 `PlayerSession::Seek` 只是 `Enqueue`，返回 Success 不代表
+                // 那次 seek 真在工作线程里做过；而这枚事件是 **DoSeek 跑完之后**由工作线程发的，
+                // 带着内核自己的 `snapshot_.position100ns`。
+                // 于是"托管层发了 Seek"与"内核认为自己在哪儿"第一次能对上账：
+                //   · 整轮一条 `operation":"seek"` 都没有 ⇒ 队列里的 DoSeek 从没执行（校正完全空转）；
+                //   · 有、且 position100ns == 目标，而下一拍托管读到的位置不是它 ⇒ 落地后被别的东西搬走。
+                // 同样只做留痕，不参与判决。
+                RecordOperationCompleted(slot, evt.DetailJson);
                 break;
             case EngineEventType.PlaybackEnded:
                 StateChanged?.Invoke(this, EventArgs.Empty);
@@ -964,6 +1032,64 @@ public sealed class PlaybackCoordinator
             if (ReferenceEquals(slots[i], slot)) { lane = i; break; }
         AppLog.Debug("Coordinator",
             $"[路{lane}] {Path.GetFileName(slot.Path)} 状态→{stateName}（内核操作={operation ?? "?"}）");
+    }
+
+    /// <summary>内核 <c>FFF3FPEvent::Error</c> 的无条件留痕（#42 缺的那条读数）。
+    ///
+    /// <para>下面的失败升级判定只看 JSON 里的 <c>state==Failed</c> 或 <c>reason</c> 含 "fail"，
+    /// 而内核 <c>PlayerSession::DoSeek</c> 在 <c>av_seek_frame</c> 失败时发的是
+    /// <c>{"result":…,"message":"FFmpeg could not seek…; playback remained active.","operation":"seek"}</c>
+    /// ——<b>两个字段都没有</b>，所以它既不升级失败、也<b>一条日志都不留</b>。
+    /// 漂移校正因此可以是"调用返回 Success、位置却永远不回"的空转，而现场查不到原因
+    /// （同一族还有 #30 那条被状态守卫拒掉的 Pause）。</para>
+    ///
+    /// <para>本方法只写日志，不改 <c>slot.Failed</c>、不改任何判定。</para></summary>
+    private void RecordEngineError(SyncController.SyncSlot slot, string detailJson)
+    {
+        if (string.IsNullOrEmpty(detailJson)) return;
+        // 截断：内核消息里可能整段嵌 JSON，日志行不能无上限地长。
+        var text = detailJson.Length > 400 ? detailJson[..400] + "…" : detailJson;
+        AppLog.Debug("Coordinator", $"[路{LaneIndex(slot)}] 内核错误事件 {text}");
+    }
+
+    /// <summary>内核 <c>FFF3FPEvent::OperationCompleted</c> 的留痕（#42 的另一半取证）。
+    /// 载荷形如 <c>{"operation":"seek","position100ns":12345678}</c>，由工作线程在
+    /// <c>DoSeek</c> 之后发出 —— 这是"托管层那次异步 Seek 到底做成了没有"的直接证据。
+    /// 只写日志，不改任何状态。</summary>
+    private void RecordOperationCompleted(SyncController.SyncSlot slot, string detailJson)
+    {
+        if (string.IsNullOrEmpty(detailJson)) return;
+        var operation = "?";
+        var position = "?";
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(detailJson);
+            if (doc.RootElement.TryGetProperty("operation", out var o) &&
+                o.ValueKind == System.Text.Json.JsonValueKind.String)
+                operation = o.GetString() ?? "?";
+            if (doc.RootElement.TryGetProperty("position100ns", out var p) &&
+                p.ValueKind == System.Text.Json.JsonValueKind.Number)
+                position = p.GetInt64().ToString();
+        }
+        catch (Exception ex)
+        {
+            // 解析不了也要留原文（与 RecordStateTransition 同规矩）：这条是异步 Seek 的唯一直接证据。
+            AppLog.Debug("Coordinator",
+                $"[路{LaneIndex(slot)}] 操作完成(原文) {detailJson} 解析失败 {ex.GetType().Name}");
+            return;
+        }
+        AppLog.Debug("Coordinator",
+            $"[路{LaneIndex(slot)}] 内核操作完成 op={operation} position100ns={position}");
+    }
+
+    /// <summary>这一路在 Slots 里的下标（找不到记 -1）。留痕行必须带路号：
+    /// 对比模式常把<b>同一份素材</b>开成多路，只打文件名就分不清是哪一格。</summary>
+    private int LaneIndex(SyncController.SyncSlot slot)
+    {
+        var slots = _sync.Slots;
+        for (var i = 0; i < slots.Count; i++)
+            if (ReferenceEquals(slots[i], slot)) return i;
+        return -1;
     }
 
     public static bool IsReadyState(PlayerState state)

@@ -78,7 +78,7 @@ int wmain(const int argc, wchar_t** argv) {
 
     FFF3FPSnapshot snapshot{};
     snapshot.size = sizeof(snapshot);
-    snapshot.version = 8;
+    snapshot.version = 20;
     FFF3FP_GetSnapshot(player, &snapshot);
     printf("源 %ux%u  limitToNative=%d\n", snapshot.videoWidth, snapshot.videoHeight, limitNative);
 
@@ -93,7 +93,7 @@ int wmain(const int argc, wchar_t** argv) {
         for (std::uint32_t xx = 0; xx < snapshot.videoWidth; xx += 4) {
             FFF3FPVideoPixelProbe point{};
             point.size = sizeof(point);
-            point.version = 1;
+            point.version = 20;
             point.x = xx;
             point.y = yy;
             if (FFF3FP_ReadVideoPixel(player, &point) != FFFResult::Success) continue;

@@ -9,27 +9,24 @@ namespace _3FCompare.Platform;
 /// （即 <see cref="WindowRegionClipper.ApplyRect"/> 的入参）。
 ///
 /// <para><b>需求与内核限制</b>：目标是"各路同步放大 → 裁剪出对应区域 → 再做分割对比"。
-/// 内核 <c>SetViewTransform</c> 只能放大、不能任意平移（<c>VideoRenderer.cpp:4509-4514</c> 的
-/// <c>max(0,·)</c> 钳制），于是改用 Win32 窗口层决定每路露出哪一块。</para>
+/// 内核把画面 fit 到<b>窗口</b>（<c>PrepareScaledVideo</c> 的目标尺寸就是窗口尺寸），它改的是
+/// 每路自己的视口，表达不了"同一幅画面被切成几块、各块互补拼回整幅"这件事 —— 那要求
+/// 每路都把<b>整幅</b>渲染进一个<b>整幅大小</b>的窗口，再各自露出一块。于是改用 Win32 窗口层
+/// （<c>SetWindowRgn</c>）决定每路露出哪一块。放大要超出整幅时同理：只能把窗口排得更大了
+/// （内核渲染不了比窗口更大的画面），见 <see cref="Magnify"/>。</para>
 ///
-/// <para><b>换算（唯一正确的形式）</b>：内核把放大后的画面锚在<b>窗口左上角</b>，
-/// 所以"看到源画面的哪一块"完全由<b>窗口相对格的位置</b>决定：
-/// 窗口相对格左上移 <c>d</c>、同时向右下放大 <c>d</c>（保证仍盖住格），
-/// 则格内露出的是源画面 <c>(d … d+格)</c> 区域 —— 这正是内核做不到的平移。
-/// 换算的最后一步就是：<c>区域 = 格 - 窗口</c>（窗口相对坐标）。
-/// 放大/平移参数<b>不直接进入本类</b>，它们通过"子窗口矩形"进入：窗口被放大/偏移多少，就露出哪一块。</para>
+/// <para><b>今天（拼合模式）窗口与格的关系</b>：网格对比从 2026-10-01 起排的是<b>拼合</b> ——
+/// 每路子窗口铺满整个对比区（<c>CompareGridView.MosaicWindows</c>），"这一路露出画面的哪一块"
+/// 完全由这里给出的区域决定；各块互不重叠、拼起来是一整幅。于是拖分割线改的是
+/// <b>哪一块归哪一路</b>，不是每格各自的缩放 —— 窗口比格大出一片是常态，裁剪也是常态。
+/// <see cref="CellToContainerDip"/> 那条"留 1px 缝"的口径只服务"窗口 == 格"的历史形态，
+/// 拼合用的是不留缝的 <see cref="MosaicRegionDip"/>。</para>
 ///
-/// <para><b>今天 <c>d</c> 有多大</b>：<c>CompareGridView.ArrangeOverride</c> 把窗口钉成恰好等于格，
-/// 但 Avalonia 会把排布矩形<b>向外取整到物理像素</b>，于是实测窗口比格表算出的矩形大 ≤1px
-/// （<c>--comparemodetest</c> 打印：格 996x1122px、窗口 1396x391px 等，差值即取整外扩）。
-/// 即 <c>d ∈ {0, 1px}</c>：裁剪会真的下发（把这 ≤1px 的外扩裁掉，区域与格在容器坐标下完全重合，
-/// 不打洞），但"裁出对应区域"这件事仍然需要窗口被真正放大 —— 见
-/// <see cref="MainWindow.ApplyCompareCrop"/> 与 docs/26 §9.5。</para>
-///
-/// <para><b>为什么不能"平移区域"（本类刻意不提供该能力）</b>：区域是"开孔"语义，不重排内容。
-/// 若把区域相对格挪动 <c>e</c>，则格内被挪开的那一条 <c>e</c> 会变成空洞（露出父窗口底色）——
-/// 因为"格被完整覆盖"要求 区域 ⊇ 格，而区域与格同尺寸 ⇒ 必须 区域 == 格。
-/// 本类从构造上满足这一条：区域恒等于"格在窗口坐标下的矩形"，故<b>永不打洞</b>。</para>
+/// <para><b>为什么不能"平移区域"（本类刻意不提供该能力）</b>：区域是"开孔"语义，不重排内容 ——
+/// 它只决定窗口里哪一块露出来，不能把画面挪到别处。若把区域相对格挪动 <c>e</c>，格内被挪开的
+/// 那一条 <c>e</c> 就变成空洞（露出父窗口底色）；要"格被完整覆盖"必须 区域 ⊇ 格，而区域与格
+/// 同尺寸 ⇒ 只能 区域 == 格。本类从构造上满足这一条：区域恒等于"格在窗口坐标下的矩形"，
+/// 故<b>永不打洞</b>。要平移，就得动<b>窗口</b>（<see cref="Magnify"/> 把窗口放大并偏移）。</para>
 ///
 /// <para><b>坐标与 DPI</b>：入参是<b>对比区容器坐标的物理像素</b>（<c>SetWindowRgn</c> 的坐标是
 /// 窗口相对、物理像素，见 <see cref="WindowRegionClipper"/>）；DIP → 物理一律走
@@ -37,6 +34,11 @@ namespace _3FCompare.Platform;
 /// </summary>
 public static class CompareCropPlanner
 {
+    /// <summary>溢出多少就不必裁（物理像素）。取 1 的依据：排版侧每格已向内收 1px 缝
+    /// （<c>CompareGridView.ArrangeOverride</c> 的 <c>+1 / -2</c>），而 Avalonia 向外取整带来的
+    /// 外扩实测就是 ≤1px ⇒ 溢出落在缝里，裁不裁用户看到的一样。
+    /// <b>改这条必须同时改那边的缝隙宽度</b>，否则就是在容忍真实的画面重叠。</summary>
+    public const int GutterTolerancePx = 1;
     /// <summary>
     /// 裁剪方案。<paramref name="ShouldApply"/> 为 false 时<b>不得</b>调用 <c>SetWindowRgn</c>
     /// （应 <see cref="WindowRegionClipper.Clear"/>）。
@@ -60,6 +62,21 @@ public static class CompareCropPlanner
                Math.Max(0, cell.Width * containerWidthDip - 2),
                Math.Max(0, cell.Height * containerHeightDip - 2));
 
+    /// <summary>拼合（mosaic）模式下某一路的<b>可见区域</b>（容器坐标 DIP）。
+    ///
+    /// <para>与 <see cref="CellToContainerDip"/> 唯一的差别就是<b>不留缝</b>：拼合时各路窗口
+    /// 都铺满对比区、互相重叠，可见范围完全由这里给出的矩形裁出来 ⇒ 任何内缩都会在两块之间
+    /// 留下一条父窗口底色，"几块拼成一整幅画面"当场破功。缝隙的意义（邻居边框不被盖住）
+    /// 在此不存在。</para>
+    ///
+    /// <para>与 <c>CompareGridView.ArrangeOverride</c> 的拼合分支是<b>同一套约定</b>
+    /// （那边窗口排成整容器、不加 <c>+1/-2</c>），改一处必须改另一处。</para></summary>
+    public static Rect MosaicRegionDip(CellRect cell, double containerWidthDip, double containerHeightDip)
+        => new(cell.X * containerWidthDip,
+               cell.Y * containerHeightDip,
+               Math.Max(0, cell.Width * containerWidthDip),
+               Math.Max(0, cell.Height * containerHeightDip));
+
     /// <summary>DIP → 物理像素。区域坐标是物理像素（Win32 不做 DPI 虚拟化，见 app.manifest 的 PerMonitorV2），
     /// 故所有进入 <see cref="WindowRegionClipper"/> 的坐标都必须先过这里。
     /// <paramref name="scaling"/> ≤ 0（尚未确定，如窗口刚创建）按 1.0 处理。</summary>
@@ -67,6 +84,17 @@ public static class CompareCropPlanner
     {
         var s = scaling > 0 ? scaling : 1.0;
         return (int)Math.Round(dip * s, MidpointRounding.AwayFromZero);
+    }
+
+    /// <summary>两个 DIP 矩形的交集；不相交时返回<b>零尺寸</b>矩形（位置取交集的左上角，
+    /// 便于日志里看出"往哪边偏了"）。拼合 + 放大时用它求"这一格与放大后可见视野的公共部分"。</summary>
+    public static Rect Intersect(Rect a, Rect b)
+    {
+        var x0 = Math.Max(a.X, b.X);
+        var y0 = Math.Max(a.Y, b.Y);
+        var x1 = Math.Min(a.X + a.Width, b.X + b.Width);
+        var y1 = Math.Min(a.Y + a.Height, b.Y + b.Height);
+        return new Rect(x0, y0, Math.Max(0, x1 - x0), Math.Max(0, y1 - y0));
     }
 
     /// <summary>整块 DIP 矩形 → 物理像素矩形。四条边都经 <see cref="ToPhysical"/>，
@@ -84,7 +112,8 @@ public static class CompareCropPlanner
     /// 计算某一路的裁剪矩形：区域 = 格在窗口坐标下的矩形。
     /// </summary>
     /// <param name="windowPx">该路子 HWND 在容器坐标中的物理像素矩形（今天 == <c>PlayerSurface.Bounds</c> 换算而来）。</param>
-    /// <param name="cellPx">该路格在容器坐标中的物理像素矩形（格表经 <see cref="CellToContainerDip"/> 换算而来）。</param>
+    /// <param name="cellPx">该路应当露出的那块在容器坐标中的物理像素矩形：拼合模式经
+    /// <see cref="MosaicRegionDip"/>、其余经 <see cref="CellToContainerDip"/> 换算而来。</param>
     /// <returns>窗口未盖住格（说明布局与格表不一致）或尺寸非法时返回 <c>ShouldApply = false</c>：
     /// 此时裁剪要么无效要么会留洞，宁可不做。</returns>
     public static CropPlan Plan(Rect32 windowPx, Rect32 cellPx)
@@ -96,8 +125,21 @@ public static class CompareCropPlanner
         // 由 Contains 保证 0 ≤ region.X 且 region.Right ≤ window.Width ⇒ 区域恒在窗口内，
         // 且与格同尺寸同位置 ⇒ 格被完整覆盖、窗口越界部分被裁掉。这就是"不打洞"的构造性保证。
         var region = new Rect32(cellPx.X - windowPx.X, cellPx.Y - windowPx.Y, cellPx.Width, cellPx.Height);
-        var shouldApply = region.X != 0 || region.Y != 0 ||
-                          region.Width != windowPx.Width || region.Height != windowPx.Height;
+
+        // ⚠ 与 `CompareGridView.ArrangeOverride` 均匀路径的 1px 缝隙是**同一套约定**，两处必须一起改：
+        // 排版时每格向内收 1px（`+1 / -2`），所以"窗口比那一块大 ≤1px"（Avalonia 把排布矩形向外
+        // 取整到物理像素的外扩，实测 d ∈ {0,1px}）溢出正好落进那条缝里，露出的是缝隙而不是
+        // 邻居的画面 ⇒ **裁它没有任何视觉收益**，也就不必为看不见的 1px 去动 D3D11 flip-model
+        // 交换链（`SetWindowRgn(bRedraw=1)` + 父窗口 `InvalidateRect`，每路每次两下；
+        // 2026-09-30 实测每会话 RegionApply 49 → 89 的增量几乎全部来自这一档）。
+        //
+        // 拼合模式下这一档基本命中不了：窗口 == 整对比区、块只是其中一格，溢出恒是"一整片"量级
+        // （区域原点可以是 0，但 overflowX 必然远超 1px）⇒ 裁剪是常态。留这条判断是为了
+        // "窗口与那块重合"的形态（单格铺满、以及历史形态）不去做无收益的 SetWindowRgn。
+        var overflowX = windowPx.Width - region.Width;
+        var overflowY = windowPx.Height - region.Height;
+        var shouldApply = region.X > GutterTolerancePx || region.Y > GutterTolerancePx ||
+                          overflowX > GutterTolerancePx || overflowY > GutterTolerancePx;
         return new CropPlan(region, shouldApply);
     }
 
@@ -107,14 +149,16 @@ public static class CompareCropPlanner
         => new(windowPx.IsValid ? new Rect32(0, 0, windowPx.Width, windowPx.Height) : default, false);
 
     // ══════════════════════════════════════════════════════════════════════
-    // 无缝放大：把子窗口放大到格的 z 倍并偏移，再用区域裁出目标画面块
+    // 无缝放大：把子窗口（拼合下 = 整幅拼合视图）放大到基准的 z 倍并偏移，再用区域裁出目标块
     // ══════════════════════════════════════════════════════════════════════
     //
     // 为什么不是"平移区域"（见类型注释）：区域是开孔语义，不重排内容。要"裁出画面局部"，
-    // 必须让子窗口比自己的格更大 —— 内核把画面 fit 到窗口，窗口 z 倍大 ⇒ 画面真的按 z 倍
+    // 必须让子窗口比基准更大 —— 内核把画面 fit 到窗口，窗口 z 倍大 ⇒ 画面真的按 z 倍
     // 重新渲染（内核 PrepareScaledVideo 的目标尺寸就是 destination 尺寸，不是插值放大），
-    // 再由区域把格以外的部分裁掉。平移则完全由"窗口相对格的位置"表达，
-    // 不受内核 SetViewTransform 的 max(0,·) 钳制影响。
+    // 再由区域把基准以外的部分裁掉。平移则由"窗口相对基准的位置"表达 —— 这是我们自己
+    // 控制的窗口几何，不经过内核视口变换，也就与它的钳制规则无关
+    // （内核那一侧 2026-09-26 已从 max(0,·) 单边钳改成"拟合原点−(放大−拟合)"的双边钳，
+    //  但它是**逐路独立**的均匀视口，仍然拼不出"几块合成一幅"）。
 
     /// <summary>放大后的几何：<paramref name="WindowDip"/> 是子窗口应占的矩形（容器坐标 DIP），
     /// <paramref name="RegionDip"/> 是必须保持可见的矩形（<b>窗口相对坐标</b> DIP，即
@@ -312,7 +356,9 @@ public static class CompareCropPlanner
     /// <para><b>z ≤ 1 是恒等退化</b>：窗口 == 格、区域 == 整个窗口（<c>ShouldApply</c> 意义上的"不裁剪"），
     /// 调用方应当直接走既有的 <see cref="Plan"/> 路径 —— 本方法给出自洽值只为让契约无歧义。</para>
     /// </summary>
-    /// <param name="cellDip">格矩形（容器坐标 DIP）。应与 <see cref="CellToContainerDip"/> 的结果一致。</param>
+    /// <param name="cellDip">放大作用的<b>基准</b>矩形（容器坐标 DIP）：拼合模式传整个对比区，
+    /// 历史形态传该路那一格（应与 <see cref="CellToContainerDip"/> / <see cref="MosaicRegionDip"/>
+    /// 的结果一致）。</param>
     /// <param name="zoom">放大倍数。≤1 视为 1（恒等）。</param>
     /// <param name="cropX">要露出的画面块左上角，<b>源画面归一化 x</b>（0~1）。自动钳到 <c>[0, 1-1/z]</c>。</param>
     /// <param name="cropY">同上，y。</param>

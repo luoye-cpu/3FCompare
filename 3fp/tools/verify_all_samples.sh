@@ -38,10 +38,25 @@ FILES=(
   "anim\07c_anim.png"
 )
 
+TOTAL=${#FILES[@]}
+BAD=0
 for f in "${FILES[@]}"; do
   echo "════════ $f ════════" >> "$OUT"
   timeout 90 ./verify_image_mode.exe "$S"'\'"$f" >> "$OUT" 2>&1
-  echo "  [exit=$?]" >> "$OUT"
+  rc=$?
+  echo "  [exit=$rc]" >> "$OUT"
+  # 非 0 即这条没过（124 = timeout 杀掉、127 = 缺 DLL 延迟加载失败，都要算红）。
+  if [ "$rc" -ne 0 ]; then BAD=$((BAD+1)); fi
 done
 
-echo "完成：$(grep -c '^════' "$OUT") 项，$(wc -l < "$OUT") 行 ⇒ $(pwd)/$OUT"
+RAN=$(grep -c '^════' "$OUT")
+echo "完成：$RAN/$TOTAL 项，判红 $BAD 项，$(wc -l < "$OUT") 行 ⇒ $(pwd)/$OUT"
+
+# 三把牙：子进程退出码必须外泄；跑到的段数必须等于清单条数；**清单为空本身就是红**
+# （否则"一条都没跑"会报成"全部通过"）。
+if [ "$TOTAL" -eq 0 ] || [ "$BAD" -ne 0 ] || [ "$RAN" -ne "$TOTAL" ]; then
+  echo "结果：判红（清单 $TOTAL 项，子进程非 0 退出 $BAD 项，实到段数 $RAN）"
+  exit 1
+fi
+echo "结果：判绿（$TOTAL 项全部通过）"
+exit 0

@@ -7,8 +7,13 @@ public sealed class SessionSnapshot
 {
     /// <summary>单路偏移的合理上限（±24 小时，100ns 单位 = 8.64e11）。
     /// 外部 .3fcs 里的 <see cref="SessionItem.Offset100ns"/> 是**未校验的 long**，
-    /// 极端值（如 long.MinValue）会让"位置 − 期望"溢出抛 OverflowException，
-    /// 把整个位置轮询打断（位置/时间码停更、界面形似卡死，docs/45 P1-9）。
+    /// 极端值（如 long.MinValue）会让"位置 − 期望"越出 long 域：本工程默认 unchecked，
+    /// 那步相减**不抛异常而是环绕**（CheckForOverflowUnderflow 从未设置，见 RA-04），
+    /// 环绕出来的小差值会被读成"已收敛"、大差值会被读成"失步"，两种都是假读数；
+    /// 而把它取幅值（<c>Math.Abs</c>）时若正好落在 <c>long.MinValue</c> 上则**是真抛**
+    /// （实测：BclFact_MathAbs_OfLongMinValue_Throws），docs/45 P1-9 那次"位置/时间码停更、
+    /// 界面形似卡死"就是这条抛出冒到轮询顶层被吞。
+    /// 所以钳制必须落在写入/加载侧，比较侧只能过滤、防不住它。
     /// 加载侧负责钳制、比较侧负责过滤，两边都以此为准。</summary>
     public const long MaxOffset100ns = 24L * 3600 * 10_000_000;
 

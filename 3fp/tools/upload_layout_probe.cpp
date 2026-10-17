@@ -82,7 +82,7 @@ int wmain(const int argc, wchar_t** argv) {
 
     FFF3FPSnapshot before{};
     before.size = sizeof(before);
-    before.version = 8;
+    before.version = 20;
     FFF3FP_GetSnapshot(player, &before);
 
     FFF3FP_Play(player);
@@ -90,7 +90,7 @@ int wmain(const int argc, wchar_t** argv) {
 
     FFF3FPSnapshot after{};
     after.size = sizeof(after);
-    after.version = 8;
+    after.version = 20;
     FFF3FP_GetSnapshot(player, &after);
 
     printf("媒体: %s\n", path.c_str());
@@ -104,6 +104,9 @@ int wmain(const int argc, wchar_t** argv) {
     const auto swDelta = after.softwareConvert100ns - before.softwareConvert100ns;
     const auto presentDelta = after.presentWait100ns - before.presentWait100ns;
     const auto lockDelta = after.deviceLockWait100ns - before.deviceLockWait100ns;
+    const auto uploadDelta = after.videoUpload100ns - before.videoUpload100ns;
+    printf("上传累计:      %.2f ms -> %.2f ms (增量 %.2f ms)\n",
+        before.videoUpload100ns / 10000.0, after.videoUpload100ns / 10000.0, uploadDelta / 10000.0);
     printf("软件转换累计: %.2f ms -> %.2f ms (增量 %.2f ms)\n",
         before.softwareConvert100ns / 10000.0, after.softwareConvert100ns / 10000.0, swDelta / 10000.0);
     printf("Present 等待:  %.2f ms -> %.2f ms (增量 %.2f ms)\n",

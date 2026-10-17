@@ -11,6 +11,7 @@
 #include <windows.h>
 
 #include <chrono>
+#include <cmath>   // std::ldexp：HALF 解码要用（此前靠 <windows.h> 间接拖进来，MSVC 14.5x 不再带）
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -101,11 +102,11 @@ int wmain(const int argc, wchar_t** argv) {
 
     FFF3FPSnapshot snapshot{};
     snapshot.size = sizeof(snapshot);
-    snapshot.version = 8;
+    snapshot.version = 20;
     FFF3FP_GetSnapshot(player, &snapshot);
     FFF3FPRenderTargetInfo before{};
     before.size = sizeof(before);
-    before.version = 2;
+    before.version = 20;
     FFF3FP_GetRenderTargetInfo(player, &before);
 
     printf("媒体: %s\n", path.c_str());
@@ -189,11 +190,11 @@ int wmain(const int argc, wchar_t** argv) {
     // V7：截图不得改变后缓冲/呈现计数
     FFF3FPRenderTargetInfo after{};
     after.size = sizeof(after);
-    after.version = 2;
+    after.version = 20;
     FFF3FP_GetRenderTargetInfo(player, &after);
     FFF3FPSnapshot afterSnapshot{};
     afterSnapshot.size = sizeof(afterSnapshot);
-    afterSnapshot.version = 8;
+    afterSnapshot.version = 20;
     FFF3FP_GetSnapshot(player, &afterSnapshot);
     const bool swapUnchanged = before.swapWidth == after.swapWidth &&
         before.swapHeight == after.swapHeight &&

@@ -143,7 +143,7 @@
 
 ### [中等] `AppLog.Raw()` 绕过 writer 空判断，且队列无界
 - **位置**：`AppLog.cs:137`、`:18`（`ConcurrentQueue`）；对比 `:131` `Enqueue` 有 `_writer is null` 判断
-- **现象**：`Raw` 不分情况入队，而它正是 `ConsoleErrorRerouter.cs:48/55/63` 与 `KernelLogBridge.cs:201` 的入口。`Initialize()` 失败（`:72-76` 静默置 `_writer = null`）或内核日志持续刷屏时，**队列只增不减直到 OOM**。
+- **现象**：`Raw` 不分情况入队，而它正是 `ConsoleErrorRerouter.cs:48/55/63` 与 `KernelLogBridge`（`src/3FCompare.Core/Diagnostics/AppLog.cs:556`，**仓内从来没有 `KernelLogBridge.cs` 这个独立文件**，当时按类名猜了文件名）的入口。`Initialize()` 失败（`:72-76` 静默置 `_writer = null`）或内核日志持续刷屏时，**队列只增不减直到 OOM**。
 - **建议**：`Raw` 同样判空；队列改 `Channel.CreateBounded`（如 10000 条，满则丢弃并记一条 overflow）。
 
 ### [中等] 日志无大小上限，长会话单文件可无限增长
@@ -343,7 +343,7 @@
 - `CompareGridView.cs:130-132` vs `:150-162`：`MeasureOverride` 用 `Math.Max(0, cellW)` 保护，`ArrangeOverride` 直接 `cw - 2`，窄窗口产生负宽 `Rect`。
 - `CompareGridView.cs:36/50/102/121` `InvalidateVisual()` 无 `Render` 重写，属无效调用。
 - `TimelineView.cs:210-251` 缓存了画刷却每帧新建 3 个 `FormattedText` + 1 个 `StreamGeometry`，与 `:176-186` 自身优化意图矛盾；`:228` 播放头横坐标未钳制。
-- `AbSliderView.cs:63-102` 每帧新建 2 个 `LinearGradientBrush` + `Pen` + 2 个 `FormattedText`（均可 `static readonly`）。
+- `AbSliderView.cs`（原 `:63-102`；**该类型已于 v0.3.1 整类删除**，commit `e47c037`，故不再给现行行号）每帧新建 2 个 `LinearGradientBrush` + `Pen` + 2 个 `FormattedText`（均可 `static readonly`）。
 - `OffsetPanel.cs:63/70` fps 极大（>1e7）时 `_frameTicks` 归零，`offset100ns / _frameTicks` 得 `Infinity`。建议 `Math.Max(1, …)`。
 - `MagnifierOverlay.cs:22-24` vs `:29` `WidthPx=>160/HeightPx=>120` 从未使用，实际是 192/144，与类注释不符；`:70-71` 翻转后 `_position.X - Width - 8` 可为负，浮窗滑出可视区。
 - `MainWindow.axaml.cs:571-574` 平移归一化在窗口尺寸为 0 时 `2.0/Min(W,H)` 为 `Infinity`，`dx==0` 算出 `NaN`，而 `Math.Clamp(NaN,-1,1)` **原样返回 NaN** 并下发到原生层。
@@ -378,7 +378,7 @@
 - **风险**：关窗后仍持有 surface/slot/session 最长 15s；退出阶段 session 可能已被 Dispose，续体再访问即为已释放对象。
 
 ### [中等] `ScreenFrameCapture` 未校验虚拟屏幕边界，多屏负坐标直接下发给 BitBlt
-- **位置**：`Platform/ScreenFrameCapture.cs:40`、`:125-135`
+- **位置**：`Platform/ScreenFrameCapture.cs`（原 `:40`、`:125-135`；**GDI 逻辑已于 v0.2.6 整体迁到** `src/3FCompare/Platform/GdiFrameCapture.cs`，本类现为 `FrameCapture` 薄壳，现址 `:52`、`:84-100`）
 - **现象**：`GetDC(0)` + `BitBlt(..., screenX, screenY, ...)`，`screenX/Y` 直接来自 `childRect`，未用 `SM_XVIRTUALSCREEN/SM_CXVIRTUALSCREEN` 裁剪；也未带 `CAPTUREBLT(0x40000000)`。
 - **风险**：副屏位于主屏左侧/上方时坐标为负 ⇒ 抓到黑图或错位区域，而 `BitBlt` 仍返回 TRUE ⇒ `:139` 的失败检查不触发，`MainWindow.Capture.cs:57-60` 的兜底路径会**导出一张错误 PNG 且无二次校验**；分层/透明窗口内容也抓不到。
 - **建议**：用 `GetSystemMetrics` 钳制到虚拟屏幕，越界走 Path B；rop 改为 `SRCCOPY|CAPTUREBLT`。
@@ -395,7 +395,7 @@
 ### 轻微项
 - `SettingsWindow.cs:229` 无效 FFmpeg 目录可被"确定"保存（状态标签已提示"✗ 目录无效"），重启后被后端静默忽略 ⇒ 用户陷入"设置→重启→无效"循环。建议 `Accept()` 中阻止关闭。
 - `SettingsWindow.cs:88/212` 退化路径下 `Math.Max(0, PreferredAdapterIndex + 1)` 在只有 1 项时得 1 ⇒ `adapter = -2`，与 `AppSettings.Normalize()` 的 `[-1,15]` 不一致。建议用 `AdapterInfo.Index` 而非位置索引。
-- `ScreenFrameCapture.cs:51-54` 裁剪矩形只钳右下、不钳左上，`relX/relY < 0` 时 `Clone` 抛异常被 `:59` 吞掉返回 null，静默失败无日志。
+- `ScreenFrameCapture.cs`（原 `:51-54`，现 `src/3FCompare/Platform/GdiFrameCapture.cs:84-87`）裁剪矩形只钳右下、不钳左上，`relX/relY < 0` 时 `Clone` 抛异常被 `:59` 吞掉返回 null，静默失败无日志。⚠ **本条已修**：现左右上三向都按 0 钳制并 `AppLog.Warn` 留痕（`:86-87`）。
 - `LanguageManager.cs:483` `Tf` 用 `string.Format(s, args)` 未指定 `CultureInfo`，`{1:0.#}` 在 de-DE 等 locale 输出逗号（仅影响显示，**未发现**任何 parse 回路）。
 - `PlaybackCoordinator.cs:40/106/156` `_onAllOpenedCallbacks` 是无锁 `Queue<Action>`，依赖"续体都回到 Avalonia 同步上下文"的隐式假设；`_ = OpenSlotAsync(...)` 的 catch 只改状态、不打日志。
 - `Views/MessageBox.cs:15-23` `CanResize=false`、固定 460×220、无 `ScrollViewer`，长异常文本被裁掉且无法查看。

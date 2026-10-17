@@ -129,7 +129,7 @@ int wmain(const int argc, wchar_t** argv) {
 
     FFF3FPSnapshot snapshot{};
     snapshot.size = sizeof(snapshot);
-    snapshot.version = 8;
+    snapshot.version = 20;
     FFF3FP_GetSnapshot(player, &snapshot);
     const auto width = snapshot.videoWidth;
     const auto height = snapshot.videoHeight;
@@ -155,7 +155,7 @@ int wmain(const int argc, wchar_t** argv) {
 
     FFF3FPVideoSuperResolutionStatus status{};
     status.size = sizeof(status);
-    status.version = 1;
+    status.version = 20;
     FFF3FP_GetVideoSuperResolutionStatus(player, &status);
     printf("\n== VSR 状态 ==\n");
     printf("  requested=%d active=%d rejected=%d reason=%d\n",

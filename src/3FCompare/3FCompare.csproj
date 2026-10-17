@@ -93,6 +93,76 @@
            Text="未找到 HarfBuzzSharp 原生库 libHarfBuzzSharp.dll（期望: $(_HarfBuzzNativePath)）。它由 Avalonia 传递引入；请用 -p:HarfBuzzNativeVersion=&lt;实际版本&gt; 覆盖（可用版本见 $(NuGetPackageRoot)harfbuzzsharp.nativeassets.win32\ 下的目录名）。" />
   </Target>
 
+  <!-- ==========================================================================
+       ARM 前瞻准备：内嵌原生 DLL 的**架构一致性**（docs/51 §二）
+       ==========================================================================
+       背景：下面几个 EmbeddedResource 都用**架构中立**的 LogicalName
+       （FFF.Native.dll / libSkiaSharp.dll / libHarfBuzzSharp.dll / 3FC.WgcCapture.dll），
+       而它们的来源路径今天全部写死 x64。将来产出 arm64 包时若只改 RID/publish 而没改这些路径，
+       就会"**构建全绿、用户启动即崩**"——正是上面 docs/14 §2.2 那段注释声称已消灭的形状。
+
+       ⚠ **为什么这里只"记录"而不在此处报错**：
+       MSBuild 里比对 PE 机器类型需要内联任务（本仓库此前零内联任务先例），而它会跑在
+       **每一次构建**上；一旦写歪，代价是**把当前可用的 x64 构建弄坏**，与"前瞻准备"的目的相反。
+       故本 target 只做纯属性/ItemGroup 运算，把"期望架构 + 各原生件路径与是否存在"落成一份清单，
+       **不引入任何 task、不调用外部进程、构建期绝不失败**。
+       真正的判定交给两处更安全的位置：
+         ① 出包前 —— tools/发布门禁.ps1（本来就跑，且是"宁可判红也不出包"的位置）；
+         ② 运行期 —— NativeArchGuard（Program.cs / NativeRuntime.cs），错了给**可归因**的日志。 -->
+  <PropertyGroup>
+    <!-- 本次构建期望的原生架构。默认由 Platform 推导，可显式覆盖。
+         x64 / x86 / ARM64 的 PE 机器类型分别是 0x8664 / 0x014C / 0xAA64
+         （Arm64EC 的 PE 头同样是 0x8664，故与 x64 同档）。 -->
+    <ExpectedNativeMachine Condition="'$(ExpectedNativeMachine)' == '' AND ('$(Platform)' == 'ARM64' OR '$(Platform)' == 'arm64' OR '$(RuntimeIdentifier)' == 'win-arm64')">0xAA64</ExpectedNativeMachine>
+    <ExpectedNativeMachine Condition="'$(ExpectedNativeMachine)' == '' AND ('$(Platform)' == 'x86' OR '$(RuntimeIdentifier)' == 'win-x86')">0x014C</ExpectedNativeMachine>
+    <ExpectedNativeMachine Condition="'$(ExpectedNativeMachine)' == ''">0x8664</ExpectedNativeMachine>
+    <ExpectedNativeArchName Condition="'$(ExpectedNativeMachine)' == '0xAA64'">ARM64</ExpectedNativeArchName>
+    <ExpectedNativeArchName Condition="'$(ExpectedNativeMachine)' == '0x014C'">x86</ExpectedNativeArchName>
+    <ExpectedNativeArchName Condition="'$(ExpectedNativeMachine)' == '0x8664'">x64</ExpectedNativeArchName>
+  </PropertyGroup>
+
+  <Target Name="WriteNativeArchManifest" AfterTargets="Build">
+    <!-- ⚠ 不要用 `Label="…"` 传显示名：`Label` 是 MSBuild 的**保留属性**（改的是 ItemGroup 标签，
+         不落进 item 元数据），实测 `%(Label)` 展开为空。同理 `%(Exists)` 是**内置元数据**，
+         在此处恒为空串，必须用 `System.IO.File::Exists` 显式求值。
+         这里的自定义元数据统一叫 `DisplayName`，避免与任何保留名撞车。 -->
+    <ItemGroup>
+      <_EmbeddedNativeForArchManifest Include="$(KernelDllPath)">
+        <DisplayName>FFF.Native.dll</DisplayName>
+      </_EmbeddedNativeForArchManifest>
+      <_EmbeddedNativeForArchManifest Include="$(_SkiaNativePath)">
+        <DisplayName>libSkiaSharp.dll</DisplayName>
+      </_EmbeddedNativeForArchManifest>
+      <_EmbeddedNativeForArchManifest Include="$(_HarfBuzzNativePath)">
+        <DisplayName>libHarfBuzzSharp.dll</DisplayName>
+      </_EmbeddedNativeForArchManifest>
+      <_EmbeddedNativeForArchManifest Include="$(WgcCaptureDllPath)">
+        <DisplayName>3FC.WgcCapture.dll</DisplayName>
+      </_EmbeddedNativeForArchManifest>
+    </ItemGroup>
+    <!-- 存在性必须先落到 item 元数据上再参与变换：
+         把 `$([System.IO.File]::Exists(...))` 直接写进 `@(...-> '…')` 的格式串里，
+         参数里的 `%(FullPath)` 不会被展开（属性函数在变换**之前**求值），
+         结果恒为 False —— 实测踩过（manifest 里四个 DLL 全报 False，而文件明明都在）。
+         所以这里先算出 `ExistsFlag`，再让变换只做纯字符串拼接。 -->
+    <ItemGroup>
+      <_EmbeddedNativeForArchManifest>
+        <ExistsFlag Condition="Exists('%(FullPath)')">yes</ExistsFlag>
+        <ExistsFlag Condition="!Exists('%(FullPath)')">MISSING</ExistsFlag>
+      </_EmbeddedNativeForArchManifest>
+    </ItemGroup>
+    <PropertyGroup>
+      <!-- 摊平成 "显示名 | 路径 | 是否存在" 三列，用 \n 连接（&#x0A;）。
+           ⚠ 别写成字面换行：MSBuild 属性值里的换行会被吃掉。 -->
+      <_NativeArchManifestLines>@(_EmbeddedNativeForArchManifest->'%(DisplayName) | %(ExistsFlag) | %(FullPath)', '&#x0A;')</_NativeArchManifestLines>
+    </PropertyGroup>
+    <WriteLinesToFile
+        File="$(TargetDir)native-arch-manifest.txt"
+        Lines="expectedMachine=$(ExpectedNativeMachine);expectedArch=$(ExpectedNativeArchName);targetFramework=$(TargetFramework);runtimeIdentifier=$(RuntimeIdentifier);platform=$(Platform);;embedded-natives(displayName | path | exists);$(_NativeArchManifestLines)"
+        Overwrite="true"
+        WriteOnlyWhenDifferent="true" />
+  </Target>
+
   <!-- 嵌入 3FC.WgcCapture.dll（抓屏主线路的原生 WGC 库，docs/27 §九 阶段 3） -->
   <!-- 与内核同款：路径由 PropertyGroup 定义、可用 -p:WgcCaptureDllPath=<绝对路径> 覆盖。
        注意这里**没有 Debug/Release 配置维度**：build.sh 直接把产物落在 native/wgc_capture/

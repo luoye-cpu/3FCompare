@@ -80,7 +80,7 @@ int wmain(const int argc, wchar_t** argv) {
         Pump(seconds * 1000);
         FFF3FPSnapshot snapshot{};
         snapshot.size = sizeof(snapshot);
-        snapshot.version = 8;
+        snapshot.version = 20;
         FFF3FP_GetSnapshot(player, &snapshot);
         printf("  源 %ux%u  呈现帧 %llu\n",
             snapshot.videoWidth, snapshot.videoHeight,

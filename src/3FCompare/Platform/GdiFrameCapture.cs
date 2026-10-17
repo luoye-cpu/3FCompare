@@ -30,7 +30,12 @@ internal sealed class GdiFrameCapture : IFrameCapture
     /// <summary>抓取目标子窗口当前帧；两条子路径都失败时返回 null。</summary>
     public System.Drawing.Bitmap? Capture(nint hwnd)
     {
-        if (hwnd == 0) return null;
+        // ⚠ 每一条返回 null 的支路都要留下"为什么"（docs/50 §二十二：验收档实测抓到过一次
+        //    "第 0 路 GDI 抓回 null"，但 null 有 6 条以上互斥成因，事后无从分辨是窗口矩形退化、
+        //    BitBlt 失败还是 PrintWindow 返回 FALSE。本文件上面第 68 行的注释抱怨的正是同一件事：
+        //    "截图莫名失败且日志里什么都没有"）。抓屏只走按需路径（导出/缩略图/验收判据），
+        //    不在每帧渲染里，所以失败留痕可以逐条打。
+        if (hwnd == 0) { WarnNull("hwnd=0", hwnd, ""); return null; }
 
         // 定位子窗口的顶层窗口与其屏幕矩形
         nint top = hwnd;
@@ -41,57 +46,134 @@ internal sealed class GdiFrameCapture : IFrameCapture
         }
         catch { /* 保留自身 */ }
 
-        if (!GetWindowRect(top, out var topRect)) return null;
-        if (!GetWindowRect(hwnd, out var childRect)) return null;
+        if (!GetWindowRect(top, out var topRect)) { WarnNull("顶层矩形读不到", top, ""); return null; }
+        if (!GetWindowRect(hwnd, out var childRect)) { WarnNull("子窗口矩形读不到", hwnd, ""); return null; }
 
         var relX = childRect.Left - topRect.Left;
         var relY = childRect.Top - topRect.Top;
         var relW = childRect.Right - childRect.Left;
         var relH = childRect.Bottom - childRect.Top;
-        if (relW <= 0 || relH <= 0 || relW > 8192 || relH > 8192) return null;
+        if (relW <= 0 || relH <= 0 || relW > 8192 || relH > 8192)
+        {
+            WarnNull("子窗口矩形退化或超限", hwnd, $" rel={relW}x{relH}");
+            return null;
+        }
 
         // Path A：BitBlt 屏幕区。⚠ 对 flip-model 不可靠，且被遮挡时抓到遮挡物（docs/26 §3.2）。
+        string pathAWhy = "ok";
         try
         {
             var viaScreen = CaptureViaBitBlt(childRect.Left, childRect.Top, relW, relH);
-            if (viaScreen is not null) return viaScreen;
+            if (viaScreen is not null) return CropToWindowRegion(hwnd, viaScreen);
+            pathAWhy = "bitblt-未产出";
         }
-        catch { /* 继续 */ }
+        catch (Exception ex) { pathAWhy = "bitblt-抛出 " + ex.GetType().Name; }
 
         // Path B：PrintWindow 抓顶层 → 裁剪子区域（部分系统有效）
         var topBmp = CaptureViaPrintWindow(top);
-        if (topBmp is not null)
+        if (topBmp is null)
         {
-            try
-            {
-                // 左上角也必须钳制：子窗口矩形有可能落在顶层窗口之外（负相对坐标），
-                // 旧实现只钳右下 ⇒ Clone 收到负 X/Y 直接抛异常，被下面的 catch 吞掉后返回 null，
-                // 现象是"截图莫名失败且日志里什么都没有"。
-                var cropX = Math.Max(0, relX);
-                var cropY = Math.Max(0, relY);
-                if (cropX != relX || cropY != relY)
-                    AppLog.Warn("Capture", $"子窗口矩形越出顶层窗口左上（relX={relX}, relY={relY}），已按 0 钳制");
+            WarnNull(pathAWhy + "+printwindow-未产出", hwnd, $" rel={relW}x{relH}");
+            return null;
+        }
+        try
+        {
+            // 左上角也必须钳制：子窗口矩形有可能落在顶层窗口之外（负相对坐标），
+            // 旧实现只钳右下 ⇒ Clone 收到负 X/Y 直接抛异常，被下面的 catch 吞掉后返回 null，
+            // 现象是"截图莫名失败且日志里什么都没有"。
+            var cropX = Math.Max(0, relX);
+            var cropY = Math.Max(0, relY);
+            if (cropX != relX || cropY != relY)
+                AppLog.Warn("Capture", $"子窗口矩形越出顶层窗口左上（relX={relX}, relY={relY}），已按 0 钳制");
 
-                var crop = new System.Drawing.Rectangle(cropX, cropY, relW, relH);
-                if (crop.Right > topBmp.Width) crop.Width = topBmp.Width - crop.X;
-                if (crop.Bottom > topBmp.Height) crop.Height = topBmp.Height - crop.Y;
-                if (crop.Width <= 0 || crop.Height <= 0) { topBmp.Dispose(); return null; }
-                var result = topBmp.Clone(crop, topBmp.PixelFormat);
-                topBmp.Dispose();
-                return result;
-            }
-            catch
+            var crop = new System.Drawing.Rectangle(cropX, cropY, relW, relH);
+            if (crop.Right > topBmp.Width) crop.Width = topBmp.Width - crop.X;
+            if (crop.Bottom > topBmp.Height) crop.Height = topBmp.Height - crop.Y;
+            if (crop.Width <= 0 || crop.Height <= 0)
             {
+                // 先取尺寸再 Dispose：读已 Dispose 的 Bitmap 会抛，把留痕本身变成新故障源。
+                var topSize = $"{topBmp.Width}x{topBmp.Height}";
                 topBmp.Dispose();
+                WarnNull(pathAWhy + "+裁块为空", hwnd, $" crop={crop.Width}x{crop.Height} top={topSize}");
                 return null;
             }
+            var result = topBmp.Clone(crop, topBmp.PixelFormat);
+            topBmp.Dispose();
+            return CropToWindowRegion(hwnd, result);
         }
-
-        return null;
+        catch (Exception ex)
+        {
+            topBmp.Dispose();
+            WarnNull(pathAWhy + "+printwindow-裁块抛出 " + ex.GetType().Name, hwnd, $" rel={relW}x{relH}");
+            return null;
+        }
     }
+
+    /// <summary>唯一的 null 出口留痕：把成因写进 app 日志，事后能按 why 分桶。</summary>
+    private static void WarnNull(string why, nint hwnd, string extra)
+        => AppLog.Warn("Capture", $"GDI 抓帧返回 null why={why} hwnd=0x{hwnd:X}{extra}");
 
     /// <summary>本实现不持有非托管资源（每次抓帧内部成对申请/释放 HDC）。</summary>
     public void Dispose() { }
+
+    /// <summary>把"整窗那一块"再裁成<b>这一路真正露出来的那一块</b>。
+    ///
+    /// <para><b>为什么必须裁</b>：拼合（网格对比）下每路子窗口的矩形恒等于<b>整个对比区</b>，
+    /// 露出哪一块完全由 <c>SetWindowRgn</c> 决定。而上面两条子路径都只按 <c>GetWindowRect</c> 取图
+    /// （Path A 从屏幕 DC BitBlt 该屏幕矩形；Path B 对顶层窗 PrintWindow 后裁同一块 <c>relW×relH</c>），
+    /// 于是各路拿到的都是<b>同一张屏幕合成图</b> —— 导出会得到"整幅拼图"而不是这一路的画面，
+    /// 缩略图与逐路抓帧也被串成同一个内容。这是静默错误：图是好的，只是不属于这一路。
+    /// 判据 <c>AssertGdiHonorsRegion</c>（<c>--comparemodetest</c> 的"拼合铺块"步）在 2 路档实测钉住：
+    /// 修前抓回 2306x1068 == 整窗、该路区域是 2306x534 ⇒ 判红。</para>
+    ///
+    /// <para><b>坐标口径</b>：<c>GetWindowRgn</c> 返回的区域由系统平移到<b>窗口原点</b>起算
+    /// （MSDN wingdi），正好与本函数入参位图的 (0,0) == 子窗口左上角同一口径；
+    /// 这一条口径在仓内已由 <c>AssertCompareCrop</c> 拿独立复算的格表逐路对过（含位置），这里只继承它、
+    /// 不重新推导。<b>不用</b>宿主那份 <c>_compareCropApplied</c> 账，是因为本类在 Platform 层、不该反向依赖
+    /// 主窗内部状态；代价是"区域被别处改掉"时这里跟着屏幕走 —— 那恰好是<b>屏幕上真正露出的那一块</b>，
+    /// 也正是导出该给的内容。</para>
+    ///
+    /// <para>无区域（<c>GetWindowRgn</c> 返 <c>ERROR</c>）⇒ 原样返回，不许硬裁：历史形态、叠加模式、
+    /// 视野外被隐藏的路都会走到这一支，那时"整窗 == 该路画面"本来就是对的。</para></summary>
+    private static System.Drawing.Bitmap CropToWindowRegion(nint hwnd, System.Drawing.Bitmap full)
+    {
+        var hRgn = CreateRectRgn(0, 0, 1, 1);
+        if (hRgn == nint.Zero) return full;
+        try
+        {
+            if (GetWindowRgn(hwnd, hRgn) == 0 /*ERROR：窗口没有区域*/) return full;
+            if (GetRgnBox(hRgn, out var r) == 0) return full;
+
+            var x = Math.Max(0, r.Left);
+            var y = Math.Max(0, r.Top);
+            var w = r.Right - r.Left;
+            var h = r.Bottom - r.Top;
+            // 整块越界或裁出来还是整窗 ⇒ 没什么可裁的（后者也覆盖"区域被设成全屏"的正常形态）
+            if (w <= 0 || h <= 0) return full;
+            if (x == 0 && y == 0 && w >= full.Width && h >= full.Height) return full;
+            if (x >= full.Width || y >= full.Height) return full;   // 区域整个落在窗外：宁可不裁，也不返回空图
+
+            var crop = new System.Drawing.Rectangle(x, y, Math.Min(w, full.Width - x), Math.Min(h, full.Height - y));
+            var cropped = full.Clone(crop, full.PixelFormat);
+            full.Dispose();
+            return cropped;
+        }
+        catch
+        {
+            // 与文件里既有的兜底风格一致：裁失败就把整窗交出去，绝不让"截图莫名失败且日志什么都没有"重演。
+            return full;
+        }
+        finally { DeleteObject(hRgn); }
+    }
+
+    [DllImport("gdi32.dll", ExactSpelling = true)]
+    private static extern nint CreateRectRgn(int left, int top, int right, int bottom);
+    [DllImport("gdi32.dll", ExactSpelling = true)]
+    private static extern int GetRgnBox(nint hRgn, out RECT rect);
+    [DllImport("gdi32.dll", ExactSpelling = true)]
+    private static extern bool DeleteObject(nint obj);
+    [DllImport("user32.dll", ExactSpelling = true)]
+    private static extern int GetWindowRgn(nint hwnd, nint hRgn);
 
     // ---- PrintWindow ----
 

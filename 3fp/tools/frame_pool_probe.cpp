@@ -101,7 +101,7 @@ int wmain(const int argc, wchar_t** argv) {
 
     FFF3FPSnapshot before{};
     before.size = sizeof(before);
-    before.version = 8;
+    before.version = 20;
     FFF3FP_GetSnapshot(player, &before);
 
     printf("媒体: %s\n解码: %s\n", path.c_str(), gpu ? "硬解" : "软解");
@@ -117,7 +117,7 @@ int wmain(const int argc, wchar_t** argv) {
         Pump(interval);
         FFF3FPSnapshot s{};
         s.size = sizeof(s);
-        s.version = 8;
+        s.version = 20;
         if (FFF3FP_GetSnapshot(player, &s) != FFFResult::Success) continue;
         const auto elapsed = (GetTickCount64() - start) / 1000;
         if (s.queuedVideoFrames > maxQueue) maxQueue = s.queuedVideoFrames;

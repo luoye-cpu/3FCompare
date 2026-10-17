@@ -43,7 +43,7 @@ std::string Utf8(const wchar_t* wide) {
 void Snapshot(FFF3FPHandle player, FFF3FPSnapshot& s) {
     s = {};
     s.size = sizeof(s);
-    s.version = 8;
+    s.version = 20;
     FFF3FP_GetSnapshot(player, &s);
 }
 } // namespace

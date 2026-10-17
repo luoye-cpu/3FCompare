@@ -155,6 +155,34 @@ run "PNG 16384x64（边界内 ⇒ 应通过）" \
     -f lavfi -i "color=c=green:s=16384x64:r=1" -frames:v 1 \
     -y "$WOUT\\edge\\09b_boundary_16384x64.png"
 
+# ── 9b. 大**面积**样张（docs/79：链重建成本 / 超大图门槛 / 4:2:0 栅格）─────────
+# 为什么要有：上面两张是 64 像素高的退化条（实测 3,451 B / 3,312 B），面积成本≈0，
+#   测不出任何降采样链行为；而且内容是 color=c=blue/green **平色** —— 平色区上
+#   "锚点没漂移"是恒等式而不是结论。这里三张一律用**周期条纹 + 非平色度**：
+#   luma 周期 4px（对角）、chroma 周期 3/5px，对隔行抽取的摩尔纹和 4:2:0 栅格
+#   错位都是苛刻夹具（docs/79 §D2 的 tile 接缝判据要用它）。
+# 产生器成本本机实测：1920x1440 时 geq 条纹 ≈199ms ⇒ 108MP 外推 ≈8s。
+echo "[9b] edge/ (大面积条纹)"
+STRIPE="nullsrc=s=12000x9000:r=1,geq=lum='255*lt(mod(X+Y,4),2)':cb='128+60*lt(mod(X,3),2)':cr='128+60*lt(mod(Y,5),2)'"
+
+run "JPG 12000x9000 条纹（≤16384 ⇒ 今天就能开；量滚轮每格的链重建成本 C0）" \
+  "$FF" -hide_banner -loglevel error \
+    -f lavfi -i "$STRIPE" -frames:v 1 -q:v 2 \
+    -y "$WOUT\\edge\\09c_stripe_12000x9000.jpg"
+
+run "JPG 17000x4000 条纹（>16384 **静图** ⇒ 超大图门槛的静态支）" \
+  "$FF" -hide_banner -loglevel error \
+    -f lavfi -i "${STRIPE/s=12000x9000/s=17000x4000}" -frames:v 1 -q:v 2 \
+    -y "$WOUT\\edge\\09d_stripe_huge_17000x4000.jpg"
+
+run "GIF 17000x300 ×3 帧（>16384 **动图** ⇒ 动图侧今天无尺寸守卫，见 docs/79 §D0）" \
+  "$FF" -hide_banner -loglevel error \
+    -f lavfi -i "${STRIPE/s=12000x9000/s=17000x300}" -frames:v 3 -loop 0 \
+    -y "$WOUT\\edge\\09e_stripe_huge_anim_17000x300.gif"
+# ⚠ >16k 的动图只能用 GIF/APNG：WebP 编码上限实测为
+#   "Picture size is too large. Max is 16383x16383."（17000x300 三帧直接被拒），
+#   所以 07a_anim.webp 那一类格式在超大图这一档根本造不出夹具。
+
 # ── 10. 序列图 img%03d.png ×10（K3：序列应回归定时视频）───────────────────────
 echo "[10] seq/"
 run "序列图 img001..010.png (640x480, 10fps)" \

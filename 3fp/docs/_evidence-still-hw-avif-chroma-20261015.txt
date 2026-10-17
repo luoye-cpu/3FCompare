@@ -1,0 +1,66 @@
+# AVIF 色度取样差异 证据（2026-10-15，重跑现采，非转抄）
+# 判据1 解码器逐位相同：dav1d(软) vs -hwaccel d3d11va + hwdownload，各 10 帧裸流 md5 对比
+07d_anim.avif sw_md5=8aa71a21abac1fabd8324425ca341ac5 hw_md5=8aa71a21abac1fabd8324425ca341ac5 bytes=4608000 4608000
+10g_bitdepth_8bit_640x480.avif sw_md5=9a1939afe3d5f205478c388542f785bf hw_md5=9a1939afe3d5f205478c388542f785bf bytes=4608000 4608000
+
+# 判据2 尺寸阈值与条纹分布（still_hw_probe --pixels 200，adapter 0）
+PlayerApiVersion: 20  reps=1  adapter=0  interleaved A/B/A  capture=200
+
+a_640x480.avif
+      cpu  open=0 mode=Unspecified presented=0 xfer=0.0ms image_info=n/a error=FFF3FP_Open=-1 0.0ms
+      gpu  open=0 mode=Unspecified presented=0 xfer=0.0ms image_info=n/a error=FFF3FP_Open=-1 0.0ms
+      median cpu=-1.0ms gpu=-1.0ms delta=+0.0ms over 0/0 completed
+      cpu-vs-gpu presented pixels: one arm has no capture, not compared
+
+a_1280x720.avif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=0 srcbitdepth=8 pixels=371,150 891x501 bit=8 58.3ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=0 srcbitdepth=8 pixels=371,150 891x501 bit=8 211.9ms
+      median cpu=58.3ms gpu=211.9ms delta=+153.6ms over 1/1 completed
+      cpu-vs-gpu presented pixels: 200 x 200 bit=8/8 max|d|=0.501961 (B) mean=0.0008195  cpu=(0.4980,0.4980,0.4980) gpu=(0.4275,0.4667,1.0000)
+      dump failed: C:/PLAN/3FCompare/_3fc_tmp/hw-image-analysis/gpx3/a0_a_1280x720_cpu.bin
+      dump failed: C:/PLAN/3FCompare/_3fc_tmp/hw-image-analysis/gpx3/a0_a_1280x720_gpu.bin
+
+a_1920x1080.avif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=0 srcbitdepth=8 pixels=371,150 891x501 bit=8 180.2ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=0 srcbitdepth=8 pixels=371,150 891x501 bit=8 214.2ms
+      median cpu=180.2ms gpu=214.2ms delta=+34.1ms over 1/1 completed
+      cpu-vs-gpu presented pixels: 200 x 200 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(1.0000,0.9412,0.0000) gpu=(1.0000,0.9412,0.0000)
+      dump failed: C:/PLAN/3FCompare/_3fc_tmp/hw-image-analysis/gpx3/a0_a_1920x1080_cpu.bin
+      dump failed: C:/PLAN/3FCompare/_3fc_tmp/hw-image-analysis/gpx3/a0_a_1920x1080_gpu.bin
+
+e_1280x720.mp4
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=0 srcbitdepth=8 pixels=371,150 891x501 bit=8 179.8ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=0 srcbitdepth=8 pixels=371,150 891x501 bit=8 211.7ms
+      median cpu=179.8ms gpu=211.7ms delta=+32.0ms over 1/1 completed
+      cpu-vs-gpu presented pixels: 200 x 200 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(1.0000,0.9412,0.0000) gpu=(1.0000,0.9412,0.0000)
+      dump failed: C:/PLAN/3FCompare/_3fc_tmp/hw-image-analysis/gpx3/a0_e_1280x720_cpu.bin
+      dump failed: C:/PLAN/3FCompare/_3fc_tmp/hw-image-analysis/gpx3/a0_e_1280x720_gpu.bin
+a_640x480.avif
+      cpu  open=0 mode=Unspecified presented=0 xfer=0.0ms image_info=n/a error=FFF3FP_Open=-1 0.0ms
+      gpu  open=0 mode=Unspecified presented=0 xfer=0.0ms image_info=n/a error=FFF3FP_Open=-1 0.0ms
+      median cpu=-1.0ms gpu=-1.0ms delta=+0.0ms over 0/0 completed
+      cpu-vs-gpu presented pixels: one arm has no capture, not compared
+a_1280x720.avif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=0 srcbitdepth=8 pixels=371,150 891x501 bit=8 180.2ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=0 srcbitdepth=8 pixels=371,150 891x501 bit=8 212.5ms
+      median cpu=180.2ms gpu=212.5ms delta=+32.3ms over 1/1 completed
+      cpu-vs-gpu presented pixels: 200 x 200 bit=8/8 max|d|=0.501961 (B) mean=0.0008195  cpu=(0.4980,0.4980,0.4980) gpu=(0.4275,0.4667,1.0000)
+a_1920x1080.avif
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=0 srcbitdepth=8 pixels=371,150 891x501 bit=8 181.0ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=0 srcbitdepth=8 pixels=371,150 891x501 bit=8 215.0ms
+      median cpu=181.0ms gpu=215.0ms delta=+34.0ms over 1/1 completed
+      cpu-vs-gpu presented pixels: 200 x 200 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(1.0000,0.9412,0.0000) gpu=(1.0000,0.9412,0.0000)
+e_1280x720.mp4
+      cpu  open=1 mode=Cpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=0 srcbitdepth=8 pixels=371,150 891x501 bit=8 180.8ms
+      gpu  open=1 mode=Gpu  presented=1 xfer=0.0ms frames=1 rot=4294967295[no_rot] srcpixfmt=0 srcbitdepth=8 pixels=371,150 891x501 bit=8 185.6ms
+      median cpu=180.8ms gpu=185.6ms delta=+4.8ms over 1/1 completed
+      cpu-vs-gpu presented pixels: 200 x 200 bit=8/8 max|d|=0.000000 (R) mean=0.0000000  cpu=(1.0000,0.9412,0.0000) gpu=(1.0000,0.9412,0.0000)
+# 条纹分布（>4/255 记为一个受影响像素；probe --pixels 200，adapter 0）
+s_640x480    (无 dump)
+a_1280x720    rect=891x501 max|d|=0.502 受影响像素=430 覆盖行=200/200 覆盖列=26/200
+a_1920x1080   rect=891x501 max|d|=0.000 受影响像素=0 覆盖行=0/200 覆盖列=0/200
+e_1280x720    rect=891x501 max|d|=0.000 受影响像素=0 覆盖行=0/200 覆盖列=0/200
+a_960x540    (无 dump)
+# 补充：更小尺寸的同一判据（probe --pixels 200，adapter 0）
+s_640x480    rect=640x480 max|d|=0.518 受影响像素=896 覆盖行=200/200 覆盖列=76/200
+a_960x540    rect=891x501 max|d|=0.502 受影响像素=483 覆盖行=200/200 覆盖列=41/200

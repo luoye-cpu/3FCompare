@@ -61,7 +61,7 @@ void ReportGeometry(const FFF3FPHandle player, const char* tag) {
     info.size = sizeof(info);
     // v2, not v1: GetRenderTargetInfo versions independently of PlayerApiVersion
     // (v2 made destX/destY signed) and rejects anything else with InvalidArgument.
-    info.version = 2;
+    info.version = 20;
     const auto result = FFF3FP_GetRenderTargetInfo(player, &info);
     if (result != FFFResult::Success) {
         printf("  [%s] GetRenderTargetInfo=%d\n", tag, static_cast<int>(result));
@@ -165,7 +165,7 @@ int wmain(const int argc, wchar_t** argv) {
     if (getImageInfo != nullptr) {
         FFF3FPImageInfo info{};
         info.size = sizeof(info);
-        info.version = 1;
+        info.version = 20;
         if (getImageInfo(player, &info) == FFFResult::Success) {
             printf("GetImageInfo: rotationQuarterTurns=%u (0xFFFFFFFF=unknown)  %s\n",
                 info.rotationQuarterTurns, FlagsText(info.flags));
@@ -208,7 +208,7 @@ int wmain(const int argc, wchar_t** argv) {
     {
         FFF3FPRenderTargetInfo info{};
         info.size = sizeof(info);
-        info.version = 2;
+        info.version = 20;
         setViewRotation(player, 0);
         Pump(400);
         if (FFF3FP_GetRenderTargetInfo(player, &info) != FFFResult::Success) {
@@ -221,7 +221,7 @@ int wmain(const int argc, wchar_t** argv) {
                 Pump(400);
                 FFF3FPVideoPixelProbe probe{};
                 probe.size = sizeof(probe);
-                probe.version = 1;
+                probe.version = 20;
                 probe.x = fixedX;
                 probe.y = fixedY;
                 const auto read = FFF3FP_ReadVideoPixel(player, &probe);

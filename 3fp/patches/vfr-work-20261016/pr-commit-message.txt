@@ -1,0 +1,110 @@
+Player/Render: variable-frame-rate pacing, per-media flip ceiling, seek robustness
+
+Single commit of everything pending locally on top of `main`.
+
+Pacing on variable-frame-rate sources
+- The flip ceiling min(panel rate, content rate) took its content half from
+  AVFrame.duration, falling back to one stream-wide avg_frame_rate. Measured here, a
+  variable-rate MPEG-TS carries no per-frame duration at all (0 of 180 packets) and
+  avg_frame_rate is probed from the stream head, so the ceiling stayed at the first
+  segment's rate for the whole file: a 25+60 fixture was capped at 25 Hz and dropped 68
+  frames in four seconds. Constant-rate TS is unaffected (240 of 240 packets carry a
+  duration), which is why this never surfaced before - every fixture in the tree is
+  constant-rate, and on constant-rate the wrong operands agree with the right one.
+- The per-frame period now comes from the interval actually being presented: the next
+  queued frame's PTS minus this one, then AVFrame.duration, then the container rates,
+  then 0 = unknown. The 0 tier is not optional: without it a frame reaching none of the
+  first three silently keeps the previous media's period. Tier one is restricted to the
+  queue path, because the other call site presents a single frame while the queue still
+  holds pre-seek frames.
+- r_frame_rate is not a peak, and it is not even reliably a bound: swapping two segments
+  of the same content flips 25/1 -> 60/1 for one true peak of 60, a 24+30 file reports
+  120/1 against a peak of 30, and a variable-rate .ts reports 20/1 for a file whose back
+  half really is 40 fps, because MPEG-TS has no index and the demuxer samples the stream
+  head. So the container cannot name the peak in either direction.
+
+The pacing layer now produces a ceiling only
+- The refresh-slot aiming is removed: no calibrated target slot, no fractional slot
+  carry, no submission lead, no deadline wait in the presenter. What is left is one
+  ceiling - min(declared panel rate, per-media ceiling) - plus "present only when there
+  is a new picture", with Present(1, 0) already clamping each flip to a vblank on a
+  fixed-refresh panel.
+- Two measurements on a 144 Hz panel support this. On a quiet machine the aimed path and
+  the fully-yielded variable-refresh path both put 100.0% of on-screen holds inside the
+  rounding band with zero out-of-band samples at 60 fps. And a 4K 60 fps run had 100% of
+  4214 submit samples inside one refresh period while 39% of its flips never reached the
+  display: submission accuracy was never the limiting factor.
+- Measured again at the ratio where slot distribution could plausibly matter - 120 fps on
+  144 Hz, 1.200 refreshes per frame, band {1,2} - the paired runs read 99.7% and 99.9%
+  in band without the aiming against 99.8% and 100.0% with it, and never-composited flips
+  fell from 23.3%/29.6% to 6.7%/4.5%.
+- The panel half of the ceiling uses the declared refresh rate only. It used to prefer a
+  period calibrated from swap-chain frame statistics, which goes self-referential once
+  variable refresh is active - the panel paces itself to the frames we submit, so
+  min(panel, content) becomes min(content, content) - and the session splits two discard
+  buckets on that same number, with only one of them feeding the adaptive-downscale
+  policy. Since there is no user-mode API that reports variable-refresh state, the
+  unsynchronized path stays a declared option, and the declared rate is re-read when the
+  calibrated period drifts more than 5% away from it, so a panel mode change during
+  playback does not leave a stale ceiling behind.
+- The content half is produced per media when it is opened, from r_frame_rate (then
+  avg_frame_rate, then none), and may only rise afterwards: a faster per-frame interval
+  observed later raises the ceiling, and nothing lowers it until the media changes. Both
+  directions are measured, not assumed - the ablation that disables the rise makes the
+  reported ceiling stay at 20 Hz for a file whose back half is 40 fps, and it also shows
+  the harm is limited to the reported value: the video still presented 40.1 fps with zero
+  drops, because a new picture does not wait on the schedule. Clamping video to the
+  ceiling would only ever be enforceable by discarding real frames, so it does not.
+- Kept as instrumentation rather than control: the measured panel period, the on-screen
+  hold-band counters, the never-composited-flip counter, and an opt-in per-interval trace
+  (FPT_HOLD_TRACE=1) that prints flips / new pictures / never-composited / expected /
+  actual for each sampled hold. That trace is what attributed every remaining out-of-band
+  sample to either a one-off arrival gap or the single interval straddling the
+  calibration restart, instead of leaving them as an unexplained spread.
+
+frameRateMode is measured rather than compared
+- It used to match av_guess_frame_rate() against r_frame_rate, which reported "constant"
+  for all three genuinely variable fixtures, and again whenever r_frame_rate was invalid,
+  because the nominal rate was then a copy of the value being compared with. It now reads
+  the spread of the per-frame intervals actually presented, with container-rate fallbacks
+  excluded as evidence, and answers "unknown" until twelve frames have been seen. The
+  verdict is published twice on purpose: at frame 12 only the first segment has been
+  observed, and it is republished when the spread widens.
+
+Seek
+- A failed seek could end playback. Timestamp-seeking a demuxer without read_seek scans
+  the input for a timestamp pair; when that finds nothing it returns failure but leaves
+  the reader at end of file, so the next read returns EOF, the pending packet list is
+  empty and the flush-at-end path marks the session ended - while the error message that
+  was emitted said playback remained active. Seeking to position 0 needs no
+  timestamp-to-byte mapping, so it now falls back to a byte seek; the reader is rolled
+  back and flushed on any failed seek, and the post-seek decode fill is skipped when the
+  seek failed. Measured on a bare Annex-B h264 stream: previously 0 decoded frames and
+  state Ended; now it plays, and reports the synthesized clock the source implies rather
+  than pretending to know its rate.
+
+Read-back
+- FFF3FP_GetPresentPacingStatus gains neverCompositedPresents, appended at the end of the
+  size-checked struct: hosts built against the older header keep loading and lose only
+  that one call. Fields whose meaning moved are named in the header: gridLocked now says
+  the ceiling is in force, pacingBypass 2 now says no ceiling is available (no output
+  window, or no declared rate), and lastSlotError100ns is now the deviation of a submit
+  interval from the ceiling period rather than from an aimed slot. No field was added,
+  removed or reordered.
+
+Verification (Windows, 144 Hz panel; each arm is a separate process)
+- Fixture self-checks: 9 of 9 pass, including a constant-rate control, a bare-stream
+  control and the 120 fps fixture used for the ratio-1.2 measurement.
+- Windowless content-period probe, five arms: 0 failures. The two variable-rate arms read
+  two plateaus each ([0.00s 2.61s @20.0Hz][2.62s 1.87s @40.0Hz]) with zero drops, the two
+  constant-rate arms read one plateau each, and the bare stream reads one at its
+  synthesized rate. Ablation that restores the old two-tier source collapses the .ts arm
+  to a single 20 Hz plateau while the .mp4 arm stays green - the red comes from what the
+  container does not carry, not from the probe.
+- Windowed pacing probe: 60 fps arms put the ceiling at 60.00 Hz with 1.000 flips per
+  presented frame and 100.0% of holds in band on a quiet machine; the 240 fps arm puts it
+  at the panel's 144.02 Hz and accounts all 528 surplus frames in the display-rate bucket
+  with the pipeline bucket at zero; the variable-refresh arm reports gridLocked 0 with
+  bypass 1 throughout while the ceiling still holds.
+- Absolute timing readings taken while other processes were active are recorded as
+  undecided rather than as kernel results.

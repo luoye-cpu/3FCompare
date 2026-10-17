@@ -40,7 +40,7 @@ std::string Utf8(const wchar_t* wide) {
 void Show(const FFF3FPHandle player, const char* when) {
     FFF3FPSnapshot s{};
     s.size = sizeof(s);
-    s.version = 8;
+    s.version = 20;
     FFF3FP_GetSnapshot(player, &s);
     printf("  %-10s hdrFormat=%u hdrPath=%u 源峰值=%u 呈现=%llu 丢帧=%llu outputBits=%u\n",
         when, s.hdrFormat, s.hdrProcessingPath, s.sourcePeakNits,

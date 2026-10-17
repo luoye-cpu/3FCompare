@@ -54,6 +54,10 @@ internal static class Program
         try { _3FCompare.Diagnostics.HookDetector.ProbeAndLog(); } catch { }
         // 双写器：全代码库 Console.Error.WriteLine 自动同步落盘（55 处调用点零改动）
         _3FCompare.Core.Diagnostics.ConsoleErrorRerouter.Install();
+        // 原生崩溃取证（docs/50 §四之四）：VEH 装在**任何可能崩的初始化之前**，
+        // 但排在日志系统之后 —— 它自己要用 AppLog 记"装上了没有"。
+        // 与 CrashGuard 相反，本仪器**对所有 `--` 自动化档也生效**：我们要的正是测量轮的崩溃现场。
+        try { _3FCompare.Diagnostics.NativeFaultRecorder.Install(AppContext.BaseDirectory); } catch { }
         _3FCompare.Core.Diagnostics.AppLog.Info("App",
             $"启动 args=[{string.Join(' ', args)}]");
 
@@ -132,6 +136,24 @@ internal static class Program
             var times = args.Length >= 3 && int.TryParse(args[2], out var ct)
                 ? ct : _3FCompare.Diagnostics.CrashGuard.MaxConsecutiveRestarts - 1;
             Environment.Exit(_3FCompare.Diagnostics.CrashGuard.RunSelfTest(counter, times));
+        }
+
+        // ── 原生崩溃取证的行为判据（docs/50 §四之四）──
+        // 真造一次访问违规，验 VEH 那条路确实落盘。为什么必须真崩：这台机器上托管钩子
+        // （AppDomain.UnhandledException）已被实测**收不到**原生 AV（探针跑过：处理器一次没进，
+        // 进程直接以 0xC0000005 消失）⇒ 只有"真崩 + 真查文件"能证明仪器接上了，
+        // 光检查"handler 装上了没有"属于返回值型假绿。
+        // 判据（外层脚本用）：本进程以 0xC0000005 退出，且 logs/faults/ 下出现**新的** fault-*.txt，
+        // 内含 `code=0xc0000005`、`ip=<某模块>+0x…`（不是 outside）、`命中=>0`。
+        if (args.Length >= 1 && args[0] == "--faultprobe")
+        {
+            var installed = _3FCompare.Diagnostics.NativeFaultRecorder.IsInstalled;
+            _3FCompare.Core.Diagnostics.AppLog.Info("Fault",
+                $"[faultprobe] handler={installed} 即将制造一次真实访问违规");
+            Console.Error.WriteLine($"[faultprobe] installed={installed}");
+            _3FCompare.Diagnostics.NativeFaultRecorder.ForceAccessViolationForProbe();
+            // 走到这里说明仪器没能拦下崩溃（不该发生）。退出码取 1，判据据此判红而不是判绿。
+            Environment.Exit(1);
         }
 
         // ── 崩溃自愈：守护模式 ──
@@ -282,16 +304,45 @@ internal static class Program
     /// 构建脚本（构建全部.ps1 / native/wgc_capture/build.sh）单独产出，开发者磁盘上的版本
     /// 可能比当前发布批次里内嵌的那份**更新**；按内容覆盖会把新版降级成旧基线
     /// （2026-09-16 内核事故：API 15 被覆盖成 API 14，表现为会话全部创建失败）。
-    /// 内嵌资源只作"磁盘上确实没有"时的兜底，所以写盘仅限缺失时。</para></summary>
+    /// 内嵌资源只作"磁盘上确实没有"时的兜底，所以写盘仅限缺失时。</para>
+    ///
+    /// <para><b>架构守卫（docs/51 §二）</b>：上面的"已存在即跳过"在**跨架构**场景下会变成
+    /// 隐患——同一个 <c>AppContext.BaseDirectory</c> 若先后被 x64 与 arm64 两个包用过，
+    /// 磁盘上残留的同名 DLL 是**另一个架构**的，它既不缺、也不报错，只会在加载时失败。
+    /// 因此这里对"磁盘上已存在"的那份做一次 PE 机器类型核对：错配则**明确拒绝使用**
+    /// （记 Error 日志 + 抛异常，由调用方的 catch 转成可读的降级原因），
+    /// 而不是把一份必然加载失败的 DLL 交给运行时。</para></summary>
     private static void ExtractEmbedded(string dllName)
     {
         var target = Path.Combine(AppContext.BaseDirectory, dllName);
-        if (File.Exists(target)) return; // 已存在则跳过（见上方安全策略）
+        if (File.Exists(target))
+        {
+            AssertArchMatches(dllName, target);
+            return; // 已存在则跳过（见上方安全策略）
+        }
         var asm = System.Reflection.Assembly.GetExecutingAssembly();
         using var stream = asm.GetManifestResourceStream(dllName);
         if (stream is null) return; // 未嵌入（开发运行或非内嵌发布）
         var data = new byte[stream.Length];
         stream.ReadExactly(data, 0, data.Length);
         File.WriteAllBytes(target, data);
+    }
+
+    /// <summary>核对磁盘上那份原生 DLL 的架构是否与当前进程相容（docs/51 §二）。
+    /// 只拦**已确证**的错配；读不出 PE 头时放行（见
+    /// <see cref="_3FCompare.Core.Backend.NativeArchGuard.IsLoadableByCurrentProcess"/>）。</summary>
+    private static void AssertArchMatches(string dllName, string path)
+    {
+        var machine = _3FCompare.Core.Backend.NativeArchGuard.ReadMachineFromFile(path);
+        if (_3FCompare.Core.Backend.NativeArchGuard.IsLoadableByCurrentProcess(machine)) return;
+
+        var message =
+            $"原生库架构不匹配：{dllName} 是 " +
+            $"{_3FCompare.Core.Backend.NativeArchGuard.Describe(machine)}，" +
+            $"而当前进程是 {_3FCompare.Core.Backend.NativeArchGuard.DescribeProcess()}。" +
+            $"该文件位于 {path} —— 通常是**上一个不同架构的包**在同一目录留下的残留。" +
+            "请删除该文件后重启（或改用一个干净的发布目录）。";
+        _3FCompare.Core.Diagnostics.AppLog.Error("Native", message);
+        throw new InvalidOperationException(message);
     }
 }

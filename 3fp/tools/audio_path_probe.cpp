@@ -81,7 +81,7 @@ int wmain(const int argc, wchar_t** argv) {
     for (int i = 0; i < 200 && !g_open; ++i) Pump(50);
 
     FFF3FPSnapshot s{};
-    s.size = sizeof(s); s.version = 8;
+    s.size = sizeof(s); s.version = 20;
     FFF3FP_GetSnapshot(player, &s);
     printf("\n===== %s =====\n", label.c_str());
     printf("视频流=%d  音频流=%d  时长=%.2fs  解码器=%d\n",
