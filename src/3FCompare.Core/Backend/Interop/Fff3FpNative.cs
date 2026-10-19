@@ -52,7 +52,9 @@ internal enum FffPlayerState : uint
     Closed = 7,
 }
 
-/// <summary>FFF3FPConfiguration 序列表（对照 FFF.Player.Api.h v12 逐字段对齐）。</summary>
+/// <summary>FFF3FPConfiguration 序列表，逐字段对照内核头 FFF.Native/3FP/Api/FFF.Player.Api.h。
+/// 内核对 version 严格相等、对 size 按下界拒收（PlayerApi.cpp:96），所以这里的字段清单就是
+/// 会话能否建立的先决条件；tools/check_kernel_config_abi.py 与 SnapshotLayoutTests.cs 看守它。</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal struct Fff3FpConfiguration
 {
@@ -79,14 +81,27 @@ internal struct Fff3FpConfiguration
     /// <summary>v16：SDR 源的 scRGB 呈现策略。0=从不（历史行为），
     /// 1=自动（显示器开启 Advanced Color 时，位深 &gt;8 或广色域的 SDR 源走 16bit scRGB 链）。</summary>
     public uint SdrScRgbMode;
+    // 上游 578f80b 追加的自适应档（结构体 80→112 B）。内核 FFF3FP_Create 按
+    // `size < sizeof(FFF3FPConfiguration)` 拒收，所以这几个字段必须声明，否则每次建会话都失败。
+    // 两个开关留 0 = 关闭（与追加前行为一致），阈值取内核头自己的默认值。
+    public uint AdaptiveDownscaleBeforeUpload;
+    public uint AdaptiveDownscaleDropPercent;
+    public uint AdaptiveDecoderThreads;
+    public uint MinSoftwareDecoderThreads;
+    public uint MaxSoftwareDecoderThreads;
+    public uint DecoderGrowDropPercent;
+    public uint DecoderShrinkDropPercent;
 }
 
-/// <summary>FFF3FPSnapshot 完整布局（对照 FFF.Player.Api.h v9，逐字段对齐）。</summary>
+/// <summary>FFF3FPSnapshot 完整布局，逐字段对照内核头 FFF.Native/3FP/Api/FFF.Player.Api.h。
+/// 顺序与宽度由 tests/3FCompare.Core.Tests/SnapshotLayoutTests.cs 现场解析内核头来对撞，
+/// 所以这里不写尺寸常数——内核 GetSnapshot 按 <c>size &lt; sizeof(FFF3FPSnapshot) || version !=
+/// PlayerApiVersion</c> 直接拒收（PlayerSession.cpp:2469），少一个字段或错一位就让整个快照读数失效。</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal struct Fff3FpSnapshot
 {
     public uint Size;
-    public uint Version;            // GetSnapshot 要求 == 8
+    public uint Version;            // == 内核 PlayerApiVersion，见 Fff3FpEngine.SnapshotVersion
     public uint State;
     public uint Decoder;
     public uint RequestedColorMode;
@@ -110,13 +125,6 @@ internal struct Fff3FpSnapshot
     public uint QueuedVideoFrames;
     public uint SourcePeakNits;
     public ulong DecodedAudioFrames;
-    // 与内核 FFF3FPSnapshot 中部字段对齐（IAMF）：iamfActive / iamfChannels / iamfSoundSystem
-    // 插在 decodedAudioFrames 与 audioPosition100ns 之间（内核 FFF.Player.Api.h:200→206-208→209），
-    // 不是尾追加。顺序错一位，其后所有音频诊断字段全部按错偏移读。
-    public uint IamfActive;
-    public uint IamfChannels;
-    // 内核是 std::int32_t（不是 uint）：OAR sound system 号，允许取负/扩展值。
-    public int IamfSoundSystem;
     public long AudioPosition100ns;
     public long BufferedAudio100ns;
     public ulong AudioUnderruns;
@@ -139,25 +147,14 @@ internal struct Fff3FpSnapshot
     public uint HdrFormat;
     public uint CompatibleHdrFormats;
     public uint HdrProcessingPath;
-    // ⛔ DEPRECATED ABI 占位槽（5 × uint32 = 20 B）——**禁止删除，禁止改名，禁止改序**。
-    //
-    // 内核 FFF.Player.Api.h（出货树 :219-223 / 内核树 :250-254）把这五个槽位标为
-    // "DEPRECATED ABI (slots retained, always zero)"：枚举值与字段都还在，值恒 0。
-    // 中性化的正确动作是「改名 + 恒零 + DEPRECATED 注释」，**不是删字段**。
-    //
-    // 2026-10-14 事故：工作区把这五行整体删掉了（git show a55e347 里它们还带着
-    // 旧字段名，此处不再复述），而内核同期只做了改名保留 ⇒ 两侧口径分叉。
-    // 后果不是"短一截"，而是 dynamicHdrMetadataActive 之后每个字段偏移整体前移
-    // 20 B，且内核 PlayerSession.cpp:1918 的 `size < sizeof(FFF3FPSnapshot)` 闸门
-    // 直接返回 InvalidArgument（镜像 376 < 内核 392）。
-    //
-    // 守护：tests/3FCompare.Core.Tests/SnapshotLayoutTests.cs 从内核头逐字段对撞偏移，
-    // 删掉这里任一行都会立即判红。总尺寸应为 392。
+    // ⛔ DEPRECATED ABI 保留槽（5 × uint32 = 20 B）——**禁止删除，禁止改名，禁止改序**。
+    // 内核把这几个槽标为 "DEPRECATED ABI (slots retained, always zero)"：中性化的正确动作是
+    // 「改名 + 恒零」，不是删字段。2026-10-14 工作区整块删过它们 ⇒ 其后每个字段偏移整体前移 20 B，
+    // 并被内核的 size 闸门直接拒收。守护：SnapshotLayoutTests.cs 逐字段对撞，删一行即判红。
     public uint HdrDpProfile;
     public uint HdrDpLevel;
-    // 这两个名字按内核头的原始大小写（`hasHDRdpRpu` / `hasHDRdpEnhancementLayer`）照搬，
-    // 首字母大写后即 `HasHDRdpRpu` / `HasHDRdpEnhancementLayer`——托管镜像与内核头
-    // 逐字段对撞时靠"首字母大写"这套唯一映射，写成 HdrDp 会让映射失配。
+    // 按内核头的原始大小写照拼（hasHDRdpRpu / hasHDRdpEnhancementLayer）：镜像与内核头逐字段
+    // 对撞靠"首字母大写"这一套唯一映射，写成 HdrDp 会让映射失配。
     public uint HasHDRdpRpu;
     public uint HasHDRdpEnhancementLayer;
     public uint HdrDpEnhancementLayer;
@@ -167,25 +164,30 @@ internal struct Fff3FpSnapshot
     public uint DisplayPeakNits;
     public uint DisplayFullFramePeakNits;
     public uint EffectiveTargetPeakNits;
-    // API v17：ST 2094 动态元数据诊断（逐帧 HDR10+ / HDR Vivid 解析结果）。
-    // ⚠ 必须与内核 FFF3FPSnapshot 尾部逐字段对齐：内核按
-    // `size < sizeof(FFF3FPSnapshot)` 判据拒绝过小的调用方，字段少一个
-    // 就会让 GetSnapshot 整体失效（本类型少长 32 字节即触发）。
+    // ST 2094 动态元数据诊断（逐帧 HDR10+ / HDR Vivid 解析结果）。
     public uint DynamicMetadataWindows;
     public uint DynamicMetadataDegrade;
     public ulong DynamicMetadataSerial;
     public ulong DynamicMetadataHeldFrames;
     public uint DynamicMetadataTargetedNits;
-    // API 尾追加（内核 FFF.Player.Api.h:250）：iamfContentChannels 在整个结构体最尾部
-    // （content 声明的声道数，≠ iamfChannels 的渲染目标声道数）；
-    // 紧随其后的 API v19 iamfBinaural（:258）才是新的最后一个字段。
-    public uint IamfContentChannels;
-    // API v19 尾追加（内核 FFF.Player.Api.h:258，API v19 时是最后一个字段）：
-    // 1=libiamf 双耳(HRTF)渲染直接出立体声，0=扬声器布局(7.1.4)由 swr 折叠。
-    public uint IamfBinaural;
-    // API v20 尾追加：1=非 IAMF 多声道床在立体声设备上由 OBR HRTF 双耳渲染（空间定位保留），
-    // 0=swr 矩阵折叠。位于 iamfBinaural 之后、结构体最尾部（内核 FFF.Player.Api.h:268）。
-    public uint AudioBinaural;
+    // IAMF 空间音频组。位置由内核头裁决，不要按"追加式 ABI"推断它们就在结构体最尾部：
+    // videoUpload100ns 就插在 iamfSoundSystem 与 iamfContentChannels 之间。
+    public uint IamfActive;
+    public uint IamfChannels;
+    public int IamfSoundSystem;      // 内核是 std::int32_t：OAR sound system 号允许取负/扩展值
+    public ulong VideoUpload100ns;
+    public uint IamfContentChannels; // content 声明的声道数（≠ iamfChannels 的渲染目标声道数）
+    public uint IamfBinaural;        // 1=libiamf 双耳(HRTF)直接出立体声，0=布局由 swr 折叠
+    public uint AudioBinaural;       // 1=非 IAMF 多声道床由 OBR HRTF 双耳渲染，0=swr 矩阵折叠
+    // 上传/降采样通路记账（内核 578f80b 追加）。
+    public long AudioDelay100ns;
+    public ulong UploadMapWait100ns;
+    public ulong UploadCopy100ns;
+    public ulong DownscaleResample100ns;
+    public ulong ScalePassCount;
+    public ulong UploadCount;
+    public ulong UploadCopyBytes;
+    public uint UploadPath;
 }
 
 /// <summary>FFF3FPVideoPixelProbe 前置关键字段（ReadPixel 用）。</summary>
@@ -219,10 +221,10 @@ internal struct Fff3FpHdrSignalDiagnostics
     public ulong SetHdrMetaDataCalls;
     public ulong SetHdrMetaDataSuppressed;
     /// <summary>DXGI 原值：max/min mastering 亮度单位 1/10000 cd/m²，两个光级单位 cd/m²。</summary>
-    public uint LastSignalledMaxMasteringLuminance;
-    public uint LastSignalledMinMasteringLuminance;
-    public uint LastSignalledMaxContentLightLevel;
-    public uint LastSignalledMaxFrameAverageLightLevel;
+    public uint LastSignaledMaxMasteringLuminance;
+    public uint LastSignaledMinMasteringLuminance;
+    public uint LastSignaledMaxContentLightLevel;
+    public uint LastSignaledMaxFrameAverageLightLevel;
     public uint SwapChainHdrEnabled;
     public uint Reserved;
 }

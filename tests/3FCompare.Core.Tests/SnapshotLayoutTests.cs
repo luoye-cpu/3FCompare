@@ -5,7 +5,7 @@ using _3FCompare.Core.Backend.Interop;
 namespace _3FCompare.Core.Tests;
 
 /// <summary>
-/// <c>FFF3FPSnapshot</c> 托管镜像与出货树内核头的<b>逐字段偏移对撞</b>。
+/// <c>FFF3FPSnapshot</c> 与 <c>FFF3FPConfiguration</c> 的托管镜像 ↔ 出货树内核头<b>逐字段偏移对撞</b>。
 ///
 /// <para><b>为什么必须存在这个测试</b>（2026-10-14 事故）：工作区做本体中性化时，把快照里的
 /// 五个 <c>hdrDp*</c> DEPRECATED 槽位<b>整体删除</b>，而内核同期做的是"改名 + 恒零 +
@@ -19,10 +19,10 @@ namespace _3FCompare.Core.Tests;
 /// <para><b>期望尺寸从内核头推导，不写死</b>：内核尾追加字段后本测试自动跟着走，
 /// 不会因为一个硬编码的 392 在下次增长时变成假绿或假红。</para>
 ///
-/// <para><b>只跟出货树（third_party\fff_project）</b>：那是进包的那棵树。内核树
-/// （3fp\kernel）当前是 376 布局（有 videoUpload100ns / audioDelay100ns，
-/// 没有 dynamicMetadata* 五个），两树 <c>GetApiVersion</c> 同为 20 却布局分叉——
-/// 那条分叉由 <c>发布门禁</c> 的 pairing 尺寸闸负责，不归本测试管。</para>
+/// <para><b>两棵树现在交同一份布局</b>：出货树与内核树都是上游 <c>578f80b</c>（PR #31），
+/// 曾经同为 API 20 却布局分叉（出货树 392 / 内核树 376）的状态已不存在，
+/// <see cref="两棵内核树交同一份快照布局"/> 负责把它钉住。按 DLL 实测尺寸的闸在发布门禁的
+/// pairing 步，不归单元测试管。</para>
 /// </summary>
 public class SnapshotLayoutTests
 {
@@ -84,6 +84,12 @@ public class SnapshotLayoutTests
 
     private static (int Size, int Align) ScalarShape(string[] lines, string cType)
     {
+        // 指针，以及 `using X = void(__cdecl*)(...)` 这种函数指针别名：x64 上都是 8 B。
+        // FFF3FPConfiguration 的 outputWindow / audioEndpointIdUtf8 / eventCallback 走这两条。
+        if (cType.EndsWith("*", StringComparison.Ordinal)) return (8, 8);
+        if (lines.Any(l => StripComment(l).TrimStart().StartsWith($"using {cType} =", StringComparison.Ordinal)))
+            return (8, 8);
+
         // 枚举类型：底层宽度决定对齐与尺寸
         if (Regex.IsMatch(cType, @"^enum\s+class\b") || !cType.Contains("::") && !cType.Contains('*'))
         {
@@ -127,7 +133,7 @@ public class SnapshotLayoutTests
         var result = new List<NativeField>();
         foreach (var line in ReadStructBody(lines, structName))
         {
-            var scalar = Regex.Match(line, @"^((?:const\s+)?[\w:]+(?:\s+[\w:]+)*(?:\s*\*)?)\s+(\w+);$");
+            var scalar = Regex.Match(line, @"^((?:const\s+)?[\w:]+(?:\s+[\w:]+)*(?:\s*\*)?)\s+(\w+)\s*(?:=[^;]*)?;$");
             Assert.True(scalar.Success,
                 $"SnapshotLayoutTests 解析 {structName} 时遇到无法解析的成员行：{line}");
             var type = scalar.Groups[1].Value;
@@ -149,29 +155,45 @@ public class SnapshotLayoutTests
         return (end + align - 1) / align * align;
     }
 
-    /// <summary>
-    /// 原生 camelCase → 托管 PascalCase。内核头里少数字段名在托管侧有历史别名，
-    /// 一律登记在这张表里；映射不出来就炸，不允许静默跳过字段。
-    /// </summary>
-    private static string ManagedNameOf(NativeField f) => f.Name switch
+    /// <summary>原生 camelCase → 托管 PascalCase。内核头里少数字段名在托管侧有历史别名，
+    /// 一律登记在这张表里；两个名字都映射不出来时仍按默认名报"托管缺字段"，不会静默跳过。</summary>
+    private static string ManagedNameOf(Type managedType, NativeField f)
     {
-        "decodeMode" => "Decoder",   // 托管侧历史命名，内核侧叫 decodeMode
-        _ => char.ToUpperInvariant(f.Name[0]) + f.Name[1..],
-    };
+        var plain = char.ToUpperInvariant(f.Name[0]) + f.Name[1..];
+        if (managedType.GetField(plain) is not null) return plain;
+        return f.Name switch
+        {
+            // 快照镜像历史上把 decodeMode 叫 Decoder；配置镜像就叫 DecodeMode。
+            "decodeMode" => "Decoder",
+            _ => plain,
+        };
+    }
 
     [Fact]
-    public void 快照镜像与出货树内核头逐字段偏移一致()
+    public void 快照镜像与出货树内核头逐字段偏移一致() =>
+        AssertMirrorsHeader(typeof(Fff3FpSnapshot), "FFF3FPSnapshot");
+
+    /// <summary>
+    /// 配置结构走同一套对账。<c>FFF3FP_Create</c> 的 <c>size &lt; sizeof(FFF3FPConfiguration)</c>
+    /// 是硬闸，而这条链路此前只有 python 侧的 tools/check_snapshot_pairing_matrix.py 在看，
+    /// 它又没接进发布门禁 ⇒ 2026-10-20 内核把结构体从 80 B 追加到 112 B 时，单元测试一路全绿、
+    /// 产品却已经建不出会话。补这条，是为了让"跑测试"本身就带这个牙。
+    /// </summary>
+    [Fact]
+    public void 配置镜像与出货树内核头逐字段偏移一致() =>
+        AssertMirrorsHeader(typeof(Fff3FpConfiguration), "FFF3FPConfiguration");
+
+    private static void AssertMirrorsHeader(Type managedType, string structName)
     {
         var lines = ReadHeader(HeaderRelativePath);
-        var fields = ParseStruct(lines, "FFF3FPSnapshot");
+        var fields = ParseStruct(lines, structName);
         var expectedSize = NativeSizeOf(fields);
 
         var mismatches = new List<string>();
-        var managedType = typeof(Fff3FpSnapshot);
 
         foreach (var f in fields)
         {
-            var managedName = ManagedNameOf(f);
+            var managedName = ManagedNameOf(managedType, f);
             var field = managedType.GetField(managedName);
             if (field is null)
             {
@@ -188,7 +210,7 @@ public class SnapshotLayoutTests
 
         var managedNames = managedType.GetFields().Select(x => x.Name)
             .OrderBy(n => n, StringComparer.Ordinal).ToList();
-        var expectedNames = fields.Select(ManagedNameOf)
+        var expectedNames = fields.Select(x => ManagedNameOf(managedType, x))
             .OrderBy(n => n, StringComparer.Ordinal).ToList();
         if (!managedNames.SequenceEqual(expectedNames))
         {
@@ -202,7 +224,7 @@ public class SnapshotLayoutTests
             mismatches.Add($"总尺寸 内核头推导={expectedSize} 托管={managedTotal}");
 
         Assert.True(mismatches.Count == 0,
-            $"FFF3FPSnapshot 托管镜像与 {HeaderRelativePath} 不一致：\n  "
+            $"{structName} 托管镜像与 {HeaderRelativePath} 不一致：\n  "
             + string.Join("\n  ", mismatches));
     }
 
@@ -250,22 +272,28 @@ public class SnapshotLayoutTests
     }
 
     /// <summary>
-    /// 两棵树同为 API 20 但布局分叉（出货树 392 / 内核树 376）这件事，本测试只负责
-    /// <b>记录并断言"镜像跟的是出货树"</b>——镜像里不能有内核树独有的那两个 100ns 字段。
-    /// 真正的"按 DLL 实测尺寸"闸在发布门禁的 pairing 步，不归单元测试管。
+    /// 两棵内核树必须交同一份 <c>FFF3FPSnapshot</c> 布局：逐字段名序列相等、推导尺寸相等，
+    /// 且托管镜像含尾组的上传计时字段。
+    /// <para>历史上两树同为 API 20 而布局分叉（出货树 392 / 内核树 376），镜像当时按"进包的那棵树"
+    /// 排除了内核树独有的 <c>videoUpload100ns</c> / <c>audioDelay100ns</c>。2026-10-20 内核补丁
+    /// 全部合并上游后分叉消失，所以这条从"镜像必须短一截"翻成"两树必须等长"——
+    /// 谁再造出分叉，它就判红。</para>
     /// </summary>
     [Fact]
-    public void 镜像跟随出货树而非内核树()
+    public void 两棵内核树交同一份快照布局()
     {
-        var managedNames = typeof(Fff3FpSnapshot).GetFields().Select(x => x.Name).ToList();
-        Assert.DoesNotContain("VideoUpload100ns", managedNames);
-        Assert.DoesNotContain("AudioDelay100ns", managedNames);
-        Assert.Contains("DynamicMetadataWindows", managedNames);
-        Assert.Contains("AudioBinaural", managedNames);
+        var shipped = ParseStruct(ReadHeader(HeaderRelativePath), "FFF3FPSnapshot");
+        var kernel = ParseStruct(ReadHeader(KernelTreeHeaderRelativePath), "FFF3FPSnapshot");
 
-        // 内核树那侧确实还留着这两个字段 ⇒ 分叉仍然真实存在，别把这条断言读成"两树已对齐"。
-        var kfText = string.Join("\n", ReadHeader(KernelTreeHeaderRelativePath));
-        Assert.Contains("videoUpload100ns", kfText);
-        Assert.Contains("audioDelay100ns", kfText);
+        Assert.Equal(kernel.Select(f => f.Name).ToList(), shipped.Select(f => f.Name).ToList());
+        Assert.Equal(NativeSizeOf(kernel), NativeSizeOf(shipped));
+
+        // 镜像跟的是这份共同布局：尾组的上传计时字段必须在，字段条数必须与内核头相等
+        // （逐字段偏移由 ManagedStructMirrorsNativeLayout 对撞，这里不重复它的名字映射规则）。
+        var managedNames = typeof(Fff3FpSnapshot).GetFields().Select(x => x.Name).ToList();
+        Assert.Contains("VideoUpload100ns", managedNames);
+        Assert.Contains("AudioDelay100ns", managedNames);
+        Assert.Contains("UploadPath", managedNames);
+        Assert.Equal(shipped.Count, managedNames.Count);
     }
 }

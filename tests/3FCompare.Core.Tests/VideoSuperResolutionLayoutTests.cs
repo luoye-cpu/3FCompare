@@ -7,68 +7,60 @@ namespace _3FCompare.Core.Tests;
 /// <summary>
 /// RTX VSR 状态结构的托管镜像 ↔ 内核布局对账。
 ///
-/// 为什么这个测试的形状与 <see cref="HdrSignalDiagnosticsLayoutTests"/> 不同：
-/// 那份从**出货内核头**（third_party 那棵）解析字段再逐偏移比；而
-/// <c>FFF3FPVideoSuperResolutionStatus</c> 目前**只存在于上游 PR #19 的头里**，
-/// 出货头里连这个类型都没有（实测 <c>grep VideoSuperResolution third_party/.../3FP</c> = 0，
-/// 盘上那份 DLL 的 93 个导出里也没有 <c>Set/GetVideoSuperResolutionStatus</c>）。
-/// 所以这里改成两条能各自成立、又都能在关键时刻变红的判据：
-///   ① 把托管镜像自己钉死成内核声明的 44 字节 / 11 个 u32 / 固定顺序
-///      —— 内核 <c>PlayerSession.cpp:2002</c> 是 <c>size &lt; sizeof || version != 20</c> 才拒，
-///      镜像被改小会读不到（响），被改成"同尺寸换顺序"就会过闸门并按错偏移读（静默错），
-///      只有逐字段偏移断言能挡后者。
-///   ② 断言出货内核头**仍然没有**这个类型。等 VSR 真被移植进出货树，这条会判红，
-///      逼着改的人把它换成 ①+头解析的真交叉校验 —— 而不是让镜像在没人对账的情况下漂走。
+/// <para>为什么不是把数字再抄一遍：抄两份常数只能挡住"两边同时改错同一处"以外的情况，
+/// 而真正的事故形态是**同尺寸、换字段顺序** —— 那时 <c>Marshal.SizeOf</c> 仍然相等，
+/// 内核的 size 闸门照样放行，字段却按错偏移读出（诊断值全错却没人报错）。所以字段序列
+/// 从**出货内核头**解析，逐个偏移与 <c>Marshal.OffsetOf</c> 比。</para>
+///
+/// <para>本文件早期不是这个形状：<c>FFF3FPVideoSuperResolutionStatus</c> 当时只存在于上游
+/// PR #19 的头里，出货头连这个类型都没有，于是只能"自钉 44 字节 + 断言出货头仍然没有它"。
+/// 2026-10-20 该类型随 PR #19 一族合并进上游、出货树取到同一个提交，那条记账断言的前提结束，
+/// 按它自己写明的处置换成了现在的按头解析交叉校验。</para>
+///
+/// <para>头文件读不到、或出现解析不了的成员行/未登记的类型，一律抛，不许静默少测一个字段。</para>
 /// </summary>
 public class VideoSuperResolutionLayoutTests
 {
     private const string ShippingHeaderRelativePath =
         @"third_party\fff_project\FFF.Native\3FP\Api\FFF.Player.Api.h";
 
-    /// <summary>内核结构体的字段顺序（源自 PR #19 的 FFF.Player.Api.h:649-670，全部 u32）。
-    /// 原生名 → 托管名（首字母大写）。</summary>
-    private static readonly (string Native, string Managed)[] ExpectedFields =
-    [
-        ("size", "Size"),
-        ("version", "Version"),
-        ("requested", "Requested"),
-        ("nvidiaAdapter", "NvidiaAdapter"),
-        ("active", "Active"),
-        ("driverRejected", "DriverRejected"),
-        ("reason", "Reason"),
-        ("sourceWidth", "SourceWidth"),
-        ("sourceHeight", "SourceHeight"),
-        ("targetWidth", "TargetWidth"),
-        ("targetHeight", "TargetHeight"),
-    ];
+    private const string NativeStructName = "FFF3FPVideoSuperResolutionStatus";
 
     [Fact]
     public void MirroredStructMatchesTheKernelFieldOrderAndWidths()
     {
-        var total = Marshal.SizeOf<Fff3FpVideoSuperResolutionStatus>();
-        Assert.Equal(ExpectedFields.Length * 4, total);
-        Assert.Equal(44, total);
-
+        var native = ParseNativeFields();
         var managed = typeof(Fff3FpVideoSuperResolutionStatus).GetFields()
             .ToDictionary(f => f.Name, f => Marshal.OffsetOf<Fff3FpVideoSuperResolutionStatus>(f.Name).ToInt32());
 
         var problems = new List<string>();
-        for (var i = 0; i < ExpectedFields.Length; i++)
+        var expectedOffset = 0;
+        foreach (var (name, size) in native)
         {
-            var (native, managedName) = ExpectedFields[i];
+            var managedName = char.ToUpperInvariant(name[0]) + name[1..];
             if (!managed.TryGetValue(managedName, out var offset))
             {
-                problems.Add($"托管缺字段 {managedName}（原生 {native}）");
-                continue;
+                problems.Add($"托管缺字段 {managedName}（内核头 {name} @{expectedOffset}）");
             }
-            if (offset != i * 4)
-                problems.Add($"{managedName} 偏移 {offset} ≠ 期望 {i * 4}（顺序或宽度漂了）");
+            else if (offset != expectedOffset)
+            {
+                problems.Add($"{managedName} 偏移 {offset} ≠ 内核头推导的 {expectedOffset}（顺序或宽度漂了）");
+            }
+            expectedOffset += size;
         }
-        var extra = managed.Keys.Except(ExpectedFields.Select(e => e.Managed)).ToList();
+
+        var extra = managed.Keys
+            .Except(native.Select(f => char.ToUpperInvariant(f.Name[0]) + f.Name[1..]))
+            .ToList();
         if (extra.Count > 0) problems.Add("托管多出字段： " + string.Join(",", extra));
 
+        // 内核按 `size < sizeof || version != 20` 拒过小的调用方，所以总尺寸也要相等才谈得上偏移对账。
+        var total = Marshal.SizeOf<Fff3FpVideoSuperResolutionStatus>();
+        if (total != expectedOffset)
+            problems.Add($"总尺寸 托管={total} 内核头推导={expectedOffset}");
+
         Assert.True(problems.Count == 0,
-            $"FFF3FPVideoSuperResolutionStatus 镜像与内核声明不一致：\n  {string.Join("\n  ", problems)}");
+            $"{NativeStructName} 镜像与内核头不一致：\n  {string.Join("\n  ", problems)}");
     }
 
     /// <summary>版本戳必须跟托管侧唯一的 API 水位同值：内核那边是硬比 <c>!= 20</c>，
@@ -80,23 +72,41 @@ public class VideoSuperResolutionLayoutTests
         Assert.Equal(4, Marshal.OffsetOf<Fff3FpVideoSuperResolutionStatus>("Version").ToInt32());
     }
 
-    /// <summary>
-    /// 出货内核头目前应当**没有**这个类型。这是一个"记账型"断言，不是放弃对账：
-    /// VSR 一旦被移植进 third_party 那棵，本测试判红，提示改成按头解析的真交叉校验。
-    /// 头文件读不到一律判红（与 HdrSignalDiagnosticsLayoutTests 同规矩），不许静默跳过。
-    /// </summary>
-    [Fact]
-    public void ShippingKernelStillLacksTheVsrStruct()
+    /// <summary>解析内核头里的字段序列（原生名, 字节宽度）。两个 enum 字段按内核默认底层 int = 4 B；
+    /// 其余形态一律抛。</summary>
+    private static List<(string Name, int Size)> ParseNativeFields()
     {
-        var root = FindRepositoryRoot();
-        var header = Path.Combine(root, ShippingHeaderRelativePath);
-        var text = File.ReadAllText(header);
+        var header = Path.Combine(FindRepositoryRoot(), ShippingHeaderRelativePath);
+        var lines = File.ReadAllLines(header);
+        var start = Array.FindIndex(lines, l => l.Contains($"struct {NativeStructName}"));
+        Assert.True(start >= 0, $"头文件里没有 struct {NativeStructName} ⇒ VSR 布局对账不能空跑");
 
-        var declares = text.Contains("FFF3FPVideoSuperResolutionStatus", StringComparison.Ordinal);
-        Assert.True(!declares,
-            "出货内核头已出现 FFF3FPVideoSuperResolutionStatus ⇒ 本测试的前提结束了。" +
-            "请把它换成与 HdrSignalDiagnosticsLayoutTests 同样的按头解析交叉校验" +
-            "（字段名/类型/偏移逐个比），并把 PR #19 的 VSR 桶一并确认已落到这棵树。");
+        var fields = new List<(string, int)>();
+        for (var i = start + 1; i < lines.Length; i++)
+        {
+            var trimmed = lines[i].Trim();
+            if (trimmed.StartsWith("};")) break;
+            if (trimmed.Length == 0 || trimmed.StartsWith("//")) continue;
+
+            var match = System.Text.RegularExpressions.Regex.Match(
+                trimmed, @"^([A-Za-z_][\w:]*)\s+(\w+)\s*(?:=[^;]*)?;\s*(?://.*)?$");
+            if (!match.Success)
+                throw new InvalidOperationException($"{NativeStructName} 里有无法解析的成员行：{trimmed}");
+
+            var size = match.Groups[1].Value switch
+            {
+                "std::uint32_t" or "uint32_t" => 4,
+                "std::uint64_t" or "uint64_t" => 8,
+                "FFF3FPVideoSuperResolution" or "FFF3FPVideoSuperResolutionReason" => 4,
+                _ => throw new InvalidOperationException(
+                    $"{NativeStructName} 出现未登记的成员类型 {match.Groups[1].Value}（{trimmed}）")
+            };
+            fields.Add((match.Groups[2].Value, size));
+        }
+
+        Assert.True(fields.Count >= 11,
+            $"{NativeStructName} 只解析出 {fields.Count} 个字段，解析器失效了");
+        return fields;
     }
 
     private static string FindRepositoryRoot()

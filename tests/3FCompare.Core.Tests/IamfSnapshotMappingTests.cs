@@ -107,55 +107,47 @@ public class IamfSnapshotMappingTests
     /// <c>GetSnapshot</c> 整体失效；即便硬抬尺寸蒙过闸门，其后字段仍整体错位。
     /// 五个槽位已补回（2026-10-14），<b>中性化的正确动作是改名保留，不是删字段</b>。</para>
     /// </summary>
+    /// <summary>
+    /// IAMF 组在托管镜像里的**相对位置**必须与内核头一致：三字段连续、顺序为
+    /// Active/Channels/SoundSystem，且排在动态元数据尾组之后（不是插在 decodedAudioFrames 与
+    /// audioPosition100ns 之间的中段）。
+    /// <para>绝对偏移不在这里钉——权威判据是 <c>SnapshotLayoutTests</c>，它从内核头逐字段解析比对，
+    /// 内核尾追加时会自动跟着走；本文件此前钉的 136/140/144/152 与 376..392 一组常数在
+    /// 2026-10-20 内核追加到 464 B 时整批判红，正是"硬编码期望值就是下一个红"那种债。
+    /// 这里只留不随尺寸漂移的结构不变量。</para>
+    /// </summary>
     [Fact]
     public void IAMF字段在托管结构体中的偏移与内核一致()
     {
-        Assert.Equal(128, Marshal.OffsetOf<Fff3FpSnapshot>(nameof(Fff3FpSnapshot.DecodedAudioFrames)).ToInt32());
+        int OffsetOf(string managedName) =>
+            Marshal.OffsetOf<Fff3FpSnapshot>(managedName).ToInt32();
 
-        var active = Marshal.OffsetOf<Fff3FpSnapshot>(nameof(Fff3FpSnapshot.IamfActive)).ToInt32();
-        var channels = Marshal.OffsetOf<Fff3FpSnapshot>(nameof(Fff3FpSnapshot.IamfChannels)).ToInt32();
-        var soundSystem = Marshal.OffsetOf<Fff3FpSnapshot>(nameof(Fff3FpSnapshot.IamfSoundSystem)).ToInt32();
-        var audioPosition = Marshal.OffsetOf<Fff3FpSnapshot>(nameof(Fff3FpSnapshot.AudioPosition100ns)).ToInt32();
-        var targetedNits = Marshal.OffsetOf<Fff3FpSnapshot>(nameof(Fff3FpSnapshot.DynamicMetadataTargetedNits)).ToInt32();
-        var contentChannels = Marshal.OffsetOf<Fff3FpSnapshot>(nameof(Fff3FpSnapshot.IamfContentChannels)).ToInt32();
-        var binaural = Marshal.OffsetOf<Fff3FpSnapshot>(nameof(Fff3FpSnapshot.IamfBinaural)).ToInt32();
-        var audioBinaural = Marshal.OffsetOf<Fff3FpSnapshot>(nameof(Fff3FpSnapshot.AudioBinaural)).ToInt32();
+        var decodedAudio = OffsetOf(nameof(Fff3FpSnapshot.DecodedAudioFrames));
+        var audioPosition = OffsetOf(nameof(Fff3FpSnapshot.AudioPosition100ns));
+        var targetedNits = OffsetOf(nameof(Fff3FpSnapshot.DynamicMetadataTargetedNits));
+        var active = OffsetOf(nameof(Fff3FpSnapshot.IamfActive));
+        var channels = OffsetOf(nameof(Fff3FpSnapshot.IamfChannels));
+        var soundSystem = OffsetOf(nameof(Fff3FpSnapshot.IamfSoundSystem));
+        var contentChannels = OffsetOf(nameof(Fff3FpSnapshot.IamfContentChannels));
+        var binaural = OffsetOf(nameof(Fff3FpSnapshot.IamfBinaural));
+        var audioBinaural = OffsetOf(nameof(Fff3FpSnapshot.AudioBinaural));
 
-        // 中部 trio：紧跟 decodedAudioFrames（8 B）之后，且排在 audioPosition100ns 之前。
-        Assert.Equal(136, active);
-        Assert.Equal(140, channels);
-        Assert.Equal(144, soundSystem);
-        Assert.Equal(152, audioPosition);
-        Assert.True(active < channels && channels < soundSystem && soundSystem < audioPosition,
-            "IAMF trio 必须严格插在 decodedAudioFrames 与 audioPosition100ns 之间且顺序为 Active/Channels/SoundSystem");
+        // 三字段连续且顺序固定。
+        Assert.Equal(active + 4, channels);
+        Assert.Equal(channels + 4, soundSystem);
 
-        // trio 之后不能再有中部字段被漏掉：audioPosition100ns 与首个 trio 之间只隔 16 B。
-        Assert.Equal(16, audioPosition - active);
+        // ⛔ 关键不变量：整组在**尾部**，排在音频位置/动态元数据尾组之后。
+        // 曾把它们放在 decodedAudioFrames 之后（@136），sizeof 相同但后半段全部错位。
+        Assert.True(audioPosition < active,
+            $"iamfActive @{active} 必须排在 audioPosition100ns @{audioPosition} 之后（内核把它们放在尾部组）");
+        Assert.True(targetedNits < active,
+            $"iamfActive @{active} 必须排在动态元数据尾字段 dynamicMetadataTargetedNits @{targetedNits} 之后");
+        Assert.True(decodedAudio < audioPosition);
 
-        // 尾部：iamfContentChannels 是动态元数据尾字段之后的字段；iamfBinaural / audioBinaural
-        // 依次追加，audioBinaural 是新的最后一个字段，每个都紧跟前者 +4。
-        //
-        // ⚠ 2026-10-14 更正：这四个数字原先是 360/364/368/372（sizeof 376），**比内核少 16 B**。
-        //   原因不是"尾部少字段"，而是工作区把中段五个 hdrDp* DEPRECATED 槽位（20 B）
-        //   整体删除了，导致其后所有字段前移（对齐吸收掉 4 B ⇒ 净差 16）。
-        //   内核真值（FFF.Player.Api.h 推导）：376/380/384/388，sizeof 392。
-        //   ⇒ 这里钉的绝对偏移只是"顺序 + 相邻 +4"的辅助校验；
-        //     **逐字段偏移的权威判据在 SnapshotLayoutTests**（它从内核头解析逐个比对），
-        //     内核再尾追加字段时那里会自动跟着走，而这里的常数需要人工同步。
-        Assert.Equal(376, targetedNits);
-        Assert.Equal(380, contentChannels);
-        Assert.Equal(targetedNits + 4, contentChannels);
-        Assert.Equal(384, binaural);
+        // 尾组内部顺序照抄内核头：soundSystem → contentChannels → binaural → audioBinaural。
+        Assert.True(soundSystem < contentChannels, "iamfContentChannels 必须排在 iamfSoundSystem 之后");
         Assert.Equal(contentChannels + 4, binaural);
-        Assert.Equal(388, audioBinaural);
         Assert.Equal(binaural + 4, audioBinaural);
-        // ⚠ 末字段偏移不是靠 sizeof - 4 反推：结构体含 long/ulong ⇒ 对齐为 8，sizeof 取到 8 的倍数。
-        // audioBinaural @388 收尾，[388,392) 全为字段、无尾部填充；对比 iamfBinaural（@384）
-        // 当末尾时其后有 4 B 填充。内核 FFF3FPSnapshot 同理（C++ /Zp8），两边 392。
-        Assert.Equal(392, Marshal.SizeOf<Fff3FpSnapshot>());
-        Assert.Equal(audioBinaural + 4, Marshal.SizeOf<Fff3FpSnapshot>());
-        // 历史锚点：iamfBinaural 仍 @384，其 +8（@384 + 4 字段 + 4 被 audioBinaural 占用的原填充）仍等于 sizeof。
-        Assert.Equal(binaural + 8, Marshal.SizeOf<Fff3FpSnapshot>());
     }
 
     /// <summary>iamfSoundSystem 的托管类型必须是有符号 <see cref="int"/>（内核 std::int32_t）：
@@ -169,54 +161,9 @@ public class IamfSnapshotMappingTests
         Assert.Equal(4, Marshal.SizeOf(field.FieldType));
     }
 
-    /// <summary>
-    /// API v20 尾追加字段 <c>audioBinaural</c> 的托管契约（内核
-    /// FFF.Player.Api.h:268）：它在 <c>iamfBinaural</c> 之后、结构体<b>最尾部</b>。
-    /// 这里用"反射遍历所有字段，没有任何字段的偏移 ≥ 它"来钉"最后一个字段"，
-    /// 而不是钉 <c>sizeof - 4</c>：结构体含 long/ulong ⇒ 对齐 8，靠末字段偏移反推
-    /// 末尾是否有填充会被对齐欺骗。audioBinaural @388 收尾，
-    /// [388,392) 全为字段、无尾部填充（sizeof = 392，内核 C++ 结构同为 392）。
-    /// <para>2026-10-14：原为 @372 / sizeof 376，随中段五个 hdrDp* DEPRECATED 槽位
-    /// 补回（+20 B，对齐吸收 4 ⇒ 净 +16）改为 388 / 392。</para>
-    /// </summary>
-    [Fact]
-    public void AudioBinaural是托管快照结构体最后一个字段()
-    {
-        var offset = Marshal.OffsetOf<Fff3FpSnapshot>(nameof(Fff3FpSnapshot.AudioBinaural)).ToInt32();
-        var size = Marshal.SizeOf<Fff3FpSnapshot>();
-        var iamfBinaural = Marshal.OffsetOf<Fff3FpSnapshot>(nameof(Fff3FpSnapshot.IamfBinaural)).ToInt32();
-
-        Assert.Equal(388, offset);
-        // 紧接在前一个尾字段 iamfBinaural（@384）之后。
-        Assert.Equal(iamfBinaural + 4, offset);
-
-        // 没有任何字段排在它之后（严格小于，而不是 ≤：同级无重复偏移字段）。
-        foreach (var field in typeof(Fff3FpSnapshot).GetFields())
-        {
-            if (field.Name == nameof(Fff3FpSnapshot.AudioBinaural))
-            {
-                continue;
-            }
-
-            Assert.True(
-                Marshal.OffsetOf<Fff3FpSnapshot>(field.Name).ToInt32() < offset,
-                $"字段 {field.Name} 的偏移排在 audioBinaural 之后，说明它不是最后一个字段");
-        }
-
-        // audioBinaural 收尾：末字段 + 自身 4 B 即 sizeof，无尾部填充。
-        // （不写 offset == sizeof - 4 来判"最后字段"——那个等式在有尾部填充时会误判；
-        //  "最后字段"由上面的反射遍历保证，这里只钉精确宽/尺寸。）
-        // 2026-10-14：376 → 392（中段五个 hdrDp* DEPRECATED 槽位补回，见本文件顶部更正）。
-        Assert.Equal(392, size);
-        Assert.Equal(offset + 4, size);
-
-        // 宽度对齐内核 std::uint32_t。
-        var audioBinauralField = typeof(Fff3FpSnapshot).GetField(nameof(Fff3FpSnapshot.AudioBinaural));
-        Assert.NotNull(audioBinauralField);
-        Assert.Equal(typeof(uint), audioBinauralField!.FieldType);
-        Assert.Equal(4, Marshal.SizeOf(audioBinauralField.FieldType));
-    }
-
+    // 「谁是最后一个字段 / sizeof 多少」不在这里钉：那种按名字+常数的断言
+    // 每追加一次就要改一次（2026-10-20 内核 578f80b 后已变成 uploadPath / 464 B）。
+    // 权威判据在 SnapshotLayoutTests：逐字段偏移与总尺寸都从内核头推导。
     /// <summary>
     /// 版本门随字段增长同步。原用例写的是"各升一级"（GetSnapshot 10→11、Create 19→20），
     /// 那是 2026-10 之前的历史叙事；版本面统一拍平到 20 之后，"升一级"已不成立，

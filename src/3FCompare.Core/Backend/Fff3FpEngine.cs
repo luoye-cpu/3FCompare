@@ -25,6 +25,8 @@ public sealed class Fff3FpEngine : IPlayerEngine
     //        内核 PlayerApiVersion 再 bump 一级，同步到此处，理由同上。
     // internal：EngineFactory 的版本门必须与这里同源（内核对 version 严格相等），
     // 两处各写一个字面量迟早会漂移（docs/45 P1-1）。
+    // ⚠ version 不变不等于布局不变：内核 578f80b 把 FFF3FPConfiguration 从 80 B 追加到 112 B、
+    // FFF3FPSnapshot 从 392 B 追加到 464 B，而 PlayerApiVersion 仍是 20 ⇒ 只跟版本号会漏掉这一类。
     internal const uint ConfigVersion = 20;
 
     public IReadOnlyList<AdapterInfo> EnumerateAdapters()
@@ -62,6 +64,16 @@ public sealed class Fff3FpEngine : IPlayerEngine
             // v16：SDR 源是否经 scRGB 链呈现（0=从不，1=自动）。内核在 FFF3FP_Create
             // 里对 &gt;1 返回 InvalidArgument，故这里钳到 [0,1] 而不是直接透传。
             SdrScRgbMode = (uint)Math.Clamp(options.SdrScRgbMode, 0, 1),
+            // 内核 578f80b 追加的自适应档。开关一律 0 = 关闭（内核对 0 的定义就是"沿用追加前的
+            // 固定行为"），阈值按内核头声明的默认值填齐——留 0 会让 min 被 clamp 成 1 而不是 4，
+            // 那是"还没打开功能就先改行为"。产品侧要启用时改这里的 options，不改结构体。
+            AdaptiveDownscaleBeforeUpload = 0,
+            AdaptiveDownscaleDropPercent = 20,
+            AdaptiveDecoderThreads = 0,
+            MinSoftwareDecoderThreads = 4,
+            MaxSoftwareDecoderThreads = 32,
+            DecoderGrowDropPercent = 10,
+            DecoderShrinkDropPercent = 2,
         };
 
         var result = Fff3FpNative.FFF3FP_Create(in config, out var handle);
@@ -1196,8 +1208,8 @@ public sealed class Fff3FpEngine : IPlayerEngine
             diagnostics = new HdrSignalDiagnostics(
                 raw.DynamicCurveFramesApplied, raw.DynamicCurveFramesRefused,
                 raw.SetHdrMetaDataCalls, raw.SetHdrMetaDataSuppressed,
-                raw.LastSignalledMaxMasteringLuminance, raw.LastSignalledMinMasteringLuminance,
-                raw.LastSignalledMaxContentLightLevel, raw.LastSignalledMaxFrameAverageLightLevel,
+                raw.LastSignaledMaxMasteringLuminance, raw.LastSignaledMinMasteringLuminance,
+                raw.LastSignaledMaxContentLightLevel, raw.LastSignaledMaxFrameAverageLightLevel,
                 raw.SwapChainHdrEnabled != 0);
             return true;
         }
