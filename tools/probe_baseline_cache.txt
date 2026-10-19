@@ -1,7 +1,7 @@
 {
- "built_at_epoch": 1792422337,
+ "built_at_epoch": 1792423612,
  "digest": "71334aead3deedd3",
- "inputs": "46c2c7056d1e4b57",
+ "inputs": "7899dac49d78f9a4",
  "max_age_days": 14.0,
  "note": "本文件由 tools/check_probe_set.py 生成，是**上次真编出来的结论**的备忘，不是判据本身；判据永远以（探针源码 sha + 输入指纹 + 条目摘要）匹配为准，对不上就重编。删掉它最多多花一次全量扫编，不会让门禁变绿。",
  "probes": {
