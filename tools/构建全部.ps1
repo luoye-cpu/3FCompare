@@ -44,14 +44,23 @@ $ForkRoot = Join-Path $ProjectRoot "third_party\fff_project"
 #   两侧实测均为 368 B（见 docs/58 §11.5）。导出面 87→90。
 #   回滚点：3fcompare-kernel-2026.9.30.1 / 394099019aaff37c4b6ce482c2e835527e5b124a
 #
+# 2026-10-20 基线 = 上游 578f80b（PR #31 的合并提交）本身。
+#   出货树此前带着自己的 2 笔提交（bed 渲染表交接 + 档位文案 + 两处注释更正）。把上游合进来之后逐行
+#   对撞：那 2 笔新增的 187 行里有 181 行上游已经有（#29 就是把床渲染搬进模块那一笔），剩下 6 行是
+#   4 行注释措辞加 2 行构造式换行——都是形式，不是内容。所以本树不再保留任何 3FCompare 侧提交，
+#   工作分支直接落在上游 tip 上：归档 tag `3fcompare-kernel-2026.10.20.1` 指的就是 578f80b。
+#   两棵树现在同一个提交、同一棵树（`git diff` 空）；被测/被构建的就是上游内容，没有"有意保留的分歧"。
+#   随仓分发的 .3fc_kernel_baseline.bundle 在清理前重建过（93 条 ref，含被删的 18 条分支与 48 个 tag，
+#   `bundle verify` 通过），旧的那份挪到 .3fc_dumps/ 不删。
+#
 # 2026-10-17 0014 退役入 tools/patches/history/：
 #   工作树已换到新谱系（upstream-sync，HEAD 不含钉死基线 d2f5826），0014 描述的是旧谱系
 #   （3fcompare/api16-kernel vs a87046e）的分歧，正向、反向 --check 都过不去 ⇒ 每次构建都在
 #   补丁段中止。按下方 throw 文案自身的处置指引移入 history/（非递归枚举，不再参与重放）。
 #   现行树构建不依赖任何顶层补丁；下一条分歧出现时按 patches/README.md 的规范顺延编号。
 $KernelRepo        = "https://github.com/Lake1059/FFF_Project.git"
-$KernelBaselineTag = "3fcompare-kernel-2026.10.8.1"
-$KernelBaselineSha = "d2f5826feccfc165a0ab66318ba80c6c665d27da"
+$KernelBaselineTag = "3fcompare-kernel-2026.10.20.1"
+$KernelBaselineSha = "578f80b6ce8603aa64b746c3e394146cf011f0d2"
 # 上一基线（回滚点）：3fcompare-kernel-2026.9.30.1 / 394099019aaff37c4b6ce482c2e835527e5b124a
 # 3FCompare 扩展的云端归档：上游 Lake1059/FFF_Project **不含**这些扩展，
 # 且本机账号对它只有读权限，所以基线归档只能落在主仓库自己的仓库里。

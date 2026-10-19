@@ -139,11 +139,12 @@ LAYOUT_19 = LAYOUT_17 + [
 
 # api 20 - shipped tree
 # third_party/fff_project/FFF.Native/3FP/Api/FFF.Player.Api.h
-# 15 members, transcribed field for field from that header (awk extract above the
-# struct). The struct itself did not change when PlayerApiVersion went 17 -> 20:
-# 15 fields -> 80 bytes, identical to LAYOUT_17. Written out in full rather than
-# aliased so a future drift in this tree shows up as its own edit, not as a
-# silent change inherited from the historical mirror.
+# 22 members. The shipping tree took upstream 578f80b (PR #31) on 2026-10-20, which
+# is the round that carried the seven adaptive decode/upload knobs into this tree as
+# well, so both headers now declare the same 22 fields -> 112 bytes (checked field
+# for field by this script's own mirror-vs-header comparison, which is what caught the
+# stale 15-field copy). Written out in full rather than aliased to the other tree, so
+# a future drift here shows up as its own edit.
 LAYOUT_20_SHIPPED = [
     ("size", _U32),
     ("version", _U32),
@@ -160,12 +161,21 @@ LAYOUT_20_SHIPPED = [
     ("forceHdrOutput", _U32),
     ("preferredAdapterIndex", _I32),
     ("sdrScRgbMode", _U32),
+    ("adaptiveDownscaleBeforeUpload", _U32),
+    ("adaptiveDownscaleDropPercent", _U32),
+    ("adaptiveDecoderThreads", _U32),
+    ("minSoftwareDecoderThreads", _U32),
+    ("maxSoftwareDecoderThreads", _U32),
+    ("decoderGrowDropPercent", _U32),
+    ("decoderShrinkDropPercent", _U32),
 ]
 
 # api 20 - experimental/kernel tree
 # 3fp/kernel/FFF.Native/3FP/Api/FFF.Player.Api.h
-# 22 members, transcribed field for field from that header: the 15 shared members
-# plus the seven adaptive decode/upload knobs that only exist in this tree.
+# 22 members, transcribed field for field from that header: the 15 long-shared members
+# plus the seven adaptive decode/upload knobs. Those seven are no longer exclusive to
+# this tree -- the shipping tree carries them since it merged 578f80b -- but the two
+# mirrors are kept separate on purpose: they are read from two different headers.
 # 22 fields -> 112 bytes.
 LAYOUT_20_KERNEL = [
     ("size", _U32),
