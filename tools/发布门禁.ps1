@@ -28,6 +28,8 @@
 #   `[2/11]` 追加 · 着色器 cbuffer 布局（docs/93 T1e；判据 tools/check_shader_cbuffer_layout.py）
 #   `[2/11]` 追加 · 探针集扫编（J3；判据 tools/check_probe_set.py + tools/probe_baseline.txt）
 #   `[2/11]` 追加 · 内核配置 ABI（J5；判据 tools/check_kernel_config_abi.py）
+#   `[2/11]` 追加 · 输出档位阶梯一致性（2026-10-19 接线；判据 tools/check_output_tier_ladder_parity.py，
+#            该判据 10-18 就写好了但零调用者 —— 本次把它接进门禁，并跑变异臂自证有牙）
 #   `[3/11]` 追加 · 内嵌内核一致性（J4；验"嵌进产物的那份内核"是不是 csproj 指向的那一份）
 #   `[7/11]` 追加 · 对比模式回归（--comparemodetest 5 路）
 #   （条数说明：文件头此前写"另有三条"，J3 落地时按 +1 改成"四条"；J4 同批又落一条，
@@ -914,6 +916,55 @@ if ($NoConfigAbi) {
     }
     $abiRead = "树 $(if ($abiTree) { $abiTree } else { '自动' }) ‖ 镜像 $abMirror/$abFields 字段 ‖ sizeof 镜像 $abCtypes B / 实测 $abNative B ‖ 账本 绿 $abPass/红 $abFailN/未判 $abUndec ‖ 判定 $abVerdict ‖ exit=$($ab.Exit)"
     Add-Result "内核配置 ABI" ($abiFail.Count -eq 0) ($abiRead + $(if ($abiFail.Count) { " ✗ " + ($abiFail -join '；') } else { "" }))
+}
+
+# ── [2/11] 追加一行：输出档位阶梯一致性（判据 tools/check_output_tier_ladder_parity.py；2026-10-19 接线）──
+#   这条判据 10-18 22:13 就写好了，但**全仓零调用者**——10-19 早上那笔欠账
+#   （docs/交接文档-2026-10-19-自动HDR判词与VSR像素闭环.md §5.5：「宿主 Form媒体信息.vb:497
+#   那份阶梯与内核 SwapChainFormatForOutputBits 是两份实现 ⇒ 需要一个托管判据钉住」）
+#   要的从来不是"再写一个脚本"，而是"让它每次发布都跑"。与上面 J5 那条同一句教训：
+#   **不接的判据等于没有判据**。
+#
+#   口径（别读反）：判据自带一把独立 python 参考式（`档位 = 16 若 hdr 否则 (10 若源位深>8 否则 8)`），
+#   拿它去量四处：内核两棵树各一份、宿主回退式两棵树各一份，再加两张文案表的界值
+#   （宿主 >=16/>=10、呈现器 Case 8/10/16）。正常臂 exit=0 且打「结论: 四处阶梯同源」才算过。
+#
+#   ⚠ 变异臂的退出码是**反的**，接线时最容易读错，这里写死语义：
+#     `--mutate` 把实验树内核阈值改成 >10（写到 _3fc_tmp\mutated_VideoRenderer.cpp 的副本，
+#     不碰真源），**判红才是对的** ⇒ 判据 exit=0 表示"有牙"，exit=1 表示"判据是死的"。
+#     所以本步两条臂都要求 exit=0，但读的是不同的结论行。
+#   ⚠ fail-closed：python 找不到、脚本不存在、结论行没打全、"一致"计数 ≠ 6，一律判红。
+Write-Host "      · 输出档位阶梯一致性（check_output_tier_ladder_parity.py：四处实现 + 两张文案表对撞独立参考式，另跑变异臂证牙）" -ForegroundColor Yellow
+$tierPy   = Join-Path $PSScriptRoot "check_output_tier_ladder_parity.py"
+$tierFail = @()
+if (-not $pyExe) {
+    Add-Result "输出档位阶梯一致性" $false "未找到 python，档位阶梯判据无法执行（fail-closed，不静默跳过）"
+} elseif (-not (Test-Path -LiteralPath $tierPy)) {
+    Add-Result "输出档位阶梯一致性" $false "判据脚本不存在：$tierPy（fail-closed）"
+} else {
+    $tierNorm = Invoke-Cmd $pyExe @($tierPy)
+    $tierOut  = @($tierNorm.Out | Where-Object { $_ -and $_.Trim() -ne "" })
+    foreach ($tLine in $tierOut) { Write-Host ("      {0}" -f $tLine) -ForegroundColor Gray; Write-Log ("      {0}" -f $tLine) }
+    $tierAgree = @($tierOut | Where-Object { $_ -match '\s一致\s' }).Count
+    $tierVerdict = @($tierOut | Where-Object { $_ -match '^结论:' } | Select-Object -Last 1)
+    if ($tierNorm.Exit -ne 0) { $tierFail += "正常臂 exit=$($tierNorm.Exit)：档位阶梯在四处中至少一处不同水" }
+    if (-not $tierVerdict -or $tierVerdict -notmatch '四处阶梯同源') {
+        $tierFail += "没读到「结论: 四处阶梯同源」这行（判据没产出结论=没判，不是判过）"
+    }
+    # 计数必须与点名条数相等：内核×2 + 宿主回退×2 + 宿主文案 + 呈现器文案 = 6
+    if ($tierAgree -ne 6) { $tierFail += "「一致」计数 $tierAgree ≠ 6 处（少一处就是有一处没被量到，恒真的可能是解析锚点漂了）" }
+
+    $tierMut = Invoke-Cmd $pyExe @($tierPy, "--mutate")
+    $tierMutOut = @($tierMut.Out | Where-Object { $_ -and $_.Trim() -ne "" })
+    foreach ($mLine in $tierMutOut) { Write-Host ("      {0}" -f $mLine) -ForegroundColor DarkGray; Write-Log ("      {0}" -f $mLine) }
+    $tierMutVerdict = @($tierMutOut | Where-Object { $_ -match '^结论:' } | Select-Object -Last 1)
+    if ($tierMut.Exit -ne 0) { $tierFail += "变异臂 exit=$($tierMut.Exit)：改了内核阈值判据却不判红 ⇒ 这条判据是死的（锚点漂了或参考式与被测同源）" }
+    if (-not $tierMutVerdict -or $tierMutVerdict -notmatch '变异臂判红了') {
+        $tierFail += "变异臂没打「变异臂判红了」（exit=0 但结论行缺失，读作没判）"
+    }
+    Add-Result "输出档位阶梯一致性" ($tierFail.Count -eq 0) (
+        "一致 $tierAgree/6 ‖ 正常臂 $($tierNorm.Exit) ‖ 变异臂 $($tierMut.Exit)（0=有牙）" +
+        $(if ($tierFail.Count) { " ✗ " + ($tierFail -join '；') } else { "" }))
 }
 
 # ── [3/11] Release 编译：0 error，且非白名单告警必须为 0 ──

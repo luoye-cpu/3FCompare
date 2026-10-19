@@ -18,6 +18,17 @@ internal static class ColorTransformAbi
     /// <summary>唯一的导出名。</summary>
     internal const string EntryPointName = "FFF_GetColorTransformApi";
 
+    /// <summary>外部床渲染函数表的导出名（同一枚模块的第二个能力面）。
+    /// 缺席=旧模块，未授权=模块拒交 —— 两者都按"没有这条通路"静默。</summary>
+    internal const string AudioEntryPointName = "FFF_GetAudioRenderApi";
+
+    /// <summary>音频函数表版本门，与内核 FFF3FP_AUDIO_PLUG_VERSION 同水。</summary>
+    internal const uint AudioTableVersion = 1u;
+
+    /// <summary><c>sizeof(FFF3FPAudioRenderPlug)</c>：两枚 uint + 六枚指针（x64）= 56。
+    /// 交换前按 <c>IntPtr.Size</c> 当场对撞，不同水就不把表交给内核。</summary>
+    internal const int AudioTableSize = 56;
+
     /// <summary>授权层的裸导出名。握手被拒时宿主仍要能问"为什么"、还能把解锁码送进去，
     /// 所以这几个符号必须在**没有函数表**的情况下也可解析。</summary>
     internal const string AuthorizationStatusEntryPointName = "FFF_ColorTransformAuthorizationStatus";
@@ -117,6 +128,10 @@ internal delegate void FffResetFn();
 /// <summary>模块导出 <c>FFF_GetColorTransformApi</c> 的托管声明。</summary>
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate int FffGetColorTransformApiFn(uint version, nint api);
+
+/// <summary>FFF_GetAudioRenderApi(version, tableOut)：模块把 56 字节函数表写进调用方
+/// 拥有的缓冲。返回 0 表示已交出，非 0 表示未授权或版本不合（表已被清零）。</summary>
+internal delegate int FffGetAudioRenderApiFn(uint version, nint table);
 
 /// <summary>FFF_ColorTransformAuthorizationStatus：2=已授权，1=未授权。
 /// 握手被拒后用来分辨"模块不在"与"模块在但锁着"——两者的画面表现一模一样，

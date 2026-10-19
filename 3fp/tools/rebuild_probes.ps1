@@ -34,6 +34,9 @@ $extraLibs = @{
     'scale_policy_probe'   = 'user32.lib'
     # Queries DXGI for the monitor's live HDR state, so it needs dxgi.
     'vsr_scrgb_probe'      = 'dxgi.lib'
+    # Same DXGI report (TrueHDR requires an HDR output chain); no D3D11 device here,
+    # the device lives inside the kernel.
+    'truehdr_pixel_probe'  = 'dxgi.lib'
 }
 $simple = @('decode_profile','block_scale_probe','image_zoom_probe','scale_policy_probe',
             'upload_layout_probe','adaptive_scale_probe','read_pixel_probe','rotation_probe',
@@ -44,7 +47,8 @@ $simple = @('decode_profile','block_scale_probe','image_zoom_probe','scale_polic
             # exists to prevent, one level up.
             'frame_pool_probe','backend_probe','loop_stutter_probe','apng_seek_repro','audio_buffer_probe',
             'audio_drift_probe','audio_health_probe','image_reopen_probe','image_load_probe','host_compat_probe',
-            'vsr_pixel_probe','vsr_scrgb_probe','pan_direction_probe','zoom_anchor_probe')
+            'vsr_pixel_probe','vsr_scrgb_probe','pan_direction_probe','zoom_anchor_probe',
+            'truehdr_pixel_probe')
 $iamf = @('iamf_layout_regression','iamf_playback_probe','iamf_probe','iamf_channel_order_probe','iamf_layout_audit','iamf_seek_probe')
 
 function Invoke-Build([string]$name, [string]$extra) {

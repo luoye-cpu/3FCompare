@@ -9,7 +9,7 @@
 //   2. VSR 应能 active（前提：硬解 + 上采样 + 源高 360..1440）
 //   3. VSR 开/关的像素应不同，且亮度无整体偏移
 //
-// 用法：vsr_scrgb_probe <媒体> [--sr-window WxH]
+// 用法：vsr_scrgb_probe <媒体> [--sr-window WxH] [--dump DIR]
 
 #include <windows.h>
 #include <dxgi1_6.h>
@@ -18,6 +18,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -27,8 +29,30 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 bool g_open = false;
-void EventCallback(void*, const FFF3FPEvent eventType, const char*) {
+void EventCallback(void*, const FFF3FPEvent eventType, const char* json) {
+    // 内核 DoOpen 对"非 HDR / 非广色域源"会把请求降成 MapToSdr 并发 ColorModeChanged，
+    // 事件里的 actual 是**硬编码的 0**。这条打印用来当场对撞"事件说的档位"与
+    // "快照/交换链实际的档位"，不靠读码下结论。
+    if (eventType == FFF3FPEvent::ColorModeChanged || eventType == FFF3FPEvent::DeviceChanged)
+        std::printf("  event type=%u: %s\n", static_cast<unsigned>(eventType), json ? json : "(空)");
     if (eventType == FFF3FPEvent::OpenCompleted) g_open = true;
+}
+// 把一整块读回像素落盘（原始 float32，行主序 RGBA），供离线判"差异落在边上还是平色区里"。
+void DumpBlock(const std::wstring& dir, const wchar_t* name, const std::uint32_t width,
+    const std::uint32_t height, const std::uint32_t bitDepth, const std::vector<float>& px) {
+    if (dir.empty() || px.empty()) return;
+    const auto bin = std::filesystem::path(dir) / name;
+    std::ofstream ofs(bin, std::ios::binary | std::ios::trunc);
+    ofs.write(reinterpret_cast<const char*>(px.data()),
+        static_cast<std::streamsize>(px.size() * sizeof(float)));
+    ofs.close();
+    auto meta = std::wstring(bin.wstring());
+    meta += L".meta";
+    std::ofstream mf(meta);
+    mf << "width=" << width << "\nheight=" << height << "\nbitDepth=" << bitDepth
+       << "\nlayout=rgba_float32_rowmajor_topdown\nbytes=" << px.size() * sizeof(float) << "\n";
+    std::wprintf(L"  dumped: %ls (%ux%u bits=%u floats=%zu)\n", bin.c_str(), width, height,
+        bitDepth, px.size());
 }
 void Pump(const int ms) {
     const auto end = GetTickCount64() + static_cast<DWORD>(ms);
@@ -81,11 +105,14 @@ void ReportDisplayHdr(const HWND window) {
 int wmain(const int argc, wchar_t** argv) {
     SetConsoleOutputCP(CP_UTF8);
     std::setvbuf(stdout, nullptr, _IONBF, 0);
-    if (argc < 2) { wprintf(L"用法: vsr_scrgb_probe <媒体> [--sr-window WxH]\n"); return 2; }
+    if (argc < 2) { wprintf(L"用法: vsr_scrgb_probe <媒体> [--sr-window WxH] [--dump DIR]\n"); return 2; }
     unsigned windowWidth = 2560, windowHeight = 1440;
+    std::wstring dumpDir;
     for (int i = 2; i < argc; ++i) {
         if (std::wstring(argv[i]) == L"--sr-window" && i + 1 < argc)
             (void)swscanf_s(argv[++i], L"%ux%u", &windowWidth, &windowHeight);
+        else if (std::wstring(argv[i]) == L"--dump" && i + 1 < argc)
+            dumpDir = argv[++i];
     }
     const auto path = Utf8(argv[1]);
 
@@ -139,19 +166,24 @@ int wmain(const int argc, wchar_t** argv) {
         static_cast<int>(snapshot.actualColorMode), snapshot.videoOutputBitDepth);
     if (width == 0 || height == 0) { printf("无尺寸\n"); FFF3FP_Destroy(player); return 1; }
 
-    const auto grab = [&](std::vector<float>& out) {
+    const auto grab = [&](std::vector<float>& out, std::uint32_t& depth) {
         out.assign(static_cast<std::size_t>(width) * height * 4, 0.0f);
-        std::uint32_t bitDepth = 0;
+        depth = 0;
         return FFF3FP_ReadVideoPixelRegion(player, 0, 0, width, height, out.data(),
-            static_cast<std::uint32_t>(out.size()), &bitDepth) == FFFResult::Success;
+            static_cast<std::uint32_t>(out.size()), &depth) == FFFResult::Success;
     };
     std::vector<float> offPixels, onPixels;
-    const auto offOk = grab(offPixels);
+    std::uint32_t offDepth = 0, onDepth = 0;
+    const auto offOk = grab(offPixels, offDepth);
 
     FFF3FP_SetVideoSuperResolution(player, FFF3FPVideoSuperResolution::Auto);
     FFF3FP_Redraw(player);
     Pump(1800);
-    const auto onOk = grab(onPixels);
+    const auto onOk = grab(onPixels, onDepth);
+    // 读回里的 bitDepth 是"这一臂真正落在哪一档"的第二个口径，与快照的 outBits 独立。
+    printf("  读回 bitDepth: 关=%u 开=%u\n", offDepth, onDepth);
+    DumpBlock(dumpDir, L"scrgb_off.f32", width, height, offDepth, offPixels);
+    DumpBlock(dumpDir, L"scrgb_on.f32", width, height, onDepth, onPixels);
 
     FFF3FPVideoSuperResolutionStatus status{};
     status.size = sizeof(status);

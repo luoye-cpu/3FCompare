@@ -465,6 +465,19 @@ internal static partial class Fff3FpNative
     [LibraryImport(DllName)]
     internal static partial FffResult FFF3FP_Play(nint player);
 
+    /// <summary>转交外部床渲染函数表（表由 <see cref="ColorTransformModule.TryGetAudioRenderTable"/>
+    /// 取得）。内核拷贝整张表，因此调用返回后调用方即可释放这块缓冲；传 0 表示撤下、
+    /// 回到矩阵折叠。附加导出：不抬 API 版本、不动快照布局。</summary>
+    [LibraryImport(DllName)]
+    internal static partial FffResult FFF3FP_SetAudioRenderPlug(nint player, nint table);
+
+    /// <summary>插槽回读：owner=1 表示最后一帧床由外部渲染器产出，0 表示矩阵折叠。
+    /// 名称缓冲与两个计数按契约可为 0（可选输出）。</summary>
+    [LibraryImport(DllName)]
+    internal static partial FffResult FFF3FP_GetAudioRenderPlugState(nint player,
+        out uint owner, nint nameBuffer, uint nameCapacity,
+        out ulong framesRendered, out ulong framesDeclined);
+
     [LibraryImport(DllName)]
     internal static partial FffResult FFF3FP_Pause(nint player);
 

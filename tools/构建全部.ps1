@@ -43,6 +43,12 @@ $ForkRoot = Join-Path $ProjectRoot "third_party\fff_project"
 #   GetSnapshot 的判据是 `size < sizeof(FFF3FPSnapshot)` 就拒绝，所以托管侧必须同批加长；
 #   两侧实测均为 368 B（见 docs/58 §11.5）。导出面 87→90。
 #   回滚点：3fcompare-kernel-2026.9.30.1 / 394099019aaff37c4b6ce482c2e835527e5b124a
+#
+# 2026-10-17 0014 退役入 tools/patches/history/：
+#   工作树已换到新谱系（upstream-sync，HEAD 不含钉死基线 d2f5826），0014 描述的是旧谱系
+#   （3fcompare/api16-kernel vs a87046e）的分歧，正向、反向 --check 都过不去 ⇒ 每次构建都在
+#   补丁段中止。按下方 throw 文案自身的处置指引移入 history/（非递归枚举，不再参与重放）。
+#   现行树构建不依赖任何顶层补丁；下一条分歧出现时按 patches/README.md 的规范顺延编号。
 $KernelRepo        = "https://github.com/Lake1059/FFF_Project.git"
 $KernelBaselineTag = "3fcompare-kernel-2026.10.8.1"
 $KernelBaselineSha = "d2f5826feccfc165a0ab66318ba80c6c665d27da"

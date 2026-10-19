@@ -1,18 +1,20 @@
 # tools/patches — 内核自定义补丁存档目录
 
-> **状态说明（2026-09-26 修订：队列重建）**
+> **状态说明（2026-10-17 修订：0014 退役，顶层无补丁）**
 >
-> 本目录现在是**唯一权威补丁 + 历史归档**两层结构：
+> 本目录是**唯一权威补丁 + 历史归档**两层结构，顶层只在有"现行树待重放的分歧"时放补丁：
 >
-> - **顶层只保留 `0014-baseline-vs-a87046e-api16.patch`**：内容就是
->   `git diff a87046e HEAD -- FFF.Native`（HEAD = 分支 `3fcompare/api16-kernel` 上的 API 16 落地提交），
->   即「已提交的内核分歧」全集（15 个文件，含 `ShaderBytecode.h` 生成物与 `tools/generate_shader_bytecode.py`）。
->   它是可重放的，且**已按这条判据验过**：对 `a87046e` 的原始树 `git apply` 正向应用后，
->   与内核 HEAD 的 15 个文件**逐字节相同**（实测 `applied-vs-HEAD differing files = 0`）。
-> - **`0013-baseline-vs-a87046e.patch` 已退役入 `history/`**：它只到方案 A 为止，API 16 落地后
+> - **`0014-baseline-vs-a87046e-api16.patch` 已退役入 `history/`（2026-10-17）**：它描述的是旧谱系
+>   （`3fcompare/api16-kernel` 相对 `a87046e` 的分歧，内容 = `git diff a87046e HEAD -- FFF.Native` 全集，
+>   含 `ShaderBytecode.h` 生成物与 `tools/generate_shader_bytecode.py`；曾对 `a87046e` 原始树正向应用后与
+>   当时内核 HEAD 的 15 个文件逐字节相同，实测 `applied-vs-HEAD differing files = 0`）。
+>   `third_party/fff_project` 已换到新谱系（`upstream-sync`，HEAD 不含钉死基线 d2f5826），
+>   该补丁正向、反向 `--check` 都不再匹配 ⇒ `tools\构建全部.ps1` 每次都在补丁段中止。
+>   按脚本自身的处置指引移入 `history/`——它是留档，不再是待应用项。
+> - **`0013-baseline-vs-a87046e.patch` 更早已退役入 `history/`**：它只到方案 A 为止，API 16 落地后
 >   反向探测不再匹配（哨兵 C 项就是抓这个的）。旧 9 个补丁同样在 `history/`（未删除、未改写，SHA1 逐一核对一致）。
->   `tools/构建全部.ps1` 的 `Get-ChildItem $PatchesDir -Filter *.patch` **不递归**，
->   因此 `history/` 下的补丁不再参与重放。
+> - `tools/构建全部.ps1` 的 `Get-ChildItem $PatchesDir -Filter *.patch` **不递归**：
+>   `history/` 下的补丁不再参与重放；**顶层无补丁时补丁段直接跳过**（脚本 L171-173 打印"补丁均为最新"）。
 >
 > 上游升级的正确流程见 `third_party/fff_project/PATCHES.md`（人工重移植 + 打新归档 tag），
 > 体检信息用 `tools/更新内核.ps1` 查询。
@@ -20,7 +22,7 @@
 ## 补丁状态表（机器可读）
 
 ```patch-status
-0014-baseline-vs-a87046e-api16.patch | in-tree
+0014-baseline-vs-a87046e-api16.patch | retired-into-history (2026-10-17)
 0013-baseline-vs-a87046e.patch | superseded-by-0014
 0001-vrr-tearing-present-config.patch | absorbed-into-0013
 0002-zoom-stall-fixes.patch | absorbed-into-0013
@@ -34,6 +36,7 @@
 ```
 
 取值含义：`in-tree`（本补丁就是当前分歧的权威描述）／
+`retired-into-history`（描述旧谱系的分歧，现行树不再匹配，仅作留档、不参与重放）／
 `absorbed-into-0013`（其内容已由 0013 承载）／`dead-not-in-tree`（有证据表明树里根本没有）。
 
 ### 每一行是怎么判出来的
@@ -119,8 +122,8 @@ git -C third_party/fff_project push origin 3fcompare-kernel-2026.9.11.1
   git -C third_party/fff_project diff > tools/patches/<名称>.patch
   ```
 - **顶层补丁的再生成**（每次合并/重移植上游后重跑一次，然后更新上面的状态表。
-  ⚠ 当前权威补丁是 **0014**——下文命令里出现的 `0013` 只是当年写示例时的编号形状，
-  照抄编号会让新旧补丁混淆；编号应顺延）：
+  ⚠ 截至 2026-10-17 顶层**没有**权威补丁（0014 退役入 `history/`，现行树是纯上游 `upstream-sync`）；
+  下一条分歧出现时按顺延编号新增，不要复用 0013/0014 编号。下文命令里出现的旧编号只是当年写示例时的形状）：
   ```powershell
   git -C third_party/fff_project diff <新上游锚点> HEAD -- FFF.Native > tools/patches/<顺延编号>-baseline-vs-<短sha>.patch
   ```
@@ -174,6 +177,8 @@ git -C third_party/fff_project push origin 3fcompare-kernel-2026.9.11.1
 > （f344c3c 落 API 16 语义、3940990 记账），基线推进到
 > `3fcompare-kernel-2026.9.30.1 / 3940990`，重放件换为 `0014-baseline-vs-a87046e-api16.patch`
 > （0013 退役入 `history/`），门禁 `[2/11]` 配对检查转绿。以下过程记录保留，供下次重移植参考。
+> （2026-10-17 再修订：0014 本身也已退役入 `history/`——现行树换到 `upstream-sync` 谱系后
+> 它不再可匹配，见文件头"状态说明"；本节记录的是当时代的代价，正文不动。）
 
 当时现状：托管侧要求 API 16（`Fff3FpEngine.cs` 的 `ConfigVersion = 16`、`FFF3FP_SetFitLimitToNative` 等 26 个入口），
 而 `KernelDllPath` 指向的 `third_party/fff_project/FFF.Native/x64/Release/FFF.Native.dll` 是

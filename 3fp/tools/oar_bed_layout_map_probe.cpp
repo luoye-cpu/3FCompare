@@ -104,7 +104,8 @@ void SplitProbe(double flAmplitude, double siAmplitude) {
         oar_destroy(oar);
         return;
     }
-    // 与内核 BedBinauralRenderer::EnsurePipeline 同款：限幅器 -1dB。
+    // 与**外部模块**里那份 BedBinauralRenderer::EnsurePipeline 同款：限幅器 -1dB。
+    // （本体已不再有该类；这份探针只对照它的声道位置表，读的是模块侧源码。）
     // （E2E 与库级 ILD 曾差 8dB，隔离变量用。）
     oar_enable_limiter(oar, 1);
     oar_set_limiter_threshold(oar, -1.0f);

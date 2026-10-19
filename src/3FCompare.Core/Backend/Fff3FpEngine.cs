@@ -287,6 +287,29 @@ public sealed class Fff3FpEngine : IPlayerEngine
 
                 // 建模块/建泵这一步与重试线程、解锁回调共用同一把闸（见 _colorLoadGate）。
                 if (!AdoptColorTransformModule(module)) return;
+
+                // 同一枚已鉴权的模块，第二个能力面：把床渲染函数表装进当前会话。
+                // 表交给内核后模块就不再卸载（见 ColorTransformModule._audioHandedOff），
+                // 内核在装载点拷贝整张表，所以这里返回后立刻释放这块暂存缓冲。
+                // 任何一步不成立都什么都不做——矩阵折叠就是现网行为，不是降级故障。
+                string? audioReason = _handle == 0 ? "会话句柄未就绪，跳过床渲染插槽" : null;
+                var audioTable = _handle == 0 ? 0 : module.TryGetAudioRenderTable(out audioReason);
+                if (audioTable == 0)
+                {
+                    if (!string.IsNullOrEmpty(audioReason)) AppLog.Debug("AudioPlug", audioReason);
+                }
+                else
+                {
+                    try
+                    {
+                        var plugRc = Fff3FpNative.FFF3FP_SetAudioRenderPlug(_handle, audioTable);
+                        if (plugRc == FffResult.Success)
+                            AppLog.Info("AudioPlug", "床渲染函数表已装入会话");
+                        else
+                            AppLog.Warn("AudioPlug", $"内核拒绝该表：{plugRc}");
+                    }
+                    finally { Marshal.FreeHGlobal(audioTable); }
+                }
                 // 逐帧驱动不能挂在 UI 轮询上：播放中的轮询是 **250ms/4Hz**
                 // （MainWindow.Playback.cs 的自适应三档），而环只装 120 帧 ⇒
                 // 60fps 素材下每秒产出 60 条、每秒只消费 4 条，环会一直溢出，

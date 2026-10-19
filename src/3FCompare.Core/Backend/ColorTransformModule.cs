@@ -27,6 +27,10 @@ public sealed class ColorTransformModule : IDisposable
     private readonly GCHandle _headerHandle;
     private readonly Lock _gate = new();
     private bool _disposed;
+    /// <summary>床渲染函数表已交给内核 ⇒ 模块必须留在进程里。
+    /// 表里是模块代码段中的裸函数指针，还带着模块自己分配的渲染上下文；
+    /// 在这里 FreeLibrary 之后，内核下一次 render() 就是踩空。</summary>
+    private bool _audioHandedOff;
 
     /// <summary>上一帧的原始载荷副本 + 由它换算出的那张表。
     /// <para>存在的理由只有一个：<see cref="ColorTransformTable.TryFromPayload"/> 每次要新写
@@ -557,6 +561,58 @@ public sealed class ColorTransformModule : IDisposable
         }
     }
 
+    /// <summary>握手取外部床渲染函数表。
+    /// <para>成功返回一块调用方拥有的 56 字节非托管缓冲（内核在装载点拷贝整张表，
+    /// 所以 <c>SetAudioRenderPlug</c> 一返回就该 <c>FreeHGlobal</c>）；表内的 context
+    /// 所有权随表归内核，模块每次握手新建一个渲染器，由内核在替换或会话拆解时释放——
+    /// 于是同进程多个会话各持一条 DSP 管线，而不是后者盖掉前者的床。</para>
+    /// <para>失败返回 0 并给一条只进日志的原因：旧模块没有这一面 / 未解锁 /
+    /// 镜像与契约不同水 / 表不合格。四类都不提示、不抛、不改默认行为——
+    /// 床继续由内核自己的矩阵折叠处理，那是现网行为。</para></summary>
+    public nint TryGetAudioRenderTable(out string? reason)
+    {
+        reason = null;
+        lock (_gate)
+        {
+            if (_disposed) { reason = "色彩模块实例已释放，音频表未取"; return 0; }
+            if (8 + 6 * IntPtr.Size != ColorTransformAbi.AudioTableSize)
+            {
+                reason = $"音频函数表镜像按 {8 + 6 * IntPtr.Size} 字节算，与契约 " +
+                         $"{ColorTransformAbi.AudioTableSize} 不同水——不交出表";
+                return 0;
+            }
+            var entry = NativeModuleLoader.Resolve(_module, ColorTransformAbi.AudioEntryPointName);
+            if (entry == 0)
+            {
+                reason = $"{ColorTransformAbi.ModuleFileName} 里没有导出 " +
+                         $"{ColorTransformAbi.AudioEntryPointName}——床保持矩阵折叠";
+                return 0;
+            }
+            var get = Marshal.GetDelegateForFunctionPointer<FffGetAudioRenderApiFn>(entry);
+            var buffer = Marshal.AllocHGlobal(ColorTransformAbi.AudioTableSize);
+            for (var offset = 0; offset < ColorTransformAbi.AudioTableSize; offset += IntPtr.Size)
+                Marshal.WriteIntPtr(buffer, offset, IntPtr.Zero);
+            var rc = get(ColorTransformAbi.AudioTableVersion, buffer);
+            var size = unchecked((uint)Marshal.ReadInt32(buffer, 0));
+            var version = unchecked((uint)Marshal.ReadInt32(buffer, 4));
+            var context = Marshal.ReadIntPtr(buffer, 8);
+            var supports = Marshal.ReadIntPtr(buffer, 24);
+            var render = Marshal.ReadIntPtr(buffer, 32);
+            var reset = Marshal.ReadIntPtr(buffer, 40);
+            if (rc != 0 || version != ColorTransformAbi.AudioTableVersion ||
+                size < ColorTransformAbi.AudioTableSize || context == 0 ||
+                supports == 0 || render == 0 || reset == 0)
+            {
+                Marshal.FreeHGlobal(buffer);
+                reason = $"{ColorTransformAbi.AudioEntryPointName} rc={rc} version={version} " +
+                         $"size={size} context={context}——床保持矩阵折叠";
+                return 0;
+            }
+            _audioHandedOff = true;
+            return buffer;
+        }
+    }
+
     public void Dispose()
     {
         // 与换算同锁：否则"正在 analyzeFrame"与"释放句柄/卸载模块"可以交错，
@@ -569,7 +625,7 @@ public sealed class ColorTransformModule : IDisposable
             _lastTable = null;
             if (_payloadHandle.IsAllocated) _payloadHandle.Free();
             if (_headerHandle.IsAllocated) _headerHandle.Free();
-            if (_module != 0) NativeModuleLoader.Release(_module);
+            if (_module != 0 && !_audioHandedOff) NativeModuleLoader.Release(_module);
         }
     }
 }

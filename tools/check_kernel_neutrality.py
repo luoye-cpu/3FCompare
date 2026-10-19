@@ -329,6 +329,11 @@ SOURCE_FATAL = (
     r"\bAVDOVI[A-Za-z_]*",            # AVDOVIMetadata / AVDOVIDecoderConfigurationRecord …
     r"\bav_dovi_[a-z_]+",             # av_dovi_get_header / av_dovi_find_level / …
     r"\blibfdk[a-z_]*|\bfdk_aac[a-z_]*",
+    # 床→双耳渲染器（2026-10-18 搬进外部模块）：本体只留中性接缝
+    # FFF.Player.AudioRenderPlug.h。这个类名一旦出现在源码层，就是"受限实现回体内"。
+    # 二进制层不判这条——iamf.lib 内含 binaural 29 次、oar.lib 14 次，那是 vendored
+    # 库自己的符号串，判红只会把免版税依赖误伤成违规。
+    r"\bBedBinauralRenderer\b",
     r"\bmpegh[a-z_]*", r"\bac4_[a-z_]+", r"\bffdac[a-z_]*",
 )
 # FFmpeg 的公开传输层名字（项目纪律：不可改也不可想当然删）——报告但不判红。
@@ -362,6 +367,17 @@ def scan_sources(root):
                         hits.append((path, number, pattern, stripped[:100]))
                         break
     print("%s  （扫过 %d 个源文件，跳过 %s）" % (root, scanned, ",".join(SOURCE_SKIP_DIRS)))
+    if scanned == 0:
+        # fail-closed：一个源文件都没扫到，"0 命中"就不是证据而是空转。
+        # 上一版这里直接进下面的"判定干净"分支 —— 把 --sources 指到一个没有 .cpp/.h 的
+        # 目录就能稳定打印"本体干净"，那是假绿而不是干净。
+        print("   [FAIL] 源码层一个源文件都没扫到 —— 空扫不算'干净'（检查 --sources 指向）")
+        return False, -1
+    if os.path.basename(os.path.abspath(root)) in SOURCE_SKIP_DIRS:
+        # 跳过表只剪子目录（`dirs[:] = [...]`），对扫描根本身无效。这里不改变结果，
+        # 只是把这件事打印出来：否则"tools 在跳过表里"会被读成"扫 tools 也安全"。
+        print("   [提示] 扫描根的名字 %r 同时在跳过表里 —— 跳过表只作用于子目录，"
+              "本次根目录内容**已被扫描**" % os.path.basename(os.path.abspath(root)))
     if not hits:
         print("   源码层·需授权实现：0 命中 —— 判定干净")
         return True, 0
@@ -506,7 +522,10 @@ def main(argv):
         ok = False
 
     if not safety_ok:
-        print("结论: 本体含受限制实现内容（判红）")
+        # 这一层现在有两种红法：检出受限制实现（点名行），和"空扫/读不到"这类
+        # fail-closed。把话说明白，别让人把覆盖失败读成"抓到东西了"。
+        print("结论: 判红 —— 安全层或覆盖检查未通过（可能来自点名命中，也可能来自"
+              "'空扫/读不到'的 fail-closed；以各层的点名行为准）")
     elif not presence_ok:
         print("结论: 无受限制实现，但免版税能力被摘除（缺 %d 项，判红；这是功能缺失、"
               "不是安全违规）：%s" % (len(presence_missing), ", ".join(presence_missing)))
