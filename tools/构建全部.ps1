@@ -15,7 +15,7 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $ForkRoot = Join-Path $ProjectRoot "third_party\fff_project"
 
-# ---- 内核基线（改基线 = 改这里；必须同时是 PATCHES.md 里归档 tag 指向的提交）----
+# ---- 内核基线（改基线 = 改这里；必须同时是归档 tag 指向的提交）----
 # 单一真源：tools/发布门禁.ps1 的 [1/11] 用正则从这里提取 $KernelBaselineSha，
 # 不要在门禁里另抄一份字面量（S6 的收敛结论）。
 #
@@ -58,8 +58,8 @@ $KernelBaselineSha = "578f80b6ce8603aa64b746c3e394146cf011f0d2"
 # 上一基线（回滚点）：3fcompare-kernel-2026.9.30.1 / 394099019aaff37c4b6ce482c2e835527e5b124a
 # 3FCompare 扩展的云端归档：上游 Lake1059/FFF_Project **不含**这些扩展，
 # 且本机账号对它只有读权限，所以基线归档只能落在主仓库自己的仓库里。
-$KernelArchiveRepo   = "https://github.com/luoye-cpu/3FCompare.git"
-$KernelArchiveBranch = "kernel/3fcompare-zoom-viewport-cover"
+# 旧的主仓 kernel/* 归档分支已随 2026-10-20 的远端清理删除（origin 现在只有 main），
+# 旧谱系 90+ 条 ref 只剩本机 .3fc_kernel_baseline.bundle（不入库）。没有云端归档可指。
 
 function Invoke-Git {
     param(
@@ -171,7 +171,7 @@ if (Test-Path $PatchesDir) {
 以下内核补丁无法应用、也不在树中：$($pending -join ', ')
 构建已中止（内核未改动）。请人工核对 third_party/fff_project 的 HEAD 与 tools/patches/ 的假设是否对得上：
   - 补丁描述的分歧若已被合并 ⇒ 把该补丁移进 tools/patches/history/（它只是记录，不再是待应用项）
-  - 若确实还没应用 ⇒ 逐个人工 git apply --3way 解冲突，并在 PATCHES.md 记一笔
+  - 若确实还没应用 ⇒ 逐个人工 git apply --3way 解冲突，并把结论记进 tools/patches/README.md
 "@
         }
         # 全部处理完（应用了或确认已在树中）才刷新标记

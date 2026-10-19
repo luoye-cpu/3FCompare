@@ -24,11 +24,11 @@
 // 上、动态元数据是否驱动"，不能区分"样本按哪条 EOTF 解出"。快照 HDR 字段描述的是
 // **最近一个已渲染帧** ⇒ 需要窗口与呈现路径；无窗口/从未出帧的会话读数不成立。
 //
-// 编译面自适应：两棵树的头不一样宽。TP 出货树
-// （third_party/fff_project/FFF.Native，API v17）的快照尾部带 ST 2094 诊断字段
-// （dynamicMetadata*）与注入导出；而现有可链接的 `3fp/build/FFF.Native.dll` 来自
-// `3fp/kernel/FFF.Native`（v19，快照无 dynamicMetadata*、也不导出注入 API）。⇒ 可选
-// 字段用 C++20 requires 探测，同一份源在两棵树下都能编，缺字段时当场说明而不是猜。
+// 编译面自适应：可选字段用 C++20 requires 探测，缺字段时当场说明而不是猜。
+// 历史动机（2026-10-14 之前）：两棵树的头宽度不同——出货树那份快照尾部带 ST 2094
+// 诊断字段（dynamicMetadata*），而当时可链接的 3fp/build/FFF.Native.dll 来自实验树、
+// 没有这些字段。PR #31 合并后两树同一份检出（API 20、快照 464 B），探测仍然留着：
+// 它拦的是"包含树与所链 DLL 不是同一份构建"，这个风险与树是否分叉无关。
 //
 // 背景（原审计冲突，本探针只在分类域内回答它）：
 //   · 一路读数称"transfer=2 ⇒ HLG 未被按 PQ 解码"——那是在 transfer 域念 hdrFormat 的
@@ -107,9 +107,8 @@ std::string CompatName(const std::uint32_t mask) {
     if (out.empty()) out = "none";
     return out;
 }
-// 可选字段探测：TP 出货树（third_party/fff_project/FFF.Native，API v17）的快照尾部带
-// ST 2094 诊断字段；3fp/kernel 那份（现有可链接 DLL 的来源，v19）没有。用 requires 探测，
-// 同一份源在两棵树下都能编，缺字段时明说而不是猜。
+// 可选字段探测：用 requires 探测 ST 2094 诊断字段在不在，缺就明说而不是猜。
+// 两棵树现在同水（都有这些字段），探测保留是为了拦"头与所链 DLL 不同一份构建"。
 template <typename T>
 concept HasSt2094Diagnostics = requires(const T& s) {
     s.dynamicMetadataWindows;
@@ -121,10 +120,9 @@ concept HasSt2094Diagnostics = requires(const T& s) {
 
 // 读一份快照。门控有两道，取值都实测过，所以这里**不猜**：
 //   · size：声明的 size 小于内核自己的 sizeof(FFF3FPSnapshot) ⇒ InvalidArgument；
-//   · version：两棵树的 PlayerSession::GetSnapshot 都写死要求 `output.version == 8`
-//     （3fp/kernel 与 third_party/fff_project 两份同源判定），8 是**快照自己的**版本号，
-//     与 PlayerApiVersion（kernel 19 / TP 17）不是一回事 —— 拿 GetApiVersion() 填这里
-//     会被拒（实测返回码 -1）。
+//   · version：PlayerSession::GetSnapshot 要求 `output.version` 等于内核写死的那一个
+//     （两棵树现在都是 20，见 PlayerSession.cpp 的 `output.version != 20`），
+//     它是**快照自己的**版本号，与 PlayerApiVersion 是两条独立的水位线。填错 ⇒ InvalidArgument。
 // ⇒ PickSnapshotVersion 在候选 {8, GetApiVersion()} 里试出第一个能读通的，之后全程用它，
 //   并把选中的值打出来：读不到时先看这一行，别把"字段全 0"当成"内核没分类"。
 bool ReadSnapshot(const FFF3FPHandle player, FFF3FPSnapshot& s, const std::uint32_t version,
@@ -272,8 +270,8 @@ int wmain(const int argc, wchar_t** argv) {
     FFF3FPHandle player = nullptr;
     const auto createResult = FFF3FP_Create(&configuration, &player);
     if (createResult != FFFResult::Success || player == nullptr) {
-        // 多半是"包含树与所链 DLL 不是同一份构建"：Configuration 的 size/version 门控
-        // 会直接拒（TP 树的头没有 kernel 树后加的自适应字段，sizeof 就小了）。
+        // 多半是"包含树与所链 DLL 不是同一份构建"：FFF3FP_Create 的 size/version 门控
+        // 直接拒（头的 FFF3FPConfiguration 比 DLL 那份窄，或 version 不等）。
         printf("创建失败 result=%d —— 检查 /I 的树与所链 FFF.Native.lib 是否同一份构建\n",
             static_cast<int>(createResult));
         return 1;

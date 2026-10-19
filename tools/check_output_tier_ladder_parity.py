@@ -110,6 +110,7 @@ def main():
             print("[FAIL] 变异没改动任何东西 —— 锚点不存在，判据可能是死的")
             return 1
         kernel_path = os.path.join(ROOT, r"_3fc_tmp\mutated_VideoRenderer.cpp")
+        os.makedirs(os.path.dirname(kernel_path), exist_ok=True)   # _3fc_tmp 不入库，新克隆上没有
         open(kernel_path, "w", encoding="utf-8").write(bad)
         print("（变异臂：内核阈值改成 >10，期望下面判红）")
 

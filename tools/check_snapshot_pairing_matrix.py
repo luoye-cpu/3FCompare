@@ -4,15 +4,12 @@
 
 Why this exists
 ---------------
-两棵内核树（实验树 3fp/kernel、出货树 third_party/fff_project）当前
-GetApiVersion 同为 20，但快照布局已经分叉：
+两棵内核树（实验树 3fp/kernel、出货树 third_party/fff_project）2026-10-20 起是**同一份上游
+检出**（HEAD 都是 578f80b），快照布局两边都是 78 字段 / 464 B、IAMF 三字段都在尾部组
+（364/368/372，videoUpload100ns 插在 376）。历史上它们分叉过（出货树 69/392 且 IAMF 在中段
+136/140/144，实验树 71/408），那一版本工具报的是"跨树对预期内红"。
 
-    实验树  71 字段 / 408 B，IAMF 三字段在**尾部**（364/368/372），
-            另有 videoUpload100ns(376) 与 audioDelay100ns(400)
-    出货树  69 字段 / 392 B，IAMF 三字段在**中段**（136/140/144），
-            没有那两个 100ns 字段
-
-两个宿主各跟一棵树：
+两个宿主各跟一棵树（树同水之后这条只说明配对关系，不再说明布局差异）：
 
     VB 宿主（3fp/kernel/FFF.Player/Interop/播放器原生接口.vb）↔ 实验树
     托管镜像（src/3FCompare.Core/.../Fff3FpNative.cs）        ↔ 出货树
@@ -27,9 +24,9 @@ GetApiVersion 同为 20，但快照布局已经分叉：
     vb-host    ↔ kernel(exp)   VB 宿主跑实验内核（tools/校验快照布局.py 已单独看守）
     cs-mirror  ↔ shipped(TP)   托管宿主跑出货内核（SnapshotLayoutTests.cs 单独看守）
 
-跨树对（vb-host↔shipped、cs-mirror↔kernel）是**已知分叉**，本脚本把它们
-报成 RED-BY-DESIGN 并在汇总里单独计数：它们是"设计上就不该配对"，不是回归。
-真正判红退出（exit 1）的只有 designated pair 漂移。
+跨树对（vb-host↔shipped、cs-mirror↔kernel）单独计数、不计入退出码——退出码只对
+designated pair 负责（exit 1 = 宿主与自己那棵树漂移）。⚠ 两树同水之后跨树对**本应全绿**，
+所以"跨树红"不再是"预期内"，而是有人开始往单棵树塞本地改动的信号，要查。
 
 Usage
 -----
@@ -70,7 +67,7 @@ PERFTEST_CS = os.path.join(REPO, "tests", "experiments", "PerfTest", "Program.cs
 #   vb-host   ↔ kernel(exp)  VB 宿主跑实验内核（tools/校验快照布局.py 已单独看守）
 #   cs-mirror ↔ shipped(TP)  托管宿主跑出货内核（SnapshotLayoutTests.cs 单独看守）
 #   perftest  ↔ shipped(TP)  PerfTest 运行前把 third_party 的 Release DLL 拷到己方目录
-#                            （PerfTest/Program.cs 的 dllSrc），跑的是出货树内核
+#                            （tests/experiments/PerfTest/Program.cs 的 dllSrc），跑的是出货树内核
 DESIGNATED = {
     ("vb-host", "kernel(exp)"),
     ("cs-mirror", "shipped(TP)"),
@@ -430,7 +427,7 @@ def main(argv):
                     designated_failed.append("%s: %s ↔ %s %s"
                                              % (struct_key, a, b, "; ".join(details)))
                 else:
-                    tag = "RED（跨树分叉，预期内）"
+                    tag = "RED（跨树对，不计入退出码；两树同水时本应绿）"
                     cross_red += 1
                 print("  %-12s ↔ %-12s %-8s %s" % (labels[a], labels[b], tag, summary))
                 for line in details:
@@ -466,7 +463,7 @@ def main(argv):
             print("  · %s" % line)
         print("VERDICT: FAIL - 宿主与其内核树的布局不再一致")
         return EXIT_FAIL
-    print("跨树分叉（预期内，不计入退出码）: %d 对" % cross_red)
+    print("跨树分叉（不计入退出码；两树同水时本应 0 对）: %d 对" % cross_red)
     print("VERDICT: PASS - 两个 designated pair 布局一致；跨树分叉如上如实呈现")
     return EXIT_OK
 

@@ -5,7 +5,7 @@
 # third_party/fff_project 是 3FCompare 的本地重移植分支（3fcompare/zoom-viewport-cover），
 # 上游 Lake1059/FFF_Project 不含这些扩展；直接切上游会静默丢掉全部自研能力
 # （旧版本正是这么做的：checkout 失败只 Write-Warning，然后拿默认分支构建出"成功"的假象）。
-# 真正的升级 = 按 third_party/fff_project/PATCHES.md 人工重移植 → 打新归档 tag → 更新
+# 真正的升级 = 把改动开成上游 PR → 合并后推进基线常量 → 更新
 # tools/构建全部.ps1 里的 $KernelBaselineSha。本脚本负责把前置信息一次查清。
 
 param(
@@ -101,14 +101,15 @@ if (-not $CheckOnly) {
         Write-Host "  ⚠ fetch 失败（离线？）: $($fetch.Out)" -ForegroundColor Yellow
     }
 }
-$upstream = (Invoke-Git $ForkRoot @("rev-parse", "origin/master")).Out
+$upstream = (Invoke-Git $ForkRoot @("rev-parse", "origin/main")).Out
+if (-not $upstream) { $upstream = (Invoke-Git $ForkRoot @("rev-parse", "origin/master")).Out }
 if ($upstream) {
-    Write-Host "  origin/master: $upstream"
-    $behind = (Invoke-Git $ForkRoot @("rev-list", "--count", "HEAD..origin/master")).Out
-    $ahead  = (Invoke-Git $ForkRoot @("rev-list", "--count", "origin/master..HEAD")).Out
-    Write-Host "  落后上游 $behind 个提交，领先 $ahead 个提交（领先的即为 3FCompare 自研扩展）"
+    Write-Host "  上游 tip: $upstream"
+    $behind = (Invoke-Git $ForkRoot @("rev-list", "--count", "HEAD..$upstream")).Out
+    $ahead  = (Invoke-Git $ForkRoot @("rev-list", "--count", "$upstream..HEAD")).Out
+    Write-Host "  落后上游 $behind 个提交，领先 $ahead 个提交（领先>0 = 本树有未合并上游的本地改动）"
 } else {
-    Write-Host "  ⚠ 无法解析 origin/master（离线或未配置远端）" -ForegroundColor Yellow
+    Write-Host "  ⚠ 无法解析 origin/main（离线或未配置远端）" -ForegroundColor Yellow
 }
 
 # ---- 3. 归档 tag 是否已推到远端（决定新机器能否复现）----
@@ -134,9 +135,9 @@ if (Test-Path $PatchesDir) {
 }
 
 Write-Host "`n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
-Write-Host "  升级内核的人工流程（见 third_party/fff_project/PATCHES.md）:" -ForegroundColor Cyan
-Write-Host "   1. 在 $branch 上合并/重放上游 origin/master" -ForegroundColor White
-Write-Host "   2. 按『必须重放』4 项重移植，以 PlayerApi 导出面为完成判据" -ForegroundColor White
+Write-Host "  升级内核的流程（内核改动走上游 PR，补丁队列见 tools/patches/README.md）:" -ForegroundColor Cyan
+Write-Host "   1. 在 $branch 上合并/重放上游 origin/main" -ForegroundColor White
+Write-Host "   2. 把改动开成上游 PR（本树不再维护树内追加补丁），以 PlayerApi 导出面为完成判据" -ForegroundColor White
 Write-Host "   3. MSBuild Release x64 构建 + dotnet build + 3FCompare.Core.Tests 全绿" -ForegroundColor White
 Write-Host "   4. 打新归档 tag：3fcompare-kernel-<上游版本>.<序号>" -ForegroundColor White
 Write-Host "   5. 同步更新 tools/构建全部.ps1 的 `$KernelBaselineSha 与 `$KernelBaselineTag" -ForegroundColor White

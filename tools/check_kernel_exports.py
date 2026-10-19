@@ -125,6 +125,10 @@ REQUIRED = (
     "FFF3FP_GetPresentPacingStatus",
     # ---- 日志回调（Fff3FpNativeProbe.cs）----
     "FFF3FP_SetLogCallback",
+    # ---- 音频渲染插口（2026-10-20 随上游 578f80b 落到两棵树；宿主已在 Fff3FpNative.cs 绑定）----
+    # 内核声明见 FFF.Native/3FP/Api/FFF.Player.AudioRenderPlug.h:110,116。
+    "FFF3FP_SetAudioRenderPlug",
+    "FFF3FP_GetAudioRenderPlugState",
 )
 
 # 托管侧声明 P/Invoke 的源文件（相对仓库根）。逐名对账用，见 managed_entry_points()。
@@ -134,9 +138,9 @@ INTEROP_SOURCES = (
 )
 
 # ── 按树声明的"已知缺失"清单（2026-10-14，J2）────────────────────────────────
-# 为什么需要：出货树（third_party/fff_project）与内核树（3fp/kernel）**本来就分叉**，
-#   REQUIRED 里的 RTX VSR 两条入口只在后者有实现（实测：VSR 在 TP 源码 0 命中、
-#   在 3fp/kernel 源码 86 命中；导出面 TP=94 / KF=104）。于是门禁 `[2/11]` 恒红——
+# 为什么需要（2026-10-14 的原始动机，当时的分叉已被 PR #31 合并消解）：那时 RTX VSR
+#   两条入口只有 3fp/kernel 有实现（TP 源码 0 命中 / KF 86 命中，导出面 TP=94 / KF=104），
+#   门禁 `[2/11]` 因此恒红——
 #   而"恒红的门禁"教给读者的第一课就是学会忽略红，那比没有门禁更坏。
 # 为什么不是"缺了就警告"：那等于把这 2 条的牙永久拔掉，内核真少一条也照样绿。
 #   ⇒ 这里的语义是**对账**：实测缺失集合必须与声明集合**完全相等**。
@@ -145,17 +149,11 @@ INTEROP_SOURCES = (
 #     · 两边相等 ⇒ 绿，且读数里点名"是哪几条、为什么"
 #   未列在这里的树**一律不豁免**（fail-closed）：换一棵树/换个检出目录就要先把
 #   分叉事实写进这张表，不能靠传参数绕过。
-KNOWN_MISSING_BY_TREE = {
-    "third_party/fff_project": {
-        "symbols": ("FFF3FP_SetVideoSuperResolution",
-                    "FFF3FP_GetVideoSuperResolutionStatus"),
-        "why": "RTX VSR 两条入口在出货树 TP 里本就没有实现：实测 `VideoSuperResolution` "
-               "在 third_party/fff_project 源码 0 命中、在 3fp/kernel 源码 86 命中，"
-               "导出面 TP=94 / KF=104。托管侧 Fff3FpNative.cs 已声明这两个 P/Invoke，"
-               "所以 REQUIRED 里必须留着（删了=托管侧引用不再被对账），豁免只挂在**这棵树**上。"
-               "该树一旦补上实现，本条目立即过期并判红——那时该做的是删条目，不是加参数。",
-    },
-}
+# 当前为空：PR #31 合并后两棵树是同一份上游检出，VSR 两条入口在两边都有实现
+# （实测那份进包 DLL 的导出面 FFF3FP_Set/GetVideoSuperResolution 均 YES，本表若还挂着
+#  这两条就会以“过期豁免”判红）。表本身和“实测缺失集合必须与声明集合完全相等”的语义留着——
+#  下次真出现单侧缺失时在这里写“哪棵树、缺哪几条、为什么”，而不是给门禁加放宽参数。
+KNOWN_MISSING_BY_TREE = {}
 
 
 def tree_id_for(path):

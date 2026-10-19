@@ -436,8 +436,8 @@ if (-not $kernelDll) {
     $exp = Invoke-Cmd $pyExe @(
         (Join-Path $PSScriptRoot "check_kernel_exports.py"),
         $kernelDll, "--min-exports", "82", "--min-api", "15",
-        # J2（2026-10-14）：出货树 TP 与内核树 KF 本来就分叉（VSR 两条入口只有 KF 有实现，
-        # TP 导出 94 / KF 导出 104），本步因此**恒红**——而恒红的门禁只教会读日志的人忽略红。
+        # J2（2026-10-14）：那时 TP 与 KF 分叉（VSR 两条入口只有 KF 有实现，导出 94 / 104），
+        # 本步因此**恒红**——而恒红的门禁只教会读日志的人忽略红。2026-10-20 起两树同源，豁免表已清空。
         # 现在按"对账"而不是"放宽"接：判据里 KNOWN_MISSING_BY_TREE 写死了"哪棵树、缺哪几条、
         # 为什么"，实测缺失集合必须与声明集合**完全相等**才放行：
         #   多缺一条 ⇒ 红（真回归）；声明里多挂着一条 ⇒ 红（提示删条目）；
@@ -849,13 +849,13 @@ if ($SkipProbeSetGate) {
 #   ⚠ 这条判据此前是**孤儿**：全仓 0 个 .ps1/.py 调用它，且镜像表只有 api 17/19，而两棵树现在
 #     都是 api 20（`Api/PlayerApi.cpp` 里 `PlayerApiVersion = 20`）⇒ 实测两棵树都 FAIL
 #     「mirror requested for api 17/19 but the DLL reports api 20」（docs/95 §N）。
-#     本次补上两棵树各自的 api 20 镜像（出货 15 字段/80 B、内核 22 字段/112 B），
-#     并在这里接进门禁 ——**不接的判据等于没有判据**。
+#     本次补上两棵树各自的 api 20 镜像，并在这里接进门禁 ——**不接的判据等于没有判据**。
+#     （当时出货那份还是 15 字段/80 B；PR #31 合并后两棵都是 22 字段/112 B。）
 #
 #   ⚠ 镜像按树选，不由 api 号猜：两棵树同为 api 20，判据要求传 `--tree`；本步从 $kernelDll
 #     往上找 `FFF.Native.vcxproj` 反查它属于哪棵树（与上面「本体中性」同一套反查思路，
-#     不硬编码 third_party），反查不到就不传 --tree，由判据按实测 sizeof 自己挑并在结论里
-#     打出挑了哪棵（80 B vs 112 B 足以区分），绝不让"猜错的镜像"静默判绿。
+#     不硬编码 third_party），反查不到就不传 --tree；两树同为 112 B 之后 sizeof 已分辨不了
+#     哪棵树，判据于是报 NOT JUDGED 而不是猜一个，绝不让"猜错的镜像"静默判绿。
 #
 #   ⚠ fail-closed：判据进程没起来（-1）、读数行没打全、exit=0 但 VERDICT 不是 PASS、
 #     或 exit=3（NOT JUDGED）一律判红。NOT JUDGED 是"环境没能给出结论"，**永远不是通过**。

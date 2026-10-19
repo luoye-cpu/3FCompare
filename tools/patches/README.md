@@ -16,7 +16,7 @@
 > - `tools/构建全部.ps1` 的 `Get-ChildItem $PatchesDir -Filter *.patch` **不递归**：
 >   `history/` 下的补丁不再参与重放；**顶层无补丁时补丁段直接跳过**（脚本 L171-173 打印"补丁均为最新"）。
 >
-> 上游升级的正确流程见 `third_party/fff_project/PATCHES.md`（人工重移植 + 打新归档 tag），
+> 上游升级的正确流程：内核改动走上游 PR：在 3fp/kernel 的分支上改 → 开 PR → 合并后把 `tools/构建全部.ps1` 的 `$KernelBaselineSha`/`$KernelBaselineTag` 推到新 tip，补丁队列与状态表见 `tools/patches/README.md`，
 > 体检信息用 `tools/更新内核.ps1` 查询。
 
 ## 补丁状态表（机器可读）
@@ -193,10 +193,10 @@ git -C third_party/fff_project push origin 3fcompare-kernel-2026.9.11.1
 | 把 PR 补丁直接落到 fork 树 | `git apply --check -p1 --ignore-whitespace` 逐文件：**8 个冲突 / 6 个干净**（冲突：`FFF.Player.Api.h`、`PlayerApi.cpp`、`PlayerSession.h/.cpp`、`VideoRenderer.h/.cpp`、两个 `FFF.Player` VB；干净：`ShaderBytecode.h`、`HdrProcessor.h`、`WasapiCapture.cpp`、`VideoMuxer.cpp`、`FFF.Native.rc`、`KernelTimelineTests.vb`） | ❌ 不是机械步骤，是**手工重移植**（下面第 1 步），且必须把 6 个干净文件的语义与 8 个冲突文件的移植一起再验一轮真机 |
 | 把 `3fp/kernel` 编好的 DLL 拷进 `third_party/.../x64/Release/` | 能做到"绿" | ❌ **禁止**：树不能再生产自己的产物，下次 `构建全部.ps1` 就把它覆盖回 15；这正是本目录铁律要防的形状（产物与源码脱钩） |
 
-**该走的路（就是本目录既有流程）**：按 `third_party/fff_project/PATCHES.md` 做人工重移植 —— 在 fork 的分支上
+**该走的路（就是本目录既有流程）**：内核改动走上游 PR：在 3fp/kernel 的分支上改 → 开 PR → 合并后把 `tools/构建全部.ps1` 的 `$KernelBaselineSha`/`$KernelBaselineTag` 推到新 tip，补丁队列与状态表见 `tools/patches/README.md` —— 在 fork 的分支上
 把 API 16 的 9 组改动逐组落地（`sdrScRgbMode` + `WantsScRgbPresentationPath`、纸白锚定与 DISPLAYCONFIG 兜底、
 gamut 三态 + `ShaderBytecode.h` 重生成、有符号 dest/对称钳位/`z<1`、`SetFitLimitToNative`、present 能力位与偏好分离、
-日志汇、3FR 两处、并发与生命周期三处），提交 → 更新 `PATCHES.md` 分类清单 → 打新归档 tag →
+日志汇、3FR 两处、并发与生命周期三处），提交 → 更新本文件的分类清单 → 打新归档 tag →
 同步 `tools/构建全部.ps1` 的 `$KernelBaselineSha`/`$KernelBaselineTag` → `tools/构建全部.ps1` 重建 →
 `[2/11]` 应转为绿。**注意版本语义**：`sdrScRgbMode` 是配置字段新增 ⇒ `PlayerApiVersion 15→16` 与
 `FFF3FPConfiguration` 尺寸（80→84 B）必须一起进，否则重演 09-27 那条"上游改布局不升版本"的教训。
@@ -210,6 +210,6 @@ PR 正文/提交信息见 `3fp/patches/combined-pr-body.md`、`combined-commit-m
 
 1. 修改 `third_party/fff_project/` 内源码
 2. 提交到 `3fcompare/zoom-viewport-cover` 分支（补丁文件仅作留档时可选导出）
-3. 更新 `third_party/fff_project/PATCHES.md` 的分类清单
+3. 更新本文件（`tools/patches/README.md`）的分类清单
 4. 打新归档 tag，并同步 `tools/构建全部.ps1` 的 `$KernelBaselineSha`
 5. 重建：`tools/构建全部.ps1`

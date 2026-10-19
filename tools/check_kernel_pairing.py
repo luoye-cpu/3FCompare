@@ -16,10 +16,10 @@
 这里不再写第二份 —— 同一个格式两处解析是本仓反复踩过的坑。
 
 诚实的限制：**本脚本判不出"这份 DLL 是从哪棵树编出来的"**。导出表里没有来源信息，
-所以"README 要求应用内核必须来自 `3fp/kernel`（`third_party` 那份缺 `IsWideGamutSource` 广色域门禁）"
-这条只能靠 csproj 的 `KernelDllPath` 指对地方来保证。当前两者恰好还有旁证：两棵树的 API 版本不同
-（15 vs 16），版本一项就能挡住；哪天两边版本号对上，这一项就失去鉴别力 —— 那时要加的是可观测的
-版本内指纹（比如构建戳导出），不要假装现在就能查出来。
+而旧的两条旁证现在都没了：两棵树同为 `PlayerApiVersion = 20`，`IsWideGamutSource`
+在两边各有 5 处命中（PR #31 合并后两树同一份检出）。所以"应用内核必须来自哪棵树"
+只能靠 csproj 的 `KernelDllPath` 指对地方 + 构建戳/`dumpbin /exports` 名称集合来事后归因；
+要真正可判，得加可观测的版本内指纹（比如构建戳导出），不要假装现在就能查出来。
 
 用法（Git Bash / PowerShell 均可）：
     py tools/check_kernel_pairing.py <FFF.Native.dll 路径>

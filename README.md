@@ -67,8 +67,9 @@
   `Copyright (c) [year] [fullname]`），故此处按实测登记为 **许可未经确认**；内核 251 个被跟踪文件里
   212 个（84.5%）与上游根提交逐字节相同，归属见 `THIRD-PARTY-NOTICES.md` §7。本项目**基于其源码二次开发**：内核以**独立 git 仓库**形式位于
   `third_party/fff_project/`——**不是 submodule**（`.gitmodules` 已无条目，整目录被 `.gitignore` 忽略），
-  基线由 `tools/构建全部.ps1` 的 SHA/tag 钉死。在其上追加自研扩展补丁（VRR 交换链 / 视口子区域 /
-  全帧回读等，见 `docs/03 §6`），保持与上游可合并。
+  基线由 `tools/构建全部.ps1` 的 SHA/tag 钉死。自研扩展（VRR 交换链 / 视口子区域 / 全帧回读 /
+  自适应上传与解码线程档等）已全部经上游 PR 合入，2026-10-20 起两棵内核树就是上游 `578f80b`
+  本身，本仓不再维护树内追加补丁；后续内核改动仍走上游 PR，合并后推进基线常量。
 - FFmpeg 公共 API：Shared FFmpeg DLL 组（`avcodec` 等）由 BtbN 构建，**不纳入本仓库**，仅在发布说明中指引获取。
 - 本项目的 UI、同步逻辑、对比工具均为独立实现；本仓库的 git 集合里**不含第三方 DLL/EXE**（按 `git ls-tree -r HEAD` 的扩展名口径实测为 0）。逐件第三方许可见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
 

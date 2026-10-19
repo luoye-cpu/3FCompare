@@ -43,7 +43,7 @@
   新机器克隆后自己补：`git -C third_party/fff_project tag 3fcompare-kernel-2026.10.20.1 578f80b…`。
 * 内核补丁已全部合并上游，旧文案"上游不含 3FCompare 扩展、不能从上游克隆"已失效。
 
-升级内核是**人工重移植**流程，见 `third_party/fff_project/PATCHES.md`。
+升级内核是**先上游后跟进**的流程：内核改动走上游 PR：在 3fp/kernel 的分支上改 → 开 PR → 合并后把 `tools/构建全部.ps1` 的 `$KernelBaselineSha`/`$KernelBaselineTag` 推到新 tip，补丁队列与状态表见 `tools/patches/README.md`。
 
 ## 调试/诊断工具
 

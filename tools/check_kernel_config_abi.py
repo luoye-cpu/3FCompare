@@ -34,10 +34,11 @@ Checks, in order
 
 The mirror follows the tree under test
 --------------------------------------
-The repo carries two kernel trees whose FFF3FPConfiguration differ, so no single
-mirror is correct. The mirror is selected from FFF3FP_GetApiVersion() (override
-with --api / --tree); each list below was transcribed field for field from that
-tree's own header with
+The repo carries two kernel trees. Since 2026-10-20 both are the same upstream
+checkout (578f80b) and declare the same 22-field / 112-byte FFF3FPConfiguration,
+but each mirror is still transcribed from its own header on disk - so a local
+edit to one tree shows up as its own drift instead of being masked by an alias.
+The mirror is selected by --tree (or by the sizeof measured from the DLL);
     awk '/^struct FFF3FPConfiguration/,/^};/' <header>
 and the member count / ctypes sizeof were measured, not remembered:
   api 17 shipped      third_party/fff_project/FFF.Native/3FP/Api/FFF.Player.Api.h
@@ -45,15 +46,14 @@ and the member count / ctypes sizeof were measured, not remembered:
   api 19 experimental 3fp/kernel/FFF.Native/3FP/Api/FFF.Player.Api.h
                       22 fields -> 112 bytes  (historical)
   api 20 shipped      third_party/fff_project/FFF.Native/3FP/Api/FFF.Player.Api.h
-                      15 fields -> 80 bytes
+                      22 fields -> 112 bytes
   api 20 experimental 3fp/kernel/FFF.Native/3FP/Api/FFF.Player.Api.h
                       22 fields -> 112 bytes
 
-Both trees now report PlayerApiVersion = 20 (each tree's Api/PlayerApi.cpp), so
-the api number no longer identifies a layout on its own. Pass --tree to say which
-mirror you mean; without it the mirror is picked by the sizeof measured from the
-DLL (80 vs 112 bytes tells the two api 20 mirrors apart unambiguously), and an
-ambiguous measurement is reported as NOT JUDGED rather than guessed.
+Both trees report PlayerApiVersion = 20 and the same layout, so neither the api
+number nor the measured sizeof identifies a tree any more. Pass --tree; without it
+two equally-sized mirrors mean the choice is not determinable, and that is reported
+as NOT JUDGED rather than guessed.
 
 Usage
 -----
@@ -219,8 +219,8 @@ def _make_struct(fields, name="FFF3FPConfigurationMirror"):
     return type(name, (ctypes.Structure,), {"_fields_": list(fields)})
 
 
-# Current mirrors, keyed by canonical tree name: both trees sit at api 20, so the
-# tree is the only thing that tells the two layouts apart.
+# Current mirrors, keyed by canonical tree name: same api, same layout - kept
+# separate because each is read from that tree's own header.
 LAYOUTS_BY_TREE = {
     "shipped": Layout(20, "shipped", SHIPPED_HEADER, LAYOUT_20_SHIPPED),
     "experimental": Layout(20, "experimental", EXPERIMENTAL_HEADER, LAYOUT_20_KERNEL),

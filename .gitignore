@@ -56,9 +56,9 @@ logs/
 # 历史补丁留档于 tools/patches/*.patch（入库跟踪，但不自动重放，详见该目录 README）。
 third_party/fff_project/
 
-# ── 3FP「图片模式」独立工作区（见 3fp/README.md）──
-# 与 third_party/fff_project/ **同上游但不同基线**：实测 `b765a1f` 并非 3fp/kernel HEAD 的祖先
-# （两树真实的共同祖先是 `a87046e`）。3FC 出货链只认 third_party/fff_project/，本树只落试验性改动。
+# ── 3FP 内核 PR 工作区（见 3fp/README.md）──
+# 与 third_party/fff_project/ 现在是**同一份上游检出**（两树 HEAD 都是 578f80b），区别只在用途：
+# 本树用来开上游 PR，third_party 那份是进包构建读的出货树。
 # 不入库原因与 third_party/fff_project/ 相同：第三方源码 + 构建产物 + 嵌套 git 仓。
 3fp/kernel/
 3fp/build/

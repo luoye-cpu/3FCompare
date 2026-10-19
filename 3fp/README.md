@@ -18,7 +18,7 @@
 - 无法判断"某个回归是 3FC 引起的还是图片模式引起的"
 
 ⇒ 因此本区域用**从基线 bundle 克隆的独立内核副本**承载改动，
-`third_party/fff_project/` 保持不动，直到改动成熟再按 `third_party/fff_project/PATCHES.md` 重移植进 3FC 基线。
+`third_party/fff_project/` 保持不动，直到改动成熟再走上游 PR 合进 3FC 基线（流程见仓库根 `tools/patches/README.md`）。
 
 ---
 
@@ -41,7 +41,7 @@
 │   ├── README.md          ← 样张集清单与生成方法
 │   ├── tools/             ← 样张生成脚本（入库）
 │   └── media/             ← 样张文件本体（**不入库**，体积大）
-├── patches/               ← 导出给上游 issue/PR 的补丁（入库）
+├── patches/               ← 导出给上游 issue/PR 的过程件（**不入库**，本机留档）
 └── build/                 ← 构建产物（**不入库**）
 ```
 
@@ -52,7 +52,7 @@
 ### 铁律 1 · 绝不改 `third_party/fff_project/`
 
 那是 3FC 的构建基线。本区域的一切改动只落在 `3fp/kernel/`。
-需要同步给 3FC 时，走 `third_party/fff_project/PATCHES.md` 的重移植流程，**不是复制文件**。
+需要同步给 3FC 时，走上游 PR 流程，**不是复制文件**。
 
 ### 铁律 2 · 视频模式"只加不改"
 
@@ -129,7 +129,7 @@ copy c:\PLAN\3FCompare\runtime\*.dll 3fp\build\
 | 目标 | 路径 |
 |---|---|
 | **上游 3FP** | `3fp/patches/` 导出补丁 → GitHub issue 探路 → PR（本机对上游**无写权限**，只能 issue/PR） |
-| **3FC** | 按 `third_party/fff_project/PATCHES.md` 重移植 → 推进 `构建全部.ps1` 的 `$KernelBaselineSha` → 更新 bundle |
+| **3FC** | 上游 PR 合并 → 推进 `构建全部.ps1` 的 `$KernelBaselineSha` → 重建归档 tag（bundle 只在本机） |
 
 ⚠ **顺序**：先上游/本区域定稿，再重移植进 3FC。
 不要在 3FC 侧另起一份实现 —— 那会导致后续无法合并。
@@ -141,6 +141,6 @@ copy c:\PLAN\3FCompare\runtime\*.dll 3fp\build\
 | 内容 | 位置 |
 |---|---|
 | FFmpeg 能力探测脚本 | `tools/探测FFmpeg能力.ps1`（主仓库，本区域复用） |
-| 3FC 内核基线与补丁归档 | `third_party/fff_project/PATCHES.md` |
+| 3FC 内核基线与补丁台账 | `tools/patches/README.md`（状态表）＋ `构建全部.ps1` 的基线常量 |
 | 3FC 构建/基线校验 | `tools/构建全部.ps1` |
 | 上游 PR 历史（PR #9 的 ABI 教训） | `docs/upstream/PR-SUBMISSION.md` |

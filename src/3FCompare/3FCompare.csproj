@@ -168,8 +168,8 @@
        注意这里**没有 Debug/Release 配置维度**：build.sh 直接把产物落在 native/wgc_capture/
        根目录，不像内核那样按配置分子目录（所以不引入会被静默忽略的 *Configuration 开关）。
 
-       缺失时**降级为 Warning**（不再硬失败）的理由：该 DLL 被 native/wgc_capture/.gitignore 忽略、
-       仓库内也没有可还原的基线归档（内核有 .3fc_kernel_baseline.bundle，WGC 没有），
+       缺失时**降级为 Warning**（不再硬失败）的理由：该 DLL 被 native/wgc_capture/.gitignore 忽略，
+       而仓库里没有它的可还原基线（内核树整体被忽略、上游 main 就是它的基线；WGC 两边都没有），
        于是任何没有 VS C++ 工具链 + cppwinrt 头的机器（CI、新克隆）连 dotnet build / dotnet test
        都跑不起来 —— 而运行时 FrameCapture.GetProbe() 探测到缺库已有 GDI 兜底、本就不会崩。
        用构建失败去拦一个运行时不崩、且多数机器上根本修不了的条件，代价明显大于收益。
