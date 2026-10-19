@@ -119,13 +119,10 @@ if (-not $remoteTags) {
 } elseif ($remoteTags -match [regex]::Escape($KernelBaselineTag)) {
     Write-Host "  ✅ 归档 tag $KernelBaselineTag 已在远端" -ForegroundColor Green
 } else {
-    Write-Host "  ⚠ 归档 tag $KernelBaselineTag **不在远端** —— 新机器裸克隆拿不到基线，" -ForegroundColor Red
-    Write-Host "    tools/构建全部.ps1 会直接报错而不是静默用错内核。建议推送：" -ForegroundColor Red
-    Write-Host "      git -C third_party/fff_project push fork $branch" -ForegroundColor White
-    Write-Host "      git -C third_party/fff_project push fork $KernelBaselineTag" -ForegroundColor White
-    Write-Host "    ⚠ 推送目标是 fork (luoye-cpu/FFF_Project)，不是 origin ——" -ForegroundColor Yellow
-    Write-Host "      origin = Lake1059/FFF_Project 对本机只读，push 必然失败。" -ForegroundColor Yellow
-    Write-Host "      基线可复现性的兜底是主仓入库的 .3fc_kernel_baseline.bundle。" -ForegroundColor Yellow
+    Write-Host "  ⚠ 归档 tag $KernelBaselineTag **不在上游远端** —— 缺的只是 tag 名，基线提交本身就是 origin/main，" -ForegroundColor Yellow
+    Write-Host "    新机器裸克隆拿到的是同一棵树。要本机复核，按 SHA 补一个本地 tag：" -ForegroundColor Yellow
+    Write-Host "      git -C third_party/fff_project tag $KernelBaselineTag $KernelBaselineSha" -ForegroundColor White
+    Write-Host "    ⚠ 只有用户明确下令才向远端 push；origin 是上游 Lake1059/FFF_Project。" -ForegroundColor Yellow
 }
 
 # ---- 4. 补丁归档 ----

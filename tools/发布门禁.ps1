@@ -1401,7 +1401,7 @@ if ($SkipPackageSelfTest) {
 #   ① 盘上发货的 FFmpeg 是 `--enable-gpl --enable-nonfree --enable-version3` 组合（实测 `-version`），
 #      而仓里只有 LGPL 文本、全仓无第三方许可致谢件；
 #   ② README/third_party README 都写过"零二进制入仓"，而 `.3fc_kernel_baseline.bundle`（2 371 867 B）
-#      就在 `HEAD` 与 `origin/main` 的树里；
+#      就在 `HEAD` 与 `origin/main` 的树里（2026-10-20 已从索引移除，见 .gitignore）；
 #   ③ `3fp/kernel/LICENSE.txt:3` 是未填的 MIT 模板（`Copyright (c) [year] [fullname]`），
 #      所以"内核 MIT 已确认"那句当时是不可证伪的假陈述。
 # 本步只干一件事：**把"发布时必须带着一份可核对的第三方清单"变成有牙的门**，

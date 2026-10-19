@@ -70,8 +70,7 @@
   基线由 `tools/构建全部.ps1` 的 SHA/tag 钉死。在其上追加自研扩展补丁（VRR 交换链 / 视口子区域 /
   全帧回读等，见 `docs/03 §6`），保持与上游可合并。
 - FFmpeg 公共 API：Shared FFmpeg DLL 组（`avcodec` 等）由 BtbN 构建，**不纳入本仓库**，仅在发布说明中指引获取。
-- 本项目的 UI、同步逻辑、对比工具均为独立实现；本仓库的 git 集合里**不含第三方 DLL/EXE**（按 `git ls-tree -r HEAD` 的扩展名口径实测为 0）。
-  ⚠ **口径限定**：仓根 `.3fc_kernel_baseline.bundle`（实测 2 371 867 B，在 `HEAD` 与 `origin/main` 的树里）是**随仓分发的二进制 git 包**，内含整套内核仓库历史（含 `refs/stash`）；`3fp/patches/history/…/ShaderBytecode.h`（1 157 815 B）内嵌自产 DXBC 字节码。"零二进制入仓"这句话只对源码集合成立，别按磁盘口径读。逐件第三方许可见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+- 本项目的 UI、同步逻辑、对比工具均为独立实现；本仓库的 git 集合里**不含第三方 DLL/EXE**（按 `git ls-tree -r HEAD` 的扩展名口径实测为 0）。逐件第三方许可见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
 
 > 详细依赖清单、构建步骤与风险见 [docs/06-风险与依赖.zh.md](docs/06-风险与依赖.zh.md)。
 
@@ -288,10 +287,13 @@ _Key keys: `Space` play/pause · `A`/`D` frame step · `←`/`→` second step �
 ### 构建与运行 / Build & Run
 
 ```powershell
-# 0. 裸克隆后先恢复内核目录（整目录不入库，随仓带的是基线归档 bundle）
-#    / On a fresh clone, restore the kernel tree first (it is gitignored; the repo ships a baseline bundle)
+# 0. 裸克隆后先恢复内核目录（整目录被 .gitignore 忽略，不入库）
+#    / On a fresh clone, restore the gitignored kernel tree (upstream main IS the pinned baseline)
 #    目标目录必须不存在；重复执行会报 "destination path already exists"。
-git clone .3fc_kernel_baseline.bundle third_party/fff_project
+git clone https://github.com/Lake1059/FFF_Project.git third_party/fff_project
+#    基线 tag 只在本机，任何远端都没有；脚本按 SHA 认人，缺 tag 时补一个：
+#    / The baseline tag exists only on this box; scripts pin the SHA. Create it if a step asks:
+git -C third_party/fff_project tag 3fcompare-kernel-2026.10.20.1 578f80b6ce8603aa64b746c3e394146cf011f0d2
 
 # 1. 一键构建内核 + 部署（需 VS 2022+ C++、Git；首次联网下载 FFmpeg/vcpkg） / One-click kernel build + deploy (requires VS 2022+ C++, Git; first-run downloads FFmpeg/vcpkg)
 powershell -ExecutionPolicy Bypass -File tools/构建全部.ps1

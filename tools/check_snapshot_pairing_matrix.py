@@ -64,7 +64,7 @@ KF_HEADER = os.path.join(REPO, "3fp", "kernel", "FFF.Native", "3FP", "Api", "FFF
 TP_HEADER = os.path.join(REPO, "third_party", "fff_project", "FFF.Native", "3FP", "Api", "FFF.Player.Api.h")
 VB_INTEROP = os.path.join(REPO, "3fp", "kernel", "FFF.Player", "Interop", "播放器原生接口.vb")
 CS_MIRROR = os.path.join(REPO, "src", "3FCompare.Core", "Backend", "Interop", "Fff3FpNative.cs")
-PERFTEST_CS = os.path.join(REPO, "PerfTest", "Program.cs")
+PERFTEST_CS = os.path.join(REPO, "tests", "experiments", "PerfTest", "Program.cs")
 
 # designated pairs：宿主/工具实际运行时所配的内核树。见模块 docstring。
 #   vb-host   ↔ kernel(exp)  VB 宿主跑实验内核（tools/校验快照布局.py 已单独看守）

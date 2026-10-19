@@ -1,6 +1,0 @@
-# 一次性产物不入库（可由 README 里的命令重生成）
-logs/
-backups/
-
-# 探针运行时产物（DLL/exe/obj/wav/日志），由 audio-plug/build_probe.bat 重生成
-audio-plug/run/

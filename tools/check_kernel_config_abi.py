@@ -138,13 +138,9 @@ LAYOUT_19 = LAYOUT_17 + [
 ]
 
 # api 20 - shipped tree
-# third_party/fff_project/FFF.Native/3FP/Api/FFF.Player.Api.h
-# 22 members. The shipping tree took upstream 578f80b (PR #31) on 2026-10-20, which
-# is the round that carried the seven adaptive decode/upload knobs into this tree as
-# well, so both headers now declare the same 22 fields -> 112 bytes (checked field
-# for field by this script's own mirror-vs-header comparison, which is what caught the
-# stale 15-field copy). Written out in full rather than aliased to the other tree, so
-# a future drift here shows up as its own edit.
+# 22 fields -> 112 bytes: the shipping tree took upstream 578f80b (PR #31) on 2026-10-20,
+# so both headers now declare the same struct. Spelled out rather than aliased, so drift
+# in one tree shows up as its own edit.
 LAYOUT_20_SHIPPED = [
     ("size", _U32),
     ("version", _U32),
@@ -172,10 +168,8 @@ LAYOUT_20_SHIPPED = [
 
 # api 20 - experimental/kernel tree
 # 3fp/kernel/FFF.Native/3FP/Api/FFF.Player.Api.h
-# 22 members, transcribed field for field from that header: the 15 long-shared members
-# plus the seven adaptive decode/upload knobs. Those seven are no longer exclusive to
-# this tree -- the shipping tree carries them since it merged 578f80b -- but the two
-# mirrors are kept separate on purpose: they are read from two different headers.
+# 22 members, transcribed field for field from that header; same struct as the shipped tree
+# since 2026-10-20, but read from a different header on purpose.
 # 22 fields -> 112 bytes.
 LAYOUT_20_KERNEL = [
     ("size", _U32),

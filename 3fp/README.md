@@ -73,9 +73,9 @@
 ## 四、环境准备（新机器 / 新 agent 接手第一步）
 
 ```powershell
-# 1) 内核工作副本（若 3fp/kernel 缺失；2 MB，秒级完成）
+# 1) 内核工作副本（若 3fp/kernel 缺失）
 cd c:/PLAN/3FCompare
-git clone .3fc_kernel_baseline.bundle 3fp/kernel
+git clone https://github.com/luoye-cpu/FFF_Project.git 3fp/kernel   # 上游与 fork 的 main 同为基线 578f80b；旧谱系归档 bundle 只在本机，不入库
 
 # 2) 按**本次任务**切分支——不要假设还叫 feature/image-mode
 #    分支随任务漂移（图片模式 / api16-scrgb / mks-subtitle …），开工前先确认：

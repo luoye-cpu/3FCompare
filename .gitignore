@@ -76,19 +76,10 @@ third_party/fff_project/
 testmedia/media/
 testmedia/tmp/
 
-# 验收 harness：驱动脚本入库，跑出来的日志/夹具/临时产物不入库。
-# 2026-09-30 实测：tests/output 下 335 个未跟踪文件 ≈ 21.8 MB，而本文件此前只按
-# **扩展名**黑名单拦截（mp4/log/dll/…）⇒ 真正的大头反而漏网：
-#   prcheck/master-tree/ 272 个 —— 上游第三方源码树快照（.vb/.h/.cpp/.resx/.slnx），
-#     与 third_party/fff_project/ 同源，而后者被整目录忽略 ⇒ 两处规则自相矛盾。
-#   scrgb-delivery/ 12 个 —— 内核侧交付快照（含 1.1 MB ShaderBytecode.h）。
-#   crashcap/ 14 个 —— 崩溃取证抓取产物。
-# 改为整目录忽略 + 台账白名单：已跟踪的三个台账是文本，用 ! 显式放行
-# （已跟踪文件本身不会被 ignore 撤回，白名单是为将来误删后能重新 add）。
-tests/output/**
-!tests/output/deleted-artifacts.txt
-!tests/output/gate-20260926.txt
-!tests/output/wip-rescue-20260926.patch
+# 验收 harness 的产物与一次性实验脚本：驱动代码在 tools/ 与 3fp/tools/，跑出来的不入库
+tests/output/
+tests/experiments/
+
 testmedia/tools/*/bin/
 testmedia/tools/*/obj/
 
@@ -109,14 +100,10 @@ publish/
 # 旧 AI 工具的会话临时产物（plan / 快照），内容已被 docs/ 与各里程碑实现覆盖
 .zcode/
 
-# 一次性 UI 自动化/调试脚本：硬编码屏幕坐标与进程号，不可复用（已移入 tools/debug/）
+# 一次性 UI 自动化/调试脚本与 `_` 前缀探针：硬编码屏幕坐标、进程号或切某段脚本来跑，不可复用。
+# 已跟踪文件不会被 ignore 撤回，发现同类残留要 `git rm --cached` 显式移除。
 tools/debug/
 tools/_*.py
-# 2026-09-30 补：此前只有 .py / .txt，漏了 .ps1 ⇒ tools/_probe_pkg_selftest_stability.ps1
-# 等一次性探针会以未跟踪状态长期躺在 tools 根。
-# ⚠ 历史遗留：`tools/_probe_build_manifest.ps1` 与 `tools/_probe_gate_step1.ps1` 在补这条
-# 规则**之前**就已入库；已跟踪文件不会被 ignore 撤回，所以它们仍处于跟踪状态。
-# 若确认不再需要，请用 `git rm` 显式移除，不要指望这条规则生效。
 tools/_*.ps1
 tools/_*.txt
 
@@ -133,19 +120,10 @@ _corrupt_pack_backup/
 # 是本机构建产物，每台机器/每次构建都可能不同，不入库。
 .3fc_kernel_sha
 
-# 注意：.3fc_kernel_baseline.bundle 是**有意入库**的（约 2MB），不要加到这里。
-# 它是内核基线归档（当前：分支 3fc/integrate-issue7 @ b765a1f +
-# tag 3fcompare-kernel-2026.9.18.3，回滚点 3fcompare-kernel-2026.9.18.2 / 0d5856e），
-# 上游 Lake1059/FFF_Project 不含 3FCompare 扩展，没有它换机器就无法复现构建。
-# 恢复方式：git clone .3fc_kernel_baseline.bundle third_party/fff_project
-#
-# ⚠ 重建时必须把 HEAD 一起打进 bundle，否则克隆后 "remote HEAD refers to
-#   nonexistent ref"，工作区不会 checkout（得到空目录）。旧 bundle 就缺 HEAD。
-#   git -C third_party/fff_project bundle create <输出路径> \
-#     HEAD 3fc/integrate-issue7 3fcompare/zoom-viewport-cover \
-#     3fcompare-kernel-2026.9.18.3 3fcompare-kernel-2026.9.18.2
-#   （2026-09-20 起基线推进到 .18.3 = 单 presenter 管线修复三连；
-#    漏掉新 tag 会让"照此命令重建"的 bundle 不含当前基线。）
+# 内核归档包与门禁缓存都是验证/构建自己会重写的本机件，不入库。两棵内核树现在就是上游 578f80b，
+# 构建可复现；旧谱系那 67 条 ref 只剩这个文件，所以盘上的它别删（只是不再进版本库）。
+.3fc_kernel_baseline.bundle
+tools/probe_baseline_cache.txt
 
 # ── 调试残留（历次实机自测/崩溃排查产生，勿入库；2026-09-15 第二轮审查补）──
 /_*.log
@@ -225,16 +203,13 @@ FFF.HDRdp.Test.dll
 *.BEFORE
 *.ABL-BASE
 *.WITH-OTHERS
-3fp/patches/**/*.exe
-3fp/patches/**/*.7z
 # 私有/敏感台账（文件名本身就是暴露面）
 docs/*DLL*
 3fp/docs/*DLL*
 docs/*授权*
 3fp/docs/*授权*
-3fp/patches/*授权*
 # 交接台账（含种子路径与对外交付决策）与 patch 工作区里的源码副本
 docs/交接-*.md
-3fp/patches/*-work-*/*.cpp
-3fp/patches/*-work-*/*.h
-3fp/patches/*-work-*/*.sh
+
+# 过程件（PR 正文、提交说明、源码快照）：本机保留，不入库
+3fp/patches/

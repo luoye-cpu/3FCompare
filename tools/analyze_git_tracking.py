@@ -61,15 +61,12 @@ RE_BUILD = re.compile(r"(^|/)(bin|obj|x64|x86|Debug|Release)(/|$)")
 RE_LOCAL = re.compile(r"(^|/)(\.vs|\.idea|\.review_pr|\.3fc_dumps|\.3fc_verify[^/]*|\.verify[^/]*|logs|\.workbuddy-ai)(/|$)")
 RE_MEDIA = re.compile(r"(^|/)testmedia/media(/|$)")
 EXT_BIN = {".dll", ".pdb", ".exe", ".obj", ".lib", ".exp", ".ilk", ".zip", ".7z",
-           ".msi", ".nupkg", ".mp4", ".mkv", ".avi", ".mov", ".so", ".a", ".o"}
+           ".msi", ".nupkg", ".mp4", ".mkv", ".avi", ".mov", ".so", ".a", ".o", ".bundle"}
 EXT_ART = {".user", ".suo", ".tlog", ".log", ".tmp", ".cache"}
-WHITELIST = {".3fc_kernel_baseline.bundle"}
 
 
 def classify(path):
     ext = os.path.splitext(path)[1].lower()
-    if path in WHITELIST:
-        return None
     if RE_LOCAL.search(path):
         return "本地工作目录"
     if RE_BUILD.search(path):

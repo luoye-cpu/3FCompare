@@ -32,35 +32,16 @@
 > 复制的后果已经出现过一次风险：改基线时漏改一处，会变成「体检脚本说与基线一致、
 > 构建却按另一份基线拦下」。改基线只改 `构建全部.ps1` 一处。
 
-内核目录 `third_party/fff_project/` 被 `.gitignore` 整体忽略，且该归档分支与 tag
-**目前只存在于本机**——远端 `Lake1059/FFF_Project` 没有 `3fcompare-kernel-*` tag。
-新机器裸克隆无法复现基线，此时脚本会**报错中止**，绝不会静默退回上游默认分支
-（旧版本正是这么做的，会拿没有 3FCompare 扩展的内核构建出"成功"的假象）。
+内核目录 `third_party/fff_project/` 被 `.gitignore` 整体忽略；找不到基线时脚本会**报错中止**，
+绝不会静默退回上游默认分支（旧版本正是这么做的，会拿没有 3FCompare 扩展的内核构建出"成功"的假象）。
 
-修复可复现性（按优先级取用）：
+基线可复现性的现状（2026-10-20 实测 `git ls-remote`）：
 
-1. **首选 —— 随仓库携带的基线归档**（无需网络、无需远端权限）：
-
-   ```bash
-   git clone .3fc_kernel_baseline.bundle third_party/fff_project
-   ```
-
-2. 云端归档分支（需网络，但**不需要上游写权限**）：
-
-   ```bash
-   git clone --branch kernel/3fcompare-zoom-viewport-cover \
-     https://github.com/luoye-cpu/3FCompare.git third_party/fff_project
-   ```
-
-3. ⚠ **不要再尝试 push 到上游** `Lake1059/FFF_Project`：本机账号对它**只有读权限**
-   （admin=false, push=false），推不上去。上面"该分支只存在于本机"的说法已随
-   bundle 入仓失效。
-
-**当前基线**：`3fcompare-kernel-2026.9.30.1` / `394099019aaff37c4b6ce482c2e835527e5b124a`
-（上一基线 `3fcompare-kernel-2026.9.27.1` / `b66136550a99f06c42c47e272c9eb21d01e09887` 为回滚点）。
-⚠ 本行只是便于阅读的副本：**以 `构建全部.ps1` 的 `$KernelBaselineTag` / `$KernelBaselineSha` 为准**
-（该值随每次内核升级漂移，本行不保证同步）。
-本行 2026-09-30 更新：此前长期停在 `.18.3 / b765a1f`，落后两个基线（`.27.1 → .30.1`）。
+* 基线提交 `578f80b…` 同时是 `origin`（Lake1059/FFF_Project）与 `fork`（luoye-cpu/FFF_Project）的 `refs/heads/main`，裸克隆任一个即可拿到。
+* tag `3fcompare-kernel-*` **两个远端都没有**（`ls-remote --tags` 均为空），只存在于本机
+  `third_party/fff_project` 的本地 ref 和未入库的 `.3fc_kernel_baseline.bundle`。
+  新机器克隆后自己补：`git -C third_party/fff_project tag 3fcompare-kernel-2026.10.20.1 578f80b…`。
+* 内核补丁已全部合并上游，旧文案"上游不含 3FCompare 扩展、不能从上游克隆"已失效。
 
 升级内核是**人工重移植**流程，见 `third_party/fff_project/PATCHES.md`。
 
