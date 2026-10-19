@@ -21,6 +21,7 @@
 用法：
   py tools/check_kernel_ledger.py                 # 正常校验，PASS 退出 0
   py tools/check_kernel_ledger.py --selftest      # 自证有牙：构造三种缺陷，每种都必须判红
+                                                # 台账缺席时这一档返回 2（未判定），不是 0
   py tools/check_kernel_ledger.py --upstream <sha> # 换上游锚点（默认取内核 HEAD 的第二父）
 """
 import argparse
@@ -69,10 +70,18 @@ def read(path):
 def upstream_anchor(override):
     if override:
         return override
+    # 默认锚点 = 上游远端分支本身。2026-10-20 起本树与上游同一提交，
+    # 旧默认 HEAD^2 取的是"我们那条 PR 分支"，拿它当上游会把上游自己的改动
+    # 记成本地分歧，A1 于是要求把厂商符号登记进台账——那是句假话。
+    for ref in ("origin/main", "origin/master", "upstream/main"):
+        out, rc = git("rev-parse", ref)
+        if rc == 0 and out.strip():
+            return out.strip()
     out, rc = git("rev-parse", "HEAD^2")
     if rc == 0:
         return out.strip()
-    raise SystemExit("内核 HEAD 不是合并提交，无法自动取上游锚点；请显式 --upstream <sha>")
+    raise SystemExit("取不到上游锚点（origin/main、origin/master、upstream/main、HEAD^2 全失败）；"
+                     "请显式 --upstream <sha>")
 
 
 def net_diff(up):
@@ -193,15 +202,24 @@ def checks(up, ledger_text=None):
     """返回 [(名字, OK?, 说明)]。ledger_text 供 --selftest 注入被改坏的台账。"""
     res = []
     fp0 = fingerprint()
-    ledger = ledger_text if ledger_text is not None else read(LEDGER)
     diff = net_diff(up)
+    # 台账不存在 ≠ 报错，也 ≠ 静默通过：只有"与上游锚点净差异为空"才允许它缺席，
+    # 一旦有本地改动而台账缺席/为空，下面的 A1/B/D 照样判红。
+    no_divergence = not diff.strip()
+    if ledger_text is not None:
+        ledger = ledger_text
+    elif os.path.exists(LEDGER):
+        ledger = read(LEDGER)
+    else:
+        ledger = ""            # 缺席；只有 no_divergence 才允许，见 B/D 的判据
     members = {i for i in local_only_idents(up, diff) if i.endswith("_")}
     listed = member_table(ledger)
 
     missing = sorted(members - listed)
     res.append(("A1 净差异成员都已登记", not missing,
                 f"未登记 {len(missing)} 个：" + " ".join(missing[:8]) if missing
-                else f"{len(members)} 个本地独有成员全部在 §十一 表中"))
+                else (f"净差异为空（HEAD == 上游锚点 {up[:9]}）⇒ 无本地成员可登记" if no_divergence
+                      else f"{len(members)} 个本地独有成员全部在 §十一 表中")))
     stale = sorted(listed - members)
     res.append(("A2 表中成员都还在净差异里", not stale,
                 f"表里有但树中已无此成员 {len(stale)} 个：" + " ".join(stale[:8]) if stale
@@ -209,7 +227,8 @@ def checks(up, ledger_text=None):
 
     rows = probe_rows(ledger)
     if rows is None:
-        res.append(("B §十一·探测块", False,
+        res.append(("B §十一·探测块", no_divergence,
+                    f"净差异为空（HEAD == 上游锚点 {up[:9]}）⇒ 无探测块可复跑" if no_divergence else
                     "PATCHES.md 缺 ```ledger-probe``` 块 ⇒ 期望值没有唯一存放处，判据无法复跑"))
     else:
         bad = []
@@ -269,8 +288,9 @@ def checks(up, ledger_text=None):
     named = {i for i in decl if i in ledger}
     unknown = sorted(i for i in decl - named
                      if i not in PROSE and not i.isupper() and len(i) >= 10)
-    res.append(("D 声明级符号有归属", len(named) > 0 and len(unknown) <= 12,
-                f"未在台账点名的长标识符 {len(unknown)} 个（多为散文/局部名）：" +
+    res.append(("D 声明级符号有归属", (no_divergence or len(named) > 0) and len(unknown) <= 12,
+                ("净差异为空 ⇒ 无声明级符号需要归属" if no_divergence else
+                 f"未在台账点名的长标识符 {len(unknown)} 个（多为散文/局部名）：") +
                 " ".join(unknown[:10])))
 
     # E 编号覆盖：表里登记的每个 D 编号都必须至少有一条探测，否则"删掉某族的判据"
@@ -301,6 +321,13 @@ def main():
     print(f"上游锚点 {up[:9]}  内核 HEAD {git('rev-parse','--short','HEAD')[0].strip()}")
 
     if a.selftest:
+        if not os.path.exists(LEDGER):
+            # 四类构造缺陷全是"把台账改坏"，台账不存在就没有可注入的本体 —— 这一档记未判定，
+            # 不许读成"哨兵自测通过"。当前状态下能跑的牙证明是负控臂：
+            # --upstream <合并前的上游 tip> 让净差异非空而台账缺席，A1/B/D 必须判红。
+            print("自证结论：未判定 —— PATCHES.md 不存在（本树与上游锚点净差异为空），"
+                  "四类注入缺陷无台账可改；改跑负控臂 py tools/check_kernel_ledger.py --upstream <更早的上游 sha>")
+            return 2
         base = read(LEDGER)
         cases = {
             "A1 少登记一个成员（删 pumpThreadId_）": (lambda t: t.replace("`pumpThreadId_`", "``", 1), "A1"),
