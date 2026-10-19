@@ -1,7 +1,7 @@
 {
- "built_at_epoch": 1792036023,
- "digest": "8d8509fd8b9c3557",
- "inputs": "403466c71e9e2947",
+ "built_at_epoch": 1792422337,
+ "digest": "71334aead3deedd3",
+ "inputs": "46c2c7056d1e4b57",
  "max_age_days": 14.0,
  "note": "本文件由 tools/check_probe_set.py 生成，是**上次真编出来的结论**的备忘，不是判据本身；判据永远以（探针源码 sha + 输入指纹 + 条目摘要）匹配为准，对不上就重编。删掉它最多多花一次全量扫编，不会让门禁变绿。",
  "probes": {
@@ -71,6 +71,12 @@
    "src": "4fe0803c38c70adb13205002e921ec168ca50dd4c0fc8005003711b0d38efb7c",
    "status": "ok"
   },
+  "content_period_probe": {
+   "detail": "",
+   "layer": "",
+   "src": "910635ee354d118d9532c6354c940ddd14f7e33a786bec09512f2424087657e0",
+   "status": "ok"
+  },
   "copyframe_probe": {
    "detail": "",
    "layer": "",
@@ -111,6 +117,18 @@
    "detail": "",
    "layer": "",
    "src": "21539ab1becc9d870a81a79c1e0d7a2f19a74b12e89296d7794b62e2ac06abb0",
+   "status": "ok"
+  },
+  "dup_presented_probe": {
+   "detail": "",
+   "layer": "",
+   "src": "2af9941de3fad84dbaea351a240c0a62f0b75b0b6c6bbf73ede5717ee0a9e2d8",
+   "status": "ok"
+  },
+  "dxgi_display_probe": {
+   "detail": "",
+   "layer": "",
+   "src": "327c8df84e919f213baaba3cce089247570cea27505e6f63c9396cc7a8645316",
    "status": "ok"
   },
   "frame_pool_probe": {
@@ -314,7 +332,7 @@
   "oar_bed_layout_map_probe": {
    "detail": "",
    "layer": "",
-   "src": "75c0f5ba0c18b7210462b2dc938d4425ea52846a36d596f2174c1ae44eec735a",
+   "src": "796ce0cf4f02fb69cd58df1a433ff4c6ca6192644fd7f40d23dcb2206776bf2b",
    "status": "ok"
   },
   "occlusion_probe": {
@@ -344,13 +362,13 @@
   "present_pacing_probe": {
    "detail": "",
    "layer": "",
-   "src": "f750dce36fabd7ff7455bcd7bbe9374c7e339c56f221a7b167dc4c3abf244d10",
+   "src": "5e0e55e9da0101ce7814c35fbac5cf4d5af651d6e2aae20678553db94b489638",
    "status": "ok"
   },
   "read_pixel_probe": {
    "detail": "",
    "layer": "",
-   "src": "facce262d258b51867109d46950faed0a444da5697783dab082f07d4a241cc6f",
+   "src": "e07ac0b7cd338a978218098b3d6fd86a4b96c1730c2063a3c1dc7e9dab638f44",
    "status": "ok"
   },
   "rotation_probe": {
@@ -431,6 +449,12 @@
    "src": "106c4d47dbbef4e344e8850f226b99b698ef761cb1422f0c5beb8960e6082b77",
    "status": "ok"
   },
+  "truehdr_pixel_probe": {
+   "detail": "",
+   "layer": "",
+   "src": "d56ef517cea27cf96bba567bf33b8d6fe58460b4c5affa41ddbace406db78f66",
+   "status": "ok"
+  },
   "upload_ab": {
    "detail": "",
    "layer": "",
@@ -494,7 +518,7 @@
   "vsr_scrgb_probe": {
    "detail": "",
    "layer": "",
-   "src": "af7e36c9c2c112077bb583c63fdea20c864a18c97f1470d013e1832b298e0ddc",
+   "src": "3188345204a4365d913936b16a2041eeb266a3cb5a4399db871b6e6d449f802d",
    "status": "ok"
   },
   "zoom_anchor_probe": {
