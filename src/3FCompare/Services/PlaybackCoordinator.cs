@@ -970,17 +970,34 @@ public sealed class PlaybackCoordinator
                 StateChanged?.Invoke(this, EventArgs.Empty);
                 break;
             case EngineEventType.DeviceChanged:
-                // 显卡/显示器变更：不自动重建（易误触发），提示用户手动恢复。
-                // 但抓屏线路要重来一次（S4）：GPU 变更后原有的 WGC 会话与失败计数都已失去意义，
-                // 继续沿用降级标记会让用户在"手动重试"后仍然拿到 GDI 的错内容。
-                _3FCompare.App.Capture.FrameCapture.ResetRouting();
-                // 组件日志：设备/显示器变化。它会让抓屏线路重来一次，也常伴随
-                // 交换链/设备重建 —— 是"崩溃前发生了什么"的高价值锚点。
-                _3FCompare.Diagnostics.ComponentLog.Log(
-                    _3FCompare.Diagnostics.Comp.Engine, "DeviceChanged", -1,
-                    $"{Path.GetFileName(slot.Path)} {evt.DetailJson}");
-                AppLog.Warn("Coordinator", $"[{Path.GetFileName(slot.Path)}] 显卡/显示器变更: {evt.DetailJson}");
-                surface.ErrorText = "检测到显卡/显示器变更，如画面异常请右键该路重试";
+                // 内核用同一枚事件报告两件不同的事：
+                //   1. 显卡/显示器真的变了（交换链、适配器）—— 需要用户手动恢复，抓屏线路也要重来；
+                //   2. 硬件解码这条路走不通，已回退 CPU —— 只是换了条解码路径，画面照常，
+                //      且 GPU 没变，抓屏线路无需重置。
+                // 区分标志是 JSON 里的 "fallback":true（内核 FallbackToSoftwareVideoDecoder
+                // 与 open 期回退都会带），此前一律按 1 处理，于是"硬解不通"被显示成
+                // "检测到显卡/显示器变更"，与实际不符。
+                if (IsHardwareDecodeFallback(evt.DetailJson))
+                {
+                    _3FCompare.Diagnostics.ComponentLog.Log(
+                        _3FCompare.Diagnostics.Comp.Engine, "DecodeFallback", -1,
+                        $"{Path.GetFileName(slot.Path)} {evt.DetailJson}");
+                    AppLog.Warn("Coordinator", $"[{Path.GetFileName(slot.Path)}] 硬件解码不可用，已改用 CPU 解码");
+                    surface.ErrorText = "该视频无法使用硬件解码，已改用 CPU 解码播放";
+                }
+                else
+                {
+                    // 抓屏线路要重来一次（S4）：GPU 变更后原有的 WGC 会话与失败计数都已失去意义，
+                    // 继续沿用降级标记会让用户在"手动重试"后仍然拿到 GDI 的错内容。
+                    _3FCompare.App.Capture.FrameCapture.ResetRouting();
+                    // 组件日志：设备/显示器变化。它会让抓屏线路重来一次，也常伴随
+                    // 交换链/设备重建 —— 是"崩溃前发生了什么"的高价值锚点。
+                    _3FCompare.Diagnostics.ComponentLog.Log(
+                        _3FCompare.Diagnostics.Comp.Engine, "DeviceChanged", -1,
+                        $"{Path.GetFileName(slot.Path)} {evt.DetailJson}");
+                    AppLog.Warn("Coordinator", $"[{Path.GetFileName(slot.Path)}] 显卡/显示器变更: {evt.DetailJson}");
+                    surface.ErrorText = "检测到显卡/显示器变更，如画面异常请右键该路重试";
+                }
                 StateChanged?.Invoke(this, EventArgs.Empty);
                 break;
             case EngineEventType.ColorModeChanged:
@@ -1056,6 +1073,28 @@ public sealed class PlaybackCoordinator
     /// 载荷形如 <c>{"operation":"seek","position100ns":12345678}</c>，由工作线程在
     /// <c>DoSeek</c> 之后发出 —— 这是"托管层那次异步 Seek 到底做成了没有"的直接证据。
     /// 只写日志，不改任何状态。</summary>
+    /// <summary>
+    /// 内核的 DeviceChanged 既可能是真的设备变更，也可能是"硬件解码不通，已回退 CPU"。
+    /// 后者由 <c>FallbackToSoftwareVideoDecoder</c> 与 open 期回退发出，JSON 里带
+    /// <c>"fallback":true</c>（内核 PlayerSession.cpp）。GPU 并没有变，所以它不该被
+    /// 当成设备变更来提示用户，也不该重置抓屏线路。解析不出一律按"不是回退"处理 ——
+    /// 保守，把未知的当成更严重的那类。
+    /// </summary>
+    private static bool IsHardwareDecodeFallback(string? detailJson)
+    {
+        if (string.IsNullOrEmpty(detailJson)) return false;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(detailJson);
+            return doc.RootElement.TryGetProperty("fallback", out var f) &&
+                   f.ValueKind == System.Text.Json.JsonValueKind.True;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private void RecordOperationCompleted(SyncController.SyncSlot slot, string detailJson)
     {
         if (string.IsNullOrEmpty(detailJson)) return;
