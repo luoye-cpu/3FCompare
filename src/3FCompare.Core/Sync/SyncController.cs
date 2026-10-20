@@ -28,6 +28,29 @@ public sealed class SyncController
     private long _loopEnd100ns = -1;
     private string? _lastRuntimeError;
 
+    /// <summary>某一路停在 <see cref="PlayerState.Paused"/> 的原因。漂移校正只恢复
+    /// <see cref="SeekBroadcast"/>——用户手动暂停、被停用、帧步进后暂停、以及绕开本类
+    /// 直接 <c>Session.Pause()</c> 的路（multitest 判别实验）保持"被有意移出播放组"的
+    /// 既有语义，与修复前逐位一致。</summary>
+    public enum RoutePauseSource
+    {
+        /// <summary>未暂停，或账已销（Playing/Ended/Ready 等状态）。</summary>
+        None = 0,
+        /// <summary>用户意图的全局暂停（<see cref="Pause"/>/<see cref="Stop"/>）。</summary>
+        User,
+        /// <summary>被视图模式停用（<see cref="SetActiveRoutes"/> 停用分支）。</summary>
+        RouteDeactivated,
+        /// <summary>帧步进前暂停（<see cref="StepFramesCore"/>，"所有路停在同一帧"语义）。</summary>
+        FrameStep,
+        /// <summary>广播/逐路 Seek 的内核副作用：内核 <c>DoSeek</c> 尾部把 Ended 改成
+        /// Paused（PlayerSession.cpp:5698-5699），此后该路落进漂移排除项就会永久失步。
+        /// 记上这笔账，漂移校正就能把它与"有意暂停"精确区分开。</summary>
+        SeekBroadcast,
+        /// <summary>绕开本类直接 <c>Session.Pause()</c>（multitest 判别实验）；
+        /// 本类无从观测，默认即 None，同样不会被自动恢复。</summary>
+        External,
+    }
+
     /// <summary>单调毫秒时间源。存在的唯一理由是让"1s 漂移冷却"可被确定性测试
     /// （docs/41 §4.3「依赖真实挂钟」+ §4.5 配套基建 <see cref="IClock"/>）。</summary>
     /// <para>默认取 <see cref="Environment.TickCount64"/>：单调、不受系统时间调整影响，
@@ -64,6 +87,12 @@ public sealed class SyncController
         public long Offset100ns { get; set; }
         public bool Failed { get; set; }
         public string? Error { get; set; }
+
+        /// <summary>本路为何停在 Paused。仅在 <c>_stepGate</c> 内读写（与所有改播放态的
+        /// 临界区一致）。挂在槽位对象上而非按索引记账：<c>SwapSlots</c> 对调的是槽位引用、
+        /// <c>RemoveSlotAt</c> 使索引整体前移，按索引记账会错位；随对象走则零维护，
+        /// 且 Clear/RemoveSlotAt 时账随对象自然消亡。</summary>
+        public RoutePauseSource PauseSource { get; set; }
 
         /// <summary>本槽是第几路的<b>镜像</b>（-1 = 不是镜像）。
         ///
@@ -556,7 +585,8 @@ public sealed class SyncController
     public void Play()
     {
         WantPlaying = true;
-        lock (_stepGate) { ForEachSlot("播放", s => s.Session.Play(), notify: false, cause: "组播放"); }
+        // Play 抛异常时 lambda 中断 ⇒ 不销账（保守保留，最多多一次恢复尝试）
+        lock (_stepGate) { ForEachSlot("播放", s => { s.Session.Play(); s.PauseSource = RoutePauseSource.None; }, notify: false, cause: "组播放"); }
         RaiseStateChanged();
     }
 
@@ -575,7 +605,8 @@ public sealed class SyncController
     public void Pause()
     {
         WantPlaying = false;
-        lock (_stepGate) { ForEachSlot("暂停", s => s.Session.Pause(), notify: false, cause: "组暂停"); }
+        // ForEachSlot 跳过 !Active 的路 ⇒ 停用路保持 RouteDeactivated，正是所需
+        lock (_stepGate) { ForEachSlot("暂停", s => { s.Session.Pause(); s.PauseSource = RoutePauseSource.User; }, notify: false, cause: "组暂停"); }
         RaiseStateChanged();
     }
 
@@ -596,7 +627,7 @@ public sealed class SyncController
     {
         WantPlaying = false;
         // 与 Play 同理：Stop 会把所有路打出"停止"态，插在帧步进中间会让刚对齐的那一帧作废。
-        lock (_stepGate) { ForEachSlot("停止", s => s.Session.Stop(), notify: false); }
+        lock (_stepGate) { ForEachSlot("停止", s => { s.Session.Stop(); s.PauseSource = RoutePauseSource.User; }, notify: false); }
         RaiseStateChanged();
     }
 
@@ -738,6 +769,9 @@ public sealed class SyncController
                         // （MainWindow.Playback.cs:145）⇒ 少计一次 = 状态栏与覆盖层这一拍根本不刷。
                         changed++;
                         slot.Session.Pause();
+                        // 停用让位是有意把本路移出播放组 ⇒ 记 RouteDeactivated，
+                        // 漂移校正不得把它自动恢复（与用户暂停同语义）。
+                        slot.PauseSource = RoutePauseSource.RouteDeactivated;
                         // 停用这一步真的发了暂停请求，时间戳要落在这一行而不是外层的
                         // "停用第 i 路开始"（那行在 Seek/Play 之前，差几毫秒就是判错的依据）。
                         _3FCompare.Core.Diagnostics.AppLog.Debug("Sync",
@@ -752,7 +786,7 @@ public sealed class SyncController
                         }
                         slot.Active = true;
                         changed++;   // 同上：标志已翻，后面 Seek/Play 抛不抛都不改"这一路变过"
-                        slot.Session.Seek(ClampToDuration(slot, masterPos + slot.Offset100ns));
+                        SeekSlotAndMark(slot, masterPos + slot.Offset100ns);
                         // "该不该立刻播"由本类自己记账，不接受调用方传参：
                         // 传参的版本要读 UI 线程的 _isPlaying，异步下发时可能读到过期值
                         // （表现为切回来的那一路停在正确位置却不播）。
@@ -796,6 +830,9 @@ public sealed class SyncController
                             _3FCompare.Core.Diagnostics.AppLog.Debug("Sync",
                                 $"第 {i} 路再启用：整组不在播 ⇒ 本次不请求起播（调用那一刻 state={stateAtRequest}）");
                         }
+                        // 重新启用是全新语义，不继承旧账；不播时也是"有意停住"，
+                        // 不能留 SeekBroadcast 账被漂移校正自动播放。
+                        slot.PauseSource = RoutePauseSource.None;
                     }
                     _3FCompare.Core.Diagnostics.AppLog.Debug("Sync", $"第 {i} 路{(want ? "启用" : "停用")}完成");
                 }
@@ -914,6 +951,14 @@ public sealed class SyncController
         return index >= 0 && index < slots.Length && slots[index].Active;
     }
 
+    /// <summary>本路当前的暂停来源记账（供 UI 侧日志判据副本读取，判据只有一份）。
+    /// 越界返回 <see cref="RoutePauseSource.None"/>。</summary>
+    public RoutePauseSource PauseSourceOf(int index)
+    {
+        var slots = SnapshotSlots();
+        return index >= 0 && index < slots.Length ? slots[index].PauseSource : RoutePauseSource.None;
+    }
+
     /// <summary>起播丢失的诊断快照（只读，供判红正文自带计数器）。
     ///
     /// <para><b>为什么必须有</b>：<see cref="DetectLostPlay"/> 有一条前置是
@@ -1023,8 +1068,27 @@ public sealed class SyncController
     {
         ForEachSlotIndexed("Seek", (slot, i) =>
         {
-            slot.Session.Seek(ClampToDuration(slot, target100ns + OffsetOf(slot, i)));
+            SeekSlotAndMark(slot, target100ns + OffsetOf(slot, i));
         }, notify: false);
+    }
+
+    /// <summary>逐路 Seek 的统一入口：任何可能把 Ended 从路改 Paused 的 Seek 都经过它。
+    ///
+    /// <para>只有"Seek 前处于 Ended"的路才会被内核 <c>DoSeek</c> 尾部改成 Paused
+    /// （PlayerSession.cpp:5698-5699），才记 <see cref="RoutePauseSource.SeekBroadcast"/>；
+    /// 读快照失败按"非 Ended"处理（保守：不记账，行为与修复前逐位一致）。</para>
+    /// <para>不覆盖"更高级"的来源：User/RouteDeactivated/FrameStep/External 优先。
+    /// （双保险：wasEnded 判定本身已排除用户暂停的路——它们是 Paused 不是 Ended。）</para></summary>
+    private void SeekSlotAndMark(SyncSlot slot, long target100ns)
+    {
+        var wasEnded = false;
+        try { wasEnded = slot.Session.ReadSnapshot()?.State == PlayerState.Ended; }
+        catch (Exception ex) { ReportRuntimeError("Seek 前读快照", ex); }
+
+        slot.Session.Seek(ClampToDuration(slot, target100ns));
+
+        if (wasEnded && slot.PauseSource is RoutePauseSource.None or RoutePauseSource.SeekBroadcast)
+            slot.PauseSource = RoutePauseSource.SeekBroadcast;
     }
 
     /// <summary>按帧步进（F12）：master 用 <c>StepFrame</c> 精确推进一帧，
@@ -1075,6 +1139,7 @@ public sealed class SyncController
             try
             {
                 slots[i].Session.Pause();
+                slots[i].PauseSource = RoutePauseSource.FrameStep;
                 _3FCompare.Core.Diagnostics.AppLog.Debug("Sync",
                     $"第 {i} 路 暂停请求已发出（原因=帧步进对齐，wantPlaying={WantPlaying}）");
             }
@@ -1150,7 +1215,9 @@ public sealed class SyncController
                 if (slot.Failed || !slot.Active) continue;
                 try
                 {
-                    slot.Session.Seek(ClampToDuration(slot, newPos + slot.Offset100ns));
+                    // 此处全路刚被置 FrameStep，助手的"不覆盖非 None/SeekBroadcast"规则
+                    // 保证步进暂停语义不被这笔 Seek 破坏。
+                    SeekSlotAndMark(slot, newPos + slot.Offset100ns);
                 }
                 catch (Exception ex) { ReportRuntimeError($"帧步进对齐第 {i} 路", ex); }
             }
@@ -1221,7 +1288,7 @@ public sealed class SyncController
                 // Seek 到超出自身片尾的位置（停在最后一帧或进入异常态），
                 // 而其他入口都已经按各自时长钳制，唯独这里漏了 ⇒ 同一次偏移调整
                 // 下各路行为不一致。ClampToDuration 已含下界 0 的钳制。
-                slot.Session.Seek(ClampToDuration(slot, masterPos + slot.Offset100ns));
+                SeekSlotAndMark(slot, masterPos + slot.Offset100ns);
             }, notify: false);
         }
         RaiseStateChanged();
@@ -1376,9 +1443,13 @@ public sealed class SyncController
     /// ⑤ 从路**自身内容已放完**（期望位置超出该路时长）时视为已收敛，不校正也不重复 Seek
     ///   —— 多素材时长不同是常态，短的那一路停在最后一帧就是正确行为；
     /// ⑥ 从路在自身内容范围内却不在期望位置时，**不看它的播放状态**（Playing / Ended
-    ///   都校正，Ended 还要补一次 Play 恢复推进）；只有 Paused 刻意排除（见
-    ///   <see cref="TickDriftCore"/> 内注释）。这一条是 docs/41 #21 的修复点：
-    ///   旧写法 `State != Playing ⇒ 跳过` 会让从路一旦落到非播放态就**永久失步**。</para>
+    ///   都校正，Ended 还要补一次 Play 恢复推进）；Paused 默认刻意排除（"被有意移出
+    ///   播放组"语义，multitest 判别实验依赖），**唯一例外是来源为
+    ///   <see cref="RoutePauseSource.SeekBroadcast"/> 的 Paused 路**——那是广播 Seek 的
+    ///   内核副作用钉住的，不恢复就永久失步（2026-10-20 修复，见
+    ///   <see cref="TickDriftCore"/> 内注释与 <see cref="SeekSlotAndMark"/>）。
+    ///   这一条是 docs/41 #21 的修复点：旧写法 `State != Playing ⇒ 跳过` 会让从路一旦
+    ///   落到非播放态就**永久失步**。</para>
     ///
     /// <para>本方法由轮询调用，自身按 <see cref="DriftCheckIntervalMs"/> 节流。</para>
     /// </summary>
@@ -1455,6 +1526,10 @@ public sealed class SyncController
             var s = snaps[i];
             if (s is null) continue;
 
+            // 观测自愈：状态已不是 Paused ⇒ 这笔"暂停账"无论消费与否都已作废
+            // （防过期记账错恢复；Playing/Ended 的恢复判定本来就不看来源，销账无副作用）。
+            if (s.State != PlayerState.Paused) slots[i].PauseSource = RoutePauseSource.None;
+
             // #42 的代数核对：上一拍这一路发过漂移 Seek，就在这一拍看它的代数动没动（消费掉，只报一次）。
             // 放在状态/阈值分支<b>之前</b>：正因为"没落地"的那一路下一拍仍然偏差很大，
             // 如果只在要再次 Seek 时才核对，就等于只在失败的分支上打分母，读数会自证。
@@ -1482,16 +1557,22 @@ public sealed class SyncController
             // Ended  ：从路已放到自己的片尾（内核 FlushAtEnd 置 Ended 并把位置钉在时长上）。
             //          必须参与校正——它可能就是"提前结束"或"内容范围内却被落在非播放态"
             //          的那一路（情形 B），跳过就永久失步。
-            // Paused ：**刻意排除**。暂停在这里是"这一路被有意移出播放组"的语义：
+            // Paused ：**默认排除**。暂停在这里是"这一路被有意移出播放组"的语义：
             //          multitest 的判别实验正是靠直接 Pause 部分路来减少并发 Present
             //          （见 MainWindow.SelfTest 的"被暂停的路不会被自动恢复播放"），
-            //          自动恢复播放会破坏该语义与其实验结论，故只对 Ended 做恢复。
-            //          ⚠ 已知残留（刻意不在此处解决）：广播 Seek 会把 Ended 从路变成 Paused
-            //          （内核 DoSeek 尾部），此后它落进本排除项、不再被自动恢复。
-            //          要覆盖它就得区分"被谁暂停"，那需要 SyncController 自己记账，
-            //          属另一条独立决策，不在本次 #21 范围内。
+            //          自动恢复播放会破坏该语义与其实验结论。
+            //          唯一例外（2026-10-20 修复，原 docs/41 #21 遗留第 2 条）：来源是
+            //          <see cref="RoutePauseSource.SeekBroadcast"/> 的路。广播 Seek 的内核
+            //          副作用（DoSeek 尾部把 Ended 改 Paused）会把从路钉在 Paused，
+            //          落进排除项就永久失步；记账后这类路可被精确识别并恢复，
+            //          而用户暂停/停用/步进后暂停/外部直调暂停的路一律不恢复。
             // 其余（Idle/Opening/Ready/Closed/Failed）：尚未就绪，交给打开流程处理，别插手。
-            if (s.State is not (PlayerState.Playing or PlayerState.Ended)) continue;
+            if (s.State is not (PlayerState.Playing or PlayerState.Ended))
+            {
+                if (s.State != PlayerState.Paused ||
+                    slots[i].PauseSource != RoutePauseSource.SeekBroadcast)
+                    continue;
+            }
 
             var expected = masterPos + slots[i].Offset100ns;
 
@@ -1544,10 +1625,19 @@ public sealed class SyncController
                 //   试过，但**16 轮交替 A/B 两臂都没再复现冻结**（各 0/8）⇒ 无法证明有用，
                 //   就不拿一个没验的语义改动去动同步逻辑（它会被 multitest 依赖的
                 //   "Paused 不被自动恢复"语义撞上）。要证它得先做单路受控实验，见 #42。
-                if (s.State == PlayerState.Ended) slots[i].Session.Play();
+                // 2026-10-20：唯一的放宽是 <see cref="RoutePauseSource.SeekBroadcast"/> 的 Paused 路——
+                //   那不是用户有意暂停，而是广播 Seek 的内核副作用钉住的（见 <see cref="SeekSlotAndMark"/>）。
+                var pauseSource = slots[i].PauseSource;
+                if (s.State == PlayerState.Ended ||
+                    (s.State == PlayerState.Paused && pauseSource == RoutePauseSource.SeekBroadcast))
+                    slots[i].Session.Play();
+
+                // 恢复成功即销账（Seek/Play 抛异常则跳过本行 ⇒ 下一拍自然重试）
+                if (pauseSource == RoutePauseSource.SeekBroadcast)
+                    slots[i].PauseSource = RoutePauseSource.None;
 
                 Diagnostics.AppLog.Debug("Sync",
-                    $"漂移校正 路{i} 态={s.State} Δ={before} → Seek {expected}");
+                    $"漂移校正 路{i} 态={s.State} 源={pauseSource} Δ={before} → Seek {expected}");
             }
             catch (Exception ex) { ReportRuntimeError($"漂移校正第 {i} 路", ex); }
         }

@@ -430,4 +430,126 @@ public class SyncControllerStepGateAndEndedTests
         }
         finally { sync.Clear(); }
     }
+
+    // ══════════════════ 2026-10-20：广播 Seek 失步残留（#21 遗留第 2 条）══════════════════
+
+    /// <summary>广播 Seek 的内核副作用（DoSeek 尾部把 Ended 改成 Paused）钉住的从路，
+    /// 带 <see cref="SyncController.RoutePauseSource.SeekBroadcast"/> 账 ⇒ 漂移校正必须
+    /// 把它与"有意暂停"精确区分：拉回期望位置、补 Play 恢复推进、然后销账。</summary>
+    [Fact]
+    public void TickDrift_广播Seek副作用钉住的Paused从路_被恢复并销账()
+    {
+        var (sync, master, follower) = CreatePair();
+        try
+        {
+            master.ForceState(PlayerState.Playing, 5 * Sec);
+            follower.ForceState(PlayerState.Ended, 10 * Sec);
+
+            // 广播 Seek：从路此前是 Ended ⇒ 内核语义下 Seek 后变 Paused，控制器记 SeekBroadcast
+            sync.SeekTo(6 * Sec);
+            Assert.Equal(SyncController.RoutePauseSource.SeekBroadcast, sync.PauseSourceOf(1));
+            Assert.Equal(PlayerState.Paused, follower.State);
+
+            // master 继续前进产生偏差（替身时钟冻结，直接摆位）
+            master.ForceState(PlayerState.Playing, 7 * Sec);
+
+            sync.TickDrift();
+
+            // ① 拉回期望位置（而不是钉在广播 Seek 的落点 6s）
+            Assert.Equal(7 * Sec, follower.Position100ns);
+            // ② 补 Play 恢复推进（恰好一次：广播 Seek 本身不发 Play）
+            Assert.Equal(1, follower.PlayCount);
+            Assert.Equal(PlayerState.Playing, follower.State);
+            // ③ 账已销：下一拍起它按普通 Playing 路参与校正
+            Assert.Equal(SyncController.RoutePauseSource.None, sync.PauseSourceOf(1));
+        }
+        finally { sync.Clear(); }
+    }
+
+    /// <summary>用户暂停的路不得被自动恢复：<see cref="SyncController.Pause"/> 记
+    /// <see cref="SyncController.RoutePauseSource.User"/>，漂移校正的准入把它排除在外
+    /// （multitest 判别实验依赖的语义，本次修复不得拓宽它）。</summary>
+    [Fact]
+    public void TickDrift_用户暂停的从路_不恢复()
+    {
+        var (sync, master, follower) = CreatePair();
+        try
+        {
+            master.ForceState(PlayerState.Playing, 5 * Sec);
+            follower.ForceState(PlayerState.Playing, 1 * Sec);   // 有偏差，本来会被校正
+
+            sync.Pause();                                       // 用户全局暂停 ⇒ 账=User
+            Assert.Equal(SyncController.RoutePauseSource.User, sync.PauseSourceOf(1));
+
+            // Pause 会把 master 一起停住，而 TickDrift 要求 master 在播放态才校正；
+            // 把 master 摆回播放态，单独考察从路的准入（真实场景=用户随后只恢复 master 一侧）。
+            master.ForceState(PlayerState.Playing, 5 * Sec);
+
+            sync.TickDrift();
+
+            Assert.Equal(0, follower.SeekCount);
+            Assert.Equal(0, follower.PlayCount);
+            Assert.Equal(1 * Sec, follower.Position100ns);
+            Assert.Equal(PlayerState.Paused, follower.State);
+            Assert.Equal(SyncController.RoutePauseSource.User, sync.PauseSourceOf(1));
+        }
+        finally { sync.Clear(); }
+    }
+
+    /// <summary>绕开 SyncController 直接 <c>Session.Pause()</c> 的路（multitest 判别实验的形态）
+    /// 不记任何账（<see cref="SyncController.RoutePauseSource.None"/>）⇒ 同样不被自动恢复。
+    /// 这条与上一条合起来把"只有 SeekBroadcast 一个例外"钉死。</summary>
+    [Fact]
+    public void TickDrift_外部直调暂停的从路_不恢复()
+    {
+        var (sync, master, follower) = CreatePair();
+        try
+        {
+            master.ForceState(PlayerState.Playing, 5 * Sec);
+            follower.ForceState(PlayerState.Playing, 1 * Sec);
+
+            follower.Pause();   // 绕开控制器直调 ⇒ 控制器无从观测，账=None
+
+            sync.TickDrift();
+
+            Assert.Equal(0, follower.SeekCount);
+            Assert.Equal(0, follower.PlayCount);
+            Assert.Equal(1 * Sec, follower.Position100ns);
+            Assert.Equal(PlayerState.Paused, follower.State);
+            Assert.Equal(SyncController.RoutePauseSource.None, sync.PauseSourceOf(1));
+        }
+        finally { sync.Clear(); }
+    }
+
+    /// <summary>帧步进后暂停的路记 <see cref="SyncController.RoutePauseSource.FrameStep"/>
+    /// ⇒ 即使随后 master 恢复播放并跑出偏差，也不自动恢复
+    /// （"所有路停在同一帧"的逐帧对比语义优先）。</summary>
+    [Fact]
+    public void TickDrift_帧步进后暂停的从路_不恢复()
+    {
+        var (sync, master, follower) = CreatePair();
+        try
+        {
+            master.ForceState(PlayerState.Playing, 5 * Sec);
+            follower.ForceState(PlayerState.Playing, 5 * Sec);
+
+            sync.StepFrames(1);   // 全组暂停（账=FrameStep）+ 从路对齐到 master 新帧
+            var seeksAfterStep = follower.SeekCount;
+            var playsAfterStep = follower.PlayCount;
+            var steppedPos = follower.Position100ns;
+            Assert.Equal(SyncController.RoutePauseSource.FrameStep, sync.PauseSourceOf(1));
+
+            // master 恢复播放并跑远（用户随后播放/回绕）；从路仍停在步进那一帧
+            master.ForceState(PlayerState.Playing, 7 * Sec);
+
+            sync.TickDrift();
+
+            Assert.Equal(seeksAfterStep, follower.SeekCount);
+            Assert.Equal(playsAfterStep, follower.PlayCount);
+            Assert.Equal(steppedPos, follower.Position100ns);
+            Assert.Equal(PlayerState.Paused, follower.State);
+            Assert.Equal(SyncController.RoutePauseSource.FrameStep, sync.PauseSourceOf(1));
+        }
+        finally { sync.Clear(); }
+    }
 }

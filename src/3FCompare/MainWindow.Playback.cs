@@ -715,7 +715,14 @@ public partial class MainWindow
             // ⚠ 判据必须与 SyncController 的**实际校正判据**保持一致（含 Ended、含"超出自身时长则跳过"）：
             // 本方法只记日志、不做校正，一旦两边分叉，日志就会漏报真实发生的校正，
             // 而这正是它存在的全部意义（硬崩后要能回溯）（docs/45 P1-10）。
-            if (s.State is not (PlayerState.Playing or PlayerState.Ended)) continue;
+            // 2026-10-20 起 Core 还校正"Paused + SeekBroadcast 来源"的路
+            // （广播 Seek 的内核副作用钉住的从路），日志判据必须跟上，否则漏报。
+            if (s.State is not (PlayerState.Playing or PlayerState.Ended))
+            {
+                if (s.State != PlayerState.Paused ||
+                    _sync.PauseSourceOf(i) != SyncController.RoutePauseSource.SeekBroadcast)
+                    continue;
+            }
 
             var expected = master.Position100ns + slots[i].Offset100ns;
             // 极端偏移保护（同 P1-9）：期望值离谱时放弃本路，避免下面的减法溢出。
