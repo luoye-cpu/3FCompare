@@ -21,7 +21,9 @@ param(
     [string]$Media = '',
     [string]$Exe = '',
     [int]$Frames = 24,
-    [int]$IntervalMs = 30
+    [int]$IntervalMs = 30,
+    # 目标框架（与四个 vbproj 的 <NetTFM> 默认值一致，由校验目标框架.ps1 核对）
+    [string]$NetTFM = 'net10.0-windows10.0.26100.0'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -31,7 +33,7 @@ if ([string]::IsNullOrWhiteSpace($Media)) {
     $Media = Join-Path $repo '3fp\samples\media\edge\09g_bigblocks_12000x9000.jpg'
 }
 if ([string]::IsNullOrWhiteSpace($Exe)) {
-    $Exe = Join-Path $repo '3fp\kernel\FFF.Player\bin\Debug\net10.0-windows10.0.26100.0\FFF.Player.exe'
+    $Exe = Join-Path $repo "3fp\kernel\FFF.Player\bin\Debug\$NetTFM\FFF.Player.exe"
 }
 if (-not (Test-Path -LiteralPath $Media)) { Write-Host "缺媒体：$Media" -ForegroundColor Red; exit 1 }
 if (-not (Test-Path -LiteralPath $Exe)) { Write-Host "缺产品 exe：$Exe" -ForegroundColor Red; exit 1 }

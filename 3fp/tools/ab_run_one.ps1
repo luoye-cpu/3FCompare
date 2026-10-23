@@ -1,7 +1,9 @@
 param(
     [Parameter(Mandatory=$true)][ValidateSet('control','guard')][string]$Variant,
     [Parameter(Mandatory=$true)][string]$Flag,
-    [Parameter(Mandatory=$true)][string]$OutDir
+    [Parameter(Mandatory=$true)][string]$OutDir,
+    # 目标框架（与四个 vbproj 的 <NetTFM> 默认值一致，由校验目标框架.ps1 核对）
+    [string]$NetTFM = 'net10.0-windows10.0.26100.0'
 )
 # ab_run_one.ps1 —— A/B 对照的「单次运行」单元：换源码 → 重建 → 校验 → 清现场 → 跑 → 快照。
 #
@@ -21,8 +23,8 @@ $ROOT = 'C:\PLAN\3FCompare\3fp'
 $PROJ = "$ROOT\kernel\FFF.Player.Tests"
 $SRC  = "$PROJ\Program.vb"
 $VAR  = "$ROOT\build\guard_ab\variants"
-$DLL  = "$PROJ\bin\Release\net10.0-windows10.0.26100.0\FFF.Player.Tests.dll"
-$BIN  = "$PROJ\bin\Release\net10.0-windows10.0.26100.0\FFF.Player.Tests.exe"
+$DLL  = "$PROJ\bin\Release\$NetTFM\FFF.Player.Tests.dll"
+$BIN  = "$PROJ\bin\Release\$NetTFM\FFF.Player.Tests.exe"
 
 $调用行 = '        引导测试进程的文件关联(参数)'
 $变异行 = "        ' " + [char]0x2605 + '变异（control 组）：注释掉闸调用'

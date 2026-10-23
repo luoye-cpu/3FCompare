@@ -1,5 +1,7 @@
 param(
-    [Parameter(Mandatory=$true)][string]$OutDir
+    [Parameter(Mandatory=$true)][string]$OutDir,
+    # 目标框架（与四个 vbproj 的 <NetTFM> 默认值一致，由校验目标框架.ps1 核对）
+    [string]$NetTFM = 'net10.0-windows10.0.26100.0'
 )
 # rht_bisect.ps1 —— 复刻 run_host_tests.sh 的行为（先构建、TEMP 覆盖、**中途不还原**），
 # 但每跑完一个开关就检查一次现场，用来定位「污染从哪一个开关开始出现」。
@@ -13,7 +15,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $ROOT = 'C:\PLAN\3FCompare\3fp'
 $PROJ = "$ROOT\kernel\FFF.Player.Tests"
-$BIN  = "$PROJ\bin\Release\net10.0-windows10.0.26100.0\FFF.Player.Tests.exe"
+$BIN  = "$PROJ\bin\Release\$NetTFM\FFF.Player.Tests.exe"
 $EXTS = '.png,.jpg,.gif,.bmp,.tiff,.apng,.webp,.heic,.avif'
 $基线 = Get-Content "$ROOT\build\guard_ab\baseline_before.txt" -Encoding UTF8
 

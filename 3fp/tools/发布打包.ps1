@@ -36,6 +36,12 @@ param(
     [string]$Configuration = 'Release',
     [string]$RuntimeIdentifier = 'win-x64',
     [string]$OutputDirectory = '',
+    # 目标框架。默认值与四个 vbproj 内的 <NetTFM> 默认值必须一致 —— 由
+    # tools\校验目标框架.ps1 强制核对，防止二者漂移。
+    # .NET 11 正式版发布后改为：发布打包.ps1 -NetTFM net11.0-windows10.0.26100.0
+    [string]$NetTFM = 'net10.0-windows10.0.26100.0',
+    # 外部商业兄弟仓 LakeUI 的目标框架，可与宿主不同（混血状态会出警告但可工作）。
+    [string]$LakeUITfm = '',
     [switch]$SkipTests,
     [string]$LogPath = ''
 )
@@ -242,7 +248,7 @@ if (-not (Test-Path $kernelDll)) { Write-Fail "未生成内核 DLL：$kernelDll"
 # ── 2. 回归（可选，但默认执行）───────────────────────────────────────────────
 if (-not $SkipTests) {
     Write-Step '回归测试'
-    $tests = Join-Path $root 'kernel\FFF.Player.Tests\bin\Release\net10.0-windows10.0.26100.0\FFF.Player.Tests.exe'
+    $tests = Join-Path $root "kernel\FFF.Player.Tests\bin\Release\$NetTFM\FFF.Player.Tests.exe"
     if (Test-Path $tests) {
         $output = & $tests 2>&1 | Out-String
         if ($output -match 'Core checks passed') { Write-Ok 'smoke 通过' }
@@ -263,8 +269,10 @@ if (-not $SkipTests) {
 Write-Step "发布宿主（$Configuration / $RuntimeIdentifier）"
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $root "publish\$Configuration-$RuntimeIdentifier" }
 
+$TfmArgs = @("-p:NetTFM=$NetTFM")
+if (-not [string]::IsNullOrWhiteSpace($LakeUITfm)) { $TfmArgs += "-p:LakeUITfm=$LakeUITfm" }
 & $dotnet publish $hostProject -c $Configuration -r $RuntimeIdentifier --self-contained false `
-    -o $OutputDirectory --nologo 2>&1 | ForEach-Object {
+    -o $OutputDirectory --nologo @TfmArgs 2>&1 | ForEach-Object {
         # 把校验 target 的输出显示出来，让"检查确实跑了"可见
         if ($_ -match '3FP API 版本|配置结构体字段数|发布中止') { Write-Host "  $_" }
         elseif ($_ -match 'error') { Write-Fail $_ }

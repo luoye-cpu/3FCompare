@@ -41,13 +41,15 @@ param(
     [double]$SettleSeconds = 3.0,
     [int]$PreWaitMs = 1500,
     [string]$OutDir = '',
-    [switch]$PerfCsv
+    [switch]$PerfCsv,
+    # 目标框架（与四个 vbproj 的 <NetTFM> 默认值一致，由校验目标框架.ps1 核对）
+    [string]$NetTFM = 'net10.0-windows10.0.26100.0'
 )
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if ([string]::IsNullOrWhiteSpace($Exe)) {
-    $Exe = Join-Path $repo '3fp\kernel\FFF.Player\bin\x64\Release\net10.0-windows10.0.26100.0\FFF.Player.exe'
+    $Exe = Join-Path $repo "3fp\kernel\FFF.Player\bin\x64\Release\$NetTFM\FFF.Player.exe"
 }
 if ([string]::IsNullOrWhiteSpace($Media)) {
     $Media = Join-Path $repo '3fp\samples\media\edge\09g_bigblocks_12000x9000.jpg'

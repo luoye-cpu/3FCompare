@@ -1,5 +1,7 @@
 param(
-    [string]$Exe = "C:\PLAN\3FCompare\3fp\kernel\FFF.Player\bin\Release\net10.0-windows10.0.26100.0\FFF.Player.exe",
+    # 目标框架（与四个 vbproj 的 <NetTFM> 默认值一致，由校验目标框架.ps1 核对）
+    [string]$NetTFM = 'net10.0-windows10.0.26100.0',
+    [string]$Exe = "C:\PLAN\3FCompare\3fp\kernel\FFF.Player\bin\Release\$NetTFM\FFF.Player.exe",
     [int]$Rounds = 9
 )
 # 裁决实验：核心文件探测是否真的扫了 PATH？

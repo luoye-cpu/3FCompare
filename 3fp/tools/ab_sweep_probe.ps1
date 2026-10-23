@@ -1,5 +1,7 @@
 param(
-    [Parameter(Mandatory=$true)][string]$OutDir
+    [Parameter(Mandatory=$true)][string]$OutDir,
+    # 目标框架（与四个 vbproj 的 <NetTFM> 默认值一致，由校验目标框架.ps1 核对）
+    [string]$NetTFM = 'net10.0-windows10.0.26100.0'
 )
 # ab_sweep_probe.ps1 —— 逐套件探测「哪个开关会污染真机 HKCU」。
 #
@@ -11,7 +13,7 @@ param(
 #   清现场与比对都走 PowerShell，且清现场后强制回读确认，杜绝上述假象。
 $ErrorActionPreference = 'Stop'
 $ROOT = 'C:\PLAN\3FCompare\3fp'
-$BIN  = "$ROOT\kernel\FFF.Player.Tests\bin\Release\net10.0-windows10.0.26100.0\FFF.Player.Tests.exe"
+$BIN  = "$ROOT\kernel\FFF.Player.Tests\bin\Release\$NetTFM\FFF.Player.Tests.exe"
 $EXTS = '.png,.jpg,.gif,.bmp,.tiff,.apng,.webp,.heic,.avif'
 $基线 = Get-Content "$ROOT\build\guard_ab\baseline_before.txt" -Encoding UTF8
 

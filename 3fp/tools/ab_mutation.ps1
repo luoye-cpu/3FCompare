@@ -1,5 +1,7 @@
 param(
-    [Parameter(Mandatory=$true)][string]$OutDir
+    [Parameter(Mandatory=$true)][string]$OutDir,
+    # 目标框架（与四个 vbproj 的 <NetTFM> 默认值一致，由校验目标框架.ps1 核对）
+    [string]$NetTFM = 'net10.0-windows10.0.26100.0'
 )
 # ab_mutation.ps1 —— 变异复验：把 guard 的**重定向那一行**删掉（只清内存、不重定向），
 # 预期应退回「污染」，从而证明「重定向设置文件路径」是闸生效的必要条件，
@@ -27,8 +29,8 @@ if (Test-Path $SRC) { Remove-Item $SRC -Force }
 [IO.File]::WriteAllText($SRC, $新, (New-Object Text.UTF8Encoding($false)))
 Write-Output "已写入变异源码（摘掉重定向）"
 
-$DLL = "$ROOT\kernel\FFF.Player.Tests\bin\Release\net10.0-windows10.0.26100.0\FFF.Player.Tests.dll"
-$BIN = "$ROOT\kernel\FFF.Player.Tests\bin\Release\net10.0-windows10.0.26100.0\FFF.Player.Tests.exe"
+$DLL = "$ROOT\kernel\FFF.Player.Tests\bin\Release\$NetTFM\FFF.Player.Tests.dll"
+$BIN = "$ROOT\kernel\FFF.Player.Tests\bin\Release\$NetTFM\FFF.Player.Tests.exe"
 if (Test-Path $DLL) { Remove-Item $DLL -Force }
 $log = "$ROOT\build\guard_ab\ab_build_mutation.log"
 Push-Location "$ROOT\kernel\FFF.Player.Tests"
