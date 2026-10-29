@@ -7,6 +7,9 @@ param(
     # 默认会把内核与原生依赖刷进本机运行目录 publish\3FCompare（见 §部署运行目录 的注释）。
     # 想只构建不碰那份正在跑的东西时加这个开关。
     [switch]$NoRunDirDeploy,
+    # IAMF 空间音频：3FC 出货内核默认强制携带（缺料即报错，而不是静默编成无 IAMF 内核）。
+    # 体积敏感场景用 -SkipIamf 显式放弃该能力（与 3fp/kernel/tools/发布3FP单文件.ps1 同口径）。
+    [switch]$SkipIamf,
     [ValidateSet("Release", "Debug")]
     [string]$Configuration = "Release"
 )
@@ -47,15 +50,21 @@ $ForkRoot = Join-Path $ProjectRoot "third_party\fff_project"
 #   其 187 行新增有 181 行上游已有，剩 6 行是注释措辞与换行。归档 tag 3fcompare-kernel-2026.10.20.1
 #   就指这个提交；两棵树与上游同一 SHA，构建/被测的就是上游内容，没有任何本地分叉。
 #
+# 2026-10-23 基线 = 上游 922e4b7（2026/10/23-1，含 PR #32–#35 与维护者发版）本身。
+#   两棵树按"上游为准"完整覆盖后同一 SHA；无本地补丁、无本地分叉。
+#   PlayerApiVersion 仍 20；FFF3FPSnapshot 78 字段/464 B、FFF3FPConfiguration 22 字段/112 B
+#   与宿主镜像一致（check_snapshot_pairing_matrix 全绿、check_kernel_config_abi --tree third_party PASS）。
+#   归档 tag 3fcompare-kernel-2026.10.23.1 指这个提交；回滚点 = 3fcompare-kernel-2026.10.20.1 / 578f80b。
+#
 # 2026-10-17 0014 退役入 tools/patches/history/：
 #   工作树已换到新谱系（upstream-sync，HEAD 不含钉死基线 d2f5826），0014 描述的是旧谱系
 #   （3fcompare/api16-kernel vs a87046e）的分歧，正向、反向 --check 都过不去 ⇒ 每次构建都在
 #   补丁段中止。按下方 throw 文案自身的处置指引移入 history/（非递归枚举，不再参与重放）。
 #   现行树构建不依赖任何顶层补丁；下一条分歧出现时按 patches/README.md 的规范顺延编号。
 $KernelRepo        = "https://github.com/Lake1059/FFF_Project.git"
-$KernelBaselineTag = "3fcompare-kernel-2026.10.20.1"
-$KernelBaselineSha = "578f80b6ce8603aa64b746c3e394146cf011f0d2"
-# 上一基线（回滚点）：3fcompare-kernel-2026.9.30.1 / 394099019aaff37c4b6ce482c2e835527e5b124a
+$KernelBaselineTag = "3fcompare-kernel-2026.10.23.1"
+$KernelBaselineSha = "922e4b70268fcbc83f0deb06d9e2c1b62e7a33b2"
+# 上一基线（回滚点）：3fcompare-kernel-2026.10.20.1 / 578f80b6ce8603aa64b746c3e394146cf011f0d2
 # 3FCompare 扩展的云端归档：上游 Lake1059/FFF_Project **不含**这些扩展，
 # 且本机账号对它只有读权限，所以基线归档只能落在主仓库自己的仓库里。
 # 旧的主仓 kernel/* 归档分支已随 2026-10-20 的远端清理删除（origin 现在只有 main），
@@ -218,10 +227,33 @@ if ($KernelState.Dirty) {
     Write-Host "  本脚本照常构建（开发要能跑），但发布门禁 [1/11] 会因此判红，直到这些改动被提交。" -ForegroundColor Yellow
 }
 $msbuild = Get-MSBuildPath
+# IAMF 空间音频：3FC 出货内核默认强制携带。HaveLibiamf 的自动探测在缺料时会静默降级成无
+# IAMF 内核（发布门禁 [2/11] 记录的历史事故形状：某配置缺 FFF_WITH_LIBIAMF ⇒ 出货版完全
+# 没有 IAMF，而验证全跑在另一配置上所以全绿）。这里两道闸：前置校验缺料即报错；构建后
+# 按导出串实测一次真携带（FFF_FORCE_LIBIAMF 只管“构建必须带”，不证明“产物里真有”）。
+# -SkipIamf 显式放弃时不校验、显式传 HaveLibiamf=false。
+if (-not $SkipIamf) {
+    $LibiamfHeader = Join-Path $ForkRoot "third_party\libiamf\include\IAMF_decoder.h"
+    $LibiamfImportLib = Join-Path $ForkRoot "third_party\libiamf\lib\x64\iamf.lib"
+    if (-not (Test-Path -LiteralPath $LibiamfHeader -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $LibiamfImportLib -PathType Leaf)) {
+        throw "IAMF 空间音频依赖未就绪：缺少 $LibiamfHeader 或 $LibiamfImportLib。请先运行 $ForkRoot\tools\准备Libiamf.ps1，或用 -SkipIamf 显式放弃该能力。"
+    }
+}
+$NativeArgs = @()
+if ($SkipIamf) { $NativeArgs += "/p:HaveLibiamf=false" } else { $NativeArgs += "/p:FFF_FORCE_LIBIAMF=true" }
 Push-Location $ForkRoot
-& $msbuild "FFF.Native\FFF.Native.vcxproj" /p:Configuration=$Configuration /p:Platform=x64 /m /v:minimal
+& $msbuild "FFF.Native\FFF.Native.vcxproj" /p:Configuration=$Configuration /p:Platform=x64 @NativeArgs /m /v:minimal
 if ($LASTEXITCODE -ne 0) { throw "FFF.Native 构建失败" }
 Pop-Location
+if (-not $SkipIamf) {
+    $KernelDllPath = Join-Path $ForkRoot "FFF.Native\x64\$Configuration\FFF.Native.dll"
+    $KernelText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($KernelDllPath))
+    if (-not $KernelText.Contains("IAMF_decoder_open")) {
+        throw "IAMF 门禁：【能力被摘除】$KernelDllPath 不含 IAMF_decoder_open —— 强制携带形态没有生效（查 FFF_FORCE_LIBIAMF / libiamf 依赖）；确认可接受后再用 -SkipIamf 显式放弃。"
+    }
+    Write-Host "   ✅ IAMF 已核：内核含 IAMF_decoder_open（强制携带形态）" -ForegroundColor Green
+}
 
 Write-Host "=== [4/4] 部署 DLL 到应用与冒烟目录 ==="
 function Deploy-To($targetDir) {
@@ -311,7 +343,11 @@ if (-not $SkipTests) {
     Write-Host "=== [可选] 构建 .NET 解决方案 ==="
     Push-Location $ProjectRoot
     dotnet build .\src\3FCompare.slnx -c $Configuration --nologo
+    $slnExit = $LASTEXITCODE
     Pop-Location
+    # 不查退出码的话，解决方案编译失败也会走到下面"✔ 全部完成"并写出新清单，
+    # 门禁 [1/11] 只读内核那份 ⇒ 整链假绿。
+    if ($slnExit -ne 0) { throw ".NET 解决方案构建失败（exit $slnExit）" }
 }
 
 Write-Host "=== 写内核构建清单（发布门禁 [1/11] 的输入）==="
