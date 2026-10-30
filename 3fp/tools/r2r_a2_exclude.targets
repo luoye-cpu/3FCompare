@@ -1,0 +1,41 @@
+<Project>
+  <!--
+    R2R 排除表：PublishReadyToRunExclude 是 Item（不是 Property），用 -p: 传会被忽略，
+    只能从 imports 钩子注入。配合 -p:CustomAfterMicrosoftCommonTargets=<本文件> 使用。
+
+    目的：复刻 A2 口径（仅 LakeUI + FFF.Player 参与 R2R），用于 O4 × A2 可加性测量。
+  -->
+  <ItemGroup>
+    <PublishReadyToRunExclude Include="ass-9.dll" />
+    <PublishReadyToRunExclude Include="avcodec-63.dll" />
+    <PublishReadyToRunExclude Include="avfilter-12.dll" />
+    <PublishReadyToRunExclude Include="avformat-63.dll" />
+    <PublishReadyToRunExclude Include="avutil-61.dll" />
+    <PublishReadyToRunExclude Include="bluray-3.dll" />
+    <PublishReadyToRunExclude Include="brotlicommon.dll" />
+    <PublishReadyToRunExclude Include="brotlidec.dll" />
+    <PublishReadyToRunExclude Include="bz2.dll" />
+    <PublishReadyToRunExclude Include="charset-1.dll" />
+    <PublishReadyToRunExclude Include="FFF.Native.dll" />
+    <PublishReadyToRunExclude Include="freetype.dll" />
+    <PublishReadyToRunExclude Include="fribidi-0.dll" />
+    <PublishReadyToRunExclude Include="harfbuzz.dll" />
+    <PublishReadyToRunExclude Include="iconv-2.dll" />
+    <PublishReadyToRunExclude Include="libpng16.dll" />
+    <PublishReadyToRunExclude Include="libxml2.dll" />
+    <PublishReadyToRunExclude Include="Microsoft.Windows.SDK.NET.dll" />
+    <PublishReadyToRunExclude Include="SharpGen.Runtime.COM.dll" />
+    <PublishReadyToRunExclude Include="SharpGen.Runtime.dll" />
+    <PublishReadyToRunExclude Include="swresample-7.dll" />
+    <PublishReadyToRunExclude Include="swscale-10.dll" />
+    <PublishReadyToRunExclude Include="udfread-3.dll" />
+    <PublishReadyToRunExclude Include="Vortice.Direct2D1.dll" />
+    <PublishReadyToRunExclude Include="Vortice.Direct3D11.dll" />
+    <PublishReadyToRunExclude Include="Vortice.DirectComposition.dll" />
+    <PublishReadyToRunExclude Include="Vortice.DirectX.dll" />
+    <PublishReadyToRunExclude Include="Vortice.DXGI.dll" />
+    <PublishReadyToRunExclude Include="Vortice.Mathematics.dll" />
+    <PublishReadyToRunExclude Include="WinRT.Runtime.dll" />
+    <PublishReadyToRunExclude Include="z.dll" />
+  </ItemGroup>
+</Project>

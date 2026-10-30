@@ -42,6 +42,9 @@ param(
     [string]$NetTFM = 'net10.0-windows10.0.26100.0',
     # 外部商业兄弟仓 LakeUI 的目标框架，可与宿主不同（混血状态会出警告但可工作）。
     [string]$LakeUITfm = '',
+    # 预编译（R2R）。默认开启，口径为 A2：只编 LakeUI + FFF.Player，其余排除（见
+    # tools\r2r_a2_exclude.targets）。实测 T2 −129.3 ms / +4.23 MB，详见 docs/120。
+    [bool]$ReadyToRun = $true,
     [switch]$SkipTests,
     [string]$LogPath = ''
 )
@@ -271,6 +274,25 @@ if (-not $OutputDirectory) { $OutputDirectory = Join-Path $root "publish\$Config
 
 $TfmArgs = @("-p:NetTFM=$NetTFM")
 if (-not [string]::IsNullOrWhiteSpace($LakeUITfm)) { $TfmArgs += "-p:LakeUITfm=$LakeUITfm" }
+
+# ── R2R（A2 口径：只编 LakeUI + FFF.Player）──────────────────────────────────
+# 实测（quiet_ab 24 轮交替，fast 档 48/48，负载 72.7%）：
+#   T2 中位 1,368.6 → 1,239.3，非配对 Δ = −129.3 ms（U=166, p=0.012）；
+#   逐轮配对中位 −161.7 ms、19/24 轮更快；体积 +4,231,680 B；像素闸门 0 差异。
+# 注意：PublishReadyToRunExclude 是 Item 不是 Property——用 -p: 传会静默失效
+#（带分号还会报 MSB1006），只能经 CustomAfterMicrosoftCommonTargets 注入。
+if ($ReadyToRun) {
+    $r2rTargets = Join-Path $PSScriptRoot 'r2r_a2_exclude.targets'
+    if (Test-Path -LiteralPath $r2rTargets) {
+        $TfmArgs += '-p:PublishReadyToRun=true'
+        $TfmArgs += ('-p:CustomAfterMicrosoftCommonTargets=' + $r2rTargets)
+        Write-Host '  R2R: 开启（A2 口径：仅 LakeUI + FFF.Player）'
+    } else {
+        Write-Host "  R2R: 排除表缺失（$r2rTargets），本次按 JIT 发布" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host '  R2R: 关闭（-ReadyToRun:$false）'
+}
 & $dotnet publish $hostProject -c $Configuration -r $RuntimeIdentifier --self-contained false `
     -o $OutputDirectory --nologo @TfmArgs 2>&1 | ForEach-Object {
         # 把校验 target 的输出显示出来，让"检查确实跑了"可见
