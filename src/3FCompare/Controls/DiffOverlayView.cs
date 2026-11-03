@@ -25,7 +25,27 @@ public sealed class DiffOverlayView : Control
     /// <c>96 × h / w / 2</c> 能算出数十万行，<c>new float[CellsX * _cellsY]</c>
     /// 直接上 GB，而 OOM/溢出异常又被下面的 catch 吞掉，表现为"点了没反应"。</summary>
     private const int MaxCellsY = 256;
+
+    /// <summary>单块回读的目标字节数（RGBA float ⇒ 16 B/像素）。块越大 ⇒ GPU 往返越少、
+    /// 单次拷贝越大；块内的"垂直空隙"也会被一并拷回（相邻网格行相距几十像素）。
+    /// 定这个值的取舍见 <see cref="PlanRowsPerTile"/>。</summary>
+    private const long TargetBlockBytes = 16L * 1024 * 1024;
+
+    /// <summary>回读块数目标上限。GPU staging 的 <c>Map</c> 会强制管线同步，往返一次的
+    /// 代价（毫秒级）远大于多拷几 MB ⇒ 分块只为了让单块别大到离谱，不是越多越好。</summary>
+    private const int MaxBlocks = 4;
+
+    /// <summary>单块超过这个尺寸就退回"一行一块"：8K 呈现分辨率下把 27 行并成一块是
+    /// 137 MB 的一次拷贝 + 一块同样大的托管缓冲，已经比 27 次小回读更糟。</summary>
+    private const long MaxBlockBytes = 64L * 1024 * 1024;
+
+    /// <summary>块缓冲常驻上限（float 个数，4 M ≈ 16 MB）：更大就不留在字段里，
+    /// 用完即弃 —— 高分辨率下不值得为一次点击常驻几十 MB。</summary>
+    private const int MaxRetainBlockFloats = 4 * 1024 * 1024;
+
     private float[] _heat = Array.Empty<float>();
+    /// <summary>两路的块缓冲（跨次重采样复用，尺寸不足时才重新分配）。</summary>
+    private float[]? _blockA, _blockB;
     private int _cellsY;
     private int _aIndex, _bIndex = 1;
     private double _diffRatio;
@@ -70,34 +90,20 @@ public sealed class DiffOverlayView : Control
 
             // 逐格回读会串行执行 96 × _cellsY（16:9 约 2592）次同步 P/Invoke，
             // 每次都要等一次 GPU staging 拷贝（强制管线同步）⇒ 点击后 UI 线程卡死数秒。
-            // 改为 **每网格行一次** TryReadPixelRegion 批量读回整行（≤ MaxCellsY 次），
-            // 再在托管侧按列取样：回读次数从 ~2592 降到 ~27，托管缓冲也只有一行宽（有界）。
-            // 两路的后台缓冲尺寸可能不同（窗口大小不同）⇒ 各自算各自的映射与行宽。
+            // 现行做法：**一次整块区域回读**（纵向若干网格行并成一块，见
+            // <see cref="PlanRowsPerTile"/>），再在托管侧按格取样。
+            // 两路的后台缓冲尺寸可能不同（窗口大小不同）⇒ 各自算各自的映射与矩形。
             var rtA = sa.ReadRenderTargetInfo(out var infoA) ? infoA : (RenderTargetInfo?)null;
             var rtB = sb.ReadRenderTargetInfo(out var infoB) ? infoB : (RenderTargetInfo?)null;
             var canBatch = rtA is not null && rtB is not null;
 
-            // 行缓冲按需求增长后复用：一次重采样内所有行共用，避免每行各分配一次。
-            float[]? rowA = null, rowB = null;
-            // 列坐标只与 x 有关（与行无关）⇒ 整次重采样只需算一次，
-            // 放在循环里会白白算 96 × _cellsY 次换算。
-            var colA = new int[CellsX];
-            var colB = new int[CellsX];
-            for (var x = 0; x < CellsX; x++)
+            if (!canBatch)
             {
-                var px = (int)((x + 0.5) / CellsX * w);
-                colA[x] = MapColumnX(rtA, px, w, h);
-                colB[x] = MapColumnX(rtB, px, w, h);
-            }
-
-            for (var y = 0; y < _cellsY; y++)
-            {
-                var py = (int)((y + 0.5) / _cellsY * h);
-
-                if (!canBatch)
+                // 拿不到渲染目标诊断信息（演示模式）时无法保证回读矩形落在后台缓冲内，
+                // 退回逐点读取 —— 该路径没有 GPU 同步，2592 次也很廉价。
+                for (var y = 0; y < _cellsY; y++)
                 {
-                    // 拿不到渲染目标诊断信息（演示模式）时无法保证行宽落在后台缓冲内，
-                    // 退回改动前的逐点读取 —— 该路径没有 GPU 同步，2592 次也很廉价。
+                    var py = (int)((y + 0.5) / _cellsY * h);
                     for (var x = 0; x < CellsX; x++)
                     {
                         var idx = y * CellsX + x;
@@ -111,27 +117,11 @@ public sealed class DiffOverlayView : Control
                         heat[idx] = d0;
                         if (d0 >= 0.02f) diffCount++;
                     }
-                    continue;
                 }
-
-                // 每网格行一次批量回读（横带高度 1），返回该带在后台缓冲里的起始 X
-                var okA = TryReadRow(sa, rtA!.Value, ref rowA, colA, py, w, h, out var originA);
-                var okB = TryReadRow(sb, rtB!.Value, ref rowB, colB, py, w, h, out var originB);
-
-                for (var x = 0; x < CellsX; x++)
-                {
-                    var idx = y * CellsX + x;
-                    if (!okA || !okB)
-                    {
-                        heat[idx] = -1f;
-                        continue;
-                    }
-                    Sample(rowA!, colA[x] - originA, out var ar, out var ag, out var ab);
-                    Sample(rowB!, colB[x] - originB, out var br, out var bg, out var bb);
-                    var d = Delta(ar, ag, ab, br, bg, bb);
-                    heat[idx] = d;
-                    if (d >= 0.02f) diffCount++;
-                }
+            }
+            else
+            {
+                diffCount = ResampleBlocks(sa, sb, rtA!.Value, rtB!.Value, w, h, heat);
             }
             _heat = heat;
             _diffRatio = diffCount * 100.0 / (CellsX * _cellsY);
@@ -158,39 +148,168 @@ public sealed class DiffOverlayView : Control
         return PixelReadback.SourceToBackBuffer(px, 0, vw, vh, rt.Value)?.X ?? px;
     }
 
-    /// <summary>批量读回"第 py 行"覆盖到的那一条后台缓冲横带（高度 1）。
-    /// <para>进入本方法前调用方已确保 <paramref name="rt"/> 有效：列坐标由
-    /// <see cref="PixelReadback.SourceToBackBuffer"/> 钳制在交换链内，横带不会越界。</para>
-    /// <returns>false 表示整行读回失败（调用方按采样失败记 -1）。</returns></summary>
-    private static bool TryReadRow(IPlayerSession session, RenderTargetInfo rt,
-        ref float[]? buffer, int[] columns, int py, int vw, int vh, out int originX)
+    /// <summary>批量采样：把网格按纵向若干行分块，每块用**一次** <c>TryReadPixelRegion</c>
+    /// 读回"覆盖该块全部采样点的包围矩形"，再在内存里按格取中心像素求 Delta。
+    /// <para>为什么按行分块而不是横向分段：一格的采样点就是它映射到后台缓冲的那个像素，
+    /// 相邻列的采样点几乎相邻，而相邻行的采样点相距几十像素（片源高 / 网格行数）。
+    /// 所以"多行并一块"要多拷回行与行之间的空隙，"多列并一块"几乎不浪费 ⇒ 块的形状
+    /// 永远是**横向全覆盖、纵向 rows 行**，分块只发生在纵向。</para>
+    /// <para>失败即整块记 -1（与改造前"整行读回失败即整行 -1"同一口径，粒度更细）。</para>
+    /// <returns>差异格数（|Δ| ≥ 0.02 的格数）。</returns></summary>
+    private int ResampleBlocks(IPlayerSession sa, IPlayerSession sb,
+        RenderTargetInfo rtA, RenderTargetInfo rtB, int vw, int vh, float[] heat)
+    {
+        var cellsY = _cellsY;
+
+        // 列坐标只与 x 有关（与行无关）⇒ 整次重采样只需算一次，
+        // 放在循环里会白白算 96 × _cellsY 次换算。
+        var colA = new int[CellsX];
+        var colB = new int[CellsX];
+        for (var x = 0; x < CellsX; x++)
+        {
+            var px = (int)((x + 0.5) / CellsX * vw);
+            colA[x] = MapColumnX(rtA, px, vw, vh);
+            colB[x] = MapColumnX(rtB, px, vw, vh);
+        }
+
+        // 行的缓冲 Y 同理只由 y 决定（列与行无关），一次算完。
+        var rowA = new int[cellsY];
+        var rowB = new int[cellsY];
+        for (var y = 0; y < cellsY; y++)
+        {
+            var py = (int)((y + 0.5) / cellsY * vh);
+            rowA[y] = MapRowY(rtA, py, vw, vh);
+            rowB[y] = MapRowY(rtB, py, vw, vh);
+        }
+
+        // 横向包围盒（列的最值）与整次重采样不变，纵向随块变。
+        var (xA0, xA1) = Span(colA);
+        var (xB0, xB1) = Span(colB);
+        var (yAll0, yAll1) = Span(rowA);
+        var (yAllB0, yAllB1) = Span(rowB);
+        var allHeight = Math.Max(yAll1 - yAll0 + 1, yAllB1 - yAllB0 + 1);
+        var rowsPerTile = PlanRowsPerTile(Math.Max(xA1 - xA0 + 1, xB1 - xB0 + 1), allHeight, cellsY);
+
+        var bufferA = _blockA;
+        var bufferB = _blockB;
+        var diffCount = 0;
+
+        for (var y0 = 0; y0 < cellsY; y0 += rowsPerTile)
+        {
+            var y1 = Math.Min(cellsY - 1, y0 + rowsPerTile - 1);
+            var ay0 = int.MaxValue; var ay1 = int.MinValue;
+            var by0 = int.MaxValue; var by1 = int.MinValue;
+            for (var y = y0; y <= y1; y++)
+            {
+                if (rowA[y] < ay0) ay0 = rowA[y];
+                if (rowA[y] > ay1) ay1 = rowA[y];
+                if (rowB[y] < by0) by0 = rowB[y];
+                if (rowB[y] > by1) by1 = rowB[y];
+            }
+            var aw = xA1 - xA0 + 1;
+            var ah = ay1 - ay0 + 1;
+            var bw = xB1 - xB0 + 1;
+            var bh = by1 - by0 + 1;
+
+            var okA = TryReadTile(sa, xA0, ay0, aw, ah, ref bufferA);
+            var okB = TryReadTile(sb, xB0, by0, bw, bh, ref bufferB);
+
+            for (var y = y0; y <= y1; y++)
+            {
+                for (var x = 0; x < CellsX; x++)
+                {
+                    var idx = y * CellsX + x;
+                    if (!okA || !okB)
+                    {
+                        heat[idx] = -1f;
+                        continue;
+                    }
+                    Sample(bufferA!, ((rowA[y] - ay0) * aw + (colA[x] - xA0)) * 4,
+                        out var ar, out var ag, out var ab);
+                    Sample(bufferB!, ((rowB[y] - by0) * bw + (colB[x] - xB0)) * 4,
+                        out var br, out var bg, out var bb);
+                    var d = Delta(ar, ag, ab, br, bg, bb);
+                    heat[idx] = d;
+                    if (d >= 0.02f) diffCount++;
+                }
+            }
+        }
+
+        // 复用缓冲：小块的留着下次用，几十 MB 的不常驻（8K/4K 下每次点击重新分配更划算）。
+        _blockA = Keep(bufferA);
+        _blockB = Keep(bufferB);
+        return diffCount;
+    }
+
+    /// <summary>每块覆盖多少网格行（块 = 纵向连续 rows 行 × 横向全覆盖）。
+    /// <para>两个相互拉扯的目标：① 块数少（每次回读都要等一次 GPU staging 拷贝，即强制
+    /// 管线同步，代价是毫秒级）；② 单块小（矩形必须覆盖首末行之间的**全部**像素，
+    /// 行距是几十像素 ⇒ 并进来越多行，拷回的"空隙"越多，带宽与内存都跟着涨）。</para>
+    /// <para>先按 <see cref="TargetBlockBytes"/> 求预算内能并几行，再抬到满足
+    /// <see cref="MaxBlocks"/> 所需的最小行数；若抬完单块仍超过 <see cref="MaxBlockBytes"/>
+    /// 就退回一行一块（8K 呈现分辨率下的最坏情形：27 行并一块要拷 137 MB，比 27 次
+    /// 小回读更糟）。</para></summary>
+    private static int PlanRowsPerTile(int rectWidth, int rectHeight, int cellsY)
+    {
+        if (cellsY <= 1) return 1;
+        var perRowBytes = (long)rectWidth * 16;          // RGBA float
+        if (perRowBytes <= 0) return 1;
+        // 相邻网格行在后台缓冲里的平均间距（矩形高 ≈ cellsY 个间距）
+        var spacing = Math.Max(1, rectHeight / cellsY);
+        var byBudget = (int)Math.Max(1, TargetBlockBytes / (perRowBytes * spacing));
+        var byCallCount = (cellsY + MaxBlocks - 1) / MaxBlocks;
+        var rows = Math.Clamp(Math.Max(byBudget, byCallCount), 1, cellsY);
+        var blockBytes = (perRowBytes * ((long)rows * spacing + 1));
+        return blockBytes > MaxBlockBytes ? 1 : rows;
+    }
+
+    /// <summary>把一批块缓冲留下来复用。超过 <see cref="MaxRetainBlockFloats"/> 的丢掉。</summary>
+    private static float[]? Keep(float[]? buffer)
+        => buffer is not null && buffer.Length <= MaxRetainBlockFloats ? buffer : null;
+
+    /// <summary>一次块回读。缓冲区按需增长后复用；<paramref name="buffer"/> 即使返回 false
+    /// 也可能已被换大，调用方应原样留用。</summary>
+    private static bool TryReadTile(IPlayerSession session, int x, int y, int width, int height,
+        ref float[]? buffer)
+    {
+        if (width <= 0 || height <= 0) return false;
+        // 必须按 long 算：width × height × 4 是 int 运算，极端尺寸下会溢出成负数。
+        var floats = (long)width * height * 4;
+        if (floats > int.MaxValue) return false;
+        var need = (int)floats;
+        if (buffer is null || buffer.Length < need) buffer = new float[need];
+        return session.TryReadPixelRegion(x, y, width, height, buffer, out _);
+    }
+
+    /// <summary>一组坐标的最小/最大值。</summary>
+    private static (int Min, int Max) Span(int[] values)
     {
         var min = int.MaxValue;
         var max = int.MinValue;
-        foreach (var c in columns)
+        foreach (var v in values)
         {
-            if (c < min) min = c;
-            if (c > max) max = c;
+            if (v < min) min = v;
+            if (v > max) max = v;
         }
-        originX = min;
-        // 带内所有列的 Y 相同（同一个 py），取任一列换算出的 Y 即可
-        var by = PixelReadback.SourceToBackBuffer(columns[0], py, vw, vh, rt)?.Y ?? py;
-        var width = max - min + 1;
-        if (width <= 0) return false;
-
-        var need = width * 4;
-        if (buffer is null || buffer.Length < need) buffer = new float[need];
-        return session.TryReadPixelRegion(min, by, width, 1, buffer, out _);
+        return (min, max);
     }
 
-    /// <summary>从行缓冲取某列（已相对行首）的 RGB 分量。</summary>
-    private static void Sample(float[] row, int offset, out float r, out float g, out float b)
+    /// <summary>片源行坐标 → 后台缓冲行坐标（与 <see cref="PixelReadback"/> 同一换算）。
+    /// 换算不出时退回片源坐标本身 —— 与 <c>TryReadPixelAtSource</c> 的兜底分支一致。</summary>
+    private static int MapRowY(RenderTargetInfo? rt, int py, int vw, int vh)
     {
-        var i = offset * 4;
-        if (i + 2 >= row.Length) { r = g = b = 0; return; }
-        r = row[i];
-        g = row[i + 1];
-        b = row[i + 2];
+        if (rt is null) return py;
+        // 列号传 0 不影响结果：SourceToBackBuffer 的 Y 分量只由 py 决定
+        return PixelReadback.SourceToBackBuffer(0, py, vw, vh, rt.Value)?.Y ?? py;
+    }
+
+    /// <summary>从块缓冲按 float 下标取 RGB 分量（下标由调用方按行宽算好）。</summary>
+    private static void Sample(float[] block, int index, out float r, out float g, out float b)
+    {
+        if (index < 0 || index + 2 >= block.Length) { r = g = b = 0; return; }
+        r = block[index];
+        g = block[index + 1];
+        b = block[index + 2];
     }
 
     private Func<int, IPlayerSession?>? _sessionAt;
