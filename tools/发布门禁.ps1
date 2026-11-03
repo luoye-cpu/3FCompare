@@ -575,9 +575,13 @@ if (-not $pyExe) {
     $neutProj = if ($neutProjDir) { Join-Path $neutProjDir "FFF.Native.vcxproj" } else { "" }
     if (-not $neutProj) { $neutFail += "从 $kernelDll 往上 6 层没找到 FFF.Native.vcxproj——工程层判据没有对象，不能读成'工程层干净'" }
     $neutSrcOk = @()
-    foreach ($neutSrcName in @("3FP", "3FR")) {
+    # 源码层喂入：内核 C++（3FP/3FR）+ 本体 VB（FFF.Player）。2026-11-02 之前只喂前两者，
+    # .vb 从未被扫——宿主侧两处 A 类越界（硬编码边数据类型键、"EL残差已合成"假绿）
+    # 靠人工审计才抓到。缺目录照旧判红：缺对象=根本没扫，不能读成 0 命中。
+    foreach ($neutSrcName in @("3FP", "3FR", "FFF.Player")) {
         if (-not $neutProjDir) { break }
-        $neutSrcDir = Join-Path $neutProjDir $neutSrcName
+        $neutSrcDir = if ($neutSrcName -in @("3FP", "3FR")) { Join-Path $neutProjDir $neutSrcName }
+                      else { Join-Path (Split-Path -Parent $neutProjDir) $neutSrcName }
         if (Test-Path -LiteralPath $neutSrcDir -PathType Container) { $neutSrcOk += $neutSrcDir }
         else { $neutFail += "源码层目录不存在：$neutSrcDir（二进制看不见 include 与被解释的结构类型，这一层缺对象=根本没扫，不能读成 0 命中）" }
     }

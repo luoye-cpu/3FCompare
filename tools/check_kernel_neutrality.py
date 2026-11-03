@@ -335,6 +335,12 @@ SOURCE_FATAL = (
     # 库自己的符号串，判红只会把免版税依赖误伤成违规。
     r"\bBedBinauralRenderer\b",
     r"\bmpegh[a-z_]*", r"\bac4_[a-z_]+", r"\bffdac[a-z_]*",
+    # 宿主侧（.vb）两条判据（2026-11-02 补：此前只扫 .cpp/.h/.hpp，.vb 从未被扫，
+    # 宿主泵的两处 A 类越界靠人工审计才抓到）：
+    # ① 假绿断言——宿主无权宣称残差"已合成"（配对与否宿主无从知晓），只能说"已请求"；
+    r"EL残差已?合成",
+    # ② 宿主持有边数据类型键字面值——类型键属模块—内核的载荷语义，宿主只许透传。
+    r"边数据契约类型|配置记录契约类型",
 )
 # FFmpeg 的公开传输层名字（项目纪律：不可改也不可想当然删）——报告但不判红。
 SOURCE_ADVISORY = (r"AV_FRAME_DATA_DOVI_METADATA", r"AV_PKT_DATA_DOVI_CONF", r"\bDOVI\b")
@@ -349,7 +355,7 @@ def scan_sources(root):
     for dirpath, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d not in SOURCE_SKIP_DIRS]
         for name in files:
-            if not name.endswith((".cpp", ".h", ".hpp")):
+            if not name.endswith((".cpp", ".h", ".hpp", ".vb")):
                 continue
             path = os.path.join(dirpath, name)
             try:
@@ -360,7 +366,7 @@ def scan_sources(root):
             scanned += 1
             for number, line in enumerate(text.splitlines(), 1):
                 stripped = line.strip()
-                if stripped.startswith("//"):
+                if stripped.startswith("//") or stripped.startswith("'") or stripped.startswith("REM"):
                     continue        # 纯注释里的名字不是实现，判红会逼人在注释里改名
                 for pattern in SOURCE_FATAL:
                     if re.search(pattern, line, re.I):
