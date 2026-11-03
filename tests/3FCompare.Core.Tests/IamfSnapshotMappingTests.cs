@@ -167,20 +167,31 @@ public class IamfSnapshotMappingTests
     /// <summary>
     /// 版本门随字段增长同步。原用例写的是"各升一级"（GetSnapshot 10→11、Create 19→20），
     /// 那是 2026-10 之前的历史叙事；版本面统一拍平到 20 之后，"升一级"已不成立，
-    /// 但它真正要保护的东西仍然成立，而且更强：<b>四个门必须同一水</b>——
-    /// 内核 GetSnapshot 门、内核 PlayerApiVersion、托管 SnapshotVersion、托管 ConfigVersion。
-    /// 漏改任一个的后果不是"读错值"：内核直接 InvalidArgument，快照拒收 / 会话创建失败。
+    /// 但它真正要保护的东西仍然成立：<b>每一对门必须同一水</b>。
+    /// <para>2026-11-03 修正口径：原先要求"四个门全相等"（内核 GetSnapshot 门、内核
+    /// PlayerApiVersion、托管 SnapshotVersion、托管 ConfigVersion），那是版本面统一拍平到
+    /// 20 那一轮的临时形态。<b>快照的 <c>version</c> 是每结构独立的字段</b>，与
+    /// <c>PlayerApiVersion</c> 本来就是两件事 —— 后者管的是 <c>FFF3FP_Create</c> 的
+    /// <c>FFF3FPConfiguration</c> 布局（这份头里只有 <c>FFF3FPPresentPacingStatus</c> 那类
+    /// 结构才标注 <c>// == PlayerApiVersion</c>）。PR #52 给快照尾追加六段计时后快照门升到 21，
+    /// 而配置结构一个字节没动、仍停在 20 —— 此时"四个相等"只会逼着人去无谓地升配置版本。
+    /// 真正要防的事故是<b>跨边界那一对不齐</b>（内核门 vs 托管常量）：不齐的后果不是读错值，
+    /// 而是内核直接 InvalidArgument、快照整份拒收 / 会话创建失败。</para>
     /// </summary>
     [Fact]
     public void 版本门四位一体()
     {
-        var gate = KernelSnapshotGate();
+        var snapshotGate = KernelSnapshotGate();
         var api = KernelPlayerApiVersion();
-        Assert.Equal(gate, api);                                     // 内核自己两处同水
-        Assert.Equal(gate, Fff3FpEngine.Fff3FpSession.SnapshotVersion);
-        Assert.Equal(gate, Fff3FpEngine.ConfigVersion);
-        Assert.True(gate >= 11u,
-            $"内核门读出来只有 {gate}，不像真实门（历史区间 9→11→20）⇒ 解析大概落到了别处");
+
+        // 快照这对：内核 GetSnapshot 的严格相等门 ↔ 托管 SnapshotVersion。
+        Assert.Equal(snapshotGate, Fff3FpEngine.Fff3FpSession.SnapshotVersion);
+        // 配置这对：内核 PlayerApiVersion ↔ 托管 ConfigVersion（FFF3FP_Create 的严格相等门）。
+        Assert.Equal(api, Fff3FpEngine.ConfigVersion);
+        Assert.True(snapshotGate >= 11u,
+            $"内核快照门读出来只有 {snapshotGate}，不像真实门（历史区间 9→11→20→21）⇒ 解析大概落到了别处");
+        Assert.True(api >= 11u,
+            $"内核 PlayerApiVersion 读出来只有 {api}，不像真实门（历史区间 11→20）⇒ 解析大概落到了别处");
     }
 
     /// <summary>定位仓库根（从二进制所在目录上溯，找得到出货内核源为止）。
