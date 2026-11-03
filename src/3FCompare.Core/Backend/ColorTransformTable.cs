@@ -213,8 +213,11 @@ public sealed class ColorTransformTable
 /// 堆垃圾——形状校验照样过（读到的多半是有限值），画面就歪了。所以这里显式按偏移把字段
 /// 写进一块 pinned 数组，让缓冲区自身就是原生布局。</para>
 /// <para>也不走 <c>Marshal.AllocHGlobal</c>：那是 421 KB 的非托管块，漏一次 Free 就是
-/// 每帧一次的泄漏且没有终结器兜底。pinned 数组的句柄进调用方的 payloadHandles 集合，
-/// 复用既有的 finally 释放路径。</para>
+/// 每帧一次的泄漏且没有终结器兜底。</para>
+/// <para><b>两条缓冲路径</b>：<see cref="BuildPinnedBuffer"/> 是一次性版（每批新开一块，
+/// 句柄进调用方的 payloadHandles 集合，走既有的 finally 释放路径）；逐帧注入走
+/// <see cref="ColorTransformPayloadBuffer"/>，那块缓冲按尺寸常驻、原位覆写，
+/// 不再每帧分配 + 钉住。</para>
 /// <para>字段偏移全部问 <c>Marshal.OffsetOf</c>，布局的事实源仍是 <see cref="Fff3FpColorTransformPayload"/>
 /// 那一个镜像结构；该结构也<b>从不作为 P/Invoke 形参按值传递</b>（包里的 Payload 是 nint）。</para>
 /// </summary>
@@ -242,12 +245,26 @@ internal static class ColorTransformPayloadMarshal
     internal static int CurveLutOffset { get; } = (int)Marshal.OffsetOf<Fff3FpColorTransformPayload>(
         nameof(Fff3FpColorTransformPayload.CurveLut));
 
-    /// <summary>表 → 原生布局的 pinned 缓冲区。调用方负责在原生调用返回后 Free 句柄。</summary>
+    /// <summary>表 → 原生布局的 pinned 缓冲区。调用方负责在原生调用返回后 Free 句柄。
+    /// <para><b>每帧注入请走 <see cref="ColorTransformPayloadBuffer"/></b>：本方法每次都要
+    /// 新开一整块 byte[] 并重新钉住，只在"一次性/多张表同批"的路径上用。</para></summary>
     internal static byte[] BuildPinnedBuffer(ColorTransformTable table, out GCHandle handle)
     {
         ArgumentNullException.ThrowIfNull(table);
         var buffer = new byte[NativePayloadByteCount];
-        var span = buffer.AsSpan();
+        WritePayload(buffer, table);
+        handle = GCHandle.Alloc(buffer, GCHandleType.Pinned);
+        return buffer;
+    }
+
+    /// <summary>把表按原生布局写进任意一块已分配好的缓冲区（尺寸必须是
+    /// <see cref="NativePayloadByteCount"/>）。复用缓冲与原位覆写共用这一段，
+    /// 免得"一次性版"与"复用版"各写一份字段偏移。</summary>
+    internal static void WritePayload(Span<byte> buffer, ColorTransformTable table)
+    {
+        ArgumentNullException.ThrowIfNull(table);
+        if (buffer.Length < NativePayloadByteCount)
+            throw new ArgumentException($"载荷缓冲区 {buffer.Length} 字节，小于 {NativePayloadByteCount}", nameof(buffer));
 
         // 四个头字段先落成局部量：MemoryMarshal.Write 的形参是 in，
         // 常量与属性访问都取不到地址（CS8156）。
@@ -255,15 +272,12 @@ internal static class ColorTransformPayloadMarshal
         uint version = ColorTransformTable.PayloadVersion;
         uint resolution = ColorTransformTable.LutResolution;
         uint domain = table.LutDomain;
-        MemoryMarshal.Write(span.Slice(SizeOffset), in size);
-        MemoryMarshal.Write(span.Slice(VersionOffset), in version);
-        MemoryMarshal.Write(span.Slice(LutResolutionOffset), in resolution);
-        MemoryMarshal.Write(span.Slice(LutDomainOffset), in domain);
-        WriteFloats(span, MatrixOffset, table.MatrixStorage);
-        WriteFloats(span, CurveLutOffset, table.CurveLutStorage);
-
-        handle = GCHandle.Alloc(buffer, GCHandleType.Pinned);
-        return buffer;
+        MemoryMarshal.Write(buffer.Slice(SizeOffset), in size);
+        MemoryMarshal.Write(buffer.Slice(VersionOffset), in version);
+        MemoryMarshal.Write(buffer.Slice(LutResolutionOffset), in resolution);
+        MemoryMarshal.Write(buffer.Slice(LutDomainOffset), in domain);
+        WriteFloats(buffer, MatrixOffset, table.MatrixStorage);
+        WriteFloats(buffer, CurveLutOffset, table.CurveLutStorage);
     }
 
     /// <summary>从原生布局缓冲区读出 9 个矩阵元素之外的三个头字段（size 单独返回）。</summary>
@@ -291,5 +305,44 @@ internal static class ColorTransformPayloadMarshal
         var target = MemoryMarshal.Cast<byte, float>(
             payload.Slice(offset, source.Length * sizeof(float)));
         source.AsSpan().CopyTo(target);
+    }
+}
+
+/// <summary>可复用的 pinned 载荷缓冲区（kind=3 逐帧注入的热路径）。
+/// <para><b>为什么需要它</b>：注入链上每帧都要把同一张 431 296 字节的原生布局交给内核，
+/// 而 <see cref="ColorTransformPayloadMarshal.BuildPinnedBuffer"/> 每次都要
+/// <c>new byte[431296]</c> + 写满 + <c>GCHandle.Alloc(Pinned)</c>。表在逐帧注入时的
+/// 尺寸是常量（内核 static_assert 钉死）⇒ 这块缓冲可以只分配、只钉住一次，
+/// 之后每帧原位覆写（一次 431 KB 的托管内存拷贝，没有任何分配）。</para>
+/// <para><b>尺寸变化</b>：只有 <see cref="ColorTransformPayloadMarshal.NativePayloadByteCount"/>
+/// 真的变了才会重新分配并先释放旧句柄（正常进程内只发生一次）。</para>
+/// <para><b>并发契约</b>：句柄指向的缓冲在原生调用期间必须独占 —— 调用方要在同一把锁下
+/// 完成"写 → 原生调用"，否则两条注入线程会互相覆盖对方正在被内核读取的载荷。</para>
+/// </summary>
+internal sealed class ColorTransformPayloadBuffer : IDisposable
+{
+    private byte[]? _buffer;
+    private GCHandle _handle;
+
+    /// <summary>把表写进复用缓冲并返回它的固定地址（调用方负责保持独占直到原生调用返回）。</summary>
+    internal nint Write(ColorTransformTable table)
+    {
+        var size = ColorTransformPayloadMarshal.NativePayloadByteCount;
+        if (_buffer is null || _buffer.Length != size)
+        {
+            // 尺寸变了（理论上不会发生）：先放旧句柄再换新块，绝不留下两个活着的钉住块。
+            Dispose();
+            _buffer = new byte[size];
+            _handle = GCHandle.Alloc(_buffer, GCHandleType.Pinned);
+        }
+        ColorTransformPayloadMarshal.WritePayload(_buffer, table);
+        return _handle.AddrOfPinnedObject();
+    }
+
+    public void Dispose()
+    {
+        if (_handle.IsAllocated) _handle.Free();
+        _handle = default;
+        _buffer = null;
     }
 }

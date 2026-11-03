@@ -153,9 +153,10 @@ internal struct Fff3FpSnapshot
     // 并被内核的 size 闸门直接拒收。守护：SnapshotLayoutTests.cs 逐字段对撞，删一行即判红。
     public uint HdrDpProfile;
     public uint HdrDpLevel;
-    // 按内核头的原始大小写照拼（hasHDRdpRpu / hasHDRdpEnhancementLayer）：镜像与内核头逐字段
-    // 对撞靠"首字母大写"这一套唯一映射，写成 HdrDp 会让映射失配。
-    public uint HasHDRdpRpu;
+    // 按内核头的原始大小写照拼（hasHdrDpMetadata / hasHDRdpEnhancementLayer）：镜像与内核头逐字段
+    // 对撞靠"首字母大写"这一套唯一映射，写成 HdrDp 会让映射失配。hasHDRdpRpu 由内核 fb964a5
+    // 改名为 hasHdrDpMetadata（DEPRECATED 恒零槽保留，改名不删字段），镜像随新名。
+    public uint HasHdrDpMetadata;
     public uint HasHDRdpEnhancementLayer;
     public uint HdrDpEnhancementLayer;
     public uint DynamicHdrMetadataActive;
@@ -188,6 +189,14 @@ internal struct Fff3FpSnapshot
     public ulong UploadCount;
     public ulong UploadCopyBytes;
     public uint UploadPath;
+    // 流水线阶段计时（内核 version 21 追加）：解码（通用/硬解 + 软解两臂）、
+    // demux av_read_frame、TrueHDR blit、超分 blit、主 shader 绘制、缩放链 pass。
+    public ulong VideoDecode100ns;
+    public ulong DemuxRead100ns;
+    public ulong TrueHdrBlit100ns;
+    public ulong VsrBlit100ns;
+    public ulong MainDraw100ns;
+    public ulong ScalePass100ns;
 }
 
 /// <summary>FFF3FPVideoPixelProbe 前置关键字段（ReadPixel 用）。</summary>

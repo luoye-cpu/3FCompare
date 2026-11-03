@@ -2,6 +2,67 @@ using _3FCompare.Core.Diagnostics;
 
 namespace _3FCompare.Core.Backend;
 
+/// <summary>注入链四段的耗时统计（逐帧累加，读侧取均值）。
+/// <para><b>为什么要它</b>：一条 431 296 字节的载荷在链上要走"取环 → 换算/解析 →
+/// 钉住写缓冲 → 原生投表"四站，站与站之间既有内核环拷贝、托管堆分配，也有 P/Invoke 与
+/// 它背后的内核锁 —— 只说"注入变慢"永远猜不出是哪一站。</para>
+/// <para><b>开销</b>：每段一次 <see cref="System.Diagnostics.Stopwatch.GetTimestamp"/>
+/// （几十纳秒，读的是 QPC/单调计数，不进内核对象），相对 431 KB 的拷贝可忽略 ⇒ 常开，
+/// 不设开关。<b>不新造 UI</b>：读数走 <see cref="Describe"/>，与泵的计数器同一出口
+/// （<see cref="ColorTransformPump.DescribeCounters"/>，会话收尾写一条日志）。</para>
+/// <para>累加全部走 <see cref="Interlocked"/>：泵线程写、会话收尾/诊断线程读。</para>
+/// </summary>
+public sealed class ColorTransformInjectTimings
+{
+    private long _captureTicks, _parseTicks, _pinTicks, _submitTicks;
+    private long _captureCount, _parseCount, _pinCount, _submitCount;
+
+    /// <summary>取环 + 拷出边数据载荷（<see cref="FrameSideDataCursor.TryReadNext"/>）。
+    /// 含内核两次进入（探尺寸 / 取字节）与一次 ≤16 KiB 的环拷贝。</summary>
+    internal void AddCapture(long ticks) => Add(ref _captureTicks, ref _captureCount, ticks);
+
+    /// <summary>换算 + 解析：外部模块的 <c>analyzeFrame</c> 调用 + 载荷载入
+    /// （<see cref="ColorTransformTable.TryFromPayload"/> 的逐字段读与有限性校验）。</summary>
+    internal void AddParse(long ticks) => Add(ref _parseTicks, ref _parseCount, ticks);
+
+    /// <summary>写入 pinned 缓冲：把表按原生布局落到那块复用缓冲上（431 KB 的托管内存拷贝）。</summary>
+    internal void AddPin(long ticks) => Add(ref _pinTicks, ref _pinCount, ticks);
+
+    /// <summary>投表调用：<c>FFF3FP_SetDynamicMetadata</c>（内核加锁、校验整批、装表）。</summary>
+    internal void AddSubmit(long ticks) => Add(ref _submitTicks, ref _submitCount, ticks);
+
+    public long CaptureCount => Volatile.Read(ref _captureCount);
+    public long ParseCount => Volatile.Read(ref _parseCount);
+    public long PinCount => Volatile.Read(ref _pinCount);
+    public long SubmitCount => Volatile.Read(ref _submitCount);
+
+    public double CaptureAverageMicroseconds => Average(ref _captureTicks, ref _captureCount);
+    public double ParseAverageMicroseconds => Average(ref _parseTicks, ref _parseCount);
+    public double PinAverageMicroseconds => Average(ref _pinTicks, ref _pinCount);
+    public double SubmitAverageMicroseconds => Average(ref _submitTicks, ref _submitCount);
+
+    /// <summary>一句话读数（均值 × 次数）。没有注入过时全是 0，不区分"没跑"与"跑得极快"。</summary>
+    public string Describe() =>
+        $"注入链均值（µs×次）：取环 {CaptureAverageMicroseconds:0.0}×{CaptureCount}，" +
+        $"解析 {ParseAverageMicroseconds:0.0}×{ParseCount}，" +
+        $"钉住 {PinAverageMicroseconds:0.0}×{PinCount}，" +
+        $"投表 {SubmitAverageMicroseconds:0.0}×{SubmitCount}";
+
+    private static void Add(ref long total, ref long count, long ticks)
+    {
+        if (ticks <= 0) return;
+        Interlocked.Add(ref total, ticks);
+        Interlocked.Increment(ref count);
+    }
+
+    private static double Average(ref long total, ref long count)
+    {
+        var n = Volatile.Read(ref count);
+        if (n == 0) return 0;
+        return Volatile.Read(ref total) * 1_000_000.0 / (n * (double)System.Diagnostics.Stopwatch.Frequency);
+    }
+}
+
 /// <summary>把"帧边数据环 → 外部模块 → kind=3 注入"这条通路串起来的泵。
 /// <para>每一帧（或每次取表时机）跑一次 <see cref="PumpOnce"/>：游标取一条边数据 →
 /// 交给换算器（产品路径就是 <see cref="ColorTransformModule.TryAnalyzeFrame"/>，
@@ -65,7 +126,14 @@ public sealed class ColorTransformPump
         // 会话不是 3FP 后端（演示模式）或盘上内核没有环导出时，游标建不起来：
         // 这不是错误，是"这条路不存在"，泵此后恒不注入。
         _cursor = session is IFrameSideDataRing ring ? new FrameSideDataCursor(ring) : null;
+        // 钉住写缓冲与原生投表两段发生在会话内部（BuildNativePackets / SetDynamicMetadata），
+        // 泵自己量不到 ⇒ 把同一枚计时器挂到会话上，四段读数落在同一个对象里。
+        if (session is Fff3FpEngine.Fff3FpSession impl) impl.InjectTimings = Timings;
     }
+
+    /// <summary>注入链四段的耗时统计（取环 / 解析 / 钉住 / 投表），
+    /// 见 <see cref="ColorTransformInjectTimings"/> 与 <see cref="DescribeCounters"/>。</summary>
+    public ColorTransformInjectTimings Timings { get; } = new();
 
     /// <summary>这条通路是否可用（换算器在、会话提供环）。false 时 PumpOnce 恒返回 false。</summary>
     public bool IsSupported => _analyze is not null && _cursor is not null;
@@ -91,8 +159,8 @@ public sealed class ColorTransformPump
     public uint SkippedFrames { get; private set; }
 
     /// <summary>累计"换算出表但内容与上一条逐位相同 ⇒ 没有重发"的帧数。
-    /// <para>为什么必须有这一格：载荷是 431 296 字节，按帧重发等于每秒几十兆的大对象分配
-    /// （<c>ColorTransformPayloadMarshal.BuildPinnedBuffer</c> 每一次都要新开并钉住一整块），
+    /// <para>为什么必须有这一格：载荷是 431 296 字节，按帧重发等于每秒几十兆的内存写
+    /// （<c>ColorTransformPayloadMarshal.WritePayload</c> 每次要整块重写 pinned 缓冲），
     /// 而"内核里已经躺着内容相同的一条 ≤ 当前帧"时重发在语义上是恒等操作，
     /// 只会把 GC 与 P/Invoke 的成本换成同一个画面。多这一格也让"模块在产出但画面没变"
     /// 与"模块压根没在产出"变成两个可读的数——不加的话它们都落在 SkippedFrames 里。</para>
@@ -107,7 +175,8 @@ public sealed class ColorTransformPump
 
     /// <summary>计数器的一句话摘要（会话收尾时写一条日志，让"通路到底跑没跑"可读）。</summary>
     public string DescribeCounters() =>
-        $"注入 {InjectedFrames} 帧，未变 {UnchangedFrames} 帧，跳过 {SkippedFrames} 帧，末帧 {LastInjectedFrameIndex}";
+        $"注入 {InjectedFrames} 帧，未变 {UnchangedFrames} 帧，跳过 {SkippedFrames} 帧，末帧 {LastInjectedFrameIndex}；" +
+        Timings.Describe();
 
     /// <summary>跑一趟。返回 true 表示本帧注入了新表。
     /// <paramref name="error"/> 只在"模块报了真失败"时非空——环里没有、本帧无据都是正常回答，
@@ -117,11 +186,18 @@ public sealed class ColorTransformPump
         error = null;
         if (!IsSupported || _cursor is null) return false;
 
-        if (!_cursor.TryReadNext(_sideDataType, out var frameIndex, out var bytes))
-            return false;
+        // 计时只为一个问题服务："注入这一帧的时间花在哪一段"。取环（含内核环拷贝）
+        // 与换算/解析是泵这一侧的两段，钉住与投表由会话侧的 InjectTimings 记。
+        var tCapture = System.Diagnostics.Stopwatch.GetTimestamp();
+        var got = _cursor.TryReadNext(_sideDataType, out var frameIndex, out var bytes);
+        Timings.AddCapture(System.Diagnostics.Stopwatch.GetTimestamp() - tCapture);
+        if (!got) return false;
 
         if (_analyze is null) return false;
-        if (!_analyze(bytes, frameIndex, out var table, out error))
+        var tParse = System.Diagnostics.Stopwatch.GetTimestamp();
+        var analyzed = _analyze(bytes, frameIndex, out var table, out error);
+        Timings.AddParse(System.Diagnostics.Stopwatch.GetTimestamp() - tParse);
+        if (!analyzed)
         {
             SkippedFrames++;
             LogOnce(error, frameIndex);

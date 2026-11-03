@@ -253,7 +253,7 @@ public class SnapshotLayoutTests
     [Theory]
     [InlineData("HdrDpProfile")]
     [InlineData("HdrDpLevel")]
-    [InlineData("HasHDRdpRpu")]
+    [InlineData("HasHdrDpMetadata")]
     [InlineData("HasHDRdpEnhancementLayer")]
     [InlineData("HdrDpEnhancementLayer")]
     public void 中性化不得删除DEPRECATED占位槽(string managedName)

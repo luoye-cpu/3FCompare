@@ -137,6 +137,20 @@ public sealed class Fff3FpEngine : IPlayerEngine
         /// 永不再发生（泄漏一整块 431 KB + 一个原生映射），而前一条泵线程还在跑。</summary>
         private readonly Lock _colorLoadGate = new();
         private int _pumpThreadStarted;
+        /// <summary>kind=3 载荷的常驻 pinned 缓冲（431 296 字节，第一次注入时分配）。
+        /// <para>原先每帧 <c>new byte[431296]</c> + 写满 + 重新钉住，一步都省不掉；
+        /// 而载荷尺寸是内核 static_assert 钉死的常量 ⇒ 这块缓冲可以只开一次、之后原位覆写。
+        /// 尺寸万一变了由 <see cref="ColorTransformPayloadBuffer.Write"/> 自己重开。</para></summary>
+        private ColorTransformPayloadBuffer? _transformPayload;
+        /// <summary>罩住"写复用缓冲 → 原生投表"的整段：缓冲里是内核本次要读的载荷，
+        /// 泵线程与 UI 线程（载入宿主表）并发注入时会互相踩。</summary>
+        private readonly Lock _payloadBufferGate = new();
+        /// <summary>复用缓冲此刻正被一次原生调用读着（只在持 <see cref="_payloadBufferGate"/> 时改）。
+        /// 作用是把"同线程重入"从复用路径上摘出去：锁可重入，单块缓冲顶不住两层调用。</summary>
+        private bool _payloadBufferInUse;
+        /// <summary>注入链计时器（<see cref="ColorTransformPump"/> 构造时挂上来，可为 null）：
+        /// "钉住写缓冲"与"原生投表"两段只有会话自己量得到，泵量不到。</summary>
+        internal ColorTransformInjectTimings? InjectTimings { get; set; }
         /// <summary>宿主自己的动态元数据表（文件菜单载入的 HDR10+/Vivid JSON）。
         /// <para>注入是<b>整表替换</b>，所以本泵每次注入都要把这张表一并重发——
         /// 只发 kind=3 那一条，等于把用户从菜单载入的表悄悄清空（<see cref="ColorTransformPump"/>）。</para></summary>
@@ -185,7 +199,7 @@ public sealed class Fff3FpEngine : IPlayerEngine
         // iamfBinaural 后内核再 bump 到 10，尾追加 audioBinaural（通用声道床双耳渲染）
         // 后再 bump 到 11；仍发旧值会让每次 ReadSnapshot 失败并落进
         // "尚未打开媒体"误报（内核 redo 轮缺陷 E 同款事故）。
-        internal const uint SnapshotVersion = 20;
+        internal const uint SnapshotVersion = 21;
         private static readonly int PixelProbeSize = Marshal.SizeOf<Fff3FpVideoPixelProbe>();
         private static readonly int RenderTargetInfoSize = Marshal.SizeOf<Fff3FpRenderTargetInfo>();
         private static readonly int HdrSignalDiagnosticsSize = Marshal.SizeOf<Fff3FpHdrSignalDiagnostics>();
@@ -1319,6 +1333,14 @@ public sealed class Fff3FpEngine : IPlayerEngine
             if (_callbackContext.IsAllocated)
                 _callbackContext.Free();
 
+            // 载荷复用缓冲：泵线程已停（StopColorTransformPump 在最前面），
+            // 这里再取一次注入锁，确保没有在飞的 SetDynamicMetadata 还在读这块。
+            lock (_payloadBufferGate)
+            {
+                _transformPayload?.Dispose();
+                _transformPayload = null;
+            }
+
             GC.SuppressFinalize(this);
         }
 
@@ -1497,50 +1519,71 @@ public sealed class Fff3FpEngine : IPlayerEngine
             if (packets == null || packets.Count == 0)
                 return ClearDynamicMetadata(DynamicMetadataKind.None);
 
-            var payloadHandles = new List<GCHandle>();
-            try
+            // 复用载荷缓冲必须独占：缓冲里躺着的正是内核本次要读的 431 KB，
+            // 两条注入线程（泵线程 + UI 线程载入宿主表）同时进来会互相覆盖对方的载荷。
+            // 锁只罩住"写缓冲 + 原生调用"这一段，且注入本身是一次短调用。
+            lock (_payloadBufferGate)
             {
-                var nativePackets = BuildNativePackets(packets, payloadHandles);
-
-                // 记下"宿主自己的表"：kind=3 的注入是整表替换，不把它一并重发
-                // 就等于把用户从菜单载入的 HDR10+/Vivid 表悄悄清空。
-                // 含 kind=3 ⇒ 这一批是本泵自己发的，不是宿主的表（见该方法的注释）。
+                var payloadHandles = new List<GCHandle>();
+                // 复用缓冲只在**这批里真有 kind=3 表**、且没有同线程重入时才用：
+                // ① 宿主只装 HDR10+/Vivid 表时不该为一块 431 KB 的 pinned 缓冲付常驻内存；
+                // ② 若原生投表在回调里又转回本方法（重入），第二层必须用独立缓冲 ——
+                //    锁是同一线程可重入的，挡不住它，单块缓冲会被覆写掉外层正在被内核读的载荷。
+                var useReusable = ContainsExternalTransform(packets) && !_payloadBufferInUse;
                 try
                 {
-                    if (_colorPump is not null && !ContainsExternalTransform(packets))
+                    // 钉住写缓冲（BuildNativePackets）的耗时单记一段：431 KB 的托管拷贝
+                    // 与内核投表是两件不同的事，合成一段就读不出"卡在拷贝还是卡在内核锁"。
+                    var reusable = useReusable ? _transformPayload ??= new ColorTransformPayloadBuffer() : null;
+                    if (useReusable) _payloadBufferInUse = true;
+                    var tPin = System.Diagnostics.Stopwatch.GetTimestamp();
+                    var nativePackets = BuildNativePackets(packets, payloadHandles, reusable);
+                    InjectTimings?.AddPin(System.Diagnostics.Stopwatch.GetTimestamp() - tPin);
+
+                    // 记下"宿主自己的表"：kind=3 的注入是整表替换，不把它一并重发
+                    // 就等于把用户从菜单载入的 HDR10+/Vivid 表悄悄清空。
+                    // 含 kind=3 ⇒ 这一批是本泵自己发的，不是宿主的表（见该方法的注释）。
+                    try
                     {
-                        _hostDynamicMetadata = packets;
-                        _colorPump.CompanionPackets = packets;
+                        if (_colorPump is not null && !ContainsExternalTransform(packets))
+                        {
+                            _hostDynamicMetadata = packets;
+                            _colorPump.CompanionPackets = packets;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        AppLog.Debug("ColorTransform", $"伴报表登记失败（已忽略）：{ex.Message}");
+                    }
+
+                    // 调用原生接口
+                    try
+                    {
+                        var tSubmit = System.Diagnostics.Stopwatch.GetTimestamp();
+                        var ok = WithNative(h =>
+                        {
+                            var result = Fff3FpNative.FFF3FP_SetDynamicMetadata(h,
+                                nativePackets, (uint)nativePackets.Length);
+                            if (result == FffResult.NotSupported || result == FffResult.InvalidArgument)
+                                return false; // 旧内核不支持或整批校验失败（旧表续任）
+                            if (result != FffResult.Success)
+                                throw new EngineException((int)result, $"SetDynamicMetadata 失败: {result}");
+                            return true;
+                        });
+                        InjectTimings?.AddSubmit(System.Diagnostics.Stopwatch.GetTimestamp() - tSubmit);
+                        return ok;
+                    }
+                    catch (EntryPointNotFoundException)
+                    {
+                        return false; // 旧内核无此导出，静默忍受
                     }
                 }
-                catch (Exception ex)
+                finally
                 {
-                    AppLog.Debug("ColorTransform", $"伴报表登记失败（已忽略）：{ex.Message}");
+                    if (useReusable) _payloadBufferInUse = false;
+                    foreach (var h in payloadHandles)
+                        if (h.IsAllocated) h.Free();
                 }
-
-                // 调用原生接口
-                try
-                {
-                    return WithNative(h =>
-                    {
-                        var result = Fff3FpNative.FFF3FP_SetDynamicMetadata(h,
-                            nativePackets, (uint)nativePackets.Length);
-                        if (result == FffResult.NotSupported || result == FffResult.InvalidArgument)
-                            return false; // 旧内核不支持或整批校验失败（旧表续任）
-                        if (result != FffResult.Success)
-                            throw new EngineException((int)result, $"SetDynamicMetadata 失败: {result}");
-                        return true;
-                    });
-                }
-                catch (EntryPointNotFoundException)
-                {
-                    return false; // 旧内核无此导出，静默忍受
-                }
-            }
-            finally
-            {
-                foreach (var h in payloadHandles)
-                    if (h.IsAllocated) h.Free();
             }
         }
 
@@ -1549,13 +1592,19 @@ public sealed class Fff3FpEngine : IPlayerEngine
         /// 而它的正确性靠的是"payloadSize 与内核等号校验逐项相等"——测试工程经
         /// InternalsVisibleTo 直接调用就能把尺寸钉死，不必加载 FFF.Native.dll。</para>
         /// <para>句柄追加进 <paramref name="payloadHandles"/>，由调用方在原生调用返回后
-        /// 统一 Free（缓冲区数组本身由 GCHandle 根住，钉住期间 GC 不会搬动）。</para></summary>
+        /// 统一 Free（缓冲区数组本身由 GCHandle 根住，钉住期间 GC 不会搬动）。</para>
+        /// <para><paramref name="reusablePayload"/> 是逐帧注入的复用缓冲：给了它，第一张
+        /// kind=3 表就写进这块常驻缓冲（<b>不进</b> payloadHandles，也就不会被调用方 Free）；
+        /// 同批出现第二张 kind=3 表时改走一次性分配——一块缓冲只能装一张表。</para></summary>
         internal static Fff3FpDynamicMetadataPacket[] BuildNativePackets(
-            IReadOnlyList<DynamicMetadataPacket> packets, List<GCHandle> payloadHandles)
+            IReadOnlyList<DynamicMetadataPacket> packets, List<GCHandle> payloadHandles,
+            ColorTransformPayloadBuffer? reusablePayload = null)
         {
             ArgumentNullException.ThrowIfNull(packets);
             ArgumentNullException.ThrowIfNull(payloadHandles);
 
+            // 只在第一张 kind=3 表上消费复用缓冲，用完置 null ⇒ 后续同 kind 包退回独占分配。
+            var shared = reusablePayload;
             var nativePackets = new Fff3FpDynamicMetadataPacket[packets.Count];
             for (int i = 0; i < packets.Count; i++)
             {
@@ -1597,9 +1646,18 @@ public sealed class Fff3FpEngine : IPlayerEngine
                         // 所以这里只能报镜像结构自己的 SizeOf；缓冲区按原生布局逐字段写、
                         // 整块 pinned，绝不把这个带 ByValArray 的结构盒子直接钉住
                         // （理由见 ColorTransformPayloadMarshal）。
-                        ColorTransformPayloadMarshal.BuildPinnedBuffer(table, out var transformHandle);
-                        payloadHandles.Add(transformHandle);
-                        payloadPtr = transformHandle.AddrOfPinnedObject();
+                        if (shared is not null)
+                        {
+                            // 常驻缓冲：原位覆写，不分配、不重新钉住（句柄归会话所有，不进 payloadHandles）
+                            payloadPtr = shared.Write(table);
+                            shared = null;
+                        }
+                        else
+                        {
+                            ColorTransformPayloadMarshal.BuildPinnedBuffer(table, out var transformHandle);
+                            payloadHandles.Add(transformHandle);
+                            payloadPtr = transformHandle.AddrOfPinnedObject();
+                        }
                         payloadSize = (uint)Marshal.SizeOf<Fff3FpColorTransformPayload>();
                         break;
 
