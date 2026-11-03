@@ -141,6 +141,15 @@ def main():
         print("  ⚠ 找不到导入库: %s（先构建内核）" % kernel_lib)
         return 1
     for name in sys.argv[1:]:
+        # 可选库：第三方 lib 目录会随出货树变（本轮实测 fdk-aac.lib 已不在），
+        # 缺一个不该让整个探针编译失败——探针多半根本不用它，缺的库名打出来即可。
+        extra_libs = []
+        for lib_path in LIBIAMF_LIBS + ABSL_LIBS:
+            if os.path.exists(lib_path):
+                extra_libs.append(lib_path)
+            else:
+                print("  ⚠ 跳过缺失的库: %s" % lib_path)
+
         # 自动识别源语言：.c = 纯 C（可直连 FFmpeg SDK，不依赖 3FC 内核）；.cpp = 3FC 探针
         src_cpp = os.path.join(TOOLS, name + ".cpp")
         src_c = os.path.join(TOOLS, name + ".c")
@@ -179,7 +188,7 @@ def main():
                    "/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS",
                    "/I" + FFMPEG_INC,
                    src, "/Fe:" + exe, "/Fo:" + os.path.join(OUT, name + ".obj"),
-                   "/link", kernel_lib] + FFMPEG_LIBS + LIBIAMF_LIBS + ABSL_LIBS + [
+                   "/link", kernel_lib] + FFMPEG_LIBS + extra_libs + [
                    "user32.lib", "gdi32.lib", "ole32.lib", "shell32.lib", "advapi32.lib",
                    # d3d11/dxgi：upload_* 要 D3D11CreateDevice、vsr_scrgb_probe 要 CreateDXGIFactory1
                    "d3d11.lib", "dxgi.lib",
