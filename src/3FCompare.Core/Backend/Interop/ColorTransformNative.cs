@@ -50,9 +50,18 @@ internal static class ColorTransformAbi
 
     /// <summary>函数表版本门：装载时请求这个值，表自报不等于它即视为模块缺席。
     /// <para>2 = 握手新增了"未授权即拒"这一语义（表形状未变，仍是 size/version + 3 个成员）。
-    /// 模块只应答版本 2；这里若还停在 1，即使已解锁也会被模块拒绝，
-    /// 于是整条链路按"模块缺席"静默降级——症状和不装模块一模一样，最难归因。</para></summary>
-    internal const uint ApiVersion = 2;
+    /// 3 = 表尾追加了第四个指针（模块自报 <c>size=40</c>）。
+    /// 模块<b>只应答当前版本</b>：拿 1 或 2 去问一律返回 -7（版本不合）并把表清零，
+    /// 于是整条链路按"模块缺席"静默降级——症状和不装模块一模一样，最难归因。
+    /// 盘上模块升到 3 之后宿主必须同水，否则已解锁的模块也会被自己拒掉。</para></summary>
+    internal const uint ApiVersion = 3;
+
+    /// <summary>握手缓冲在镜像大小之外额外开的余量（字节）。
+    /// <para>存在的唯一理由是模块的写长由**它自己的** <c>sizeof</c> 决定、与本侧声明无关：
+    /// ABI 3 那次尾追加就是这么踩到宿主身上的（32 字节缓冲收到 40 字节整表）。
+    /// 留两枚指针的余量，让下一次尾追加不至于当场越界；自报 <c>Size</c> 事后还要再复核一次，
+    /// 余量兜的是"已知形态的演进"，复核兜的是"我们不知道的演进"。</para></summary>
+    internal const int ApiTableSlackBytes = 16;
 
     /// <summary>本模块产出的载荷 kind（内核 <c>FFF3FPDynamicMetadataKind::ExternalColorTransform</c>）。</summary>
     internal const uint PayloadKind = 3;
@@ -103,9 +112,14 @@ internal struct FffColorTransformOutput
     public uint Reserved;
 }
 
-/// <summary>FFFColorTransformApi 函数表：三个函数指针按 nint 存放，
+/// <summary>FFFColorTransformApi 函数表：前三个函数指针按 nint 存放，
 /// 由宿主 <c>GetDelegateForFunctionPointer</c> 现取现用（形参全是指针/blittable，
-/// 声明成 nint 就不给源生成器留任何按值传 421 KB 结构的机会）。</summary>
+/// 声明成 nint 就不给源生成器留任何按值传 421 KB 结构的机会）。
+/// <para>ABI 3 在 <see cref="Reset"/> 之后尾追加了第四个指针 <c>setDisplayTargetNits</c>。
+/// 槽位<b>必须留在镜像里</b>：模块头声称"拿 32 字节 v2 表的旧宿主照旧能用"，
+/// 但它<b>并不尊重调用方在调用前声明的 <c>size</c></b>——实测传 32 也照样按自己的
+/// <c>sizeof</c>=40 整表回写（写到偏移 39），镜像若只有 32 字节，最后 8 字节就落到
+/// pinned 数组之外，成为一条不抛异常、只偶尔踩坏相邻对象的堆越界。</para></summary>
 [StructLayout(LayoutKind.Sequential)]
 internal struct FffColorTransformApiTable
 {
@@ -114,6 +128,10 @@ internal struct FffColorTransformApiTable
     public nint TransformVersion;
     public nint AnalyzeFrame;
     public nint Reset;
+    /// <summary>ABI 3 尾追加：<c>void __cdecl setDisplayTargetNits(float)</c>，会话级烘焙目标。
+    /// 本宿主目前只占位不调用（见 <c>ColorTransformPump</c> 里的缺口说明），
+    /// 保留槽位的第一个目的是让表布局与模块同水、不发生越界写。</summary>
+    public nint SetDisplayTargetNits;
 }
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]

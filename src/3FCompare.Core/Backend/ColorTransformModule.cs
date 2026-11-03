@@ -110,13 +110,17 @@ public sealed class ColorTransformModule : IDisposable
             var getApi = Marshal.GetDelegateForFunctionPointer<FffGetColorTransformApiFn>(entry);
 
             // 函数表按原生布局读写：结构是全标量/nint 的 blittable 镜像，
-            // 所以直接把它写进一块 pinned 缓冲再读回，不给"按值传 32 字节表"留歧义。
+            // 所以直接把它写进一块 pinned 缓冲再读回，不给"按值传表"留歧义。
+            // 🔴 缓冲必须留余量：模块**不尊重调用方声明的 Size**（实测声明 32 仍按自己的
+            // sizeof 整表回写，写到偏移 39），缓冲只按本侧镜像大小开就是 8 字节堆越界。
+            // 余量 + 事后按自报 Size 复核，两层各管一段：余量挡住已知的尾追加，
+            // 复核挡住"模块哪天又长了一截"这种余量兜不住的演进。
             var api = new FffColorTransformApiTable
             {
                 Size = (uint)Marshal.SizeOf<FffColorTransformApiTable>(),
                 Version = 0,
             };
-            var apiBuffer = new byte[Marshal.SizeOf<FffColorTransformApiTable>()];
+            var apiBuffer = new byte[Marshal.SizeOf<FffColorTransformApiTable>() + ColorTransformAbi.ApiTableSlackBytes];
             MemoryMarshal.Write(apiBuffer.AsSpan(), in api);
             var apiHandle = GCHandle.Alloc(apiBuffer, GCHandleType.Pinned);
             int entryResult;
@@ -132,12 +136,15 @@ public sealed class ColorTransformModule : IDisposable
 
             // 版本门不过 ⇒ 头里的约定："与模块不在盘上同等处理"。
             // 二次核对表内容：Size/Version 自描述 + 两个必用指针齐备（TransformVersion 可缺，只用于日志）。
+            // 另外复核自报 Size 没有超出手里这块缓冲：模块自报的写长由它自己决定，
+            // 超过缓冲长度就意味着刚才那次写入已经越界，这一份表的内容一律不可信。
             if (entryResult != 0 || api.Version != ColorTransformAbi.ApiVersion ||
                 api.Size < (uint)Marshal.SizeOf<FffColorTransformApiTable>() ||
+                api.Size > (uint)apiBuffer.Length ||
                 api.AnalyzeFrame == 0 || api.Reset == 0)
             {
                 // 握手被拒有三种完全不同的原因，画面却一模一样，必须分开留痕：
-                //   1) 盘上是早于 ABI 版本 2 的旧件（不含授权层，也不认这个版本门）
+                //   1) 盘上是早于当前 ABI 版本的旧件（不含授权层，也不认这个版本门）
                 //   2) 模块在、但**未解锁** —— 这是授权门的设计结果，不是故障
                 //   3) 模块自称已解锁却仍然被拒 —— 真故障（多半是两侧版本没对上）
                 // 分不开它们，"没装模块"与"装了没解锁"在日志里就同形，最难归因。

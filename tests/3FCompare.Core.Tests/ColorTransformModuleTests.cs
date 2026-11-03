@@ -109,7 +109,8 @@ public class ColorTransformModuleTests
     {
         // 真源是模块自己那份未公开的 ABI 契约头（不进本仓测试路径），
         // 这里按 x64 C 对齐规则独立复算一遍：4+4 头之后是指针（8 对齐），
-        // 于是三个结构都是 32 字节、无空洞。
+        // 于是输入/输出两个结构都是 32 字节、无空洞；函数表在 ABI 3 多了第四个
+        // 指针（setDisplayTargetNits）⇒ 40 字节。
         Assert.Equal(32, Marshal.SizeOf<FffColorTransformInput>());
         Assert.Equal(0, Marshal.OffsetOf<FffColorTransformInput>(nameof(FffColorTransformInput.Size)).ToInt32());
         Assert.Equal(4, Marshal.OffsetOf<FffColorTransformInput>(nameof(FffColorTransformInput.Version)).ToInt32());
@@ -123,10 +124,14 @@ public class ColorTransformModuleTests
         Assert.Equal(24, Marshal.OffsetOf<FffColorTransformOutput>(nameof(FffColorTransformOutput.PayloadCapacity)).ToInt32());
         Assert.Equal(28, Marshal.OffsetOf<FffColorTransformOutput>(nameof(FffColorTransformOutput.Reserved)).ToInt32());
 
-        Assert.Equal(32, Marshal.SizeOf<FffColorTransformApiTable>());
+        // 函数表 40 字节：ABI 3 在 reset 之后尾追加 setDisplayTargetNits（第四个指针）。
+        // 这不是"可选字段"——模块永久按 40 字节整表回写，镜像少 8 字节就是越界写
+        // （判据见 ColorTransformUnlockTests.真模块回写函数表时不越过宿主镜像的字节数）。
+        Assert.Equal(40, Marshal.SizeOf<FffColorTransformApiTable>());
         Assert.Equal(8, Marshal.OffsetOf<FffColorTransformApiTable>(nameof(FffColorTransformApiTable.TransformVersion)).ToInt32());
         Assert.Equal(16, Marshal.OffsetOf<FffColorTransformApiTable>(nameof(FffColorTransformApiTable.AnalyzeFrame)).ToInt32());
         Assert.Equal(24, Marshal.OffsetOf<FffColorTransformApiTable>(nameof(FffColorTransformApiTable.Reset)).ToInt32());
+        Assert.Equal(32, Marshal.OffsetOf<FffColorTransformApiTable>(nameof(FffColorTransformApiTable.SetDisplayTargetNits)).ToInt32());
     }
 
     [Fact]

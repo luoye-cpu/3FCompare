@@ -1,4 +1,6 @@
+using System.Runtime.InteropServices;
 using _3FCompare.Core.Backend;
+using _3FCompare.Core.Backend.Interop;
 using _3FCompare.Core.Tests.Infrastructure;
 
 namespace _3FCompare.Core.Tests;
@@ -88,6 +90,62 @@ public class ColorTransformUnlockTests
         // 若哪天有人在缺席时也去提示，这条会先红（它证明缺席与锁着是两格）。
         Assert.Equal(ColorTransformModule.ColorTransformPresence.PresentLocked, presence);
         Assert.False(string.IsNullOrWhiteSpace(reason));
+    }
+
+    [Fact]
+    public void 真模块回写函数表时不越过宿主镜像的字节数()
+    {
+        // 这条是 2026-11-03 那次堆越界的回归判据：模块 ABI 3 在表尾追加了第四个指针
+        // （setDisplayTargetNits），而模块**不尊重调用方声明的 size**——拿 32 字节缓冲去问，
+        // 它照样按自己的 sizeof=40 整表回写，最后 8 字节落在缓冲之外。金丝雀就是这么变脏的。
+        var dir = RealModuleDirectory;
+        if (dir is null)
+        {
+            Console.WriteLine($"[SKIP] 真模块臂：{RealModulePath} 不在盘上 ⇒ 本臂未执行");
+            return;
+        }
+
+        var tableSize = Marshal.SizeOf<FffColorTransformApiTable>();
+        const int CanaryBytes = 8;
+        var buffer = Marshal.AllocHGlobal(tableSize + CanaryBytes);
+        try
+        {
+            for (var i = 0; i < tableSize + CanaryBytes; i++) Marshal.WriteByte(buffer, i, 0xAA);
+            Marshal.WriteInt32(buffer, 0, tableSize);   // 调用方声明的表大小
+            Marshal.WriteInt32(buffer, 4, 0);
+
+            var loaded = NativeLibrary.Load(RealModulePath);
+            try
+            {
+                var export = NativeLibrary.GetExport(loaded, ColorTransformAbi.EntryPointName);
+                var getApi = Marshal.GetDelegateForFunctionPointer<FffGetColorTransformApiFn>(export);
+                var rc = getApi(ColorTransformAbi.ApiVersion, buffer);
+                if (rc != 0)
+                {
+                    // 未授权（或版本不合）时模块把表清零、一个字节都不写 —— 没有写入可验，
+                    // 但仍然要说出这一臂是空的，别让它看起来像"通过了"。
+                    Console.WriteLine($"[SKIP] 真模块臂：握手返回 {rc}（未授权或版本不合）⇒ 无写入可验");
+                    return;
+                }
+            }
+            finally
+            {
+                NativeLibrary.Free(loaded);
+            }
+
+            for (var i = 0; i < CanaryBytes; i++)
+            {
+                Assert.Equal(0xAA, Marshal.ReadByte(buffer, tableSize + i));
+            }
+
+            // 模块自报的 sizeof 必须与本侧镜像同数：不同数就意味着有人少写了字段，
+            // 而这一次"少写"的代价是越界 8 字节，不是单纯读错。
+            Assert.Equal((uint)tableSize, (uint)Marshal.ReadInt32(buffer));
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
     }
 
     [Fact]
