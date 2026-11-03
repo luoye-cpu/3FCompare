@@ -18,6 +18,8 @@ public sealed class ColorTransformModule : IDisposable
     private readonly nint _module;
     private readonly FffAnalyzeFrameFn? _analyze;
     private readonly FffResetFn? _reset;
+    /// <summary>ABI 3 的会话级显示目标入口（旧模块没有 ⇒ null，此时按模块自己的 100-nit 回退）。</summary>
+    private readonly FffSetDisplayTargetNitsFn? _setDisplayTargetNits;
 
     // 复用缓冲区：pinned 数组由 GCHandle 根住，句柄在 Dispose 里 Free，
     // 不走 AllocHGlobal（那是 421 KB 的非托管块，漏一次 Free 就是每帧一次的泄漏）。
@@ -55,6 +57,9 @@ public sealed class ColorTransformModule : IDisposable
             Marshal.GetDelegateForFunctionPointer<FffAnalyzeFrameFn>(table.AnalyzeFrame);
         _reset = table.Reset == 0 ? null :
             Marshal.GetDelegateForFunctionPointer<FffResetFn>(table.Reset);
+        // ABI 3 才有的第四个指针。缺席是正常情况（更早的模块），不是错误。
+        _setDisplayTargetNits = table.SetDisplayTargetNits == 0 ? null :
+            Marshal.GetDelegateForFunctionPointer<FffSetDisplayTargetNitsFn>(table.SetDisplayTargetNits);
     }
 
     /// <summary>模块自报的载荷布局版本（<c>transformVersion()</c>），仅用于日志归因。</summary>
@@ -566,6 +571,43 @@ public sealed class ColorTransformModule : IDisposable
             _lastPayloadBytes = null;
             _lastTable = null;
         }
+    }
+
+    /// <summary>把"宿主管线把这段内容映射到的峰值亮度"告诉模块（ABI 3 的会话级烘焙输入）。
+    /// <para><b>为什么必须传</b>：模块拿它当 tone-mapping 的<b>目标</b>、把表相对它编码
+    /// （<c>Bt709OETF(linear / target)</c>），渲染侧用同一个数解码。不传就等于让模块按
+    /// <b>100 nit</b> 烘、而渲染侧按真实峰值解读 —— 同一张表两侧不同域，画面整体偏暗
+    /// 且没有任何报错，症状与"模块没接"极像，最难归因。换显示设备、改 HDR 峰值亮度
+    /// 之后都要重传：模块按会话级输入处理，不自行跟随宿主设置。</para>
+    /// <para><b>失败语义</b>：模块缺席 / 旧模块（无此指针）/ 已释放 / 值非正或非有限 ⇒
+    /// 返回 false 且什么都不做。返回 false 不是错误，这条通道本来就是可选的；
+    /// 调用方只需据此判断"要不要在日志里记一笔两侧不同源"。</para></summary>
+    public bool SetDisplayTargetNits(float nits)
+    {
+        // 先挡非法值：0 在模块里是"未设置"，传进去等于悄悄退回 100 nit，比不传更难查。
+        if (!(nits > 0.0f) || float.IsInfinity(nits)) return false;
+        lock (_gate)
+        {
+            if (_disposed || _setDisplayTargetNits is null) return false;
+            try
+            {
+                _setDisplayTargetNits(MathF.Min(nits, 10000.0f));   // 模块头的定义域 (0, 10000]
+                return true;
+            }
+            catch (Exception ex)
+            {
+                // 模块是可选件：它把这条入口弄砸也不能把宿主的主循环带倒。
+                AppLog.Warn("ColorTransformModule",
+                    $"setDisplayTargetNits({nits}) 抛 {ex.GetType().Name}: {ex.Message}");
+                return false;
+            }
+        }
+    }
+
+    /// <summary>这枚模块支持不支持显示目标通道（ABI 3 起才有；旧件恒 false）。</summary>
+    public bool SupportsDisplayTargetNits
+    {
+        get { lock (_gate) return !_disposed && _setDisplayTargetNits is not null; }
     }
 
     /// <summary>握手取外部床渲染函数表。

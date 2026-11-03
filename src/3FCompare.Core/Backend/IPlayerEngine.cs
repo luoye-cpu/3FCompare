@@ -377,6 +377,15 @@ public sealed record EngineSnapshot
     /// <see cref="IPlayerSession.SetPresentConfig"/> 的返回值只说明交换链<b>允许</b>撕裂，
     /// 不代表 Present 实际没等，故不能用作判据。</para></summary>
     public long PresentWait100ns { get; init; }
+    /// <summary>内核解析出的色调映射<b>目标峰值</b>（cd/m²）。对应
+    /// <c>FFF3FPSnapshot.effectiveTargetPeakNits</c>（内核 <c>ResolveTargetPeak</c> 的结果：
+    /// 有覆盖值用覆盖值、否则取 EDID 的显示器峰值、都拿不到才回退 1000）。
+    /// <para>它是"这一段内容被映射到多亮"的<b>唯一</b>权威读数：注入链路（外部色彩变换模块）
+    /// 必须以<b>同一个数</b>烘焙，否则表按 A 烘、渲染按 B 解读，画面整体偏亮/偏暗而不报错。</para></summary>
+    public uint EffectiveTargetPeakNits { get; init; }
+    /// <summary>显示器自报的峰值亮度（cd/m²，EDID）；0 = 读不到。
+    /// 与 <see cref="EffectiveTargetPeakNits"/> 的区别：后者含"用户设置覆盖"这一步。</summary>
+    public uint DisplayPeakNits { get; init; }
     /// <summary>时间轴代数：仅在真实 demuxer seek 成功后递增。
     /// 用于判定 Seek/StepFrame 是否真正生效（3FCompare 优化项⑤）。</summary>
     public ulong TimelineGeneration { get; init; }

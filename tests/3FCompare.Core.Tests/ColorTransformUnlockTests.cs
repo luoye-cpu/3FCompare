@@ -149,6 +149,37 @@ public class ColorTransformUnlockTests
     }
 
     [Fact]
+    public void 真模块的显示目标通道可调用()
+    {
+        // ABI 3 的第四个指针（setDisplayTargetNits）。这条臂回答的是"那个槽位里真的有一个
+        // 能调的入口"，而不是"传进去之后画面亮度对了" —— 后者要真 Dolby 素材才能判，
+        // 属于端到端测量，不在单测范围内。装载失败（未授权 / 版本不同水）就显式跳过。
+        var dir = RealModuleDirectory;
+        if (dir is null)
+        {
+            Console.WriteLine($"[SKIP] 真模块臂：{RealModulePath} 不在盘上 ⇒ 本臂未执行");
+            return;
+        }
+        if (!ColorTransformModule.TryOpen(out var module, out var reason, dir))
+        {
+            Console.WriteLine($"[SKIP] 真模块臂：装载失败（{reason}）⇒ 本臂未执行");
+            return;
+        }
+
+        using (module)
+        {
+            Assert.True(module!.SupportsDisplayTargetNits);
+            Assert.True(module.SetDisplayTargetNits(1000f));
+            Assert.True(module.SetDisplayTargetNits(400.5f));
+            // 0 / 非有限值一律不送进模块：模块把 0 解释成"未设置"，会悄悄退回 100 nit，
+            // 那种"传了等于没传"比不传更难查，所以在宿主侧就挡掉。
+            Assert.False(module.SetDisplayTargetNits(0f));
+            Assert.False(module.SetDisplayTargetNits(float.NaN));
+            Assert.False(module.SetDisplayTargetNits(-10f));
+        }
+    }
+
+    [Fact]
     public async Task 解锁请求每进程只发一次()
     {
         ColorTransformUnlock.ResetForTests();

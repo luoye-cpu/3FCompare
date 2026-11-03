@@ -96,6 +96,10 @@ public sealed class ColorTransformPump
     private readonly IPlayerSession _session;
     private readonly TryAnalyzeSideData? _analyze;
     private readonly Action? _resetAnalyzer;
+    /// <summary>把目标峰值交给模块的接缝。<b>必须带返回值</b>：模块对"我没这条通道"
+    /// 的回答是 false，用 <c>Action</c> 会把它吞成"已生效"，于是 README 式的日志说传了、
+    /// 实际按 100 nit 烘着 ——"传了等于没传"正是最难查的那一类。</summary>
+    private readonly Func<float, bool>? _applyDisplayTargetNits;
     private readonly FrameSideDataCursor? _cursor;
     private readonly uint _sideDataType;
 
@@ -111,17 +115,20 @@ public sealed class ColorTransformPump
         : this(session,
                module is null ? null : new TryAnalyzeSideData(module.TryAnalyzeFrame),
                sideDataType,
-               module is null ? null : new Action(module.Reset))
+               module is null ? null : new Action(module.Reset),
+               module is null ? null : new Func<float, bool>(module.SetDisplayTargetNits))
     {
     }
 
     /// <summary>接缝构造：换算器与它的 reset 都由调用方给（测试专用）。</summary>
     internal ColorTransformPump(IPlayerSession session, TryAnalyzeSideData? analyze,
-        uint sideDataType, Action? resetAnalyzer = null)
+        uint sideDataType, Action? resetAnalyzer = null,
+        Func<float, bool>? setDisplayTargetNits = null)
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _analyze = analyze;
         _resetAnalyzer = resetAnalyzer;
+        _applyDisplayTargetNits = setDisplayTargetNits;
         _sideDataType = sideDataType;
         // 会话不是 3FP 后端（演示模式）或盘上内核没有环导出时，游标建不起来：
         // 这不是错误，是"这条路不存在"，泵此后恒不注入。
@@ -173,9 +180,76 @@ public sealed class ColorTransformPump
     private ColorTransformTable? _lastInjectedTable;
     private string? _lastLoggedError;
 
+    /// <summary>问一次快照拿目标峰值的最小间隔（毫秒）。显示器/设置变化是秒级事件，
+    /// 而这条路每帧都会走 —— 250 ms 足够跟上，又不至于把 <c>GetSnapshot</c> 变成逐帧调用。
+    /// 与测试对齐用的可调值：单测把它压到 0 才能在同一帧序列里验证"变了才重推"。</summary>
+    internal int DisplayTargetPollMilliseconds { get; set; } = 250;
+
+    private long _lastDisplayTargetPollTicks;
+    private bool _displayTargetPolled;
+    private float _appliedDisplayTargetNits;
+
+    /// <summary>已经告诉模块的烘焙目标峰值（nits；0 = 还没说过）。</summary>
+    public float AppliedDisplayTargetNits => _appliedDisplayTargetNits;
+
+    /// <summary>成功推送目标峰值的次数（>1 说明中途换过显示器/改过峰值设置）。</summary>
+    public uint DisplayTargetUpdates { get; private set; }
+
+    /// <summary>把"内核把内容映射到的峰值"同步给模块 —— 少了这一步，模块按 100 nit 烘、
+    /// 渲染按真实峰值解读，同一张表落在两个域里，画面整体偏暗且不报错。
+    /// <para>取值口径只有一条：<c>EffectiveTargetPeakNits</c>（内核 <c>ResolveTargetPeak</c>
+    /// 的结果，含用户覆盖）；它读不到才退回 EDID 的 <c>DisplayPeakNits</c>。两个都读不到
+    /// 就<b>不传</b>（模块保持自己的 100-nit 回退，也就是这条通道引入之前的行为），
+    /// 而不是猜一个数 —— 猜错会亮/暗得毫无线索。</para>
+    /// <para>模块缺席、旧模块（无此指针）、会话未就绪都不构成错误：这条通道是可选的，
+    /// 方法安静返回，由 <see cref="AppliedDisplayTargetNits"/> 说明"到底传没传成"。</para></summary>
+    private void SyncDisplayTarget()
+    {
+        if (_applyDisplayTargetNits is null) return;
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        // 成功与失败都按同一间隔节流：读不到峰值、模块说"我没这条通道"时不要每帧重试，
+        // 但也绝不永久放弃 —— 用户中途插上 HDR 显示器、或旧的模块被换掉，下一拍就能接上。
+        if (_displayTargetPolled &&
+            System.Diagnostics.Stopwatch.GetElapsedTime(_lastDisplayTargetPollTicks, now).TotalMilliseconds
+                < DisplayTargetPollMilliseconds)
+            return;
+        _displayTargetPolled = true;
+        _lastDisplayTargetPollTicks = now;
+
+        float target;
+        try
+        {
+            var snapshot = _session.ReadSnapshot();
+            target = snapshot.EffectiveTargetPeakNits > 0
+                ? snapshot.EffectiveTargetPeakNits
+                : snapshot.DisplayPeakNits;
+        }
+        catch (Exception)
+        {
+            return;   // 拆解中 / 未就绪：下一拍再问，绝不把异常带进注入循环
+        }
+        if (!(target > 0f) || target == _appliedDisplayTargetNits) return;
+        bool applied;
+        try
+        {
+            applied = _applyDisplayTargetNits(target);
+        }
+        catch (Exception)
+        {
+            return;
+        }
+        if (!applied) return;   // 模块不认这个数/没这条通道：不记账，下一拍再试
+        _appliedDisplayTargetNits = target;
+        DisplayTargetUpdates++;
+        // 第一次（以及每次换值）留一行：两侧不同源时，这个数是唯一能对上的线索。
+        AppLog.Info("ColorTransformPump",
+            $"注入烘焙目标峰值 = {target} nits（与内核 effectiveTargetPeakNits 同源，第 {DisplayTargetUpdates} 次）");
+    }
+
     /// <summary>计数器的一句话摘要（会话收尾时写一条日志，让"通路到底跑没跑"可读）。</summary>
     public string DescribeCounters() =>
         $"注入 {InjectedFrames} 帧，未变 {UnchangedFrames} 帧，跳过 {SkippedFrames} 帧，末帧 {LastInjectedFrameIndex}；" +
+        $"烘焙目标 {AppliedDisplayTargetNits} nits（更新 {DisplayTargetUpdates} 次）；" +
         Timings.Describe();
 
     /// <summary>跑一趟。返回 true 表示本帧注入了新表。
@@ -194,6 +268,8 @@ public sealed class ColorTransformPump
         if (!got) return false;
 
         if (_analyze is null) return false;
+        // 烘焙目标必须在换算之前同步：表是相对它编码的，晚一帧就等于那一帧按旧目标烘。
+        SyncDisplayTarget();
         var tParse = System.Diagnostics.Stopwatch.GetTimestamp();
         var analyzed = _analyze(bytes, frameIndex, out var table, out error);
         Timings.AddParse(System.Diagnostics.Stopwatch.GetTimestamp() - tParse);

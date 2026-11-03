@@ -361,4 +361,111 @@ public class ColorTransformPumpTests
             return SideDataReadOutcome.Found;
         }
     }
+
+    // ---- 烘焙目标峰值（模块 ABI 3 的 setDisplayTargetNits） ----
+
+    /// <summary>建一个带环的会话 + 记录推送值的泵。换算器对指定帧出恒等表。</summary>
+    private static ColorTransformPump PumpWithTargetSink(FakeSession session,
+        List<float> sinks, params long[] injectFrames)
+    {
+        var pump = new ColorTransformPump(session, AnalyzerForFrames(injectFrames),
+            ColorTransformPump.SideDataTypeDoviMetadata,
+            setDisplayTargetNits: nits => { sinks.Add(nits); return true; })
+        {
+            DisplayTargetPollMilliseconds = 0,   // 测试里不要节流，否则"变了才重推"验不出来
+        };
+        return pump;
+    }
+
+    [Fact]
+    public void 泵把内核解析的目标峰值告诉模块()
+    {
+        // 少了这一步，模块按 100 nits 烘、渲染按真实峰值解读 —— 同一张表落在两个域里。
+        var session = SessionWithRing(1);
+        session.EffectiveTargetPeakNits = 1000;
+        session.DisplayPeakNits = 1600;     // 有覆盖值时以 effective 为准
+        var sinks = new List<float>();
+        var pump = PumpWithTargetSink(session, sinks, 1);
+
+        Assert.True(pump.PumpOnce(out _));
+
+        Assert.Equal(new[] { 1000f }, sinks);
+        Assert.Equal(1000f, pump.AppliedDisplayTargetNits);
+        Assert.Equal(1u, pump.DisplayTargetUpdates);
+    }
+
+    [Fact]
+    public void 目标峰值没变不重推_变了立刻重推()
+    {
+        var session = SessionWithRing(1, 2, 3);
+        session.EffectiveTargetPeakNits = 800;
+        var sinks = new List<float>();
+        var pump = PumpWithTargetSink(session, sinks, 1, 2, 3);
+
+        Assert.True(pump.PumpOnce(out _));          // 帧 1：首次推送 800
+        Assert.True(pump.PumpOnce(out _));          // 帧 2：同值 ⇒ 不再推
+        Assert.Equal(new[] { 800f }, sinks);
+
+        session.EffectiveTargetPeakNits = 400;      // 用户调低 HDR 峰值亮度
+        Assert.True(pump.PumpOnce(out _));          // 帧 3：换值 ⇒ 立即重推
+        Assert.Equal(new[] { 800f, 400f }, sinks);
+        Assert.Equal(2u, pump.DisplayTargetUpdates);
+    }
+
+    [Fact]
+    public void 读不到峰值时不猜数_模块保持自己的回退()
+    {
+        // 两个数都是 0 = 内核还没解析出目标。此时猜一个（比如 100）会让"亮/暗得毫无线索"，
+        // 所以宁可什么都不传：模块的 100-nit 回退就是这条通道引入之前的行为。
+        var session = SessionWithRing(1);
+        var sinks = new List<float>();
+        var pump = PumpWithTargetSink(session, sinks, 1);
+
+        Assert.True(pump.PumpOnce(out _));
+
+        Assert.Empty(sinks);
+        Assert.Equal(0f, pump.AppliedDisplayTargetNits);
+        Assert.Equal(1u, pump.InjectedFrames);      // 注入照常发生，不受这条通道影响
+    }
+
+    [Fact]
+    public void 旧模块没有这个入口时只影响烘焙目标_注入照常()
+    {
+        // setDisplayTargetNits 传 null 等于"盘上是 ABI 2 的旧件"：泵必须照常跑，
+        // 只是拿不到目标峰值（模块自己按 100 nit 烘）。
+        var session = SessionWithRing(1);
+        session.EffectiveTargetPeakNits = 1000;
+        var pump = new ColorTransformPump(session, AnalyzerForFrames(1),
+            ColorTransformPump.SideDataTypeDoviMetadata)
+        {
+            DisplayTargetPollMilliseconds = 0,
+        };
+
+        Assert.True(pump.PumpOnce(out _));
+        Assert.Equal(0f, pump.AppliedDisplayTargetNits);
+        Assert.Equal(1u, pump.InjectedFrames);
+    }
+
+    [Fact]
+    public void 模块答不认这个数时不算已生效_下一拍还会再试()
+    {
+        // 用 Action 接缝会把这个 false 吞成"已生效"，于是日志说传了、画面按 100 nit 烘着。
+        // 这条臂钉住"只有模块认了才记账"。
+        var session = SessionWithRing(1, 2);
+        session.EffectiveTargetPeakNits = 1000;
+        var attempts = new List<float>();
+        var pump = new ColorTransformPump(session, AnalyzerForFrames(1, 2),
+            ColorTransformPump.SideDataTypeDoviMetadata,
+            setDisplayTargetNits: nits => { attempts.Add(nits); return false; })
+        {
+            DisplayTargetPollMilliseconds = 0,
+        };
+
+        Assert.True(pump.PumpOnce(out _));
+        Assert.True(pump.PumpOnce(out _));
+
+        Assert.Equal(new[] { 1000f, 1000f }, attempts);   // 两拍都试过
+        Assert.Equal(0f, pump.AppliedDisplayTargetNits);  // 但一次都没记成
+        Assert.Equal(0u, pump.DisplayTargetUpdates);
+    }
 }

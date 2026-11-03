@@ -76,6 +76,11 @@ public sealed class FakeSession : IPlayerSession, IFrameSideDataRing
     /// 此前替身没有这个字段、<c>ReadSnapshot</c> 也就恒填 0 ⇒ 任何读这一列的单测都只能读到 0，
     /// "列根本没被算"与"算出来就是 0"在测试里分不开（#42 的 Present 归因读数要用的就是它）。</summary>
     public long PresentWait100ns { get; set; }
+    /// <summary>对应真实内核 <c>FFF3FPSnapshot.effectiveTargetPeakNits</c>（ResolveTargetPeak 的结果）。
+    /// 注入链的烘焙目标就取这个数；替身没有它，"泵到底把什么数告诉了模块"就无从断言。</summary>
+    public uint EffectiveTargetPeakNits { get; set; }
+    /// <summary>对应真实内核 <c>FFF3FPSnapshot.displayPeakNits</c>（EDID 峰值，不含用户覆盖）。</summary>
+    public uint DisplayPeakNits { get; set; }
     public PlayerState State { get; set; } = PlayerState.Idle;
     public EngineMediaInfo? MediaInfo { get; set; }
     public bool Disposed => _disposed;
@@ -325,6 +330,8 @@ public sealed class FakeSession : IPlayerSession, IFrameSideDataRing
         SwapChainPresents = SwapChainPresents,
         PresentWait100ns = PresentWait100ns,
         TimelineGeneration = TimelineGeneration,
+        EffectiveTargetPeakNits = EffectiveTargetPeakNits,
+        DisplayPeakNits = DisplayPeakNits,
     };
 
     public EngineMediaInfo? ReadMediaInfo() => MediaInfo;

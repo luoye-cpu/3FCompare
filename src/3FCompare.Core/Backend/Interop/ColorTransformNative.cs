@@ -143,6 +143,15 @@ internal delegate int FffAnalyzeFrameFn(nint input, nint output);
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate void FffResetFn();
 
+/// <summary>FFFColorTransformApi.setDisplayTargetNits(float)（ABI 3 尾追加）。
+/// <para>会话级烘焙输入：模块把它当作 tone-mapping 的<b>目标</b>、把表相对它编码
+/// （<c>Bt709OETF(linear / target)</c>），渲染侧必须用同一个数解码 —— <b>两侧必须同源</b>。
+/// 传 0 表示"未设置"，模块回退到经典的 100-nit SDR 目标（= 引入该通道之前的行为），
+/// 那不是"安全默认"，而是<b>与显示管线不一致</b>：内容被压到 100 nit、管线却按真实峰值解读。
+/// 模块自己会把它钳到 (0, 10000]。</para></summary>
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate void FffSetDisplayTargetNitsFn(float nits);
+
 /// <summary>模块导出 <c>FFF_GetColorTransformApi</c> 的托管声明。</summary>
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate int FffGetColorTransformApiFn(uint version, nint api);

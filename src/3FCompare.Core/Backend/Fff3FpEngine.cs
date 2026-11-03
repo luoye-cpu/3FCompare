@@ -866,6 +866,12 @@ public sealed class Fff3FpEngine : IPlayerEngine
             // API v20 尾追加（内核 FFF.Player.Api.h:268，结构体最尾部）：非 IAMF 多声道床
             // 在立体声设备上的双耳渲染。1=OBR HRTF 双耳渲染（保留空间定位），0=swr 矩阵折叠。
             AudioBinaural = snap.AudioBinaural,
+            // 色调映射目标峰值（内核 FFF.Player.Api.h:278-280，API v17 起的字段，此前没人映射）。
+            // effectiveTargetPeakNits 是 ResolveTargetPeak 的结果 —— 也就是内核真正把内容映射到的那个数；
+            // displayPeakNits 是 EDID 自报的显示器峰值（不含用户覆盖）。注入链路必须拿前者烘焙，
+            // 两侧不同源时画面整体偏亮/偏暗却不报错（模块 ABI 3 的 setDisplayTargetNits 就吃这个数）。
+            EffectiveTargetPeakNits = snap.EffectiveTargetPeakNits,
+            DisplayPeakNits = snap.DisplayPeakNits,
         };
 
         private EngineMediaInfo? _cachedMediaInfo;
