@@ -98,6 +98,11 @@ public class ColorTransformUnlockTests
         // 这条是 2026-11-03 那次堆越界的回归判据：模块 ABI 3 在表尾追加了第四个指针
         // （setDisplayTargetNits），而模块**不尊重调用方声明的 size**——拿 32 字节缓冲去问，
         // 它照样按自己的 sizeof=40 整表回写，最后 8 字节落在缓冲之外。金丝雀就是这么变脏的。
+        if (!RealModuleArmEnabled)
+        {
+            Console.WriteLine("[SKIP] 真模块臂：未设 FFF_CT_REAL_MODULE=1 ⇒ 本臂未执行（装载会污染同进程的 Probe 用例）");
+            return;
+        }
         var dir = RealModuleDirectory;
         if (dir is null)
         {
@@ -148,12 +153,26 @@ public class ColorTransformUnlockTests
         }
     }
 
+    /// <summary>真模块臂的显式开关。装载会把 <c>FFF.HDRdp.Test.dll</c> 带进<b>整个测试进程</b>：
+    /// Windows 按模块基名解析已装载的 DLL，于是同进程里别的 <c>Probe</c> 用例（喂畸形目录、
+    /// 空目录求"缺席"的那些）会突然答 <c>Ready</c> —— 判据本身没错，是进程被污染了。
+    /// xunit 默认按集合并行，撞上就是随机红。所以这类臂默认不跑，要跑的人自己开口：
+    /// <code>set FFF_CT_REAL_MODULE=1</code></summary>
+    private static bool RealModuleArmEnabled =>
+        Environment.GetEnvironmentVariable("FFF_CT_REAL_MODULE") == "1";
+
+    /// <summary>真模块的显示目标通道可调用。</summary>
     [Fact]
     public void 真模块的显示目标通道可调用()
     {
         // ABI 3 的第四个指针（setDisplayTargetNits）。这条臂回答的是"那个槽位里真的有一个
         // 能调的入口"，而不是"传进去之后画面亮度对了" —— 后者要真 Dolby 素材才能判，
-        // 属于端到端测量，不在单测范围内。装载失败（未授权 / 版本不同水）就显式跳过。
+        // 属于端到端测量，不在单测范围内。
+        if (!RealModuleArmEnabled)
+        {
+            Console.WriteLine("[SKIP] 真模块臂：未设 FFF_CT_REAL_MODULE=1 ⇒ 本臂未执行（装载会污染同进程的 Probe 用例）");
+            return;
+        }
         var dir = RealModuleDirectory;
         if (dir is null)
         {
