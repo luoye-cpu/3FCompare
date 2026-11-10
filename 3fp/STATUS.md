@@ -641,3 +641,24 @@ TP 原停在 `pr/hdr-peak-display-20261102` @`0db9f7e`（落后 53 提交）+ HL
 
 ### 四视角审计（同日：本地/fork/上游PR/上游基线）
 KF 工作区临时索引落树 = `9ec14896`（与 fad4487 的提交树相同），树级 diff 仅差两个有意保留的 `.vcxproj.user`；上游基线 `72af915` 为 fad4487 祖先（merge-base 核验）；上游 `refs/pull/57/head` = `fad4487`。**结论：FFF_Project 范围内无任何未进 PR 的内容**。不进 PR 的三项（非内核内容）：① KF 草稿 `_pr48_review/`、`LakeUI性能分析笔记_20261106.md`（有意排除）；② fork `main` 滞后 `30b2a7e`（缺 #52/#54/#55/#56 合并，属 fork 维护非 PR 内容）；③ 根仓 3FCompare 的 3 个未推送提交与 docs/tools/tests 改动（另一 GitHub 仓，无开放 PR，无法进 #57）。
+
+
+## 根仓整理出仓（2026-11-11）
+
+四视角审计第③项收口：根仓 3FCompare（luoye-cpu/3FCompare，另一 GitHub 仓）main 落地全部积压内容。此前状态：3 个未推送提交 + 11 个脏跟踪文件 + 92 条未跟踪。
+
+### 提交（main，就地收口无分叉）
+- `ae26a45` 仓库：gitignore 补全一次性工作区与本地产物；清空壳目录与编译垃圾
+- `a9a278c` 文档：101–143 台账出仓与账本同步——HLG 修复、VRR 判决矩阵、综合审查全量修复、四视角审计（56 篇 docs + 本账本 + 2 份 cleanup 记录归位 docs/）
+- `6c62873` 探针：HLG OOTF 五锚点等 24 项探针入库——sdr_white QDC 回退、vrr 引用泄漏、zoom 快照 v23、注册表同步
+- `9b8861d` 工具：r2r 排除表清死条目；发布打包补建预加载小助手并 fail-closed 校验
+- `f9b0e46` 门禁：宿主 .vb 违规本体判据（24UI/29UI）与 Rem 注释大小写不敏感
+- `dcf8640` 测试：PR/AB 与 UI 驱动 harness、enumtest 源入库；附 WGC 抓帧与 llama CUDA 探测脚本
+
+### 清理裁决
+- **删除**：空壳目录 `3fp/kernel_pr49/`、`3fp/qwen-main-merge/`、`third_party/_pr52_c1wt/`（find 证实 0 文件，worktree 残骸）；空文件 `覆盖`；编译垃圾 `pixfmt_name*.obj`。
+- **gitignore 新增 20 条**（本机保留不入库）：`/test/`（124MB prefetch 实测工作区）、`/third_party/build/`、`/_3fc_tmp*` 系 5 条、`/.arts/`、`/.resultverify/`、`/endpoint-capabilities.json`（含本机设备 GUID）、`/debug.log`、`/.3fc_kernel_*` 3 条、`/FFF.HDRdp.Test.dll`、AudioEndpointProbe `_obj/`+`*.exe`。
+- **保留本机**：`.resultverify/` 验证报告、`_gui_test/` 截图与 PR 草稿、kernel baseline bundle。
+
+### 终态
+`git status --porcelain` = **0 条**（工作区全净）；连同既有 3 提交（`1d907ef`/`db47cd2`/`ecec92e`）共 10 个提交推送 `origin main`。
