@@ -662,3 +662,25 @@ KF 工作区临时索引落树 = `9ec14896`（与 fad4487 的提交树相同）�
 
 ### 终态
 `git status --porcelain` = **0 条**（工作区全净）；连同既有 3 提交（`1d907ef`/`db47cd2`/`ecec92e`）共 10 个提交推送 `origin main`。
+
+## LakeUI 图形性能选项移植（2026-11-11，3FUI→宿主）
+
+用户批准把 3FUI（Lake1059/FFmpegFreeUI，LakeUI 招牌作品）的 LakeUI 性能工程全量搬进 3FP。先对 3FUI 近三月 130+ 提交做了四路分析（9月/10月/11月三窗口 + 当前代码横切），确认其模式 = 引擎旋钮全面设置化 + 上层使用纪律（脏标记合并刷新、节流、BeginUpdate 批处理、反射热路径查找表、线程卸载、有界预算）。
+
+### 收口（移植前）
+KF 开发树此前停在 72af915（上游基线），PR #57 内容以未提交形态躺在工作区（树内容=fad4487，即四视角审计的结论）。本次就地收口：`git reset --hard fad4487`（分支 feature/cuda-d3d11-interop 快进到 PR 顶；工作区本就逐字相同，零数据移动；`.vcxproj.user`×2 与 `_pr48_review/` 等未跟踪件不受影响），跟踪文件归零脏，新工作叠在其上。
+
+### 移植内容（提交 `3689f77`，宿主 5 文件 +858/−7）
+- **设置.vb**：新增 `LakeUI抗锯齿/文字渲染/超采样/GPU缓存档/画刷缓存档/字体缓存档/CPU缓存档/背景脏区档/SSAA分桶档/动画帧率` 十字段（存档位下标）+ 九组档位表 + `应用图形性能设置()`（一次性写 `LakeUI.GlobalOptions`：AntialiasMode/TextQuality/SSAA/GpuCacheBudgetBytes/CpuCacheBudgetBytes/BrushCacheLimit/TextFormat+FontResolveCacheLimit/BackgroundDirtyRectLimit+FullDirtyRatio/SsaaBucketSize）+ `规范化()` 全量钳制（帧率只认离散档，脏值归 60）。
+- **Form1.vb**：撤 Load 顶部硬编码 `GlobalTextQuality=Outline`，改为设置加载后调 `应用图形性能设置()`——默认档=Outline，升级行为逐位不变。
+- **字体控制.vb**：`替换字体` 内搭车反射下发 `AnimationFPS`（值变才写，避免无谓重启动画节拍）；`DropDownAnimationFPS` null-safe 照写（LakeUI 5.116 无此属性，落空即跳过）。
+- **设备与性能页**：新增 LakeUI 组（说明标签 + 十个下拉 + 清理说明 + 三档+GC 两档的缓存清理动作下拉），页面照 AI字幕先例改 AutoScroll + 根面板绝对定位 + 宽度对齐；清理动作不落盘、执行完弹回空档。
+
+### 验证
+- 宿主 Release 构建 **0 警告 0 错**（Debug 档缺 vcpkg 调试 DLL，与本次改动无关）；`FFF.Player.Tests` 构建 0 错，`--360-identification-regression` **29/29**。
+- 中性化门禁：二进制 0 命中、`FFF.Native` 77 源文件 + `FFF.Player` 93 源文件（含新增）**0 命中**；判红唯一来源 = vcxproj:122 `fdk-aac.lib`（需授权库旗标，fad4487 既有状态，非本轮引入）。
+- KF 内核 Release 重建 0 错，产物 sha16 `d4836ad9c0649417`（6521344 B，与出货同尺寸）；hlg_ootf_probe 复验进行中（后台）。
+
+### 暂缓项（有意不做）
+- LakeUI HDR 输出档位（`GlobalOptions.HDR`）未暴露：播放器 HDR 由内核管线管辖，宿主 UI 层再开一路 HDR 颜色映射有双重色调映射风险，留待产品决策。
+- 3FUI 的流式渲染节流/HttpClient 连接池/瓦片大图等模式在宿主无对应场景（无 LLM 流式 UI、无每请求建连、图片走内核呈现），未搬。
