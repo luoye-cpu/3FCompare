@@ -213,3 +213,45 @@ docs/交接-*.md
 
 # 过程件（PR 正文、提交说明、源码快照）：本机保留，不入库
 3fp/patches/
+
+# ── 2026-11-11 审查追加：本地产物与一次性工作区，不入库 ──────────────────
+# 逐条核实过：git ls-files 对下列路径均为空（没有已跟踪文件被新规则遮蔽；
+# gitignore 本就不影响已跟踪文件，这里是防呆留痕）。
+# 注意 gitignore 不支持行尾注释，注释必须独立成行（首轮就栽在这上面）。
+# /dist/                        发布产物目录
+/dist/
+# /tests/media/                 测试媒体素材（体积大，规则同 testmedia/media/）
+/tests/media/
+# /_p7_e2e/                     一次性 E2E 工作区
+/_p7_e2e/
+# /_pr49_e2e/                   一次性 E2E 工作区
+/_pr49_e2e/
+# /3fp/samples/passthrough/     passthrough 样张（规则同 3fp/samples/media/）
+/3fp/samples/passthrough/
+# git worktree 工作区（_wt_base/_wt_bisect/_wt_perf13/_wt_pr49fix/_wt_pr49revert/_wt_pr54push）
+/_wt_*/
+
+# ── 2026-11-11 根仓整理追加 ─────────────────────────────────────────────
+# /test/                        prefetch 实测工作区（E1/route/scope/publish_probe）
+/test/
+# /third_party/build/           TP 树构建产物
+/third_party/build/
+# 一次性工作区（_3fc_tmp 系；审查/截图/PR 正文草稿，本机保留）
+/_3fc_tmp/
+/_3fc_tmp_lane/
+/_3fp-ai-subtitles/
+/_3fp-review/
+/_gui_test/
+# 本机状态与设备数据（.arts 工具状态；resultverify 验证运行件；endpoint 含本机设备 GUID）
+/.arts/
+/.resultverify/
+/endpoint-capabilities.json
+# 本机运行件：调试日志、内核基线包、宿主测试 DLL
+/debug.log
+/.3fc_kernel_baseline.bundle
+/.3fc_kernel_build.json
+/.3fc_kernel_sha
+/FFF.HDRdp.Test.dll
+# AudioEndpointProbe 构建产物（源码与 build.ps1 入库；_obj 不在全局 obj/ 规则内）
+/3fp/tools/AudioEndpointProbe/_obj/
+/3fp/tools/AudioEndpointProbe/*.exe
