@@ -340,7 +340,20 @@ SOURCE_FATAL = (
     # ① 假绿断言——宿主无权宣称残差"已合成"（配对与否宿主无从知晓），只能说"已请求"；
     r"EL残差已?合成",
     # ② 宿主持有边数据类型键字面值——类型键属模块—内核的载荷语义，宿主只许透传。
+    #    （2026-11-11 补）②是**症状词**判据，真实违规**本体**是 VB UInteger 字面量
+    #    `24UI` / `29UI`——症状词可被改写绕开，字面量才是本体，故另立一组
+    #    SOURCE_FATAL_HOST_VB（见下）与之双保险。
     r"边数据契约类型|配置记录契约类型",
+)
+# 宿主 .vb 专属追加判据（2026-11-11 补，与上面宿主侧①②组成"症状词+违规本体双保险"）：
+# 违规本体就是字面值本身（VB UInteger 字面量 24UI/29UI = 边数据契约的类型键被宿主
+# 硬编码），不再依赖症状词的措辞。
+# ⚠ 只对 .vb 文件生效、**不并入 SOURCE_FATAL**：发布门禁的源码层还会扫内核 3FP/3FR
+#   （tools/发布门禁.ps1 喂入 3FP/3FR/FFF.Player 三个目录），数字字面量在内核里合法
+#   出现的面太大，进全局表会把内核扫成假红；3FP/3FR 无 .vb 文件，本组天然碰不到内核。
+SOURCE_FATAL_HOST_VB = (
+    r"\b24UI\b",
+    r"\b29UI\b",
 )
 # FFmpeg 的公开传输层名字（项目纪律：不可改也不可想当然删）——报告但不判红。
 SOURCE_ADVISORY = (r"AV_FRAME_DATA_DOVI_METADATA", r"AV_PKT_DATA_DOVI_CONF", r"\bDOVI\b")
@@ -364,11 +377,19 @@ def scan_sources(root):
                 print("   [FAIL] 读不到 %s：%s（fail-closed）" % (path, ex))
                 return False, -1
             scanned += 1
+            # 宿主 .vb 专属判据（症状词+违规本体双保险，见 SOURCE_FATAL_HOST_VB 注）
+            # 只拼进 .vb 的判据集；内核 3FP/3FR 扫描根里没有 .vb，字面判据碰不到内核。
+            fatal_patterns = SOURCE_FATAL + (SOURCE_FATAL_HOST_VB if name.endswith(".vb") else ())
             for number, line in enumerate(text.splitlines(), 1):
                 stripped = line.strip()
-                if stripped.startswith("//") or stripped.startswith("'") or stripped.startswith("REM"):
+                # VB 的 Rem 引导词大小写不敏感（Rem/rem/REM 都是注释）——按 lower() 判。
+                # 但 Rem 之后必须跟空白或行尾才是注释：RemoveHandler/Resume、rem3=… 这类
+                # 以 rem 开头的真实语句行不能吞，吞错的方向是漏扫（比红更坏）。
+                is_remark = (stripped[:3].lower() == "rem"
+                             and (len(stripped) == 3 or stripped[3] in " \t"))
+                if stripped.startswith("//") or stripped.startswith("'") or is_remark:
                     continue        # 纯注释里的名字不是实现，判红会逼人在注释里改名
-                for pattern in SOURCE_FATAL:
+                for pattern in fatal_patterns:
                     if re.search(pattern, line, re.I):
                         hits.append((path, number, pattern, stripped[:100]))
                         break
