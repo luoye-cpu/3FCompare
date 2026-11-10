@@ -248,6 +248,23 @@ Write-Ok '内核构建通过'
 $kernelDll = Join-Path $root "kernel\FFF.Native\x64\$Configuration\FFF.Native.dll"
 if (-not (Test-Path $kernelDll)) { Write-Fail "未生成内核 DLL：$kernelDll"; exit 1 }
 
+# ── 1b. 构建前后预加载小助手 ────────────────────────────────────────────────
+# 内核 EnsureHelper() 按自身 DLL 所在目录查找这枚独立 exe；发布脚本必须构建它。
+# 缺件只会降级 helper 侧的 WARM/PROBE，进程内静图解码线与 P0-a 命中不受影响，
+# 但出货包仍应完整携带这枚加速件，故 §5 做 fail-closed 校验。
+Write-Step "构建预加载小助手（$Configuration / x64）"
+$helperProject = Join-Path $root 'kernel\FFF.PrefetchHost\FFF.PrefetchHost.vcxproj'
+if (-not (Test-Path $helperProject)) { Write-Fail "找不到小助手工程：$helperProject"; exit 1 }
+# 干净检出可能没有 3fp\build\，而小助手的 Mirror Target 会直接往那里 Copy。
+New-Item -ItemType Directory -Force -Path (Join-Path $root 'build') | Out-Null
+# 清掉上一次外部命令的退出码，避免「构建失败却读到旧 0」的低概率假绿。
+$global:LASTEXITCODE = $null
+& $msbuild.FullName $helperProject /p:Configuration=$Configuration /p:Platform=x64 /m /v:minimal /nologo
+if ($LASTEXITCODE -ne 0) { Write-Fail '预加载小助手构建失败'; exit $LASTEXITCODE }
+$helperExe = Join-Path $root 'build\FFF.PrefetchHost.exe'
+if (-not (Test-Path $helperExe)) { Write-Fail "未生成小助手：$helperExe"; exit 1 }
+Write-Ok '预加载小助手构建通过'
+
 # ── 2. 回归（可选，但默认执行）───────────────────────────────────────────────
 if (-not $SkipTests) {
     Write-Step '回归测试'
@@ -331,7 +348,10 @@ Write-Step '运行期依赖'
 $required = @(
     'avcodec-63.dll', 'avformat-63.dll', 'avutil-61.dll',
     'swresample-7.dll', 'swscale-10.dll', 'avfilter-12.dll',
-    'ass-9.dll', 'bluray-3.dll'
+    'ass-9.dll', 'bluray-3.dll',
+    # 前后预加载小助手：内核按自身 DLL 所在目录查找，缺了会静默降级成门内最小形态，
+    # 但发布包必须带上它，否则出货版本拿不到这条能力。
+    'FFF.PrefetchHost.exe'
 )
 $missing = @()
 foreach ($name in $required) {
@@ -343,15 +363,28 @@ if ($missing.Count -gt 0) {
     Write-Fail ("交付目录缺少 {0} 个运行期依赖：{1}" -f $missing.Count, ($missing -join ', '))
     Write-Host '  这些 DLL 在 kernel\runtime 与 third_party\vcpkg_installed 下；' -ForegroundColor DarkGray
     Write-Host '  若缺失，请检查 FFF.Player.vbproj 的 CopyProductNativeToPublish 是否拷贝了 @(DevelopmentRuntime)。' -ForegroundColor DarkGray
+    Write-Host '  若缺 FFF.PrefetchHost.exe，请检查 vbproj 的 @(PrefetchHelper) 与 CopyProductNativeToPublish 是否生效（1b 段已自动构建）。' -ForegroundColor DarkGray
     exit 1
 }
 Write-Ok '运行期依赖完整'
+
+# 两方比对：镜像件（3fp\build\）vs 发布件。发布件由 vbproj 的 @(PrefetchHelper)
+# 从 3fp\kernel\build\ 拷贝，镜像件由 post-build Target 从同一原始件拷贝；
+# 两者一致即说明没有残留其它配置的镜像，且 publish 的拷贝确实生效。
+$helperPublished = Join-Path $OutputDirectory 'FFF.PrefetchHost.exe'
+$h3 = (Get-FileHash $helperExe -Algorithm SHA256).Hash
+$h4 = (Get-FileHash $helperPublished -Algorithm SHA256).Hash
+if ($h3 -ne $h4) {
+    Write-Fail '产物中的 FFF.PrefetchHost.exe 与刚构建的不一致（可能残留了其它配置的镜像）'
+    exit 1
+}
+Write-Ok "FFF.PrefetchHost.exe 一致（SHA256 $($h3.Substring(0,16))…）"
 
 # ── 6. 交付目录 ─────────────────────────────────────────────────────────────
 Write-Step '交付目录'
 $files = Get-ChildItem $OutputDirectory -File | Sort-Object Name
 Write-Host ("  共 {0} 个文件，{1} MB" -f $files.Count, [math]::Round((($files | Measure-Object Length -Sum).Sum)/1MB, 1))
-foreach ($name in 'FFF.Player.exe', 'FFF.Native.dll') {
+foreach ($name in 'FFF.Player.exe', 'FFF.Native.dll', 'FFF.PrefetchHost.exe') {
     $f = $files | Where-Object Name -eq $name
     if ($f) { Write-Host ("    · {0,-20} {1,8:N2} MB  {2}" -f $name, ($f.Length/1MB), $f.LastWriteTime) }
 }

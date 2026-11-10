@@ -8,10 +8,12 @@
     2026-11-04 清理（136 号盘点 #4，123 §7.2 判定）：删除全部 20 条原生 DLL 条目
     （ass/avcodec/avfilter/avformat/avutil/bluray/brotli/bz2/charset/freetype/fribidi/
     harfbuzz/iconv/libpng/libxml2/swresample/swscale/udfread/z）——R2R 只处理托管
-    程序集，原生 DLL 条目从来无效。保留托管程序集 11 条。
+    程序集，原生 DLL 条目从来无效。
+    2026-11-11 复查补删：FFF.Native.dll 本身也是原生 DLL（FFF.Native.vcxproj 纯 C++、
+    无 CLRSupport/CompileAsManaged，产物无 CLR 元数据，R2R 根本不会碰它），上一轮
+    漏删属于死条目、与"保留托管程序集"的口径不符。本表现存托管程序集 10 条。
   -->
   <ItemGroup>
-    <PublishReadyToRunExclude Include="FFF.Native.dll" />
     <PublishReadyToRunExclude Include="Microsoft.Windows.SDK.NET.dll" />
     <PublishReadyToRunExclude Include="SharpGen.Runtime.COM.dll" />
     <PublishReadyToRunExclude Include="SharpGen.Runtime.dll" />
