@@ -64,7 +64,8 @@ double PatchSum(FFF3FPHandle player, const std::uint32_t x, const std::uint32_t 
 
 std::uint64_t SwapPresents(FFF3FPHandle player, FFF3FPSnapshot& snap) {
     snap.size = sizeof(snap);
-    snap.version = 20;                 // 本树唯一被接受的快照版本（实测 19/0/巨大 一律 rc=-1）
+    // PlayerSession.cpp:56 SnapshotVersion；改快照结构须同步此处并重新编译本探针。
+    snap.version = 23;                 // 实测 19/0/巨大 与旧的 20 一律 rc=-1
     return FFF3FP_GetSnapshot(player, &snap) == FFFResult::Success ? snap.swapChainPresents : 0;
 }
 } // namespace

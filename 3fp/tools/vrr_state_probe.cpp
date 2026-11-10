@@ -7,7 +7,8 @@
 //      D3D 适配器选择三处共用），不可用时明确告警并退回主屏。
 //   ② D3D 设备显式建在窗口屏所在适配器上——混合 GPU 下默认适配器可能与窗口屏
 //      不同，swap chain 绕合成路径概率增大、帧统计失真（§4 拓扑教训落实）。
-//   ③ 判决矩阵与文档 §2 统一（此前两处口径偏差）：
+//   ③ 判决矩阵与文档 §2 统一（此前两处口径偏差；§2 的落仓版是 3fp/docs/142
+//      《VRR面板状态探针判决矩阵》，此前只存在于仓外面）：
 //        - NVAPI requested 并入 vrr-idle 证据（v1/v2 单独 requested 会落 fixed）；
 //        - W1 声明单独即可 vrr-idle——"能力在、行为未确证"语义，声明面本身就是
 //          能力证据，无需请求态陪伴；请求态/系统开关只进 NOTE 行增强解释；
@@ -101,15 +102,18 @@
 //                视为过（无参照可判，交轮内稳定与 W/N 段兜底）。
 //             任一不过只记 ambiguous，交 W/N 段裁决。
 //
-// 判决矩阵（VRR-VERDICT 行，v3 与文档 §2 统一口径）：
+// 判决矩阵（VRR-VERDICT 行，v3 与 3fp/docs/142 统一口径——即头注所称"文档 §2"）：
 //   vrr-active   E 段五重守门全过（跌落+调用率+LFC 相关+轮内稳定+节奏，决定性）
 //   vrr-idle     面板级 VRR 证据在、E 未实测确证：NVAPI 窗口屏读数 possible/
 //                enabled/requested 任一，或 W1 EDID 声明了 VRR（FreeSync/HF-VSDB）
 //                ——声明本身就是能力证据，无需请求态陪伴（v3 定稿；请求态与
 //                系统开关只进 NOTE 行增强解释，不参与判决分支）
 //   fixed        E 有数据且无跌落、非 ambiguous，且 NVAPI 窗口屏三位全 0、W1 无声明
-//   inconclusive 零面板级证据：E 判别力受限/样本不足/链建不起来，且 W/N 均无
-//                声明可依（v3 前此态还吞掉了"有声明但链建不起来"——现在归 vrr-idle）
+//   inconclusive 零面板级证据：E 段没给出决定性读数（判别力受限/样本不足），
+//                且 W/N 均无声明可依（v3 前此态还吞掉了"E 失能但有声明"——现在
+//                有声明即归 vrr-idle）。注意建窗/D3D 设备/建链/RTV 失败**走不到
+//                判决矩阵**：直接 exit 2 基础设施失败，不打印任何 VRR-VERDICT 行，
+//                不与 inconclusive（exit 3）混同。
 //
 // 用法：vrr_state_probe（环境变量 VRR_SECONDS_CAL=1.5 VRR_SECONDS_SLOW=3.0
 //        VRR_FPS=24 VRR_DEVICE=\\.\DISPLAY1 选目标监视器，默认主屏）
@@ -813,6 +817,9 @@ int main() {
                     if (SUCCEEDED(output->GetDesc(&od)) &&
                         _wcsicmp(od.DeviceName, windowMonitorInfo.szDevice) == 0) {
                         chosen = adapter;   // 命中：持有引用，adapter 不在此处释放
+                        output->Release();  // output 只为读 DeviceName，命中后即不再用：
+                                            // 与下方未命中路径同一释放纪律（此前命中
+                                            // 路径在 break 前漏放一个引用）
                         break;
                     }
                     output->Release();
@@ -1009,7 +1016,7 @@ int main() {
     const bool nvWinAny       = nvWinPossible || nvWinEnabled || nvWinRequested;
     const bool eDataOk = calib1.Usable() && (slowV1.Usable() || slowT.Usable());
 
-    // 判决矩阵 v3（与文档 §2 统一口径，详见头注）：
+    // 判决矩阵 v3（与 3fp/docs/142 统一口径，详见头注）：
     //   vrr-active  = E 五重守门全过
     //   fixed       = E 有数据且无跌落、非 ambiguous，且 NVAPI 窗口屏三位全 0、无声明
     //   vrr-idle    = 任一面板级证据（NVAPI possible/enabled/requested 或 W1 声明），

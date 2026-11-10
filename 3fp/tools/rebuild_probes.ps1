@@ -41,7 +41,7 @@ $extraLibs = @{
 $simple = @('decode_profile','block_scale_probe','image_zoom_probe','scale_policy_probe',
             'upload_layout_probe','adaptive_scale_probe','read_pixel_probe','rotation_probe',
             'hdrpeak_probe','copyframe_probe','occlusion_probe','shot_probe','vsr_probe',
-            'thread_ladder_probe',
+            'thread_ladder_probe','hlg_ootf_probe',
             # These were missing from the list and so kept failing with a stale struct
             # long after the header changed -- the same trap the delete-first fix above
             # exists to prevent, one level up.

@@ -130,35 +130,44 @@ float ReadSdrWhiteLevelWinRT(HWND window, int* advancedColorKind) noexcept {
     return nits;
 }
 
-/* 系统「SDR 内容亮度」：与内核 ReadSdrWhiteLevelDisplayConfig 同一来源。 */
+/* 系统「SDR 内容亮度」：与内核 ReadSdrWhiteLevelDisplayConfig 同一来源。
+ *
+ * QDC_DATABASE_CURRENT 在部分驱动上直接回 87（本机实测：DM72u + HDR 激活），
+ * 旧版本此处直接返回 0，于是 reference 退化成 1.0、nearWhite 判据失效，
+ * 结论会被伪装成「无二次映射」。这里与内核一致地退回 QDC_ALL_PATHS，
+ * 只认 active path。 */
 float ReadSdrWhiteLevelNits(HWND window) noexcept {
     const auto monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
     if (monitor == nullptr) return 0.0f;
     MONITORINFOEXW monitorInfo{};
     monitorInfo.cbSize = sizeof(monitorInfo);
     if (!GetMonitorInfoW(monitor, &monitorInfo)) return 0.0f;
-    UINT32 pathCount = 0;
-    UINT32 modeCount = 0;
-    if (GetDisplayConfigBufferSizes(QDC_DATABASE_CURRENT, &pathCount, &modeCount) != ERROR_SUCCESS)
-        return 0.0f;
-    std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
-    std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
-    if (QueryDisplayConfig(QDC_DATABASE_CURRENT, &pathCount, paths.data(), &modeCount,
-                           modes.data(), nullptr) != ERROR_SUCCESS)
-        return 0.0f;
-    for (UINT32 index = 0; index < pathCount; ++index) {
-        DISPLAYCONFIG_SOURCE_DEVICE_NAME source{};
-        source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-        source.header.adapterId = paths[index].sourceInfo.adapterId;
-        source.header.id = paths[index].sourceInfo.id;
-        if (!QueryDisplayConfigInfo(source)) continue;
-        if (_wcsicmp(source.viewGdiDeviceName, monitorInfo.szDevice) != 0) continue;
-        DISPLAYCONFIG_SDR_WHITE_LEVEL sdr{};
-        sdr.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
-        sdr.header.adapterId = paths[index].sourceInfo.adapterId;
-        sdr.header.id = paths[index].targetInfo.id;
-        if (!QueryDisplayConfigInfo(sdr)) return 0.0f;
-        return static_cast<float>(sdr.SDRWhiteLevel) / 1000.0f * 80.0f;
+    for (const UINT32 flags : {static_cast<UINT32>(QDC_DATABASE_CURRENT),
+                               static_cast<UINT32>(QDC_ALL_PATHS)}) {
+        UINT32 pathCount = 0;
+        UINT32 modeCount = 0;
+        if (GetDisplayConfigBufferSizes(flags, &pathCount, &modeCount) != ERROR_SUCCESS) continue;
+        std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+        std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+        if (QueryDisplayConfig(flags, &pathCount, paths.data(), &modeCount, modes.data(),
+                               nullptr) != ERROR_SUCCESS) continue;
+        for (UINT32 index = 0; index < pathCount; ++index) {
+            if (flags != QDC_DATABASE_CURRENT &&
+                (paths[index].flags & DISPLAYCONFIG_PATH_ACTIVE) == 0) continue;
+            DISPLAYCONFIG_SOURCE_DEVICE_NAME source{};
+            source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+            source.header.adapterId = paths[index].sourceInfo.adapterId;
+            source.header.id = paths[index].sourceInfo.id;
+            if (!QueryDisplayConfigInfo(source)) continue;
+            if (_wcsicmp(source.viewGdiDeviceName, monitorInfo.szDevice) != 0) continue;
+            DISPLAYCONFIG_SDR_WHITE_LEVEL sdr{};
+            sdr.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
+            sdr.header.adapterId = paths[index].sourceInfo.adapterId;
+            sdr.header.id = paths[index].targetInfo.id;
+            if (!QueryDisplayConfigInfo(sdr)) continue;
+            const float nits = static_cast<float>(sdr.SDRWhiteLevel) / 1000.0f * 80.0f;
+            if (nits > 0.0f) return nits;
+        }
     }
     return 0.0f;
 }
@@ -270,7 +279,7 @@ int main() {
     const float sdrWhiteWinRT = ReadSdrWhiteLevelWinRT(window, &advancedColorKind);
     std::printf("sdrWhite(DISPLAYCONFIG): %.0f nits\n", sdrWhiteNits);
     std::printf("sdrWhite(WinRT)        : %.0f nits, AdvancedColorKind=%d "
-                "(1=Standard 2=WideColorGamut 3=HighDynamicRange)\n",
+                "(0=Standard 1=WideColorGamut 2=HighDynamicRange)\n",
                 sdrWhiteWinRT, advancedColorKind);
     std::printf("step: display/swapchain ready\n");
 
@@ -345,9 +354,12 @@ int main() {
     const float reference = sdrWhiteNits > 0.0f ? sdrWhiteNits / 80.0f : 1.0f;
     const bool nearOne = std::fabs(g - 1.0f) < 0.05f;
     const bool nearWhite = sdrWhiteNits > 0.0f && std::fabs(g - reference) < 0.05f;
-    // 只有 AdvancedColorKind == HighDynamicRange(3) 才允许下结论：SDR/WCG 桌面上
+    // 只有 AdvancedColorKind == HighDynamicRange(2) 才允许下结论：SDR/WCG 桌面上
     // 合成器不做 SDR 白提升，清屏 1.0 读回必然 ≈1.0，会伪装成「无二次映射」。
-    if (advancedColorKind != 3) {
+    // 枚举值是 0/1/2（Standard/WideColorGamut/HighDynamicRange，见
+    // ABI::Windows::Graphics::Display::AdvancedColorKind）。早前这里写成 != 3，
+    // 而 3 不存在，判据恒真 ⇒ 该探针在本机永远输出 inconclusive。
+    if (advancedColorKind != 2) {
         std::printf("verdict     : inconclusive - AdvancedColorKind=%d is not HDR; "
                     "enable HDR (Advanced Color) for the V7 verdict.\n", advancedColorKind);
     } else if (nearOne && !nearWhite) {

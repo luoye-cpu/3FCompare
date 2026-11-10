@@ -211,7 +211,8 @@ int wmain(const int argc, wchar_t** argv) {
     // 不静默出零（docs/78 §1 记过这类 ABI 静默错位）。
     FFF3FPSnapshot snapshot{};
     snapshot.size = sizeof(snapshot);
-    snapshot.version = 20;
+    // PlayerSession.cpp:56 SnapshotVersion；旧值 20 会被 GetSnapshot 的尺寸/版本门拒绝。
+    snapshot.version = 23;
     if (FFF3FP_GetSnapshot(player, &snapshot) != FFFResult::Success) {
         printf("GetSnapshot 失败：呈现代数读不到，本探针不产出结论。\n");
         FFF3FP_Close(player); FFF3FP_Destroy(player);
