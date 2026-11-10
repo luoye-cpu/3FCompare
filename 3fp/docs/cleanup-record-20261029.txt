@@ -1,0 +1,100 @@
+清理记录 · 2026-10-29
+====================
+
+起因：用户指令「删除掉乱七八糟的文件，只留最纯净的一份 GPU+CPU 的包，一份 NPU 的包」。
+
+结论：工作区从 1 个临时区（36 GB、1288 项）收成 2 份成品包（合计约 2.0 GB，位于 dist/）。
+_3fc_tmp 现在只剩 build_kernel.py（1.5 KB）与 .gh_token（41 B），合计 1.6 KB。
+
+
+一、保留的交付物
+----------------
+dist/AI字幕包-GPU+CPU/        1.1 GB   ← 默认包
+    ai-subtitles.json         version 3 / engine llama
+    asr_worker.py             生产 worker（两份包同一份代码）
+    model/Qwen3-ASR-0.6B-Q8_0.gguf              768 MB  主权重
+    model/mmproj-Qwen3-ASR-0.6B-Q8_0.gguf       205 MB  音频投影层（缺了不认音频）
+    model/selftest.wav, selftest.txt                    金样本
+    runtime/vulkan/           88 MB   52 个文件（llama-server.exe + ggml-*.dll）
+    许可声明.txt
+
+dist/AI字幕包-NPU/            942 MB   ← NPU 支线载体包
+    ai-subtitles.json         version 3 / engine onnx（无 runtime 字段）
+    asr_worker.py
+    model/conv_frontend.onnx  42 MB
+    model/encoder.int8.onnx   174 MB
+    model/decoder.int8.onnx   721 MB
+    model/tokenizer/
+    model/selftest.wav, selftest.txt
+    许可声明.txt
+
+⚠️ NPU 包当前**跑不了 NPU**：worker 里 NpuBackend 仍是桩，选 npu 会明确降回 CPU
+   并报「需要独立的 ONNX + OpenVINO 包」。这个包是 NPU 支线的载体（ONNX 容器 +
+   未来接 OpenVINO），现在实际能力是 CPU / CUDA（经 sherpa-onnx）。
+
+
+二、删掉的东西（合计约 36 GB）
+------------------------------
+_3fc_tmp/ 下除 build_kernel.py 与 .gh_token 之外的全部，含：
+  - 崩溃转储 4 个                        3.9 GB   fffplayer_{hang,silent,main2,main_hang}.dmp
+  - int8-recheck                         7.8 GB   五个后端 int8 复测的中间件
+  - igpu-test                            4.4 GB   GGUF/Vulkan/CUDA 臂的现场 + cuda.zip/cudart.zip
+  - trt-pkg                              3.3 GB   TensorRT 试探
+  - sherpa-cuda                          2.9 GB   自编 sherpa CUDA 轮子
+  - cudnn-old + cudnn-real               3.9 GB
+  - abtest / int4 / qwen3-onnx / ai-pack 3.1 GB   四臂实验、int4 试探、官方 ONNX 原件、老 ONNX 包
+  - dv / dumps / ort-* / ov-api / 各种   若干
+  - 根目录 557 个一次性补丁脚本（append_doc*/patch_*/apply_* 等）
+  - 235 个 `dotnet build` 留下的 0 字节 MSBuild 临时目录
+  - 各类 .log / .csv / .json / 截图
+
+仓库根目录：
+  - NPU测试包.zip                        20 MB    OV/NPU 探针包（model 只有 conv_frontend）
+  - NVIDIA Corporation/umdlogs/                 驱动崩溃日志
+  - debug.log                           52 KB
+
+不在删除范围（未动）：
+  3fp/ src/ tests/ tools/ docs/ third_party/ LakeUI/ kit/ publish/ runtime/ native/
+  _3fp-review/（348 MB，源码树副本，来路不明，留着等你定）
+  _3fc_tmp_lane/ _3fp-ai-subtitles/
+  cleanup-record-20261025.txt（上一轮清理记录）
+  _3fc_tmp/.gh_token（凭据）
+
+
+三、删之前抢救出来的（KB 级，进仓库）
+------------------------------------
+tools/ai-subtitles/bench/   64 KB
+    ab_cpu.py / ab_llama.py              四臂横评脚本
+    gold-{sherpa,ort-p1,ort-p0,llama}.json  交接文档 §31.1 那张表的原始数据
+    proto_run.py                         真走二进制协议的端到端探针
+    llama-cpu.log / sherpa*.json / ort-pad30-probe.json
+理由：交接文档 §31/§32 把这些当证据引用，直接删会让文档指向死链。
+
+
+四、验收（删后实测，不是推断）
+------------------------------
+dist/AI字幕包-GPU+CPU  --device cpu   → selftest ok / device=cpu / CER=0.06
+dist/AI字幕包-GPU+CPU  --device auto  → selftest ok / device=gpu / provider=Vulkan0
+                                        （NVIDIA GeForce RTX 5080）/ CER=0.06
+dist/AI字幕包-NPU      --device cpu   → selftest ok / device=cpu / CER=0.00
+
+两份包内 model/runtime 全是真实文件（find -type l 为空），不依赖 _3fc_tmp。
+.gitignore 新增 /dist/：模型和原生运行时绝不进库。
+
+
+五、本次顺带修的真 bug（发现于「用相对路径跑便携包」）
+------------------------------------------------------
+asr_worker.py 起 llama-server 时把子进程 cwd 设成运行时目录（为了找 ggml-*.dll），
+于是宿主的相对 --model-dir 被解析成 runtime/vulkan/model ⇒ llama-server 报
+「failed to load model」。之前的测试全用绝对路径，所以没暴露。
+修法：main() 里 model_dir 与 _resolve_runtime_dir() 的返回值一律 expanduser().resolve()。
+
+
+六、要重建的话
+--------------
+两份包 = 模型 + 运行时 + worker + 清单，都可以从 dist/ 自身复制，不依赖已删文件。
+重新下载模型（约 1.8 GB）：
+  GGUF      https://hf-mirror.com/Qwen/Qwen3-ASR-0.6B-GGUF/resolve/main/<文件>.gguf
+  ONNX      https://github.com/k2-fsa/sherpa-onnx/releases（qwen3-asr-0.6b-int8 包）
+  Vulkan    llama.cpp releases 的 win-vulkan-x64 压缩包
+出包工具：third_party/fff_project/tools/ai-subtitles/make_portable_pack.py

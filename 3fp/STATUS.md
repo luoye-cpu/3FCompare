@@ -469,3 +469,175 @@ Copy-Item C:\PLAN\3FCompare\runtime\*.dll C:\PLAN\3FCompare\3fp\build\ -Force
 >    视频 `[open]` 段 `outBits=8` 也**不是**缺陷（判视频看 `[after-play]`）。详见 `docs/13` §3。
 
 ---
+
+
+## 2026-11-10 追加（当日多条线的收口；逐轮原始记录见 `.workbuddy/memory/2026-11-10.md`）
+
+> ⚠ **留痕**：本文件当日版本曾被一次脚本误操作清空（`open(..., 'wb')` 先截断、随后的 `write` 因类型错误失败），已从 Git 基线恢复（本文件原有 471 行），本节为摘要重建。当天每一轮的完整过程以 `.workbuddy/memory/2026-11-10.md`（224 行）为准，那里没有丢。
+
+### 预加载（第一步 + 第二步）
+- 第一步：跨进程 POD 协议、可释放缓存（静图 CPU 帧 / 容器 POD / 文件页）、`FFF.PrefetchHost.exe` 小助手（WARM 只读字节、PROBE 只 `avformat_open_input` 读 `codecpar`）、三档内存守门员（吃紧 = `dwMemoryLoad ≥ 95%`）。
+- 第二步：静图命中分支接进 `DecodeInitialFrame`（`TakeStill` → 呈现 → seek 回绕），`TakeProbe` 仍只有写入端。
+- 🔴 修掉的真缺陷：缓存键必须是 `CacheKey()`（`/`→`\`），否则宿主下发的列表路径与 `mediaPath_` 的 `GetFullPathNameW` 归一化结果不一致 ⇒ 缓存填满、`hits` 恒 0。
+- E1（`--chain` 连续 Open、`FFF3FP_PREFETCH=0` 作零基线、8 轮×2 rep、Mann–Whitney）：108 MP JPEG **680.8 → 101.1 ms（−85 %，p=6.7e-6）**；0.9 MB PNG **26.0 → 8.0 ms（−69 %）**；16 配对行×18 字段 0 差异、媒体信息 JSON 逐字节相同。
+- 🔴 口径纠正：`FFF3FP_Close()` 销毁整个 D3D 渲染器（≈270–350 ms），「Close→Open 循环」的绝对值都被它污染；`FFF3FP_PREFETCH_HIT=0` 不等于没有预加载（worker 仍在解码邻居抢 CPU）。
+
+### 360 全景识别收敛为「只认元数据」
+- 删掉 `宽 == 高×2` 几何兜底；只剩 `AV_PKT_DATA_SPHERICAL` 与容器/流 tag 白名单两路（side data 非空即权威短路）。
+- 键归一化（去 `_`/`-` + 小写）+ 键值配对（投影类型键只认 `equirectangular`；布尔声明键只认 `1`/`true`）；删 `stitching_software` 与 `360` 子串匹配。
+- `av_spherical_projection_name` 实测：2 = tiled、3 = half equirectangular ⇒ 原 `Contains("equirectangular")` 会误认，已修。
+- 回归进仓：`FFF.Player.Tests/播放器360识别回归.vb`（29 例，`--360-identification-regression`），变异复验能判红。
+
+### HRTF 按端点形态自动激活 + 底部徽章
+- 病灶：`SelectBedRoute` 只看「插槽装了 + 端点 2 声道」⇒ 任何 2 声道端点都双耳化，立体声音箱上 5.1 被误开。
+- 判据取 `EndpointFormFactor ∈ {3 耳机, 5 头戴}`；USB DAC 报 9（数字输出）⇒ 手动强制是必需项。
+- 新增 `FFF3FP_SetAudioBinauralPolicy` / `FFF3FP_GetAudioBinauralStatus`（附加导出，API 仍 20）；热插拔靠渲染线程既有的 500 ms 端点比对，不加通知。
+- 探针 20/20 PASS（内核 formFactor 与独立 MMDevice 查询互证）。仍 U：本机 11 个耳机端点全 NOTPRESENT，无法端到端造出活动耳机。
+
+### HDR→SDR 参考白统一到 203（BT.2408，用户定则）
+- 🔴 口径纠正：真正默认值是 `设置.vb` 的 **250**（`播放器控制器.vb` 的 100 只是构造初值，`Form1.vb` 启动即覆盖）。
+- 五处改 203：`设置.vb`、`播放器控制器.vb` 的 `默认SDR峰值尼特`、`播放模型.vb`、`Form设置_HDR.Designer.vb` 滑块初值、`VideoRenderer.cpp/h` 的 `sdrPeakNits_` / `CachedVideoSettings::sdrPeak`。
+- 迁移只搬「恰好 = 旧默认 250」那一档（E1 三例：250 无标记→203、203 带标记幂等、250 带标记不覆盖）。
+- 顺带修好 `ReadSdrWhiteLevelDisplayConfig`：原本只用 `QDC_DATABASE_CURRENT`，本机返回 87 ⇒ 恒读 0 nits；改为回退 `QDC_ALL_PATHS` 且只认 ACTIVE path。
+- 码值影响（1000 nit 源、8bit、18 % 灰 26 nit）：203→100.2、180→106.1(+5.9)、100→139.4(+39.2)、80→153.0(+52.7) ⇒ 180 与 203 只差 3–8 码值，80/100 差 30–50。
+
+### ⛔ 已撤销 · SDR 参考白「自动读取显示器白点」（同日落地后按批准移除）
+> 用户问「有意义吗」，复核结论是**净负面**，当场按批准撤销。
+
+**为什么撤**——四条独立成立：
+
+1. **语义错位**：`sdrPeak` 是「源内容里多少 nits 当作 SDR 满白」，是内容侧常量（BT.2408 = 203）；`GET_SDR_WHITE_LEVEL` 描述的是「DWM 把 SDR 信号抬到多亮」，是合成器增益。拿增益当内容常量，等于把映射链的一端塞进另一端。
+2. **HDR 桌面下是双重补偿**：DWM 本来就把该窗口 SDR 码值 1.0 显示成系统白点（本机 100 nits）。按 203 归一化时 203 nits → 码值 1.0 → 100 nits，与同屏其它 SDR 窗口天然一致；再按 100 归一化等于把该增益预乘进内容，DWM 又乘一次 ⇒ 203 以上全被 clamp 成死白、暗部整体抬亮 30–50 码值。
+3. **命中率几乎为零**：SDR 桌面 `GET_SDR_WHITE_LEVEL` 回 80 单位锚（被 >82 门挡），本机 ICC 是 stock sRGB（lumi=80，被门禁拒）⇒ 自动档等价于常量 203，零收益；只有 HDR 桌面取到值，而 HDR 桌面默认走 `MapToHdr`，根本不经过 `sdrPeak`。
+4. **两处可观测缺陷**：设置页滑块显示 203（锁死）与副标题「当前 100 尼特」自相矛盾；`当前SDR参考白说明()` 内部调 `刷新SDR参考白()`，**打开设置页这个只读动作会静默改写渲染参数并重建缓存**。
+
+**撤销范围（E2）**：删 `3FP/Render/SdrReferenceWhite.h/.cpp`、`FFF3FP_QuerySdrReferenceWhite` 导出及 `FFF3FPSdrWhiteSource` / `FFF3FPSdrReferenceWhite`（`FFF.Player.Api.h` 尾部整块 + `PlayerApi.cpp` 包装）、vcxproj/filters 四处引用；VB 侧删 `原生SDR参考白`、`查询SDR参考白`、`SDR参考白来源`、`SDR参考白解析结果`、`刷新SDR参考白`、`当前SDR参考白说明`、`HDR映射SDR参考亮度自动`、`SDR参考白已迁移203` 与一次性迁移、设置页复选框及事件；`应用SDR亮度设置`、`打开媒体Async` 回到单行固定值路径；三个取证探针一并删除（源码备份在 `_3fc_tmp/sdr_white_removed/`）。全局 grep 上述 10 个符号**零残留**。
+
+**保留**：203 五处不动；`ReadSdrWhiteLevelDisplayConfig` 的 `QDC_ALL_PATHS` 回退修复保留——它服务既有的 `sdrWhiteLevelNits_` 路径。
+
+**验证**：内核重建 **0 警 0 错**，`FFF.Native.dll` sha16 **`1067bfa7a4f379eb`**（6517760 B，比带功能版少 5632 B），`x64/Release` 与宿主 `bin/Release/net10.0-windows/` 两份一致；DLL 内 `FFF3FP_QuerySdrReferenceWhite` **0 命中**（对照 `FFF3FP_GetPrefetchStatus` 1 命中）；宿主 `dotnet build` **0 警 0 错**、`PlayerApiVersion` 仍 **20**；宿主实机启动、主窗口正常渲染；`--360-identification-regression` **29/29 PASS**；`Settings.json` 逐字节还原为 3095 B / sha16 `b13cbf64ee033f72`，计划任务已删。
+
+**仍 U**：设置页在本沙箱里点不开（`SetCursorPos`+`mouse_event` 与 `PostMessage` 都被自绘控件吞掉），「HDR 页无复选框」只有 E2（Designer 已删、编译通过、grep 零残留），无新截图。
+
+---
+
+## 2026-11-11 · 快进/快退卡顿：seek 期间跳过非参考帧
+
+### 定位（E1）
+方向键 → `相对跳转` → `FFF3FP_Seek`（精确）→ `DoSeek(value,-1,exact=true)` → `av_seek_frame(BACKWARD)` 落到目标前最近的关键帧 → `DecodeUntilSeekTarget()` 在 worker 里逐包同步解码到目标。单次代价 ≈ `(目标 − 前一关键帧) 的帧数 × 单帧解码成本`，中间帧不上屏（`PresentVideoFrame:7071` 提前 return）却必须解，因为它们是后续帧的参考链。
+
+`skip_frame` 阶梯（`EvaluateVideoSkipRung`）原本**刻意**在 seek 期间降回 `AVDISCARD_DEFAULT`，理由是"暂停/单步要把解码器产出的每一帧都交出来"。对精确 seek 这条理由不成立：目标之外的参考帧之外，没有一帧会被用到。
+
+### 改动（3 处，均在 `PlayerSession`）
+1. `DecodeUntilSeekTarget`：精确 seek 期间按包位置分两段——远段 `AVDISCARD_NONREF`（非参考 B 帧不重建），距目标 `(has_b_frames+4)` 帧内恢复 `DEFAULT`（目标帧自己可能就是非参考帧）。只对 H.264/HEVC 的渐进流启用（AV1/VP9 的"一包=一帧"不成立）。退出时按 `appliedSkipRung_` 还原，避免恢复播放的前几帧被静默丢掉。
+2. `PumpPlayback`：播放态的 seek 原本是主泵每 tick 推一个包（61 帧 = 61 tick）。目标达成前画面本来就不变，逐 tick 只延长黑屏，改为一次解到位。`FFF_SEEK_BATCH=0` 可退回。
+3. 新增 `IndexVideoPacketTimestamp()`：被跳过的帧不走 `PresentVideoFrame` 的索引维护，按包补 PTS，让帧号保持连续（不补时 9.000 s 的帧号从 121 掉到 67）。
+
+开关：`FFF_SEEK_SKIP=0` / `FFF_SEEK_BATCH=0` 可分别回退；默认都开。
+
+### 实测（同一进程内 A/B，`FFF_SEEK_TRACE` 同时给出包数与每包成本）
+4K HEVC 10bit 硬解（`seek4k_hevc.mp4`，GOP 120、has_b_frames=2）：
+
+| 目标 | 全解 | 跳参考帧 | 降幅 |
+|---|---|---|---|
+| 7.6 s | 169.6 ms | 75.5 ms | −55% |
+| 9.6 s | 172.2 ms | 63.4 ms | −63% |
+| 11.6 s | 155.8 ms | 62.8 ms | −60% |
+
+4K H.264 High 硬解（`seek4k_bf.mp4`）：暂停态 217–297 → 94–172 ms；播放态 358–422 → 170–203 ms；`FFF_SEEK_BATCH=0` 立刻退回 390 ms。
+
+连点 6 次（间隔 40 ms，照宿主"读快照 + step"写法）：**1677 → 905 ms**。
+
+纯 FFmpeg 侧对照（`seek_floor_probe --skip nonref`）：4K HEVC 输出帧 115 → 58、解码 11.2 s → 7.2 s；4K H.264 61 → 31 帧、1354 → 575 ms。
+
+### 正确性
+- 落点逐帧一致：两臂 `framePts` 相同（9.000/11.000/13.000 s），误差为 0。
+- 像素一致：`ffmpeg -skip_frame nonref` 与 `none` 在 9.0 s 的 `framemd5` 同为 `985597d190343914a121637d9a820b72`。
+- 两臂日志均无 decode error / corrupt / concealing。
+- `--360-identification-regression` 29/29 PASS，内核 0 警 0 错。
+
+### 边界（必须记住）
+- **无 B 帧的素材零收益**：`pr49_1080p60.mp4` 与最早的 `seek4k.mp4` 都是 Constrained Baseline（`has_b_frames=0`），输出帧数一帧不减，只有 ~14% 噪声级差异。收益完全取决于素材有没有非参考帧。
+- **精确 seek 的物理下限**是「GOP 内从关键帧到目标的**参考帧**数 × 单包成本」。要再快只能牺牲精确性：落关键帧（实测 10–30 ms）或"先出关键帧画面、后台精确到位"的两段式。两者都改行为，未实施。
+- 帧号仍有 2–6（H.264）/ 10–22（HEVC）的偏差：补索引按包 PTS 插，而 `PresentVideoFrame` 用 `best_effort_timestamp`，两者对个别帧不等。宿主不调用 `FFF3FP_SeekFrame`（`跳转到帧` 无调用者），可见行为不受影响。
+- **`decodedVideoFrames` 仍然看不见这段工作量**：它只在 `QueueVideoFrame` 累加，而 seek 期间的帧走 `PresentVideoFrame` 后提前返回。这是既有盲区，本次未改。
+
+### 产物
+`FFF.Native.dll` sha16 **`3cc923551c6831d7`**（6519296 B），`x64/Release`、`3fp/build`、测试目录三份一致；宿主 `bin/Release` 仍是改动前的 `1067bfa7a4f379eb`（生产路径未动）。零 commit / 零 push。
+
+
+## seek 预览帧（渐进呈现）——完整修复（2026-11-11，已实现、零出仓）
+
+### 动机
+`AVDISCARD_NONREF` 跳过修复把 seek 的**总耗时**降了 45–62%，但感知延迟仍在：`PresentVideoFrame` 对「position < 目标」的帧直接 return，整段参考链解码期间屏幕停在 seek 前那一帧。用户按键后没有任何视觉反馈——这就是「卡顿」的本体。
+
+### 实现（`PlayerSession.cpp/.h`，四处）
+1. **真 bug 修复**：`ClearVideoQueue()`（flush 统一入口）不清 `framePtsIndex_/framePtsIndexBase_`，回跳后新 PTS 被 `lower_bound` 插进旧表前部而 base 不变 → 快照 frameIndex 虚高、按帧 seek 的到位判定被提前满足。修法：flush 时清表并归零 base；按帧精确 seek 到位时把 base 校正到 `seekTargetFrame_`。
+2. **seek 预览帧**：`PresentVideoFrame` 增加 `seekPreview` 形参。仅离目标仍远时把解出的第一帧上屏，但不结案（不清 seek 目标、不写 position/frameIndex、不解除音频门、不缓存 side data）；每次 seek 只预览一帧，近目标一律走原路径。`FFF_SEEK_PREVIEW=0` 可关。
+3. **连点冷却**：预览的渲染+一次 vblank 会落在下一次 seek 的关键路径上（连点 6 次实测 1542–1704 ms vs 对照 605–1201 ms）。DoSeek 记录 `lastSeekStartedMs_`，与前一次 DoSeek 间隔 <400 ms 视为连击，整段连击不做预览。400 ms 的依据：连击时相邻 DoSeek 间隔 = 上一次 seek 的耗时（4K 实测 100–200 ms），150 ms 分不开两者；>400 ms 静默后的按键是新的意图，保留预览。
+4. **解码量补账**：新增 `seekDecodedFrames_` 独立计数（不进 ABI 快照，避免污染 skip 阶梯的 decodedDelta 判定），进 `FFF_SEEK_TRACE` 输出；trace 的目标值在成功呈现清零前快照（原来每次都打 0）。
+
+### 实测（硬解，同进程 A/B，`pv3_*` 4 rep×6 轮 + `pp_*` 3 rep×5 轮）
+| 场景 | 对照首画面 | 开预览首画面 | 降幅 | 目标帧到位 |
+|---|---|---|---|---|
+| 4K HEVC 10bit 暂停态 | 101.7 ms | 27.4 ms | −73% | 101.7 → 109.2 ms（持平） |
+| 4K H.264 暂停态 | 110.8 ms | 31.2 ms | −72% | 110.8 → 125.9 ms（持平） |
+| 4K HEVC 播放态 | 62.0 ms | 15.7 ms | −75% | 62.0 → 48.8 ms（略优） |
+| 连点 6 次（冷却生效） | 631/1037 ms 中位 | 646/1014 ms 中位 | 持平 | — |
+
+### 正确性与回归
+- 落点逐帧一致：两臂落点 pts 序列完全相同。
+- 探针判据修正：新增「首画面ms」列，只认 `presentedVideoFrames` 增量（旧判据「位置≈目标且 frameIndex≥0」看不见预览帧）。
+- `--360-identification-regression` **29/29 PASS**（`FFF.Player.Tests.exe`，本次重跑）；probe360 变异表 24/24。
+- 内核重建 0 警 0 错；宿主 `dotnet build` 0 警 0 错。
+- 误启 GUI 探索的 `FFF.Player.Settings.json` 确认逐字节未变（sha16 `b13cbf64ee033f72`）；23 个历次计划任务全部删除。
+
+### 产物
+`FFF.Native.dll` sha16 **`b0c02cf5f9296fac`**（6520320 B），`x64/Release`、`3fp/build`、宿主 `bin/Release/net10.0-windows/` 三份一致。零 commit / 零 push，内核 HEAD 仍 `72af915`。
+
+
+## HLG→scRGB 过曝：OOTF 亮度域修复（2026-11-11，两树已实现、零出仓）
+
+### 🔴 缺陷定位
+`HlgToNits`（shader + C++ 参考实现两份）把 BT.2100 OOTF 的 `pow(·,1.2)` **逐通道**施加，正确做法是在场景亮度 `Yc=dot(E,(0.2627,0.6780,0.0593))` 上取 `1000·Yc^0.2` 同乘三通道。逐通道与亮度域仅对灰阶等效；对饱和像素等效每通道乘 `Yc^(-0.2)`（纯蓝 ×1.76）。YouTube HLG 素材（`Qs2-klYtq5Y` 两个最小 HDR 交付，已存 `_3fc_tmp/hlg_audit/`）逐像素实测：日落帧 P99 过亮 ×1.19、最亮太阳像素 scRGB 19.29→应 14.96（+29%）——中性灰全对（0.75→203nits），饱和高光系统性偏亮 20%~76% 且过饱和，DWM rolloff 下呈"高光滚白"过曝。审查全记录与修复见 **docs/141**。
+
+### 改动（KF 与 TP 逐字同步，各四处 + 字节码）
+1. HLSL：`HlgOne` 拆成 `HlgInvOetf` + 亮度域 `HlgToNits(float3)`（灰阶逐位不变）。
+2. C++：标量改 `HlgInvOetf`，`Float3` 后新增 `Float3 HlgToNits(Float3)`，`EvaluateVideoColorTransform` 消费点改单调用。
+3. `BuildDxgiHdr10Metadata`：`MinMasteringLuminance` 无 side data 时 0 → 0.0001（1 个 DXGI 单位）。**更正**：审查中口头报过的「HLG 元数据全零色度」系误读，`HdrStaticMetadata` 默认值本就是 BT.2020/D65，不成立。
+4. `ProcessFrame`：帧级 `color_trc` 双向重分类（原只允许 Sdr 升级）——容器错标不再把 HdrProcessor 与 shader（已跟随帧级）永久撕裂；Vivid/HDR10+ 属主状态不动（真实流帧级 trc 为 UNSPECIFIED，FATE 已验证）。
+5. 两树 `ShaderBytecode.h`/`SdrShaderBytecode.h` 重生成（fxc 10.0.28000.0），两树哈希一致；SDR 特化逐字节未变 = HLG 分支被死码消除（反证 SDR 链不受伤）；`check_shader_cbuffer_layout.py` 两树全绿。
+
+### 实测与回归
+- 新探针 `3fp/tools/hlg_ootf_probe.cpp`（挂 `rebuild_probes.ps1`）：五锚点（灰 0.75 / 红绿蓝 1.0 / 晚霞）容差 ±0.02，KF DLL 与 TP 源码独立构建均 **5/5 PASS**。
+- `rebuild_probes.ps1` 34 探针 OK；内核两树构建 0 错。
+
+### 产物
+`FFF.Native.dll`（KF 构建，含 IAMF）sha16 **`983451b73d370877`**（6520832 B），四份一致：KF `x64/Release`、`3fp/build`、宿主 `bin/Release/net10.0-windows/`、TP `x64/Release`（出货镜像位）。**注意**：TP vcxproj 的 IAMF 链接段缺 `fdk-aac.lib`（KF 已补、TP 未跟，既有缺口），TP 本地强制 IAMF 链接会失败；出货二进制按惯例取 KF 构建镜像，TP 源码级验证用其 `HaveLibiamf=false` 构建（`54f876f9f262c63e`，探针同过）。零 commit / 零 push。
+
+**补记（同日）**：TP vcxproj 缺 `fdk-aac.lib` 的准确表述——该链接行**已在上游 main（72af915 之前）**，TP 只是落后 53 提交才没有；TP 追平基线后自然解决，非独立缺口。上游基线事实：最近 PR = **#55**（CUDA 解码直拷，merge `0d336b7`），main 顶端另有直推 `72af915`（非 PR），KF 检出恰好=该基线。
+
+
+## 综合审查与全量修复（2026-11-11，PR55+上游基线全部本地更改）
+
+对「最近一个 PR + 上游基线上全部本地额外更改」的完整审查（PR55 全量、KF 工作树 39 文件 9 条工作线、TP 4 文件、根仓 3 未推送提交 + 107 条脏/未跟踪）发现的问题逐项修复。审查明细与修复清单见 **docs/143**；VRR 判决矩阵落仓见 **docs/142**。
+
+### 修复要点
+- **PR55 跟进（P1）**：CUDA 互操作 Probe 换 context 先按旧 context Reset + Reset 补 per-plane unregister trace（防御缺口：跨 context 注销静默失败曾致 Import 永久落回退臂）。
+- **KF P2×3**：`AudioPassthroughLane::Format()` 改值返回（带锁逃逸引用）；`FFF_SEEK_BATCH` 加 250ms 时间片（暂停态「一次解到位」语义不变，`timeSliced` 仅播放态批量臂为 true）；prefetch 命中回卷失败分支补 flush + trace。
+- **KF P3**：四处环境开关 0 值解析边界（"0000"/"0 " 不再被当开启，CUDA 侧三开关收敛共用 `CudaEnvStartsWith`）；CPU `HlgInvOetf` 去 Clamp01 与 HLSL 对齐；`/r` 笔误与签名挤行；PrefetchHost still 表补 AV1/HEVC；`.gitignore` 补 build/obj。
+- **TP**：**移植 QDC SDR 白电平回退**（QDC_ALL_PATHS 重试，本机实测 87 错误场景）——此前只在 KF 脏改动里，不带即随包带病；`.gitattributes` 固定生成头 LF。
+- **根仓**：中性化门禁 REM 大小写（带词边界）+ `SOURCE_FATAL_HOST_VB`（`24UI`/`29UI` 字面判据仅拼宿主 .vb）；**VRR 判决矩阵落仓 docs/142**（探针三处「文档 §2」改指落仓版）；VRR 探针 DXGIOutput 泄漏 + inconclusive 措辞；`r2r_a2_exclude` 删 FFF.Native.dll 死条目（余托管 10 条）；`.gitignore` 补 6 条大目录（未跟踪 111→101）；三个散落根目录 md 归档进 docs。
+- **决策记录**：双耳自动门控对非耳机 2ch 端点关闭床渲染——接受，一次性 UI 提示列为产品后续。
+
+### 验证与产物
+KF `FFF.Native` + `FFF.PrefetchHost` 重建 0 错；TP 源码构建（含 QDC）0 错；`hlg_ootf_probe` 新 DLL 5/5、TP 构建 5/5；门禁脚本 `py_compile`+`--self-test` 38/38+构造样本实测（三种 Rem 注释跳过、`removehandler` 不误吞、`.cpp` 行为不变、真实宿主树 93 文件 0 假红）；VRR 探针编译链接通过。`FFF.Native.dll` sha16 **`02acb77bbe900cdf`**，四镜像一致。零 commit / 零 push。
+
+### 出仓（同日）
+KF 工作树全部待提交工作已按用户指令提交进开放 PR **#57**（`pr/passthrough-color-metadata-20261108`，fork luoye-cpu/FFF_Project）：以临时索引落树（排除 `_pr48_review/`、`LakeUI性能分析笔记`），在独立 worktree 于 `85af3fa` 之上落增量并恢复两个 `.user` 文件，**`fad4487`** 快进推送（无 force）；PR-tip 全量编译 Native+PrefetchHost 0 错、`hlg_ootf_probe` 对推送字节 5/5，上游 `refs/pull/57/head` 已同步 `fad4487`。KF 主工作树 `feature/cuda-d3d11-interop` 的工作区状态不变（仅 index 曾用临时文件，未动）；根仓与 TP 的文档/探针改动仍未提交。
+
+### TP 收口（同日，用户裁决：禁止分叉、就地解决）
+TP 原停在 `pr/hdr-peak-display-20261102` @`0db9f7e`（落后 53 提交）+ HLG/QDC 未提交改动——构成平行状态。收口：fetch 后逐文件验证 TP 脏改动**已全部被 `fad4487` 包含**（`ShaderBytecode.h` 工作区与 fad4487 逐字节相同；`SdrShaderBytecode.h` 三方一致；`VideoRenderer/HdrProcessor` 经特征行核验为子集；`.gitattributes` 为 fad4487 超集），随后**丢弃脏改动、TP 直接落到 PR 分支** `pr/passthrough-color-metadata-20261108` @`fad4487`（跟踪 fork，工作区 0 脏；临时 pr57 worktree 已拆除不再有平行检出）。TP 自树重建：**IAMF 自动链接成功**（fad4487 的 vcxproj 已含 fdk-aac.lib，旧链接缺口随收口消失），出货产物 `FFF.Native.dll` sha16 **`7a8339d42c5533a7`**（6521344 B，含 IAMF），`hlg_ootf_probe` 对出货字节 **5/5**。
+
+### 四视角审计（同日：本地/fork/上游PR/上游基线）
+KF 工作区临时索引落树 = `9ec14896`（与 fad4487 的提交树相同），树级 diff 仅差两个有意保留的 `.vcxproj.user`；上游基线 `72af915` 为 fad4487 祖先（merge-base 核验）；上游 `refs/pull/57/head` = `fad4487`。**结论：FFF_Project 范围内无任何未进 PR 的内容**。不进 PR 的三项（非内核内容）：① KF 草稿 `_pr48_review/`、`LakeUI性能分析笔记_20261106.md`（有意排除）；② fork `main` 滞后 `30b2a7e`（缺 #52/#54/#55/#56 合并，属 fork 维护非 PR 内容）；③ 根仓 3FCompare 的 3 个未推送提交与 docs/tools/tests 改动（另一 GitHub 仓，无开放 PR，无法进 #57）。

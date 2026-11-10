@@ -1,0 +1,33 @@
+清理核对记录  生成时间: 2026-10-25 00:51:36
+工作区: C:\PLAN\3FCompare
+
+=== A. 内核 Release 目录内备份与崩溃日志 ===
+目录: C:\PLAN\3FCompare\third_party\fff_project\FFF.Native\x64\Release
+
+=== B. 源码树内 .bak-* 临时文件 ===
+C:\PLAN\3FCompare\src\3FCompare\MainWindow.SelfTest.cs.bak-20261024 | 603889 bytes | 2026-10-22 20:14:34
+C:\PLAN\3FCompare\src\3FCompare\MainWindow.SelfTest.cs.bak-pansign-20261024 | 605105 bytes | 2026-10-24 08:54:07
+C:\PLAN\3FCompare\src\3FCompare\bin\Release\net11.0-windows\FFF.Native.dll.bak-pre-pr9 | 757760 bytes | 2026-09-18 18:11:51
+C:\PLAN\3FCompare\src\3FCompare\Platform\ViewPan.cs.bak-20261024 | 11563 bytes | 2026-09-29 21:54:07
+C:\PLAN\3FCompare\tests\3FCompare.Platform.Tests\ViewPanTests.cs.bak-20261024 | 23563 bytes | 2026-09-29 22:13:48
+
+=== C. 未跟踪目录/文件（需人工判断，不自动删） ===
+tests/harness/ , tests/tools/ , 3fp/tools/dovi_blob_dump.cpp , 3fp/tools/dxgi_dup_grab.cpp
+
+=== D. 本次排查产生的临时测试目录 ===
+C:\PLAN\3FCompare\.tmp-tests | 3 项子项
+
+=== E. 建议保留 ===
+FFF.Native.dll.bak-pre-pr9（历史内核快照，待您确认后再决定去留）
+
+=== F. 实际清理动作  2026-10-25 00:52:07 ===
+DELETED C:\PLAN\3FCompare\src\3FCompare\bin\Release\net11.0-windows\FFF.Native.dll.bak
+DELETED C:\PLAN\3FCompare\src\3FCompare\bin\Release\net11.0-windows\crash_trace_mt-trace-100ms.log
+DELETED C:\PLAN\3FCompare\src\3FCompare\bin\Release\net11.0-windows\crash_trace_mt-trace-200ms.log
+DELETED C:\PLAN\3FCompare\src\3FCompare\bin\Release\net11.0-windows\crash_trace_mt-trace-30000ms.log
+DELETED C:\PLAN\3FCompare\src\3FCompare\MainWindow.SelfTest.cs.bak-20261024
+DELETED C:\PLAN\3FCompare\src\3FCompare\MainWindow.SelfTest.cs.bak-pansign-20261024
+DELETED C:\PLAN\3FCompare\src\3FCompare\Platform\ViewPan.cs.bak-20261024
+DELETED C:\PLAN\3FCompare\tests\3FCompare.Platform.Tests\ViewPanTests.cs.bak-20261024
+DELETED  C:\PLAN\3FCompare\.tmp-tests
+剩余备份/日志: FFF.Native.dll.bak-pre-pr9, settings.json.bak
