@@ -3,7 +3,10 @@
 > **给接手的 agent**：先读本文件，再读 `README.md`（铁律），然后按「下一步」的第一个动作开工。
 > 更新本文件时请同步更新「最后更新」一行。
 
-- **最后更新**：2026-10-11（RTX VSR P1/P2：实验树 `3fp/kernel` 修 P1 旋转几何 + 三条 P2 清理，
+- **最后更新**：2026-11-11（PR #57 继续出仓：LakeUI 图形性能选项 `3689f77` 快进推入
+  `pr/passthrough-color-metadata-20261108`，上游 `refs/pull/57/head` 同步；推送前补齐
+  `hlg_ootf_probe` 五锚点 5/5 与宿主 Release 0 警告 0 错。详见文末「PR #57 继续出仓」。）
+  2026-10-11（RTX VSR P1/P2：实验树 `3fp/kernel` 修 P1 旋转几何 + 三条 P2 清理，
   记录见 [docs/89](docs/89-RTX-VSR自动模式P1旋转几何与P2清理修复记录（2026-10-11）.zh.md)；
   `cl /Zs` PASS + `static_assert` 牙齿实测，未提交、未实机运行。下文「最后更新」叙事为 2026-10-09 交接轮收口内容。）
   2026-10-09（交接轮收口：注入语义三缺陷 + 像素级闭环已修并复测，JXR/Vivid 两块补了正式账本。
@@ -679,8 +682,30 @@ KF 开发树此前停在 72af915（上游基线），PR #57 内容以未提交�
 ### 验证
 - 宿主 Release 构建 **0 警告 0 错**（Debug 档缺 vcpkg 调试 DLL，与本次改动无关）；`FFF.Player.Tests` 构建 0 错，`--360-identification-regression` **29/29**。
 - 中性化门禁：二进制 0 命中、`FFF.Native` 77 源文件 + `FFF.Player` 93 源文件（含新增）**0 命中**；判红唯一来源 = vcxproj:122 `fdk-aac.lib`（需授权库旗标，fad4487 既有状态，非本轮引入）。
-- KF 内核 Release 重建 0 错，产物 sha16 `d4836ad9c0649417`（6521344 B，与出货同尺寸）；hlg_ootf_probe 复验进行中（后台）。
+- KF 内核 Release 重建 0 错，产物 sha16 `d4836ad9c0649417`（6521344 B，与出货同尺寸）；hlg_ootf_probe 复验 5/5 PASS（见文末「PR #57 继续出仓」）。
 
 ### 暂缓项（有意不做）
 - LakeUI HDR 输出档位（`GlobalOptions.HDR`）未暴露：播放器 HDR 由内核管线管辖，宿主 UI 层再开一路 HDR 颜色映射有双重色调映射风险，留待产品决策。
 - 3FUI 的流式渲染节流/HttpClient 连接池/瓦片大图等模式在宿主无对应场景（无 LLM 流式 UI、无每请求建连、图片走内核呈现），未搬。
+
+
+## PR #57 继续出仓：LakeUI 图形性能选项 `3689f77`（2026-11-11）
+
+### 背景
+上一节「LakeUI 图形性能选项移植」的成果以 `3689f77` 提交在 KF 工作树（`3fp/kernel`，分支 `feature/cuda-d3d11-interop`），父提交 = PR #57 当时顶端 `fad4487`；该笔只在本地、未推送。本次按用户指令续做收口：补完遗留验证，把该笔快进送进 PR。
+
+### 推送前补完的验证
+- `hlg_ootf_probe`（`3fp/build/hlg_ootf_probe.exe`，静态链接 KF `x64/Release/FFF.Native.lib`）：五锚点 **5/5 PASS**——灰 0.75 / 红 / 绿 / 蓝 / 晚霞全部在 ±0.02 容差内，上一轮「复验进行中」闭环。
+- 宿主 `dotnet build FFF.Player.vbproj -c Release`：**0 警告 0 错误**（8.3 s，.NET SDK 11.0.100-rc.3）。
+- 持久化复核：`设置` 由 `JsonSerializer` 整体序列化/反序列化，新增的 10 个属性自动随设置文件读写；旧文件缺键 = 留默认档 = 升级观感不变。
+- 内核源码零改动：`git diff fad4487 3689f77` 仅 `FFF.Player` 5 文件 +858/−7，无需重编内核。
+
+### 出仓
+- `git push origin 3689f77:refs/heads/pr/passthrough-color-metadata-20261108`：**`fad4487..3689f77` 快进**（无 force）；fork 分支、上游 `refs/pull/57/head`、GitHub PR 记录三处一致 = `3689f77`。
+- PR #57 保持 **open**：commits **4**（`5d88c1b` / `85af3fa` / `fad4487` / `3689f77`）、changed_files **63**、base 上游 `main` @`72af915`。
+- 本地 `3fp/kernel` 的 `pr/passthrough-color-metadata-20261108` 同步快进到 `3689f77`（只动 ref，未切检出）；工作区跟踪文件 0 脏，两个有意排除的未跟踪件（`_pr48_review/`、`LakeUI性能分析笔记_20261106.md`）仍在本地、未进 PR。
+- TP（`third_party/fff_project`）保持 `fad4487`：与 PR tip 只差本笔宿主 5 文件，`FFF.Native`/`3FP` 逐字节相同；3FC 内核基线由 `tools/构建全部.ps1` 钉上游 `922e4b7`，不受影响。
+
+### 注意事项（留给后续）
+- PR 标题/正文仍只描述最初两笔（`5d88c1b`/`85af3fa`），`fad4487` 与本笔未写进正文——本轮按「只推内容、不改 PR 元数据」处理；是否需要向上游评审补充正文由用户决定（本机无 `gh`，改正文需 token 或网页）。
+- 验证边界如实记录：本轮未跑全量测试、未做设置页 GUI 实机冒烟（本笔改动为设置读写 + 控件事件，编译期与既有 29/29 回归为上一轮证据）。
