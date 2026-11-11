@@ -3,7 +3,8 @@
 > **给接手的 agent**：先读本文件，再读 `README.md`（铁律），然后按「下一步」的第一个动作开工。
 > 更新本文件时请同步更新「最后更新」一行。
 
-- **最后更新**：2026-11-11（启动期 HIGH 优先级复核落 **docs/145**：该机制 base 已有且默认开，两次实测均不支持有效（优先级单独 Δ+4.4 ms、p=0.78），建议删除或改事件驱动；本轮未跑新基准。）
+- **最后更新**：2026-11-11（启动期 CPU 放置可行性落 **docs/146**：Intel P-core / AMD 多 CCD 机制可行但为软亲和、收益 ms 级待实测；AMD "主 CCD"无权威定义，只建议探测不默认启用。）
+  2026-11-11（启动期 HIGH 优先级复核落 **docs/145**：该机制 base 已有且默认开，两次实测均不支持有效（优先级单独 Δ+4.4 ms、p=0.78），建议删除或改事件驱动；本轮未跑新基准。）
   2026-11-11（PR #57 全量内容审查：剩余可用性能优化落 **docs/144**——只读静态审查 63 文件
   + 复用既有实测，未跑新基准；结论与建议顺序见文末「PR #57 全量性能审查」。）
   2026-11-11（PR #57 继续出仓：LakeUI 图形性能选项 `3689f77` 快进推入
@@ -745,3 +746,14 @@ PR #57 四笔（`5d88c1b`/`85af3fa`/`fad4487`/`3689f77`）**63 文件全量覆�
 - 建议：**删除启动期 HIGH（首选）**——用现成 `FFF_NO_STARTUP_PRIORITY=1` 做「无此功能」臂，20 轮交替确认 T2 无退化即可；若坚持保留：降档改事件驱动（首帧/首图/Preroll）+ 只提关键线程 + 修内核基线。若目标确是负载机最坏情况，先按 docs/145 §5.3 做受控争抢实验（判据 T2 中位差 ≥5%/p<0.05 + 启动期 CPU 占墙钟比）。
 - 更值钱方向：CPU Sets 把启动关键线程钉 P-core（`PlacementPolicy` 已有 tier0 机制但只用于播放期）、继续减同步等待（四图层延后 −88.6 ms、GPU 预热消融 −446.6 ms）。
 - 边界：本轮未跑新基准（当前窗格负载 ~65%，不满足安静窗纪律），引用 docs/120/124 既有同窗 A/B。
+
+## 启动期 CPU 放置可行性（2026-11-11，docs/146）
+
+- 用户问：启动时把启动线程放进 P-core、AMD 多 CCD 机型放进"主 CCD"，可行吗？
+- **结论：机制可行，资产大半现成，但收益是"软亲和"级、必须实测**：内核 `PlacementPolicy` 已实现 Intel 效率类 / AMD 多 L3 域两种发现 + `SetProcessDefaultCpuSets`/`SetThreadSelectedCpuSets` 施加与负控，但只在播放期调用（`PlayerSession.cpp:9407`），启动期未用。CPU Sets 官方定义是软亲和（调度器优先、必要时越界），不是硬钉。
+- **Intel P-core**：本机 P 组=6C/12T（i7-13650HX）。建议只钉 UI 线程 + 内核 create/worker/present 线程（线程级），**不要进程默认**——否则 GC/JIT/线程池/预取侧车全挤 P、E 核闲置；Windows 11 Thread Director + 前台提升已做掉一部分，边际收益要 A/B。
+- **AMD 多 CCD**：Windows **不暴露 CCD 编号**，只暴露 `LastLevelCacheIndex`（Zen3/4 ≈ 一个 CCD，Zen1/2 = 一个 CCX）；"主 CCD"没有权威公共定义（候选：最低 LP 域 / UI 线程当前域 / L3 最大 / 频率最高 / 最不忙，各有坑）；X3D 上缓存 CCD 频率更低、CPPC 首选核排序无公共 Win32 读取 ⇒ 只能"探测 + 日志 + 开关"，**默认不猜**。多 group（Threadripper 128T）上官方明确跨 group 的 CPU Set 赋值会被忽略 ⇒ 需 group-aware 或 no-op。
+- **先决条件（阶段 0）**：①测启动期 CPU 时间/墙钟比（<30% 则这条路判死）；②用现成 `FFF_PLACEMENT=off` 补测**播放期** tier0 的收益——这套策略至今没有 A/B 账（docs/124 只复核了时序）。
+- **路径**：阶段 1 Intel 最小臂（线程级、首帧/首图/3 s 事件化释放、env 默认关）；阶段 2 AMD 仅加 `PLACEMENT_STARTUP` 探测日志（3–5 台真实机型：5950X/7800X3D/7950X/7950X3D/3990X），再决定策略；阶段 3 达标默认开、不达标删启用路径。
+- 风险：affinity mask 覆盖 CPU Set、多 group 忽略、E 核闲置、AMD 选错 CCD/X3D、与内核 `PlacementPolicy` 双写者、测试矩阵大。
+- 边界：本轮未实现、未跑新基准（窗格负载 ~65%）；AMD 无本机数据；官方语义引自 Microsoft Learn「CPU Sets / SYSTEM_CPU_SET_INFORMATION / SetProcessDefaultCpuSets / SetThreadSelectedCpuSets」。
