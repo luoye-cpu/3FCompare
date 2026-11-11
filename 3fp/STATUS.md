@@ -3,7 +3,8 @@
 > **给接手的 agent**：先读本文件，再读 `README.md`（铁律），然后按「下一步」的第一个动作开工。
 > 更新本文件时请同步更新「最后更新」一行。
 
-- **最后更新**：2026-11-11（启动期 CPU 放置可行性落 **docs/146**：Intel P-core / AMD 多 CCD 机制可行但为软亲和、收益 ms 级待实测；AMD "主 CCD"无权威定义，只建议探测不默认启用。）
+- **最后更新**：2026-11-11（启动期 CPU 放置**已实现**并落 **docs/147**：可选导出 + 宿主启动钩子，默认关（`FFF_STARTUP_PLACEMENT=1`）；内核/宿主 Release 编译通过，运行验证按用户指示暂缓；本地提交 `49d1500`，未推送 PR。）
+  2026-11-11（启动期 CPU 放置可行性落 **docs/146**：Intel P-core / AMD 多 CCD 机制可行但为软亲和、收益 ms 级待实测；AMD "主 CCD"无权威定义，只建议探测不默认启用。）
   2026-11-11（启动期 HIGH 优先级复核落 **docs/145**：该机制 base 已有且默认开，两次实测均不支持有效（优先级单独 Δ+4.4 ms、p=0.78），建议删除或改事件驱动；本轮未跑新基准。）
   2026-11-11（PR #57 全量内容审查：剩余可用性能优化落 **docs/144**——只读静态审查 63 文件
   + 复用既有实测，未跑新基准；结论与建议顺序见文末「PR #57 全量性能审查」。）
@@ -757,3 +758,17 @@ PR #57 四笔（`5d88c1b`/`85af3fa`/`fad4487`/`3689f77`）**63 文件全量覆�
 - **路径**：阶段 1 Intel 最小臂（线程级、首帧/首图/3 s 事件化释放、env 默认关）；阶段 2 AMD 仅加 `PLACEMENT_STARTUP` 探测日志（3–5 台真实机型：5950X/7800X3D/7950X/7950X3D/3990X），再决定策略；阶段 3 达标默认开、不达标删启用路径。
 - 风险：affinity mask 覆盖 CPU Set、多 group 忽略、E 核闲置、AMD 选错 CCD/X3D、与内核 `PlacementPolicy` 双写者、测试矩阵大。
 - 边界：本轮未实现、未跑新基准（窗格负载 ~65%）；AMD 无本机数据；官方语义引自 Microsoft Learn「CPU Sets / SYSTEM_CPU_SET_INFORMATION / SetProcessDefaultCpuSets / SetThreadSelectedCpuSets」。
+
+## 启动期 CPU 放置实现（2026-11-11，docs/147）
+
+- 用户指令：docs/146 的"执行"只做实现，**测试暂不测**（系统繁忙，以后再说）。
+- 已实现（内核可选导出 + 宿主启动钩子，**默认关**）：
+  - 新头 `FFF.Native/3FP/Api/FFF.Player.CpuPlacement.h`：`FFF3FP_BeginStartupCpuPlacement()` / `FFF3FP_EndStartupCpuPlacement()`；不抬 `PlayerApiVersion(20)`/`SnapshotVersion(23)`、不动快照布局（同 prefetch/audio-tap 纪律）。
+  - `PlacementPolicy` 复用 `Discover()`：**Intel = EfficiencyClass 最高的 P-core 组**；**AMD 多 CCD = 调用线程（UI）当前所在 L3 域**（不猜"主 CCD"）；**多 processor group 拒绝**并记日志。只写进程默认 CPU Set（覆盖旧线程+新线程，任意线程都能清）。
+  - 会话共存：`ApplyTier` 写进程默认集合时置 `g_sessionOwnsProcessDefaultCpuSets`，启动期 End 不清会话集合。
+  - 释放：`PlayerSession::PresentVideoFrame` 首帧（`firstFrameForMedia && !seekPreview`）自动 End；宿主 `Form1_Shown` 3 s 兜底（没有媒体可放时首帧不来）。
+  - 宿主 `MyApplication_Startup` 先查 `FFF_STARTUP_PLACEMENT=1` 再碰导出——没开时**绝不提前加载 FFF.Native**，不污染所有人的启动时序；旧内核缺导出 ⇒ 静默不启用。
+- 开关：`FFF_STARTUP_PLACEMENT=1` 启用（默认关）；`FFF_PLACEMENT=off` 时一并禁用（负控一致）；诊断看内核日志 `PLACEMENT_STARTUP begin/end/skip/fail` 行。
+- 验证：内核 `FFF.Native.vcxproj` Release x64 与宿主 `dotnet build FFF.Player.vbproj -c Release` **均编译通过**（内核 exit 0 无警告；宿主 0 警告 0 错误，API 四方校验 20/20/20/20）。**未做**任何运行期/性能验证（用户指示暂缓）。
+- 提交状态：`3fp/kernel` 本地提交 `49d1500`（`feature/cuda-d3d11-interop`）；**未推送、PR #57 未更新**，等 A/B 结果或用户指示。
+- 已知缺口/退路：进程默认集合会覆盖 GC/线程池/预取侧车/图层泵（若 A/B 反效果 → 改只钉 UI+create 的线程级版本）；AMD 取"当前 L3 域"；多 group no-op；开关只在进程启动时读一次。
