@@ -7,11 +7,12 @@
 //   audio_binaural_probe.exe <media>
 //
 // What it proves, and what it cannot:
-//   * the endpoint form factor the kernel reports is the SAME value an
-//     independent MMDeviceEnumerator query returns for the default render
-//     endpoint (two paths, one answer);
+//   * the endpoint form factor AND mix channel count the kernel reports are the
+//     SAME values independent MMDeviceEnumerator queries return for the default
+//     render endpoint (two paths, one answer);
 //   * the three policies drive `wanted` exactly as specified, including the
-//     automatic branch computing its answer from that form factor;
+//     automatic branch computing its answer from the endpoint's mix channel
+//     count (2 => binaural default; product decision 2026-11-12);
 //   * an out-of-range policy is refused without moving the stored value;
 //   * `available` follows "plug installed AND 2-channel endpoint", so a run
 //     with no module on disk must read 0 even when `wanted` is 1.
@@ -209,32 +210,26 @@ void Check(const bool condition, const char* what, const std::string& detail) {
     if (!condition) ++failures;
 }
 
-// The whole decision rule, exercised for every policy against every documented
-// EndpointFormFactor. 3 = Headphones and 5 = Headset are the two that mean "worn
-// on the head"; 9 is what this machine's USB DAC reports and what HDMI reports.
+// The whole decision rule, exercised for every policy against the channel counts
+// that matter. Product default (2026-11-12): automatic = binaural on a 2-channel
+// endpoint, matrix fold-down on multichannel; the form factor decides nothing.
 void CheckDecisionRule() {
-    const std::uint32_t headphoneShapes[] = {3u, 5u};
-    const std::uint32_t otherShapes[] = {0u, 1u, 2u, 4u, 6u, 7u, 8u, 9u, 10u};
-    bool autoRule = true;
-    for (const auto shape : headphoneShapes)
-        autoRule = autoRule && PlayerWasapiRenderer::BinauralWantedFor(0u, shape);
-    for (const auto shape : otherShapes)
-        autoRule = autoRule && !PlayerWasapiRenderer::BinauralWantedFor(0u, shape);
-    Check(autoRule, "auto: headphones only (3,5), nothing else", "");
+    bool autoRule = PlayerWasapiRenderer::BinauralWantedFor(0u, 2u);
+    for (const auto channels : {1u, 3u, 4u, 6u, 8u, 12u, 16u})
+        autoRule = autoRule && !PlayerWasapiRenderer::BinauralWantedFor(0u, channels);
+    Check(autoRule, "auto: stereo endpoint on, multichannel off", "");
 
     bool forcedOn = true;
-    for (const auto shape : otherShapes)  // the point of forcing: a DAC reports 9
-        forcedOn = forcedOn && PlayerWasapiRenderer::BinauralWantedFor(1u, shape);
-    Check(forcedOn, "force-binaural ignores the endpoint shape", "");
+    for (const auto channels : {1u, 6u, 8u, 12u})  // the point of forcing: render binaural anywhere
+        forcedOn = forcedOn && PlayerWasapiRenderer::BinauralWantedFor(1u, channels);
+    Check(forcedOn, "force-binaural ignores the channel count", "");
 
-    bool forcedOff = true;
-    for (const auto shape : headphoneShapes)
-        forcedOff = forcedOff && !PlayerWasapiRenderer::BinauralWantedFor(2u, shape);
-    Check(forcedOff, "force-stereo overrides even a headphone", "");
+    const bool forcedOff = !PlayerWasapiRenderer::BinauralWantedFor(2u, 2u);
+    Check(forcedOff, "force-stereo overrides even a stereo endpoint", "");
 
-    // Unknown shape (property store silent) must not be guessed into binaural.
+    // Unknown channel count (device not opened yet) must not be guessed into binaural.
     Check(!PlayerWasapiRenderer::BinauralWantedFor(0u, 0u),
-        "auto treats an unknown shape as not-a-headphone", "");
+        "auto treats an unknown channel count as fold-down", "");
 }
 
 }  // namespace
@@ -310,12 +305,13 @@ int main(const int argc, char** argv) {
         "kernel formFactor == independent MMDevice query",
         "kernel=" + std::to_string(opened.formFactor) +
             " os=" + std::to_string(osFormFactor));
-    // Automatic policy on the shape the kernel actually reported.
-    const std::uint32_t autoWanted =
-        (opened.formFactor == 3u || opened.formFactor == 5u) ? 1u : 0u;
-    Check(opened.wanted == autoWanted, "auto policy derives from that shape",
+    // Automatic policy on the mix channel count the kernel actually reported
+    // (2026-11-12 rule: stereo endpoint => binaural default).
+    const std::uint32_t autoWanted = osChannels == 2u ? 1u : 0u;
+    Check(opened.wanted == autoWanted, "auto policy derives from the channel count",
         "wanted=" + std::to_string(opened.wanted) +
-            " expected=" + std::to_string(autoWanted));
+            " expected=" + std::to_string(autoWanted) +
+            " (mix channels " + std::to_string(osChannels) + ")");
 
     // Reproduce the host's install step, if a module was named on the command line,
     // and watch `available` become 1. This is the half the earlier run could not
