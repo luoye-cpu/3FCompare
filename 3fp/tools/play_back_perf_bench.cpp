@@ -14,10 +14,26 @@
 // Usage:
 //   play_back_perf_bench <media> [--decode cpu|gpu] [--color sdr|hdr]
 //                        [--forcehdr 0|1] [--sdrscrgb 0|1] [--window WxH]
-//                        [--seconds N] [--runs R] [--one]
+//                        [--seconds N] [--runs R] [--adaptive 0|1] [--one]
 // Without --window the session is headless: only decode and per-frame HDR
 // metadata processing are on the clock. The HDR presentation path requires a
 // window (see CreateProbeWindow).
+//
+// --adaptive 1 mirrors the shipping host's config (adaptive decoder-thread ladder:
+// 1 / min 4 / max 32 / grow 10 / shrink 2). Leave it off for the historical
+// kernel-ABI default. This is what makes the placement policy's three-tier path
+// participate the same way it does in the product (see 播放器会话.vb 原生配置).
+//
+// 2026-11-12 additions for the CPU-placement A/B (docs/151): the probe now also
+// prints, per sample:
+//   ENV       the FFF_* variables the child actually saw (env-injection self-proof)
+//   PLACEMENT one FFF3FP_GetCpuPlacementSnapshot read mid-playback (tier/domain/
+//             flags/set counts/worker+presenter selection/decoder count)
+//   PRESENT   swap-chain flip cadence (p50/p99/max gap in ms) from
+//             FFF3FP_GetPresentationCounter polled during the playback window
+//   KLOG      the kernel's own PLACEMENT_* diagnostics captured through
+//             FFF3FP_SetLogCallback (the policy's own account of what it applied)
+// The SAMPLE line is unchanged, so existing parsers keep working.
 //
 // The config block on each sample is part of the instrument, not decoration: if
 // the colour mode, decode mode or output bit depth is not what the arm claims to
@@ -29,10 +45,12 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "3FP/Api/FFF.Player.Api.h"
+#include "3FP/Api/FFF.Player.CpuPlacement.h"
 
 namespace {
 
@@ -40,6 +58,41 @@ bool g_openCompleted = false;
 
 void EventCallback(void*, const FFF3FPEvent eventType, const char*) {
     if (eventType == FFF3FPEvent::OpenCompleted) g_openCompleted = true;
+}
+
+// ---- kernel diagnostic log capture (placement self-proof, 2026-11-12) ----
+// The policy already emits PLACEMENT_* lines through the kernel log sink; the probe
+// is the only consumer in these runs because the GUI host does not register the sink.
+// Capturing them here means "the arm's env never reached the kernel" can never be
+// misread as "the policy made no difference".
+std::mutex g_logMutex;
+std::vector<std::string> g_logLines;
+
+void LogSink(void*, const char* line) noexcept {
+    if (line == nullptr) return;
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    if (g_logLines.size() < 4096) g_logLines.emplace_back(line);
+}
+
+std::vector<std::string> TakeLogLines() {
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    return g_logLines;
+}
+
+double NowMs() {
+    static const double frequency = [] {
+        LARGE_INTEGER f{};
+        QueryPerformanceFrequency(&f);
+        return static_cast<double>(f.QuadPart > 0 ? f.QuadPart : 1);
+    }();
+    LARGE_INTEGER counter{};
+    QueryPerformanceCounter(&counter);
+    return static_cast<double>(counter.QuadPart) * 1000.0 / frequency;
+}
+
+const char* EnvironmentOrUnset(const char* name) {
+    const char* value = std::getenv(name);
+    return (value != nullptr && *value != '\0') ? value : "(unset)";
 }
 
 void Pump(const int ms) {
@@ -65,6 +118,9 @@ struct Options {
     bool windowed = false;
     int width = 1280;
     int height = 720;
+    // Product host default (播放器会话.vb 原生配置): the adaptive decoder ladder is
+    // what makes PlacementPolicy's three-tier path behave as it does in the product.
+    bool adaptive = false;
 };
 
 // The 29 counters the SAMPLE line carries. Print and parse are lock-step:
@@ -110,6 +166,60 @@ HWND CreateProbeWindow(const int width, const int height) {
         GetModuleHandleW(nullptr), nullptr);
 }
 
+// ---- 2026-11-12 CPU-placement A/B diagnostics (docs/151) ---------------------
+// All of these are additive print lines; SAMPLE keeps its 29-field format.
+
+void PrintEnvLine(const Options& o) {
+    std::printf("ENV placement=%s trace=%s startup=%s prefetch=%s adaptive=%d surface=%s\n",
+        EnvironmentOrUnset("FFF_PLACEMENT"), EnvironmentOrUnset("FFF_PLACEMENT_TRACE"),
+        EnvironmentOrUnset("FFF_STARTUP_PLACEMENT"), EnvironmentOrUnset("FFF3FP_PREFETCH"),
+        o.adaptive ? 1 : 0, o.windowed ? "window" : "headless");
+}
+
+void PrintPlacementSnapshot(FFF3FPHandle player) {
+    FFF3FPCpuPlacementSnapshot snapshot{};
+    snapshot.size = sizeof(snapshot);
+    snapshot.version = FFF3FP_CPUPLACEMENT_SNAPSHOT_VERSION;
+    const FFFResult result = FFF3FP_GetCpuPlacementSnapshot(player, &snapshot);
+    std::printf("PLACEMENT rc=%d domain=%u tier=%u flags=0x%X procclass=%d baseline=%d "
+        "tier0=%u tier1=%u procdefault=%u preferred=%u groups=%u worker=%u workerprio=%d "
+        "workersets=%u present=%u presentsets=%u decoders=%u\n",
+        static_cast<int>(result), snapshot.domain, snapshot.tier,
+        static_cast<unsigned>(snapshot.flags),
+        static_cast<int>(snapshot.processPriorityClass),
+        static_cast<int>(snapshot.baselinePriorityClass),
+        snapshot.tier0SetCount, snapshot.tier1SetCount, snapshot.processDefaultSetCount,
+        snapshot.preferredDomainThreads, snapshot.processorGroupCount,
+        snapshot.workerThreadId, static_cast<int>(snapshot.workerThreadPriority),
+        snapshot.workerSelectedSetCount, snapshot.presentThreadId,
+        snapshot.presentSelectedSetCount, snapshot.decoderThreadCount);
+}
+
+double Percentile(const std::vector<double>& sorted, const double fraction) {
+    if (sorted.empty()) return 0.0;
+    const double index = fraction * static_cast<double>(sorted.size() - 1);
+    const auto lower = static_cast<std::size_t>(index);
+    const auto upper = (lower + 1 < sorted.size()) ? lower + 1 : sorted.size() - 1;
+    const double weight = index - static_cast<double>(lower);
+    return sorted[lower] * (1.0 - weight) + sorted[upper] * weight;
+}
+
+void PrintPresentCadence(const std::uint64_t counterDelta, std::vector<double> gapsMs) {
+    std::sort(gapsMs.begin(), gapsMs.end());
+    std::printf("PRESENT counter_delta=%llu gaps=%zu p50=%.2f p90=%.2f p99=%.2f max=%.2f\n",
+        static_cast<unsigned long long>(counterDelta), gapsMs.size(),
+        Percentile(gapsMs, 0.50), Percentile(gapsMs, 0.90), Percentile(gapsMs, 0.99),
+        gapsMs.empty() ? 0.0 : gapsMs.back());
+}
+
+void PrintKernelLog() {
+    for (const auto& line : TakeLogLines()) {
+        if (line.find("PLACEMENT") != std::string::npos) {
+            std::printf("KLOG %s\n", line.c_str());
+        }
+    }
+}
+
 Sample RunOnce(const Options& o) {
     Sample s;
     HWND window = nullptr;
@@ -119,6 +229,7 @@ Sample RunOnce(const Options& o) {
         ShowWindow(window, SW_SHOWNOACTIVATE);
         UpdateWindow(window);
     }
+    PrintEnvLine(o);
     FFF3FPConfiguration configuration{};
     configuration.size = sizeof(configuration);
     configuration.version = FFF3FP_GetApiVersion();
@@ -132,6 +243,20 @@ Sample RunOnce(const Options& o) {
     configuration.sdrScRgbMode = o.sdrScRgb;
     configuration.eventCallback = EventCallback;
     configuration.preferredAdapterIndex = -1;                   // 0 is a valid index, not "unset"
+    if (o.adaptive) {
+        // Same numbers the shipping host sends (播放器会话.vb 原生配置). Spelled out
+        // rather than relying on struct defaults so the A/B config cannot drift silently.
+        configuration.adaptiveDecoderThreads = 1;
+        configuration.minSoftwareDecoderThreads = 4;
+        configuration.maxSoftwareDecoderThreads = 32;
+        configuration.decoderGrowDropPercent = 10;
+        configuration.decoderShrinkDropPercent = 2;
+    }
+
+    // Install the kernel diagnostic sink before Create: PlacementPolicy decides at
+    // construction whether FFF_PLACEMENT_TRACE is on, and the sink must be live before
+    // the playback-start trace lines can be emitted.
+    FFF3FP_SetLogCallback(&LogSink, nullptr);
 
     FFF3FPHandle player = nullptr;
     const auto cleanup = [&](const bool closePlayer) {
@@ -153,8 +278,10 @@ Sample RunOnce(const Options& o) {
         // PlayerSession::GetSnapshot gates on an exact version and returns
         // InvalidArgument for anything else, so a stale constant here fails every
         // arm with "SAMPLE failed" and no other symptom. Keep it in lock-step with
-        // the shipping kernel: 8 -> 9 (ST 2094 diagnostics tail) -> 11 (current).
-        snap.version = 20;
+        // the shipping kernel: ... -> 22 (audio tap) -> 23 (audio passthrough
+        // diagnostics tail, current). Stale 20 was the reason this probe printed
+        // SAMPLE failed on the 2026-11-12 kernel.
+        snap.version = 23;
         return FFF3FP_GetSnapshot(player, &snap) == FFFResult::Success;
     };
 
@@ -180,7 +307,51 @@ Sample RunOnce(const Options& o) {
     const LARGE_INTEGER wallStart{ [] { LARGE_INTEGER v; QueryPerformanceCounter(&v); return v; }() };
 
     FFF3FP_Play(player);
-    Pump(o.seconds * 1000);
+    // Playback window: pump messages (the window has to be composited) while polling
+    // the live swap-chain flip counter, so the present cadence is a measured
+    // distribution and not just a frame count. One placement snapshot is taken
+    // mid-playback, after the policy has had time to escalate.
+    const double playbackStart = NowMs();
+    const double playbackMs = static_cast<double>(o.seconds) * 1000.0;
+    const double placementReadAt =
+        playbackStart + (playbackMs * 0.5 < 2000.0 ? playbackMs * 0.5 : 2000.0);
+    bool placementRead = false;
+    bool haveFlip = false;
+    std::uint64_t flipsSeen = 0;
+    std::uint64_t flipsStart = 0;
+    (void)FFF3FP_GetPresentationCounter(player, &flipsStart);
+    std::uint64_t lastFlips = flipsStart;
+    double lastFlipMs = playbackStart;
+    std::vector<double> flipGapsMs;
+    flipGapsMs.reserve(4096);
+    while (true) {
+        const double now = NowMs();
+        if (now - playbackStart >= playbackMs) break;
+        MSG message{};
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+        std::uint64_t flips = 0;
+        if (FFF3FP_GetPresentationCounter(player, &flips) == FFFResult::Success) {
+            if (!haveFlip) {
+                haveFlip = true;
+                lastFlips = flips;
+                lastFlipMs = now;
+            } else if (flips > lastFlips) {
+                flipGapsMs.push_back(now - lastFlipMs);
+                lastFlips = flips;
+                lastFlipMs = now;
+            }
+            flipsSeen = flips;
+        }
+        if (!placementRead && now >= placementReadAt) {
+            PrintPlacementSnapshot(player);
+            placementRead = true;
+        }
+        Sleep(1);
+    }
+    PrintPresentCadence(flipsSeen > flipsStart ? flipsSeen - flipsStart : 0, flipGapsMs);
 
     FILETIME kernelEnd{}, userEnd{};
     GetProcessTimes(GetCurrentProcess(), &create, &exit, &kernelEnd, &userEnd);
@@ -232,7 +403,19 @@ Sample RunOnce(const Options& o) {
     s.videoBitRate = after.videoBitRate;
 
     s.ok = s.decoded > 0;
-    return cleanup(true);
+    // Teardown before printing the kernel log: Release()/Close() lines belong to this
+    // sample's account too. (The probe is one sample per process, so no cross-talk.)
+    if (player != nullptr) {
+        FFF3FP_Close(player);
+        FFF3FP_Destroy(player);
+        player = nullptr;
+    }
+    if (window != nullptr) {
+        DestroyWindow(window);
+        window = nullptr;
+    }
+    PrintKernelLog();
+    return s;
 }
 
 constexpr const char* kSampleFormat =
@@ -298,6 +481,7 @@ Options Parse(int argc, wchar_t** argv) {
         else if (key == L"--sdrscrgb") o.sdrScRgb = static_cast<unsigned>(_wtoi(next().c_str()));
         else if (key == L"--seconds") o.seconds = _wtoi(next().c_str());
         else if (key == L"--runs") o.runs = _wtoi(next().c_str());
+        else if (key == L"--adaptive") o.adaptive = _wtoi(next().c_str()) != 0;
         else if (key == L"--window") {
             const std::wstring spec = next();
             const auto x = spec.find(L'x');
@@ -319,6 +503,7 @@ std::wstring ChildCommand(const std::wstring& self, const Options& o) {
     cmd += L" --forcehdr " + std::to_wstring(o.forceHdr);
     cmd += L" --sdrscrgb " + std::to_wstring(o.sdrScRgb);
     cmd += L" --seconds " + std::to_wstring(o.seconds);
+    if (o.adaptive) cmd += L" --adaptive 1";
     if (o.windowed) {
         cmd += L" --window " + std::to_wstring(o.width) + L"x" + std::to_wstring(o.height);
     }
@@ -466,7 +651,8 @@ int wmain(const int argc, wchar_t** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     if (argc < 2) {
         std::wprintf(L"用法: play_back_perf_bench <媒体> [--decode cpu|gpu] [--color sdr|hdr]"
-                    L" [--forcehdr 0|1] [--sdrscrgb 0|1] [--seconds N] [--runs R] [--one]\n");
+                    L" [--forcehdr 0|1] [--sdrscrgb 0|1] [--seconds N] [--runs R]"
+                    L" [--adaptive 0|1] [--one]\n");
         return 2;
     }
     const Options o = Parse(argc, argv);

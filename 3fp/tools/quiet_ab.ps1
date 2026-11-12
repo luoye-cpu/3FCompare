@@ -22,7 +22,14 @@ param(
     # 臂级环境变量，供「同一 exe、不同开关」的 A/B 使用（如 FFF_EARLY_OPEN=1）。
     # 格式："KEY=VAL" 或 "KEY1=VAL1;KEY2=VAL2"。不设则两臂继承当前环境。
     [string]$EnvA = '',
-    [string]$EnvB = ''
+    [string]$EnvB = '',
+    # 逐轮 trace 目录（docs/151）：传入时启动 startup_image_time 的 -TraceDir，
+    # 并且把自证列（StartupDefaultSetMax / CpuAtT2 / Env*）一并写进 CSV。
+    [string]$TraceDir = '',
+    # 交替臂顺序（A→B / B→A 逐轮翻转）：抵消轮内漂移，docs/151 用。
+    [switch]$AltOrder,
+    # 预热轮（两臂各跑一次，不计数）：稳定文件缓存后再进正式轮。
+    [int]$WarmupRounds = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -104,8 +111,13 @@ $armDefs = @(
 )
 
 $envKeys = @()
-for ($round = 1; $round -le $Rounds; $round++) {
-    foreach ($arm in $armDefs) {
+for ($round = (1 - $WarmupRounds); $round -le $Rounds; $round++) {
+    $isWarmup = $round -lt 1
+    if ($isWarmup) { Write-Host ("== warmup {0}/{1} (discarded) ==" -f ($round + $WarmupRounds), $WarmupRounds) }
+    # AltOrder：偶数轮把 B 放到 A 前面，抵消"同一轮里后跑的那臂总是继承同一机器状态"的偏差。
+    $armOrder = $armDefs
+    if ($AltOrder -and ($round % 2 -eq 0)) { $armOrder = @($armDefs[1], $armDefs[0]) }
+    foreach ($arm in $armOrder) {
         $load = Get-TotalCpuPct
         # 先擦掉上一臂设的键，再注入本臂的；子进程直接继承，探针无需改动。
         foreach ($k in $envKeys) { Remove-Item -Path ("Env:" + $k) -ErrorAction SilentlyContinue }
@@ -119,11 +131,19 @@ for ($round = 1; $round -le $Rounds; $round++) {
         $tmp = Join-Path ([IO.Path]::GetTempPath()) ('ab1_' + [guid]::NewGuid().ToString('N') + '.csv')
         try {
             # 不再 | Out-Null：探针异常要落到 Note 里，否则整轮会静默变“无输出”
-            $probeOut = & pwsh -NoProfile -File $tool -Exe $arm.Exe -Image $Image -Runs 1 -WarmupRuns 0 -CsvOut $tmp -Tag $arm.Tag 2>&1
+            $probeArgs = @('-NoProfile', '-File', $tool, '-Exe', $arm.Exe, '-Image', $Image,
+                '-Runs', '1', '-WarmupRuns', '0', '-CsvOut', $tmp, '-Tag', $arm.Tag)
+            if ($TraceDir -ne '') {
+                $armTrace = Join-Path $TraceDir ("{0}_r{1}" -f $arm.Tag, $round)
+                $probeArgs += @('-TraceDir', $armTrace)
+            }
+            $probeOut = & pwsh @probeArgs 2>&1
             $probeErr = ($probeOut | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] -or $_ -match 'Exception|already running|Cannot|无法' } | Select-Object -First 1)
             if (Test-Path -LiteralPath $tmp) {
                 $r = @(Import-Csv -LiteralPath $tmp) | Select-Object -First 1
                 if ($r) {
+                    $cpuAtT2 = [double]$r.CpuAtT2Ms
+                    $cpuRatio = if ($cpuAtT2 -ge 0 -and [double]$r.OnScreenMs -gt 0) { [math]::Round($cpuAtT2 / [double]$r.OnScreenMs * 100, 1) } else { -1.0 }
                     $rows.Add([pscustomobject]@{
                         Round  = $round
                         Arm    = $arm.Tag
@@ -133,23 +153,27 @@ for ($round = 1; $round -le $Rounds; $round++) {
                         T1     = [double]$r.TitledMs
                         T2     = [double]$r.OnScreenMs
                         StdDev = $r.ContentStdDev
+                        CpuAtT2Ms = $cpuAtT2
+                        CpuOverWallPct = $cpuRatio
+                        StartupSetMax = [double]$r.StartupDefaultSetMax
+                        EnvStartupPlacement = $r.EnvStartupPlacement
                         Note   = $r.Note
                     })
                 } else {
-                    $rows.Add([pscustomobject]@{ Round = $round; Arm = $arm.Tag; LoadPct = $load; SpawnMs = -1; T1 = -1; T2 = -1; StdDev = ''; Note = '无输出行' })
+                    if (-not $isWarmup) { $rows.Add([pscustomobject]@{ Round = $round; Arm = $arm.Tag; LoadPct = $load; ArmEnv = $arm.Env; SpawnMs = -1; T1 = -1; T2 = -1; StdDev = ''; CpuAtT2Ms = -1; CpuOverWallPct = -1; StartupSetMax = -1; EnvStartupPlacement = ''; Note = '无输出行' }) }
                 }
             } else {
                 $why = if ($probeErr) { "探针异常: $probeErr" } else { '探针未产出 CSV' }
-                $rows.Add([pscustomobject]@{ Round = $round; Arm = $arm.Tag; LoadPct = $load; SpawnMs = -1; T1 = -1; T2 = -1; StdDev = ''; Note = $why })
+                if (-not $isWarmup) { $rows.Add([pscustomobject]@{ Round = $round; Arm = $arm.Tag; LoadPct = $load; ArmEnv = $arm.Env; SpawnMs = -1; T1 = -1; T2 = -1; StdDev = ''; CpuAtT2Ms = -1; CpuOverWallPct = -1; StartupSetMax = -1; EnvStartupPlacement = ''; Note = $why }) }
             }
         } catch {
-            $rows.Add([pscustomobject]@{ Round = $round; Arm = $arm.Tag; LoadPct = $load; SpawnMs = -1; T1 = -1; T2 = -1; StdDev = ''; Note = "探针异常: $($_.Exception.Message)" })
+            if (-not $isWarmup) { $rows.Add([pscustomobject]@{ Round = $round; Arm = $arm.Tag; LoadPct = $load; ArmEnv = $arm.Env; SpawnMs = -1; T1 = -1; T2 = -1; StdDev = ''; CpuAtT2Ms = -1; CpuOverWallPct = -1; StartupSetMax = -1; EnvStartupPlacement = ''; Note = "探针异常: $($_.Exception.Message)" }) }
         }
         finally {
             Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
         }
     }
-    Write-Host ("round {0}/{1} 完成" -f $round, $Rounds)
+    if (-not $isWarmup) { Write-Host ("round {0}/{1} 完成" -f $round, $Rounds) }
 }
 
 $rows | Export-Csv -LiteralPath $CsvOut -NoTypeInformation -Encoding UTF8
@@ -178,9 +202,68 @@ function Show-Stratum([string]$name, [object[]]$set) {
 $fast  = @($rows | Where-Object { [double]$_.SpawnMs -ge 0 -and [double]$_.SpawnMs -lt 60 -and [double]$_.T2 -gt 0 })
 $slow  = @($rows | Where-Object { [double]$_.SpawnMs -ge 60 -and [double]$_.SpawnMs -le 700 -and [double]$_.T2 -gt 0 })
 $waste = @($rows | Where-Object { [double]$_.SpawnMs -gt 700 -or [double]$_.T2 -le 0 })
-$loadAvg = if ($rows.Count) { [math]::Round((($rows | Measure-Object LoadPct -Average).Average), 1) } else { -1 }
+$loadAvg = if ($rows.Count) { [math]::Round((($rows | Where-Object { $_.LoadPct -ge 0 } | Measure-Object LoadPct -Average).Average), 1) } else { -1 }
 Write-Host ''
 Write-Host ("总轮 {0} | fast={1} slow={2} 废={3} | 平均负载 {4}%" -f $rows.Count, $fast.Count, $slow.Count, $waste.Count, $loadAvg)
 Show-Stratum 'fast <60ms（绝对基线）' $fast
 Show-Stratum 'slow 60-700ms（仅相对比较）' $slow
+
+# ---- 配对差（同轮 B−A）与符号检验：AltOrder 已抵消轮内顺序偏差 ----------------
+$pairedT2 = @(); $pairedCpu = @()
+foreach ($roundKey in @($rows | ForEach-Object { [int]$_.Round } | Sort-Object -Unique)) {
+    $a = @($rows | Where-Object { [int]$_.Round -eq $roundKey -and $_.Arm -eq $TagA }) | Select-Object -First 1
+    $b = @($rows | Where-Object { [int]$_.Round -eq $roundKey -and $_.Arm -eq $TagB }) | Select-Object -First 1
+    if ($a -and $b) {
+        if ([double]$a.T2 -gt 0 -and [double]$b.T2 -gt 0) { $pairedT2 += ([double]$b.T2 - [double]$a.T2) }
+        if ([double]$a.CpuOverWallPct -ge 0 -and [double]$b.CpuOverWallPct -ge 0) { $pairedCpu += ([double]$b.CpuOverWallPct - [double]$a.CpuOverWallPct) }
+    }
+}
+function Show-Paired([string]$name, $deltas, [string]$unit) {
+    if ($deltas.Count -lt 6) { Write-Host ("  [{0}] 配对样本不足 n={1}" -f $name, $deltas.Count); return }
+    $med = Get-Median ([double[]]$deltas)
+    $pos = @($deltas | Where-Object { $_ -gt 0 }).Count
+    $neg = @($deltas | Where-Object { $_ -lt 0 }).Count
+    $n = $pos + $neg
+    $z = if ($n -gt 0) { ($pos - $n / 2.0) / [Math]::Sqrt($n / 4.0) } else { 0 }
+    $p = 2.0 * (1.0 - 0.5 * (1.0 + (Get-Erf ([Math]::Abs($z) / [Math]::Sqrt(2.0)))))
+    Write-Host ("  [{0}] 配对 Δ(B-A) 中位={1,7:N1}{2}  正/负={3}/{4}  sign-p={5}" -f $name, $med, $unit, $pos, $neg, [math]::Round($p, 4))
+}
+Write-Host ''
+Write-Host '===== 配对差（同轮 B−A；AltOrder 抵消轮内顺序偏差）====='
+Show-Paired 'T2' $pairedT2 ' ms'
+Show-Paired 'CPU/墙钟比' $pairedCpu ' %'
+
+# ---- 启动期 CPU 放置自证（docs/151）----------------------------------------------
+# StartupSetMax = 启动窗口内该进程「进程默认 CPU 集合」的大小，由 GetProcessDefaultCpuSets
+# 在 OS 侧直接读。FFF_STARTUP_PLACEMENT=1 的臂必须出现非零；否则说明 env 没进 GUI 或策略
+# 被拒——这时 T1/T2 的「无差异」不能当成策略无效的证据。
+$placementArms = @($armDefs | Where-Object { $_.Env -match 'FFF_STARTUP_PLACEMENT\s*=\s*1' } | ForEach-Object { $_.Tag })
+Write-Host ''
+Write-Host '===== 启动期 CPU 放置自证（StartupSetMax = 启动窗口内进程默认 CPU 集合大小）====='
+$validRows = @($fast + $slow)
+foreach ($tag in @($TagA, $TagB)) {
+    $s = @($validRows | Where-Object { $_.Arm -eq $tag })
+    if ($s.Count -eq 0) { Write-Host ("  {0,-8} 无有效样本" -f $tag); continue }
+    $setCounts = [double[]]@($s | ForEach-Object { [double]$_.StartupSetMax })
+    $nonZero = @($setCounts | Where-Object { $_ -gt 0 }).Count
+    $isPlacementArm = @($placementArms) -contains $tag
+    $verdict = if ($isPlacementArm) {
+        if ($nonZero -gt 0) { 'OK（策略确实生效）' }
+        else { '自证失败：该臂没有一个样本看到进程默认集合 ⇒ env 未注入或策略被拒' }
+    } else {
+        if ($nonZero -eq 0) { 'OK（未要求放置，确实没施加）' } else { "注意：未要求放置却有 $nonZero 轮看到集合" }
+    }
+    Write-Host ("  {0,-8} StartupSetMax 中位={1,6:N0} 非零轮={2}/{3}  {4}" -f $tag, (Get-Median $setCounts), $nonZero, $s.Count, $verdict)
+}
+Write-Host ('  臂环境：A=[{0}] B=[{1}]' -f $EnvA, $EnvB)
+
+# ---- 启动期 CPU 时间 / 墙钟比（docs/146 阶段0 判据：<30% 则该方向判死）-----------
+Write-Host ''
+Write-Host '===== 启动期 CPU 时间 / 墙钟比（T2 之前的子进程 CPU 秒 ÷ T2 秒）====='
+foreach ($tag in @($TagA, $TagB)) {
+    $s = @($validRows | Where-Object { $_.Arm -eq $tag -and [double]$_.CpuOverWallPct -ge 0 })
+    if ($s.Count -eq 0) { Write-Host ("  {0,-8} 无读数" -f $tag); continue }
+    $ratios = [double[]]@($s | ForEach-Object { [double]$_.CpuOverWallPct })
+    Write-Host ("  {0,-8} n={1,3}  CPU/墙钟 中位={2,6:N1}%" -f $tag, $s.Count, (Get-Median $ratios))
+}
 Write-Host ("明细：{0}" -f $CsvOut)

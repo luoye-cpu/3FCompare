@@ -140,6 +140,27 @@ namespace StartupImage {
         [DllImport("gdi32.dll")] static extern int GetDIBits(IntPtr dc, IntPtr bmp, uint start, uint lines, IntPtr bits, ref BITMAPINFO bmi, uint usage);
         const int SRCCOPY = 0x00CC0020;
 
+        // ---- 启动期 CPU 放置自证（docs/151，P1 启动期 A/B）----------------------
+        // GetProcessDefaultCpuSets 是 OS 侧读数：只要 FFF_STARTUP_PLACEMENT=1 真的
+        // 通过了宿主→内核，启动窗口内该进程就会持有 P-core 的默认 CPU 集合（本机 12）。
+        // 计数为 0 说明策略没生效（或 env 没进 GUI）—— 用来把"注入失败"和"无差异"分开。
+        [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetProcessDefaultCpuSets(IntPtr process, UIntPtr[] cpuSetIds, uint count, out uint required);
+        [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+        const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+        public static uint ProcessDefaultCpuSetCount(uint pid) {
+            IntPtr h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+            if (h == IntPtr.Zero) return 0xFFFFFFFF;
+            try {
+                // Same contract the kernel's own query uses: TRUE = no explicit default;
+                // FALSE + ERROR_INSUFFICIENT_BUFFER = required count is the set size.
+                uint required;
+                if (GetProcessDefaultCpuSets(h, null, 0, out required)) return 0;
+                if (Marshal.GetLastWin32Error() == 122) return required;
+                return 0xFFFFFFFF;
+            } finally { CloseHandle(h); }
+        }
+
         [StructLayout(LayoutKind.Sequential)] public struct BITMAPINFOHEADER { public int biSize, biWidth, biHeight; public short biPlanes, biBitCount; public int biCompression, biSizeImage, biXPelsPerMeter, biYPelsPerMeter, biClrUsed, biClrImportant; }
         [StructLayout(LayoutKind.Sequential)] public struct BITMAPINFO { public BITMAPINFOHEADER bmiHeader; public uint bmiColors; }
     }
@@ -183,7 +204,12 @@ function Measure-One {
     $psi.UseShellExecute = $false
     $psi.RedirectStandardError = $true
     # FFFPROF / FPT_OPEN_TRACE / DOTNET_ROOT are inherited from this shell (set above).
-
+    # Self-proof columns (docs/151): the FFF_* values THIS shell will hand to the GUI,
+    # the system load of the round, and the child's process-default CPU-set size
+    # sampled while it starts (FFF_STARTUP_PLACEMENT=1 must show P-core ids here).
+    $envStartupPlacement = if ($null -eq $env:FFF_STARTUP_PLACEMENT) { '(unset)' } else { [string]$env:FFF_STARTUP_PLACEMENT }
+    $envPlacement = if ($null -eq $env:FFF_PLACEMENT) { '(unset)' } else { [string]$env:FFF_PLACEMENT }
+    $loadPct = try { [double](Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'").PercentProcessorTime } catch { -1.0 }
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $spawnSw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -199,10 +225,14 @@ function Measure-One {
     $meanAtT2 = -1.0; $stdAtT2 = -1.0; $meanLate = -1.0
     $cls = ''; $titleAtT1 = ''; $titleAtT2 = ''
     $contentStreak = 0
+    $startupSetMax = 0
+    $cpuAtT2 = -1.0
     $note = ''
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSec)
     while ([DateTime]::UtcNow -lt $deadline) {
         if ($p.HasExited) { $note = "early-exit exit=$($p.ExitCode)"; break }
+        $setCount = [StartupImage.Native]::ProcessDefaultCpuSetCount($procId)
+        if ($setCount -ne 0xFFFFFFFF -and $setCount -gt $startupSetMax) { $startupSetMax = [int]$setCount }
         if ($titledMs -lt 0) {
             [IntPtr]$hwnd = [IntPtr]::Zero
             if ([StartupImage.Native]::FindTitledWindow($procId, [ref]$hwnd, [ref]$cls, [ref]$titleAtT1)) {
@@ -222,6 +252,9 @@ function Measure-One {
                         $t2 = '';$c2 = ''
                         [StartupImage.Native]::FindTitledWindow($procId, [ref]$script:LastHwnd, [ref]$c2, [ref]$t2) | Out-Null
                         $titleAtT2 = $t2
+                        # CPU time consumed by the child up to T2: the stage-0 ratio
+                        # (CPU / wall) that docs/146 §八 uses to kill this direction.
+                        try { $cpuAtT2 = [math]::Round($p.TotalProcessorTime.TotalMilliseconds, 1) } catch { $cpuAtT2 = -1.0 }
                         break
                     }
                 } else { $contentStreak = 0 }
@@ -260,6 +293,8 @@ function Measure-One {
         SpawnMs = $spawnMs; TitledMs = $titledMs; OnScreenMs = $pixelsMs
         StT1 = $stT1; StT2 = $stT2
         ContentStdDev = $s; StdDevLate = $stdLate; MeanAtT2 = $meanAtT2; StdAtT2 = $stdAtT2; MeanLate = $meanLate; Class = $cls; TitleAtT1 = $titleAtT1; TitleAtT2 = $titleAtT2; Note = $note
+        StartupDefaultSetMax = $startupSetMax; CpuAtT2Ms = $cpuAtT2; LoadPct = $loadPct
+        EnvStartupPlacement = $envStartupPlacement; EnvPlacement = $envPlacement
     }
 }
 
@@ -278,7 +313,7 @@ for ($i = 1; $i -le $Runs; $i++) {
     $script:RoundCounter++
     $r = Measure-One
     $results += $r
-    Write-Host ("  run {0}: titled={1} onscreen={2} stddev={3:N1} {4}" -f $i, $r.TitledMs, $r.OnScreenMs, $r.ContentStdDev, $r.Note)
+    Write-Host ("  run {0}: titled={1} onscreen={2} stddev={3:N1} cpu={4} setmax={5} {6}" -f $i, $r.TitledMs, $r.OnScreenMs, $r.ContentStdDev, $r.CpuAtT2Ms, $r.StartupDefaultSetMax, $r.Note)
 }
 
 $valid = @($results | Where-Object { $_.TitledMs -ge 0 -and $_.OnScreenMs -ge 0 -and $_.Note -eq '' })
@@ -290,6 +325,9 @@ function Median($arr) {
     if ($s.Count % 2 -eq 1) { return [math]::Round($s[[int][math]::Floor($s.Count / 2)], 1) }
     return [math]::Round(($s[$s.Count / 2 - 1] + $s[$s.Count / 2]) / 2, 1)
 }
+$ratioValues = @($valid | ForEach-Object {
+        if ($_.OnScreenMs -gt 0 -and $_.CpuAtT2Ms -ge 0) { [math]::Round($_.CpuAtT2Ms / $_.OnScreenMs * 100, 1) }
+    })
 Write-Host "`n===== summary ($($valid.Count)/$($results.Count) valid) ====="
 [pscustomobject]@{
     Exe = $Exe; Image = $Image; Tag = $Tag
@@ -297,6 +335,11 @@ Write-Host "`n===== summary ($($valid.Count)/$($results.Count) valid) ====="
     TitledMedian = Median @($valid | ForEach-Object { $_.TitledMs })
     OnScreenMedian = Median @($valid | ForEach-Object { $_.OnScreenMs })
     OpenGapMedian = Median @($valid | ForEach-Object { $_.OnScreenMs - $_.TitledMs })
+    CpuAtT2MedianMs = Median @($valid | ForEach-Object { $_.CpuAtT2Ms })
+    CpuOverWallMedianPct = Median $ratioValues
+    StartupSetMaxMedian = Median @($valid | ForEach-Object { $_.StartupDefaultSetMax })
+    LoadMedianPct = Median @($valid | ForEach-Object { $_.LoadPct })
+    EnvStartupPlacement = $env:FFF_STARTUP_PLACEMENT
     TitledAll = (($valid | ForEach-Object { $_.TitledMs }) -join ',')
     OnScreenAll = (($valid | ForEach-Object { $_.OnScreenMs }) -join ',')
 } | Format-List
