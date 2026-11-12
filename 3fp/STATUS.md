@@ -3,7 +3,16 @@
 > **给接手的 agent**：先读本文件，再读 `README.md`（铁律），然后按「下一步」的第一个动作开工。
 > 更新本文件时请同步更新「最后更新」一行。
 
-- **最后更新**：2026-11-11（**交接**：整体 CPU 策略盘点草稿落 **docs/148**、交接说明落 **docs/149**；内核启动期 CPU 放置实现留在本地 `49d1500` **未推送**，PR #57 未动；运行期验证按用户要求暂缓。）
+- **最后更新**：2026-11-13（**NPU 下载全公共源化（docs/157 §六修订）——零上传零配置**：用户问"NPU 必须我们上传吗"→ 逐件核查：模型六件在 **csukuangfj2/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25**（k2-fsa 官方维护者公开仓，HF LFS SHA256 与验证包逐字节一致）；运行时=python.org embeddable 3.12.10 + PyPI 官方 wheel（numpy 2.5.4/ort 1.27.0/openvino 2026.4.1-22982/sherpa 2.0.1，版本精确一致）；qwen3_ort.py 是我们自己的代码→随 exe 部署（vbproj 新增）。下载器 NPU 清单重写为 12 项公共源（字节+SHA256 钉死），母仓守卫删除、母仓降为可选加速（zip 覆盖前缀命中跳过散件，失败自动回落）；组装写 python312._pth + 复制 worker/ort。**真下载 E2E 全通**：1.06GB 12 件下载→组装→断点续传实测→包内 python 金样本真推理（粤语与 selftest 一致）→Ai字幕包.载入 OK（onnx/int8/包内 Python）。UI 文案改"直链 sherpa 官方仓"。宿主 `FFF.Player.dll` 1,129,984 B；内核未动。NPU 真机（Core Ultra）端到端仍 U。零 commit / 零 push。）
+  2026-11-13（**AI 字幕双包下载（GPU+CPU / NPU）落 docs/157**：用户确认 NPU 与 GPU 是不同引擎的独立包，选定"下载支持两种包"。下载器加 `包类型` 枚举（GpuCpu/Npu）+ `组清单` 分流；UI 加「包类型」下拉行（PanelAI12）+ 切类型重置目录框（防旧引擎目录误判"已是有效包"，实测修复）；设备下拉随引擎联动是既有能力。初版 NPU 走母仓（已被同日 §六 全公共源修订取代）。验证（headless 反射，绕过不稳定 GUI 注入）：NPU 生成清单经 Ai字幕包.载入 校验通过 ✓、UI 渲染截图 ✓。零 commit / 零 push。）
+  2026-11-12（**AI 字幕包一键下载/删除 + AI 设置页规范化落 docs/156**：新增 `Ai字幕包下载器`——模型直链 **ggml-org/Qwen3-ASR-0.6B-GGUF**（官方 GGUF 仓，cleanup-record 的 Qwen/… 路径不存在已纠错）、字节+SHA256 钉死、hf-mirror 兜底、.part 断点续传、磁盘预检；运行时=母仓（dist\hf-upload\ 两 zip 已备好待传）→ llama.cpp b12110 回退；包内 Python 随母仓。设置页 AI 字幕按规范重构（行容器+HCL+富文本状态区）+「下载官方包…/取消/删除包」行（删除带确认、先停 worker、只删有效包）。实测：假包启用/删除确认/目录清空 ✓、下载 87%@12s→完成→清单 v3+worker+52 文件运行时就位 ✓、**worker 用下载包端到端跑通**（llama-server 拉起、ASR 窗口循环）✓。构建链插曲：MSB3821（resx MOTW）因本机 IE 安全组件缺失误判第一方 resx——`strip_resx_binary.ps1` 移除全部二进制/typed 条目（仅 Form1 $this.Icon 被用 → 运行时 ICO.ico 加载）后恢复。宿主 `FFF.Player.dll` 1,111,552 B / sha16 `7C7CD325FE7655D9`（resx 剥离二进制后缩小；随 exe 新部署 ai-subtitles\asr_worker.py + ICO.ico）；内核未动（`74DF07F5CC62AA66`）。零 commit / 零 push。）
+  2026-11-12（**双耳自动策略改为按端点声道数落 docs/155**：`BinauralWantedFor(policy, endpointChannels)`——auto ⇔ 端点 mix=2 声道默认激活 HRTF，多声道回退传统折叠；形态 3/5 规则废除（USB DAC 报 9 的机器不再需要手动强制）。内核 3 文件、0 ABI/0 导出变化，构建 0 警告 0 错，新 DLL 6,528,000 B / sha16 `74DF07F5CC62AA66`，`check_kernel_exports` OK（38/API20）；探针重建重跑 **21/21 PASS**（本机形态 9/mix 2 ⇒ live auto `wanted=1` 首次成立，`available=0` 如实反映授权渲染器缺席）；GUI 冒烟正常。同日 docs/154 §六-§八：输出徽章三态循环 + 真值化（HRTF 显示改真接管）+ 架构澄清（HRTF 接缝/策略/徽章=本体；渲染实现+授权=模块函数表，本机 `FFF.HDRdp.Test.dll` 缺席属设计内静默降级）。零 commit / 零 push。）
+  2026-11-12（**输出徽章真值化落 docs/154 §七**：HRTF 态从"路由意图"改为真接管 `音频双耳渲染生效`；传统态输出声道数在设备热切换/模式变化后经 `状态已变化` 重探媒体信息跟随真实端点；点击循环同样真值定位，2.0 源（无床）直接跳过 HRTF 到直通、模块婉拒不卡死循环；tooltip 说明 2.0 无床。宿主 2 文件小改、零内核/ABI；构建 0 警告 0 错，`FFF.Player.dll` 1,225,728 B / sha16 `47C8C0A02D824224`；本机实测弹窗/跳过路径无回归。另同日 §六 落"耳机自动 HRTF 保障链"分析 + `audio_binaural_probe` 重建重跑 19/19 PASS（对 `EC3B89A550B3BD0E`）。零 commit / 零 push。）
+  2026-11-12（**音频输出徽章三态循环落 docs/154**：`HRTF`+`5.1` 两徽章合并为一个"输出侧"按钮，文本按实际输出显示 直通/IAMF/HRTF/5.1/7.1/5.1.4/立体声（青=HRTF、橙=直通），点击循环 传统→HRTF→直通→传统；直通沿用独占确认弹窗、拒绝后"下一次跳过、下下次回当前态、下下下次再弹"、确认后 1.5 s 未接管自动回退解码+回共享。宿主 4 文件、零内核/ABI 改动；顺带修 `应用音频直通设置` 同值重设弹错（内核 `SetMode` 仅变化报真 → 先读回现值幂等化）。构建 0 警告 0 错，`FFF.Player.dll` 1,225,216 B / sha16 `A4D0D9B7997F0964`；GUI 截屏实测 8 项全过（跳过/回退路径），HRTF 一跳因本机插槽未装仅代码路径验证。零 commit / 零 push。）
+  2026-11-12（**P2-8 内核最小面已实施落 docs/153**：`PresenterTimerResolution` 幂等 `Raise/Release` + `TimedTextThread` 空轮询释放（暂停/Ended/静图 ≤~0.5s 释放 1ms，播放期间仍持），只改 `VideoRenderer.cpp` 3 处、0 头文件/0 导出/0 ABI；内核构建 **0 警告 0 错误**，新 DLL 6,528,000 B / sha16 `EC3B89A550B3BD0E`，导出 131 不变；探针 359 帧/0 丢帧、GUI 播放 48.96%→暂停 0.52%→恢复 36.46%、10 次暂停恢复循环无线程/进程异常。宿主侧同改待 U（双耳心跳）；单侧改动**无法**外部证明时基回落。零 commit / 零 push。）
+  2026-11-12（**P2-8「空闲态计时器/时基」只诊断落 docs/152**：代码前提成立（宿主 4 台常驻 PrecisionTimer 从 Load 起持进程级 1ms 时基、内核 Present 线程渲染过即永不退出 ⇒ 暂停/最小化/静图双持 1ms），但 E1 实测 CPU 常驻税很小（暂停/最小化 ≈0–0.5% 单核、可见空闲 1.25–4.7%，播放中最小化 14.6% 是播放本身）。本机量具看不见 1ms 对 C-state/功耗的代价 ⇒ 建议先只做内核最小面（幂等 Raise/Release + 空轮询释放，零可见行为），宿主侧待「双耳心跳」U 再定。同轮把本地 `thread_census.ps1` 加了按线程名枚举（P0-3 验收：FFF.Player.Present 等 5 条名可见）。）
+  2026-11-12（**CPU 放置两笔首次 A/B 实测落 docs/151**：播放期 CPU Set 对呈现/丢帧零收益（硬解全中性、软解仅 CPU −4.3% p=0.0005）；启动期放置 T2 无收益（+33 ms、p=0.15，自证 22/22 生效）。两笔均未改产品默认值，是否收敛「默认关+日志」待用户拍板。同轮修好 `play_back_perf_bench` 的 SnapshotVersion 20→23 真 bug，并给 `quiet_ab`/`startup_image_time` 补自证列与 `-TraceDir` 透传。零 commit / 零 push。）
+  2026-11-12（**CPU 策略 5 项零行为变化改动落地，见 docs/150**：P0-1 启动期 HIGH 改默认关（显式 opt-in）、P0-2 进程优先级写者规则、P0-3 8 条原生线程命名、P2-9 上传统路 env 真缓存 + 删三项零读取方写入、P3-12 CPU 策略快照导出（内核 131 导出 / API 20 + 宿主解析）。内核/宿主 Release 编译 **0 警告 0 错**，导出/中性/配置 ABI 门禁见 docs/150 §七；**零 commit / 零 push**、PR #57 未动、未跑任何运行期/性能测试。）
   2026-11-11（启动期 CPU 放置**已实现**并落 **docs/147**：可选导出 + 宿主启动钩子，默认关（`FFF_STARTUP_PLACEMENT=1`）；内核/宿主 Release 编译通过，运行验证按用户指示暂缓；本地提交 `49d1500`，未推送 PR。）
   2026-11-11（启动期 CPU 放置可行性落 **docs/146**：Intel P-core / AMD 多 CCD 机制可行但为软亲和、收益 ms 级待实测；AMD "主 CCD"无权威定义，只建议探测不默认启用。）
   2026-11-11（启动期 HIGH 优先级复核落 **docs/145**：该机制 base 已有且默认开，两次实测均不支持有效（优先级单独 Δ+4.4 ms、p=0.78），建议删除或改事件驱动；本轮未跑新基准。）
@@ -787,3 +796,66 @@ PR #57 四笔（`5d88c1b`/`85af3fa`/`fad4487`/`3689f77`）**63 文件全量覆�
   - 建议顺序：P0 卫生（删启动 HIGH / 写单一所有者规则 / 补线程名）→ P1 安静窗补两笔 A/B（`FFF_PLACEMENT=off` 负控、`FFF_STARTUP_PLACEMENT=1`）→ P2 常驻税（KR-13 等待、HS-7 timeBeginPeriod、计时器链）→ P3 预算两段化与预取侧车预算。
 - 交接状态：根仓 docs 已提交推送；内核 `49d1500` 仍在本地 `feature/cuda-d3d11-interop`，**未推送、PR #57 未动**（推不推等用户拍板）；两份并行静态审查（内核/宿主 CPU 策略）报告未回收，接手者可按 docs/149 §三 P0 处理。
 - 本轮仍未跑任何运行期/性能测试（窗格负载 ~65%）。
+
+## docs/148 定稿：整体 CPU 策略盘点收口（2026-11-11，接 docs/149 P0）
+
+- 用户指令「阅读交接文档，继续任务」⇒ 按 docs/149 §三 P0 推进：重做两份只读静态审查（内核侧 / 宿主侧 CPU 策略，并行子代理）、并入后定稿 docs/148、补本账。**未写代码、未跑测试、未编译、未推送、未动 PR #57**。
+- 两份审查均已回收，主 Agent 对每条主张独立复核后采纳/驳回，处置集中在 docs/148 §〇（A 草稿修正 14 条 / B 审查采纳 8 条 / C 不采纳或撤回 3 条）。
+- **推翻的既有结论**（影响后续立项）：
+  - docs/144 PF-1 因果链不成立：FFmpeg `AVCodecContext.thread_count` 默认 **1**（`options_table.h:216`），`av_cpu_count()` 只在 `threads=auto`/`thread_count=0` 生效 ⇒ 预取侧车「不设 thread_count ⇒ ≈20 worker 抢 CPU」不成立；真实缺口是「不受 `DecoderThreadBudget()` 约束 + worker 未降优先级」，实际线程数待 E1（U）。
+  - 「present 线程被钉 tier0/提权」不成立：被钉的是 **session worker**（`PlayerSession.cpp:3379/9413`），执行 `Present` 的是渲染器 `TimedTextThread`（`VideoRenderer.cpp:5966`），后者未被钉核。
+  - KR-13「三处 Sleep」过时：全树 ≥12 处，且 `:6436-6442` 饱和背压已改 `wait_for`；`FFF_SEEK_PREVIEW` 已改每次 seek 读一次，但 `FFF3FP_UPLOAD_FORCE_*` 仍每帧 2 次 `_dupenv_s`。
+  - 启动 HIGH 的 docs/124「600 ms 常量 NORMAL」是旧版代码；当前是 1500 ms + 恢复保存值（`Form1.vb:617-620`）。`FFF3FP_Create` 不在 UI 线程（`播放器控制器.vb:1487-1488` 的 `Await Task.Run`）。
+  - `timeBeginPeriod(1)` 是**双写者**（LakeUI 引用计数 + 内核 `PresenterTimerResolution`）；`TimedTextThread` 只在设备重建 / `ResetMedia` / `Close` 时停（`VideoRenderer.cpp:9540/9555/9640`）⇒ docs/148 §四 P2-8 单靠宿主停计时器无法让时基归零。
+  - 计时器 **15 个对象、默认持续跑 4 条**；180 ms 布局已是 `AutoReset=False` 单次 debounce（删「改事件驱动」建议）；`thread_census.ps1` 在 `3fp/build/imgperf/`、被根仓 `.gitignore:64` 忽略；`3fp/LakeUI` 是 `third_party/LakeUI` 的符号链接。
+- **不采纳的审阅者主张**：「`49d1500` 不是有效对象 / 宿主文件有未提交改动 / 版本基准需标 U」——两份审查各查了根仓与 LakeUI 仓，未查内核仓；`git -C 3fp/kernel rev-parse HEAD` = `49d1500…`、`cat-file -t` = `commit`、跟踪文件 0 脏 ⇒ 误报。另「Create 在 UI 线程」由内核审查自行撤回。
+- 边界：本轮**零代码改动**（只改 `3fp/docs/148-…zh.md` 与本文件）；E1 无新增，所有新增事实为 E2；U 项（侧车实际线程数、两项脏区旋钮零读取方、空闲态 `TimedTextThread` 是否存活、AMD 实机）留在 docs/148 §五。
+- 待用户拍板项未变（docs/149 §三 P1/P2）：内核 `49d1500` 是否推送 / 是否更新 PR #57；启动期 HIGH 是否删默认；安静窗的两笔 A/B（`FFF_PLACEMENT=off`、`FFF_STARTUP_PLACEMENT=1`）。
+
+## CPU 策略实现：卫生三件 + 零读取方清理 + 策略快照（2026-11-12，docs/150）
+
+- 用户「阅读交接文档，继续任务」⇒ 按 docs/148 §四 + memory `2026-11-12` 的全量实现审查（三条方向性错误已修正）落地 **5 项零行为变化**改动。**零 commit / 零 push**，内核 HEAD 仍 `49d1500`、PR #57 未动；**未跑任何运行期/性能测试**（非安静窗）。
+- **P0-1 启动期 HIGH 默认关**：`ApplicationEvents.vb:76-93` 改为显式 opt-in（`FFF_STARTUP_PRIORITY=1` 才拉高；`FFF_NO_STARTUP_PRIORITY=1` 兼容 no-op 且优先）；默认路径在 `Process.GetCurrentProcess` 之前返回 ⇒ docs/124 §4.1 基线竞态**默认不可能发生**。降回线程/GPU 预热/启动预取/CPU 放置兜底全部保留。
+- **P0-2 写者规则**：宿主播放链路零写入；进程 class 只由内核按测量升级并恢复播放开始基线；session worker 线程级 HIGHEST 与 LakeUI 计时线程 `AboveNormal` 分属不同层不混算。规则正文在 docs/150 §三，代码锚点 `PlacementPolicy.cpp:666/:683`。
+- **P0-3 线程命名**：新 header-only `FFF.Native/3FP/Core/ThreadNaming.h`（`GetProcAddress("SetThreadDescription")` 一次解析），8 条原生线程入口命名（SessionWorker/SoftwareDecode/Present/WasapiRender/Prefetch/PrefetchGuard/Fmp4Scan/CoverBackdrop），零优先级/亲和性改动。
+- **P2-9**：① `VideoRenderer.cpp:1721/:1734` 的 `Force*UploadCached` 改真 `static const`（每帧 2 次 `_dupenv_s` 归零；运行期改 env 不再生效是刻意的）；② 删 `设置.vb:491-495` 对 LakeUI `BackgroundDirtyRectLimit`/`BackgroundFullDirtyRatio`/`SsaaBucketSize` 的三处写入（E2：`GlobalOptions.vb:142/194/198` 仅定义、全树零读取方）；旋钮去留待 P3-13。
+- **P3-12 策略快照**：`FFF.Player.CpuPlacement.h:52-116` 追加 `FFF3FPCpuPlacementSnapshot`（22×4B=88B 纯 POD，`static_assert`）+ `FFF3FP_GetCpuPlacementSnapshot` 导出；`PlacementPolicy::FillDiagnosticSnapshot`/`QueryThreadSelectedCpuSetCount`、`PlayerSession::GetCpuPlacementSnapshot`、`VideoRenderer::TimedTextThreadId` 落地；`FFF_PLACEMENT_TRACE=1` 时 `SetState(Playing)` 后发一行 `PLACEMENT_SNAPSHOT`。宿主 `播放器原生接口.vb:1580-1647` 解析可选导出（旧内核静默降级，暂无调用方）。**零契约动作**：`FFF.Player.Api.h`/`PlayerApiVersion=20`/`SnapshotVersion=23` 未动，且 `CpuPlacement.h` 不在模块仓 contract 闭包内（独立复核：闭包仅 3 文件）。
+- **验收**：内核 `build_kernel.py` rc=0 / 0 警告 0 错，DLL 6,527,488 B sha16 `F84A9759B6C68E32`（3fp/build 同哈希）、导出 130→131、API 20；宿主 framework MSBuild（沙箱内官方 `dotnet build` 因匿名管道被拒，已用等价官方构建替代）0 警告 0 错、DLL 1,222,144 B；`check_kernel_exports` OK、`check_kernel_neutrality` 二进制/源码层 0 判红（工程层 fdk-aac 为 HEAD 既有项）、`check_kernel_config_abi --tree experimental` PASS；`check_kernel_pairing` 的 G2-snapshot UNREADABLE 与 ledger 红均为**既有**（对 TP 基线 DLL/未提交本地分叉同样红）。详见 docs/150 §七。
+- **下一步（不变）**：先安静窗做 P1 两笔 A/B（现有 `PLACEMENT_SNAPSHOT` 自证；判据换视频稳态、`quiet_ab.ps1` 补 `-TraceDir`）→ P2-8 只诊断 → P2-9 补实现（E1 + LakeUI 仓）→ P2-7 → P3-10（E1）→ P3-11 撤销；`49d1500` 与本轮改动推不推、PR #57 动不动仍待用户拍板。
+
+## CPU 放置两笔首次 A/B 实测（2026-11-12，docs/151）
+
+- 用户「CPU 已留空，你可以开始了」⇒ 按 docs/148 §四 P1 跑两笔 A/B（各 20 轮逐轮交替、臂顺序翻转、同轮配对 Wilcoxon）。**零 commit / 零 push，未改任何产品默认值**。
+- **播放期 CPU Set（`FFF_PLACEMENT=off` vs 默认）**：
+  - 产品默认硬解码（4K HEVC10 60 fps，窗口渲染）：presented **359/359**、dropped **0/0**、呈现间隔 p50 **16.62/16.66 ms**、进程 CPU **765.62/765.62 ms**（p=0.80）⇒ **完全中性**。
+  - 软件解码敏感臂：presented 355/355、dropped 0/0、呈现间隔不变；**进程 CPU 10007.8 → 9578.1 ms（−4.3%，配对 Wilcoxon p=0.0005 / MWU p=0.0002）** ⇒ 只省 CPU，无可见收益。
+  - 自证：A 臂 `tier=0/DISABLED`；B 臂 `tier=1`、`workerSets=12`（硬解）/`16`（软解，tier0 被 `EnsurePreferredCapacity` 扩容）；**`presentSets=0` 全 20 轮** ⇒ 运行时实证「被钉的是 worker、呈现线程未被钉」；`PLACEMENT_SNAPSHOT` 20/20 轮可见。
+- **启动期 CPU 放置（`FFF_STARTUP_PLACEMENT=1` vs 关，GUI 冷启动 + 1080p 图）**：T1 930.1→963.9 ms（p=0.12）、**T2 1020.1→1049.4 ms（+33 ms，p=0.15，不显著且方向略慢）**、CPU/墙钟 117.9%→115.5%（p=0.077）；早期非交替复跑方向相反（T2 −18.8 ms，p=0.20）⇒ 差异在噪声内。自证：on 臂 OS 侧 `GetProcessDefaultCpuSets` **22/22 轮 = 12**，off 臂 0/22 ⇒ 注入与策略均生效。
+- **窗口不是真安静**：三组中位负载 43.9% / 32.5% / 51.5%，峰值 100%（360tray / BackgroundDownload / kryptex 矿机 / ZCode / DSH 等常驻）；44/44 启动轮落在 spawn-slow 档。结论只作同窗相对比较；默认值决策建议在真闲置窗复跑一次。
+- **建议（等用户拍板）**：按 docs/148 P1-6「中性则收敛」——`FFF_PLACEMENT` 默认改关 + 保留 `prefer|spill|boost` 与 trace 作诊断；`FFF_STARTUP_PLACEMENT` 维持默认关。若用户更看重"软解省 4.3% CPU"，可维持现状。
+- **量具修复（附带）**：`play_back_perf_bench.cpp` 的 `snap.version` 硬编码 **20 vs 内核 23** ⇒ 该探针对当前内核每次都 `SAMPLE failed`（真 bug，已修）并新增 `--adaptive`/内核 KLOG 捕获/快照行/呈现间隔分位；`startup_image_time.ps1` 增加 `StartupDefaultSetMax`/`CpuOverWallPct`/`LoadPct`/env 自证列；`quiet_ab.ps1` 修 `-TraceDir` 不透传、加 `-AltOrder`/`-WarmupRounds`/自证块/配对检验。全部未提交。
+- **U**：8K/HEVC444 软解到掉帧压力下放置能否减丢帧（本轮两臂 0 丢帧，测不到上限收益）；AMD 多 CCD；真安静窗绝对值。
+
+## P2-8「空闲态计时器 / 进程时基」只诊断（2026-11-12，docs/152）
+
+- 按 docs/148 实施顺序的下一步「P2-8 只诊断」（零行为变化）执行；两份只读调查（内核 `task-3` / 宿主 `task-4`）+ 本机 E1 外部采样，**未改任何产品代码、未 build、未 commit**。
+- **代码前提成立（E2）**：宿主 4 台常驻 `PrecisionTimer`（100ms 界面呈现 + 字幕/弹幕/歌词三泵，`UI\播放器界面呈现器.vb:108-113` / `Form1.vb:234,358` 等）从 `Form1_Load` 起各持一份**进程级 `timeBeginPeriod(1)`**，无 `WindowState/Visible` 门控；内核 `FFF.Player.Present`（`VideoRenderer.cpp:5977`）由「图层非空 :5957 / Render 有帧 :8065 / Redraw :8122」拉起，**唯一退出条件是 StopTimedTextThread（:6077）**，调用者只有设备重建/ResetMedia/Close ⇒ 暂停/最小化/静图时 alive，其 `PresenterTimerResolution`（:108-114，:5981 构造）再持一份 1ms。
+- **E1 实测**：`FFF.Player.Present` 在 静态图 / 暂停 / 最小化 / 播放 下均 alive（暂停已用前台焦点+空格验证 42.7%→0.52%→40.1%），无媒体 idle 不存在（从未渲染）；进程 CPU：暂停 0.52%、静态图最小化 ~0%、可见空闲 1.25–4.7%（噪声）、播放 40–42.7%、播放中最小化 14.6%（播放本身在跑）。⇒ **可测 CPU 常驻税很小**；1ms 对深睡/C-state 的代价 CPU 时间量具看不见（U）。
+- **结论/建议**：只做内核最小面（`PresenterTimerResolution` 幂等 Raise/Release + 空轮询释放；约 +15/−2 行，0 ABI/契约变化，播放期间恒持、暂停/Ended/静图 ≤0.5s 释放）；宿主侧待 U（100ms 兼作双耳跟随心跳，播放中最小化不能停；要归零须 4 台 timer 全停）再定。若用户无功耗/续航诉求，P2-8 可整体降优先级、仅记录方案。
+- 本地工具：`3fp/build/imgperf/thread_census.ps1` 增加「按线程名」一节（跨进程 `OpenThread+GetThreadDescription`）——同时是 P0-3「8 条原生线程命名」在 Release 产物上的验收（可见 `FFF.Player.Present/SessionWorker/Prefetch/PrefetchGuard/CoverBackdrop`）。
+- 量具（`_3fc_tmp`，未入库）：`thread_states.ps1`、`pause_check.ps1`、`resident_tax.ps1`；数据 `thread_states.csv`。
+
+## P2-8 内核最小面实施：PresenterTimerResolution 幂等升降（2026-11-12，docs/153）
+
+- 范围：docs/152 §五 建议的**内核最小面**（宿主侧待 U，未改）。只动 `FFF.Native/3FP/Render/VideoRenderer.cpp` 3 处：`:97-131` RAII 幂等化（`Raise()/Release()` + ctor/dtor 兜底 + 注释说明进程级引用计数）；`:5996-5999` 入口注释；`:6021-6036` 循环「本拍有 present → Raise、纯 `devicePollOnly` → Release（防御臂也 Release）」，位置在 cadence `wait_until`/`PresentTimedText` 之前。0 头文件 / 0 导出 / 0 ABI / 0 日志 / 0 契约变化；CRLF 保持。
+- 构建（framework MSBuild）：**rc=0 / warnings=0 / errors=0**；新产物 **6,528,000 B / sha16 `EC3B89A550B3BD0E`**（`3fp/build` + 宿主 bin 已同步；docs/150/151 的 `F84A9759B6C68E32` 是上一轮产物，历史值不改）；导出 **131 不变**（109 `FFF3FP_*` + 22 `FFF_*`），`PlayerApiVersion 20` / `SnapshotVersion 23` 未动；内核仓仍 15 文件 + `ThreadNaming.h` 未提交，**零 commit / 零 push**。
+- 验证（E1）：探针 359 帧/0 丢帧/`PRESENT p50 16.57 p99 20.08`/`PLACEMENT` 快照自证不变/exit=0；GUI 播放 48.96% → 暂停 0.52% → 恢复 36.46%（单核%），`FFF.Player.Present` 全程 alive；10 次暂停恢复循环线程 123→123、无退出/无残留；图片模式 128 线程 + Present alive；启动开图 T2 887.7/1039.9 ms 无回退迹象。
+- **边界**：单改内核**无法**外部证明"暂停后进程时基回落到 15.6ms"——宿主 4 台 LakeUI PrecisionTimer 仍持进程级 1ms，且系统 `NtQueryTimerResolution` 被 PresentMonService 等顶在 1ms ⇒ 收益需宿主同改 + 功耗/C-state 量具验证。边角：>500ms 停顿两次 present 之间可能 Release 一次（下一帧前 Raise），只影响 wait 精度。
+- 下一步：宿主最小面（Form1 `Resize/Minimized` 状态源、字幕/歌词判据并入播放状态、100ms 最小化降频、恢复补帧）**待 U**：100ms 兼双耳跟随心跳，播放中最小化能否停；要归零须 4 台 timer 全停；不建议改 LakeUI。
+
+## 音频输出徽章三态循环（2026-11-12，docs/154）
+
+- 用户裁定（附截图）：`HRTF`/`5.1` 两徽章重复 → 合并为一个"输出侧"按钮，显示实际输出（直通/IAMF/HRTF/5.1/7.1/5.1.4/立体声），点击循环 **传统→HRTF→直通**；按到直通弹既有独占确认框（文案改直通版），**拒绝后下一次按跳过直通、下下次返回当前状态、下下下次才再弹**；确认后 1.5 s 未接管自动回退（偏好关+回共享+提示），接管则橙字"直通"。旧 `5.1` 徽章隐藏功能（WASAPI 独占开关）收编进直通态，旧处理器删除。
+- 改动：`UI\播放器界面呈现器.vb`（`刷新音频输出按钮` 文本/颜色/ToolTip/可见性；`格式化声道数` 2→立体声、10/12→5.1.4/7.1.4；声道数徽章隐藏）、`Core\播放器控制器.vb`（+`设置双耳策略`/`设置音频直通偏好`；`应用音频直通设置` 幂等化——内核 `SetMode` 同值重设回 InvalidArgument，先读回 `读取音频直通状态().模式` 相同不发）、`Form1.vb`（Async 三态循环 + 回退 + 跳过旗标 + 防连点；删旧独占开关/红色指示）、`Form1.Designer.vb`（tooltip 文案）。**零内核/ABI 改动**；构建 0 警告 0 错；`FFF.Player.dll` 1,225,216 B / sha16 `A4D0D9B7997F0964`。
+- 实测（GUI 截屏 + 注入，本机）：合并显示 ✓、直通弹窗 ✓、拒绝→跳过 toast ✓、跳过后再弹 ✓、确认→未接管回退 toast ✓ 无错误框 ✓；注：芯片 X 坐标随时间标签宽度漂移，测试用 `WindowFromPoint` 探测定位。**本机 HRTF 插槽未装（可用=False）** ⇒ 传统→HRTF 一跳与直通真实接管未实测（代码路径复用旧双耳持久化机制），留 U。
+- 零 commit / 零 push；验证期临时点击日志已移除后终编。
