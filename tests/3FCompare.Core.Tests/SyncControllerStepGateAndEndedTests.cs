@@ -168,6 +168,7 @@ internal sealed class StubSession : IPlayerSession
     public void SelectAudioStream(int streamIndex) { }
     public void SelectVideoStream(int streamIndex) { }
     public void SetVolume(float volume, bool muted) { }
+    public void SetAudioDelay(long delay100ns) { }
     public void SetColorMode(ColorMode mode, bool? contentIsHdr = null) { }
     public bool SetPresentConfig(bool tearing) => true;
 

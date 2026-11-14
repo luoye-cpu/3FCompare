@@ -9,6 +9,7 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Threading;
 using _3FCompare.Localization;
 using global::Avalonia.Platform.Storage;
 using _3FCompare.Core.Backend;
@@ -36,6 +37,18 @@ public sealed class SettingsWindow : Window
     /// <summary>RTX 视频超分辨率（内核 <c>FFF3FP_SetVideoSuperResolution</c>）。会话级设置：
     /// 改动后只对<strong>新开的会话</strong>生效（与 VRR 呈现、scRGB 链同一约定）。</summary>
     private readonly CheckBox _vsrEnable = new();
+    /// <summary>蓝牙低延迟模式：默认输出是蓝牙端点时按 profile 区间自动补偿。
+    /// 与 VRR/VSR 不同，它<b>对已开会话也立即生效</b>（SetAudioDelay 是运行期 API）。</summary>
+    private readonly CheckBox _btLowLatency = new();
+    private readonly NumericUpDown _btTrim = new()
+    {
+        Minimum = -100, Maximum = 100, Increment = 5, FormatString = "0",
+    };
+    private readonly TextBlock _btStatus = new() { FontSize = 11, TextWrapping = TextWrapping.Wrap };
+    private BluetoothAudioInfo _btInfo = BluetoothAudioInfo.NonBluetooth;
+    /// <summary>设置页打开期间的蓝牙状态刷新（500ms）。端点切换/耳机连上时状态行不 stale；
+    /// 关闭窗口即停，避免后台常驻枚举注册表。</summary>
+    private readonly DispatcherTimer _btStatusTimer;
     private readonly CheckBox _scrubPreview = new() { IsChecked = true };
     private readonly CheckBox _minimap = new() { IsChecked = true };
     private readonly ComboBox _colorMode = new();
@@ -73,6 +86,7 @@ public sealed class SettingsWindow : Window
         // 实时预览过的主题在未确认时还原：否则用户点「取消」却留下了改过的外观，
         // 而配置里存的仍是旧值 —— 下次启动又变回去，看起来像"设置没保存"。
         if (!_accepted) ThemeManager.Apply(_origTheme, persist: false);
+        try { _btStatusTimer.Stop(); } catch { /* 构造失败时可能未初始化 */ }
         base.OnClosed(e);
     }
 
@@ -108,6 +122,10 @@ public sealed class SettingsWindow : Window
             DefaultGridCols = current.DefaultGridCols,
             DefaultGridRows = current.DefaultGridRows,
             VrrTearingPresent = current.VrrTearingPresent,
+            // ⚠ 蓝牙两项同样要进 _orig：漏了它们，用户改了开关/微调后 changed 恒为 false
+            //（或 Result 缺字段被写回默认），表现为"设置存不住"。
+            BluetoothLowLatencyMode = current.BluetoothLowLatencyMode,
+            BluetoothExtraLeadMs = current.BluetoothExtraLeadMs,
             // ⚠ 与 AppSettings.RtxVideoSuperResolution 的注释同源：两处深拷贝（_orig 与
             // Result）都要带上，漏一处就让"确认设置"把该字段静默写回默认值。
             RtxVideoSuperResolution = current.RtxVideoSuperResolution,
@@ -172,6 +190,11 @@ public sealed class SettingsWindow : Window
         _vsrEnable.Content = LanguageManager.T("Vsr_Enable");
         ToolTip.SetTip(_vsrEnable, LanguageManager.T("Vsr_Hint"));
         _vsrEnable.IsChecked = current.RtxVideoSuperResolution;
+        _btLowLatency.Content = LanguageManager.T("Bluetooth_Enable");
+        ToolTip.SetTip(_btLowLatency, LanguageManager.T("Bluetooth_EnableHint"));
+        _btLowLatency.IsChecked = current.BluetoothLowLatencyMode;
+        _btTrim.Value = Math.Clamp(current.BluetoothExtraLeadMs, -100, 100);
+        ToolTip.SetTip(_btTrim, LanguageManager.T("Bluetooth_TrimHint"));
         _scrubPreview.Content = LanguageManager.T("Scrub_PreviewEnabled");
         _scrubPreview.IsChecked = current.ScrubPreviewEnabled;
         ToolTip.SetTip(_scrubPreview, LanguageManager.T("Scrub_PreviewHint"));
@@ -197,6 +220,14 @@ public sealed class SettingsWindow : Window
         _align.SelectedIndex = Math.Clamp(current.CompareAlign, 0, 1);
         _ffmpegDir.Text = current.FfmpegDirectory ?? string.Empty;
         UpdateFfmpegStatus();
+
+        // 蓝牙探测只在打开设置 / 点「重新检测」时跑；开关与微调只重算状态，不重读注册表。
+        _btLowLatency.Click += (_, _) => UpdateBluetoothStatus();
+        _btTrim.ValueChanged += (_, _) => UpdateBluetoothStatus();
+        DetectBluetooth();
+        _btStatusTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+        _btStatusTimer.Tick += (_, _) => DetectBluetooth();
+        _btStatusTimer.Start();
 
         // 外观：主题 = 跟随系统 / 浅色 / 深色。改选即生效（实时预览），
         // 点「确定」才落盘；取消/直接关窗由 OnClosed 还原。
@@ -233,6 +264,15 @@ public sealed class SettingsWindow : Window
         stack.Children.Add(Section(LanguageManager.T("Vsr_SectionTitle"),
             _vsrEnable,
             Hint(LanguageManager.T("Vsr_Hint"))));
+        // 蓝牙延迟补偿：与 VRR/VSR 并列，但它作用于音频会话而不是呈现链。
+        var btDetect = new Button { Content = LanguageManager.T("Bluetooth_Detect"), Height = 26 };
+        btDetect.Click += (_, _) => DetectBluetooth();
+        stack.Children.Add(Section(LanguageManager.T("Bluetooth_SectionTitle"),
+            _btLowLatency,
+            Row(Label(LanguageManager.T("Bluetooth_Trim")), _btTrim),
+            btDetect,
+            Hint(LanguageManager.T("Bluetooth_Hint")),
+            _btStatus));
         stack.Children.Add(Section(LanguageManager.T("Scrub_SectionTitle"),
             _scrubPreview, _minimap, Hint(LanguageManager.T("Scrub_PreviewHint"))));
         stack.Children.Add(Section(LanguageManager.T("Status_Color"),
@@ -572,6 +612,66 @@ public sealed class SettingsWindow : Window
         return idx is < -1 or > 15 ? -1 : idx;
     }
 
+    /// <summary>重新读默认端点（COM + MMDevices + BTHENUM）。构造、500ms 状态刷新与「重新检测」共用。</summary>
+    private void DetectBluetooth()
+    {
+        _btInfo = BluetoothAudioDetector.DetectDefaultOutput();
+        UpdateBluetoothStatus();
+    }
+
+    /// <summary>用缓存的探测结果重算状态行；开关/微调变化走这里，避免每次按键都枚举注册表。</summary>
+    private void UpdateBluetoothStatus()
+    {
+        var hz = DisplayRefreshRate.Read(nint.Zero);
+        var enabled = _btLowLatency.IsChecked == true;
+        var trim = (int)(_btTrim.Value ?? 0);
+        var delay100ns = BluetoothLatencyPolicy.ComputeDelay100ns(enabled, _btInfo, hz, trim);
+
+        if (!_btInfo.IsBluetooth)
+        {
+            // 把"探测失败"和"确实不是蓝牙"分开：否则 USB 声卡与 COM 失败都显示成同一句，
+            // 用户无法判断是设备不对还是探测坏了。
+            if (!string.IsNullOrWhiteSpace(_btInfo.Detail) &&
+                _btInfo.Detail.StartsWith("蓝牙探测失败", StringComparison.Ordinal))
+            {
+                _btStatus.Text = LanguageManager.Tf("Bluetooth_Status_Error", _btInfo.Detail);
+                ThemePalette.SetBrush(_btStatus, TextBlock.ForegroundProperty, "ErrorBrush");
+            }
+            else
+            {
+                _btStatus.Text = LanguageManager.T("Bluetooth_Status_NotBluetooth");
+                ThemePalette.SetBrush(_btStatus, TextBlock.ForegroundProperty, "TextSecondaryBrush");
+            }
+            return;
+        }
+
+        if (!_btInfo.IsConnected)
+        {
+            _btStatus.Text = LanguageManager.Tf("Bluetooth_Status_Disconnected",
+                string.IsNullOrWhiteSpace(_btInfo.DeviceName) ? _btInfo.EndpointName : _btInfo.DeviceName,
+                _btInfo.Detail);
+            ThemePalette.SetBrush(_btStatus, TextBlock.ForegroundProperty, "ErrorBrush");
+            return;
+        }
+
+        var displayMs = Math.Round(BluetoothLatencyPolicy.EstimateDisplayLatencyMs(hz), 1);
+        var delayMs = delay100ns / 10_000.0;
+        var text = LanguageManager.Tf("Bluetooth_Status_Format",
+            string.IsNullOrWhiteSpace(_btInfo.DeviceName) ? _btInfo.EndpointName : _btInfo.DeviceName,
+            _btInfo.ProfileName,
+            _btInfo.LatencyLowMs,
+            _btInfo.LatencyHighMs,
+            displayMs,
+            hz,
+            delayMs.ToString("+0.0;-0.0;0"));
+        if (!enabled)
+            text = LanguageManager.T("Bluetooth_Status_DisabledPrefix") + text;
+
+        _btStatus.Text = text;
+        ThemePalette.SetBrush(_btStatus, TextBlock.ForegroundProperty,
+            enabled ? "SuccessBrush" : "TextSecondaryBrush");
+    }
+
     private void Accept()
     {
         var lang = _lang.SelectedIndex;
@@ -591,6 +691,8 @@ public sealed class SettingsWindow : Window
         var rows = (int)(_rows.Value ?? 1);
         var vrrTearing = _vrrTearing.IsChecked == true;
         var vsrEnable = _vsrEnable.IsChecked == true;
+        var btMode = _btLowLatency.IsChecked == true;
+        var btTrim = (int)(_btTrim.Value ?? 0);
         var scrubPreview = _scrubPreview.IsChecked == true;
         var miniMap = _minimap.IsChecked == true;
         // 对齐模式：越界下标（列表项数变化 / 脏初值）会被静默当成某一档，故显式钳一次，
@@ -627,6 +729,8 @@ public sealed class SettingsWindow : Window
             || color != _orig.ColorMode || cols != _orig.DefaultGridCols || rows != _orig.DefaultGridRows
             || vrrTearing != _orig.VrrTearingPresent
             || vsrEnable != _orig.RtxVideoSuperResolution
+            || btMode != _orig.BluetoothLowLatencyMode
+            || btTrim != _orig.BluetoothExtraLeadMs
             || scrubPreview != _orig.ScrubPreviewEnabled || miniMap != _orig.MinimapEnabled
             // ⚠ 新设置项必须加进这条链：漏了它 Changed 恒为 false ⇒ 改了设置"确定"后
             // MainWindow 直接 return（Result 不落地），表现为"设置存不住"且无任何报错。
@@ -655,6 +759,8 @@ public sealed class SettingsWindow : Window
                 DefaultGridRows = rows,
                 VrrTearingPresent = vrrTearing,
                 RtxVideoSuperResolution = vsrEnable,
+                BluetoothLowLatencyMode = btMode,
+                BluetoothExtraLeadMs = Math.Clamp(btTrim, -100, 100),
                 ScrubPreviewEnabled = scrubPreview,
                 MinimapEnabled = miniMap,
                 WindowX = _orig.WindowX, WindowY = _orig.WindowY,

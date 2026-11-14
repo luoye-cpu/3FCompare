@@ -513,6 +513,10 @@ internal static partial class Fff3FpNative
     [LibraryImport(DllName)]
     internal static partial FffResult FFF3FP_SetVolume(nint player, float volume, uint muted);
 
+    /// <summary>嵌入音轨延迟（100ns；正=音频更晚）。见 FFF.Player.Api.h:984。</summary>
+    [LibraryImport(DllName)]
+    internal static partial FffResult FFF3FP_SetAudioDelay(nint player, long delay100ns);
+
     [LibraryImport(DllName)]
     internal static partial FffResult FFF3FP_SetOutputWindow(nint player, nint outputWindow);
 

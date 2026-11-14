@@ -33,6 +33,11 @@ public partial class MainWindow : Window
     private readonly SyncController _sync = new();
     private readonly PlaybackCoordinator _coordinator;
     private readonly DispatcherTimer _pollTimer;
+    /// <summary>蓝牙默认端点/握手变化的低频轮询（500ms）。只在下发值真正变化时调
+    /// SetAudioDelay，避免每拍都触发内核 re-seek。</summary>
+    private readonly DispatcherTimer _btTimer;
+    private string _lastBluetoothKey = "";
+    private long _lastBluetoothDelay100ns = 0;
     private readonly IPlayerEngine _engine;
     private readonly bool _realMode;
 
@@ -181,6 +186,14 @@ public partial class MainWindow : Window
         RebuildKeyMap();   // 键位表：只在构造与设置被采纳两处重建
         _coordinator = new PlaybackCoordinator(_engine, _sync, _settings, Grid.GetSurface);
         _coordinator.StateChanged += (_, _) => { UpdateStatus(); UpdatePanelsForSelection(); };
+
+        // 蓝牙延迟：启动即算一次（新会话建会话后由 Coordinator 补放），
+        // 之后每 500ms 检查默认输出/握手/连接状态是否变化。检测本身只读注册表+COM，
+        // 不在音频线程上跑；只有值变化才下发，避免无谓 re-seek。
+        _btTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+        _btTimer.Tick += (_, _) => ApplyBluetoothAudioCompensation();
+        _btTimer.Start();
+        ApplyBluetoothAudioCompensation(force: true);
 
         StatusEngine.Text = BuildEngineLabel();
         // P1-2：静态事件若强持有窗口，关窗后整个对象图（含引擎会话与 D3D 设备）都不会释放。
@@ -3034,6 +3047,9 @@ public partial class MainWindow : Window
             ComponentLog.Log(Comp.Settings, "Saved", -1, "src=settingsDialog");
             SettingsStore.Save(result);
             CopySettings(result);
+            // 蓝牙延迟是运行期 API（不像 VRR/VSR 只对新会话生效）：设置保存后
+            // 立刻对已开会话重算并下发，否则用户要等到下一次开文件才听得到变化。
+            ApplyBluetoothAudioCompensation(force: true);
             // 小地图是 PlayerSurface 的静态开关（GDI 绘制路径读它），内存 _settings
             // 更新不会自动传导 —— 必须在这里显式回写，否则改设置后本次会话无反应。
             PlayerSurface.SharedMinimapEnabled = _settings.MinimapEnabled;
@@ -3049,9 +3065,45 @@ public partial class MainWindow : Window
     /// <summary>停掉全部 DispatcherTimer 并冲刷日志（D11/D7 共用）。
     /// <para>重启路径上使用：不能依赖 OnClosed——<c>Environment.Exit</c> 直接终止进程，
     /// 定时器回调与日志后台线程都没有收尾机会。</para></summary>
+    /// <summary>按当前默认输出/设置重算蓝牙延迟并下发。值不变时直接返回：
+    /// <c>SetAudioDelay</c> 成功会按当前位置 re-seek，每 500ms 无脑下发会让播放反复起跳。</summary>
+    private void ApplyBluetoothAudioCompensation(bool force = false)
+    {
+        if (!_settings.BluetoothLowLatencyMode)
+        {
+            if (!force && _lastBluetoothKey == "disabled" && _lastBluetoothDelay100ns == 0) return;
+            var hadDelay = _lastBluetoothDelay100ns != 0;
+            _lastBluetoothKey = "disabled";
+            _lastBluetoothDelay100ns = 0;
+            // 只有此前确实下发过非 0 补偿才需要显式清回 0；否则 SetAudioDelay(0)
+            // 也会触发一次 re-seek，纯属打断播放。
+            if (hadDelay) _coordinator.SetAudioDelay(0);
+            _3FCompare.Core.Diagnostics.AppLog.Info("AudioDelay", "蓝牙低延迟已关闭，会话延迟归零");
+            return;
+        }
+
+        var info = BluetoothAudioDetector.DetectDefaultOutput();
+        var hz = DisplayRefreshRate.Read(TryGetPlatformHandle()?.Handle ?? nint.Zero);
+        var delay100ns = BluetoothLatencyPolicy.ComputeDelay100ns(
+            enabled: true, info, hz, _settings.BluetoothExtraLeadMs);
+        var key = $"{info.EndpointId}|{info.Profile}|{info.IsConnected}|{hz}|{info.Detail}";
+        var changed = key != _lastBluetoothKey || delay100ns != _lastBluetoothDelay100ns;
+        if (!changed) return;
+
+        var valueChanged = delay100ns != _lastBluetoothDelay100ns;
+        _lastBluetoothKey = key;
+        _lastBluetoothDelay100ns = delay100ns;
+        if (valueChanged) _coordinator.SetAudioDelay(delay100ns);
+        _3FCompare.Core.Diagnostics.AppLog.Info("AudioDelay",
+            $"输出={(info.IsBluetooth ? $"BT/{info.ProfileName}" : "非蓝牙")} " +
+            $"设备={info.DeviceName} 连接={info.IsConnected} 刷新={hz}Hz " +
+            $"估计={info.LatencyLowMs}-{info.LatencyHighMs}ms 下发={BluetoothLatencyPolicy.FormatMs(delay100ns)}");
+    }
+
     private void StopTimersAndFlushLog()
     {
         _pollTimer.Stop();
+        _btTimer.Stop();
         _scrubTimer.Stop();
         _transformFlushTimer.Stop();
         _transportHoverTimer.Stop();
@@ -3083,6 +3135,8 @@ public partial class MainWindow : Window
         // RTX VSR：会话级配置，同 VrrTearingPresent —— 只同步到内存中的 _settings，
         // 由新会话建会话时读取；已开会话不热切换（内核该请求在 CreateSession 里登记）。
         _settings.RtxVideoSuperResolution = s.RtxVideoSuperResolution;
+        _settings.BluetoothLowLatencyMode = s.BluetoothLowLatencyMode;
+        _settings.BluetoothExtraLeadMs = s.BluetoothExtraLeadMs;
         _settings.ScrubPreviewEnabled = s.ScrubPreviewEnabled;
         _settings.MinimapEnabled = s.MinimapEnabled;
         _settings.Language = s.Language;
@@ -3129,12 +3183,32 @@ public partial class MainWindow : Window
         // 选中 60fps 的从路、master 是 24fps，一次"±1 帧"会挪 41.7ms 而不是 16.7ms，
         // 用户微调时表现为"怎么都对不准"（docs/15 §3.6）。
         // master 仅在本路拿不到帧率时兜底。
-        var targetSnap = slot.Session.ReadSnapshot();
-        var fps = targetSnap is not null ? SyncController.EstimateFps(targetSnap) : 0;
+        //
+        // ⚠ 会话刚 AddSlot 时仍处于 Opening，内核 GetSnapshot 返回 InvalidArgument。
+        // 这个回调挂在 PlaybackCoordinator.StateChanged 上，异常若逃出去会把刚
+        // 开始打开的会话判成失败（日志里只有 SessionOpen/HwndCreate，没有
+        // RouteReady）。拿不到快照就退回 master/24fps，不能因此打断打开流程。
+        var fps = 0.0;
+        try
+        {
+            var targetSnap = slot.Session.ReadSnapshot();
+            if (targetSnap is not null) fps = SyncController.EstimateFps(targetSnap);
+        }
+        catch (Exception ex) when (ex is EngineException or ObjectDisposedException)
+        {
+            _3FCompare.Core.Diagnostics.AppLog.Debug("UI", $"选中路快照暂不可用（{ex.GetType().Name}），等待就绪");
+        }
         if (fps <= 0)
         {
-            var masterSnap = _sync.ReadMasterSnapshot();
-            fps = masterSnap is not null ? SyncController.EstimateFps(masterSnap) : 0;
+            try
+            {
+                var masterSnap = _sync.ReadMasterSnapshot();
+                if (masterSnap is not null) fps = SyncController.EstimateFps(masterSnap);
+            }
+            catch (Exception ex) when (ex is EngineException or ObjectDisposedException)
+            {
+                _3FCompare.Core.Diagnostics.AppLog.Debug("UI", $"主路快照暂不可用（{ex.GetType().Name}）");
+            }
         }
         if (fps <= 0) fps = 24; // 最终兜底
         _offsetPanel.SetFps(fps);
@@ -3695,6 +3769,7 @@ public partial class MainWindow : Window
     protected override void OnClosed(EventArgs e)
     {
         _pollTimer.Stop();
+        _btTimer.Stop();
         _scrubTimer.Stop();
         _transformFlushTimer.Stop();
         _autosaveTimer.Stop();

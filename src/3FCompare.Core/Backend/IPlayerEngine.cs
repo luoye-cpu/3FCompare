@@ -38,6 +38,15 @@ public interface IPlayerSession : IDisposable
     /// <summary>音量设置（0..1；muted=1 静音）。</summary>
     void SetVolume(float volume, bool muted);
 
+    /// <summary>设置嵌入音轨的延迟补偿（100ns）。
+    /// <para><b>正值 = 音频比视频晚播</b>（内核 `FFF.Player.Api.h:981`），负值 = 音频提前。
+    /// 有符号补偿量见 <c>BluetoothLatencyPolicy.ComputeDelay100ns</c>：
+    /// 蓝牙场景通常为 <c>L_disp - L_BT</c>（负值）。</para>
+    /// <para>内核只在 Ready/Playing/Paused/Ended 接受该调用；Opening 阶段会返回
+    /// InvalidArgument，调用方应在会话就绪后补放（PlaybackCoordinator 负责）。
+    /// 成功后内核会按当前位置 re-seek，使新补偿从下一帧可听样本生效。</para></summary>
+    void SetAudioDelay(long delay100ns);
+
     /// <summary>设置色彩模式（MapToSdr/RawHdrAsSdr/MapToHdr）。运行时切换 HDR/SDR。</summary>
     /// <param name="mode">目标色彩模式。</param>
     /// <param name="contentIsHdr">内容是否为 HDR。传 null 由会话按自身媒体信息判定；

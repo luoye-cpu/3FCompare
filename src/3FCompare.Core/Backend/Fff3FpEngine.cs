@@ -732,6 +732,11 @@ public sealed class Fff3FpEngine : IPlayerEngine
             WithNative(h => Check(Fff3FpNative.FFF3FP_SetVolume(h, volume, muted ? 1u : 0u), nameof(SetVolume)));
         }
 
+        public void SetAudioDelay(long delay100ns)
+        {
+            WithNative(h => Check(Fff3FpNative.FFF3FP_SetAudioDelay(h, delay100ns), nameof(SetAudioDelay)));
+        }
+
         /// <summary>设置色彩模式（运行时切换 HDR/SDR）。</summary>
         /// <param name="contentIsHdr">内容是否为 HDR。为 null 时按本会话媒体信息自行判定；
         /// <b>多路对比时调用方必须传入统一值</b>——否则同一源的两路只要有一路 HDR 元数据丢失，

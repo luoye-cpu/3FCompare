@@ -136,6 +136,8 @@ public sealed class SimulatedEngine : IPlayerEngine
 
         public void SetVolume(float volume, bool muted) { /* 演示模式无音频 */ }
 
+        public void SetAudioDelay(long delay100ns) { /* 演示模式无音频 */ }
+
         public void SetColorMode(ColorMode mode, bool? contentIsHdr = null) { /* 演示模式略过 */ }
 
         public bool SetPresentConfig(bool tearing) => !tearing; // 演示模式无呈现链，仅"关闭"语义成立

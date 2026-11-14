@@ -40,6 +40,13 @@ public sealed class PlaybackCoordinator
     private readonly SyncController _sync;
     private readonly AppSettings _settings;
 
+    /// <summary>当前应下发的嵌入音轨延迟（100ns；正=音频更晚）。0 = 不补偿。
+    /// 由 MainWindow 的蓝牙检测/设置变更写入，所有新建会话在建会话后补放。</summary>
+    private long _audioDelay100ns;
+
+    /// <summary>当前延迟值（读取端为诊断/测试）。</summary>
+    public long AudioDelay100ns => Volatile.Read(ref _audioDelay100ns);
+
     /// <summary>同时播放的路数上限（3×3 网格）。</summary>
     internal const int MaxRoutes = 9;
 
@@ -541,6 +548,45 @@ public sealed class PlaybackCoordinator
     public bool RealMode => _realMode;
     public SyncController Sync => _sync;
 
+    /// <summary>设置并立即应用到所有现有会话；新会话由 <see cref="ApplyAudioDelay"/> 补放。
+    ///
+    /// <para>状态不合法（Opening）时内核返回 InvalidArgument，这里只记 Debug 不抛：
+    /// 该路随后会在 <see cref="WaitForOpenCompletionAsync"/> 就绪后由
+    /// <see cref="ApplyAudioDelay"/> 重新下发。</para></summary>
+    public void SetAudioDelay(long delay100ns)
+    {
+        Volatile.Write(ref _audioDelay100ns, delay100ns);
+        foreach (var slot in _sync.Slots)
+            ApplyAudioDelay(slot.Session, force: true);
+    }
+
+    /// <summary>把当前延迟下发给单个会话。失败只记日志：
+    /// 单路音频补偿失败不应影响播放/打开编排。
+    ///
+    /// <param name="force">true = 即使值为 0 也下发（用于把已生效的非 0 补偿清回 0）。
+    /// false = 新会话在值为 0 时跳过：内核会话的初始 audioDelay 本来就是 0，
+    /// 再调一次会触发一次无意义的 re-seek，把刚就绪的会话推回 Seeking。</param></summary>
+    private void ApplyAudioDelay(IPlayerSession session, bool force = false)
+    {
+        var delay = Volatile.Read(ref _audioDelay100ns);
+        if (!force && delay == 0) return;
+        try
+        {
+            session.SetAudioDelay(delay);
+        }
+        catch (EngineException ex)
+        {
+            // Opening/Idle 阶段会走到这里；就绪后还有一次补放，属正常路径。
+            AppLog.Debug("AudioDelay",
+                $"SetAudioDelay({delay / 10_000.0:0.0}ms) 暂不可用（{ex.Result}），待就绪后重试");
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn("AudioDelay",
+                $"SetAudioDelay({delay / 10_000.0:0.0}ms) 失败: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
     /// <summary>窗口已关闭（自动化流程终止标志）。</summary>
     public bool IsClosed => _closed;
 
@@ -629,6 +675,8 @@ public sealed class PlaybackCoordinator
             // 故这里同步等它完成 —— 打开失败要立刻知道（返回 null 让调用方降级），
             // 而不是留一个永远没画面的会话占着解码器与交换链（那还会推高 N）。
             session.OpenAsync(path).GetAwaiter().GetResult();
+            // 镜像同样要补延迟；OpenAsync 返回时可能仍是 Opening，故走"就绪后补放"。
+            _ = ApplyAudioDelayWhenReadyAsync(session);
             return session;
         }
         catch (Exception ex)
@@ -795,6 +843,9 @@ public sealed class PlaybackCoordinator
                 surface.FileName = Path.GetFileName(path);
                 if (_realMode)
                     await WaitForOpenCompletionAsync(slot, surface);
+                // 会话就绪后补放当前蓝牙延迟：SetAudioDelay 在 Opening/Idle 会被内核拒绝，
+                // 必须等 Ready 才能生效（与音量不同，它会触发一次 re-seek）。
+                ApplyAudioDelay(slot.Session);
                 // 每次 await 之后都要复查关闭信号（F3）：等待期间窗口可能已经关闭，
                 // 此时不应再 Play，也不能让配额悬挂着。
                 if (_closed) { DiscardBatch(batch); return; }
@@ -831,6 +882,29 @@ public sealed class PlaybackCoordinator
             }
         }
         StateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>镜像会话的就绪后补延迟。镜像不参与 <see cref="TrySettle"/> 批次，
+    /// 没有现成的"等待 Ready"路径；这里用 100ms 轮询补一次，最多 5s。
+    /// 失败/超时都只是"镜像没拿到补偿"，不影响镜像画面。</summary>
+    private async Task ApplyAudioDelayWhenReadyAsync(IPlayerSession session)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (!_closed && DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                if (IsReadyState(session.ReadSnapshot().State))
+                {
+                    ApplyAudioDelay(session);
+                    return;
+                }
+            }
+            catch { /* 会话可能已被并发释放；下一拍再试或超时退出 */ }
+
+            try { await Task.Delay(100, CancelToken); }
+            catch { return; }
+        }
     }
 
     /// <summary>真实模式等待 3FP 后端真正就绪；失败/超时(15s)也视为完成（标记失败）。</summary>

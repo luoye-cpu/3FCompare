@@ -212,6 +212,8 @@ public sealed class FakeSession : IPlayerSession, IFrameSideDataRing
     public void SelectAudioStream(int streamIndex) { ThrowIfDisposed(); }
     public void SelectVideoStream(int streamIndex) { ThrowIfDisposed(); }
     public void SetVolume(float volume, bool muted) { ThrowIfDisposed(); }
+    public void SetAudioDelay(long delay100ns) { ThrowIfDisposed(); LastAudioDelay100ns = delay100ns; }
+    public long LastAudioDelay100ns { get; private set; }
     public void SetColorMode(ColorMode mode, bool? contentIsHdr = null) { ThrowIfDisposed(); LastColorMode = mode; LastContentIsHdr = contentIsHdr; }
 
     public ColorMode? LastColorMode { get; private set; }

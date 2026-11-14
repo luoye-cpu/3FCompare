@@ -61,6 +61,7 @@ public sealed class AppSettings
         // 用户以为设成了像素级却没有。故必须钳，不能靠 bool 的"天然只有两态"兜底。
         CompareAlign = Math.Clamp(CompareAlign, 0, 1);
         PreferredAdapterIndex = Math.Clamp(PreferredAdapterIndex, -1, 15); // -1=系统默认
+        BluetoothExtraLeadMs = Math.Clamp(BluetoothExtraLeadMs, -100, 100);
 
         // 侧栏宽度：非正或大得离谱就当作没设置（null = 用默认）
         if (SidebarWidth is <= 0 or > 2000) SidebarWidth = null;
@@ -198,6 +199,25 @@ public sealed class AppSettings
     /// 让 G-SYNC/FreeSync 显示器按自身节奏扫描输出。默认 false = VSync 锁定（无撕裂，
     /// 盯帧对比推荐）。显示器链不支持时自动回退 VSync。</summary>
     public bool VrrTearingPresent { get; set; }
+
+    /// <summary>蓝牙低延迟模式（默认关闭）。
+    ///
+    /// <para>开启后，若<b>当前默认输出端点</b>是蓝牙音频设备，按 profile 级延迟表
+    /// 自动下发 <c>SetAudioDelay(d)</c>，其中 <c>d = L_disp - L_BT</c>（通常为负）。
+    /// 非蓝牙/未连接时自动恢复 0。</para>
+    ///
+    /// <para>它是**会话级**设置：对已开会话立即生效、对新会话在建会话后补放
+    /// （内核只接受 Ready/Playing/Paused/Ended 状态下的调用）。</para>
+    ///
+    /// <para>为什么需要：Windows 用户态读不到 codec，只能按 profile 区间估计；
+    /// 但蓝牙 150–300ms 的固定延迟足以让音画明显错位，即使估计有 ±30ms 误差，
+    /// 补偿后也远好于不补。精确校准由 <see cref="BluetoothExtraLeadMs"/> 微调。</para></summary>
+    public bool BluetoothLowLatencyMode { get; set; }
+
+    /// <summary>蓝牙补偿的额外提前量（ms，正=音频更早）。
+    /// 用于吸收 profile 区间中位估计与真实设备之间的偏差；默认 0，
+    /// 范围 [-100,100]（与设置页 NumericUpDown 一致，见 <see cref="Normalize"/>）。</summary>
+    public int BluetoothExtraLeadMs { get; set; }
 
     // ⚠ 这里曾有一段"媒体率呈现节奏（pacing）"的 /// 注释，但对应属性**从未实现**
     // （内核侧也不存在 SetPacingConfig）。悬空的 /// 会被编译器挂到下一个成员上
